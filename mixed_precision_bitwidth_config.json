@@ -1,0 +1,57 @@
+{
+  "description": "混合精度位宽配置文件 - 控制不同层的量化位宽",
+  
+  "default_bitwidth": {
+    "weight": 8,
+    "output": 8,
+    "comment": "默认位宽，未在下面配置的层将使用此位宽"
+  },
+  
+  "layer_type_config": {
+    "QuantizedConv2d": {
+      "weight_bitwidth": 4,
+      "output_bitwidth": 4,
+      "comment": "所有卷积层使用4-bit"
+    },
+    "QuantizedLinear": {
+      "weight_bitwidth": 4,
+      "output_bitwidth": 4,
+      "comment": "所有全连接层使用4-bit"
+    },
+    "QuantizedTanh": {
+      "output_bitwidth": 16,
+      "comment": "Tanh激活函数使用16-bit输出"
+    },
+    "QuantizedSigmoid": {
+      "output_bitwidth": 16,
+      "comment": "Sigmoid激活函数使用16-bit输出"
+    },
+    "QuantizedVar": {
+      "disable_quantization": true,
+      "comment": "方差算子完全禁用量化"
+    },
+    "Var": {
+      "disable_quantization": true,
+      "comment": "方差算子完全禁用量化"
+    }
+  },
+  
+  "layer_name_config": {
+    "comment": "基于层名称的精细控制（优先级高于layer_type_config）",
+    "examples": {
+      "model.fc0": {
+        "weight_bitwidth": 8,
+        "output_bitwidth": 8,
+        "comment": "示例：将fc0层设为8-bit"
+      },
+      "model.conv_in": {
+        "weight_bitwidth": 8,
+        "output_bitwidth": 8,
+        "comment": "示例：将第一个卷积层设为8-bit"
+      }
+    }
+  }
+}
+
+
+
