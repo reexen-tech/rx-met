@@ -5,7 +5,7 @@
 import torch
 import json
 import os
-from typing import Dict, List, Any, Optional
+from typing import Dict, List, Any, Optional, Tuple, Set
 from pathlib import Path
 
 
@@ -106,7 +106,8 @@ def load_quantizer_encodings(
     layer_types: Optional[List[str]] = None,
     exclude_layer_types: Optional[List[str]] = None,
     skip_if_not_found: bool = True,
-    verbose: bool = True
+    verbose: bool = True,
+    allow_overwrite: Optional[bool] = None,
 ) -> Dict[str, Any]:
     """
     从 JSON 文件加载量化参数并应用到模型
@@ -120,6 +121,8 @@ def load_quantizer_encodings(
                            优先级高于 layer_types
         skip_if_not_found: 如果量化器不存在，是否跳过
         verbose: 是否打印详细信息
+        allow_overwrite: 加载后是否允许后续 compute_encodings 覆盖；
+                        设为 False 可锁定已加载量化器
     
     Returns:
         加载统计信息
@@ -223,12 +226,14 @@ def load_quantizer_encodings(
                     rmin = item.get("real_min")
                     rmax = item.get("real_max")
                     if rmin is not None and rmax is not None and _apply_aimet_encoding_to_quantizer(q, rmin, rmax, device, item, verbose):
+                        _set_quantizer_allow_overwrite(q, allow_overwrite)
                         loaded_count += 1
                         loaded_types.add(type(module).__name__)
             elif isinstance(inp_enc, dict):
                 rmin, rmax = inp_enc.get("real_min"), inp_enc.get("real_max")
                 if hasattr(module, 'input_quantizers') and len(module.input_quantizers) > 0 and module.input_quantizers[0] is not None and rmin is not None and rmax is not None:
                     if _apply_aimet_encoding_to_quantizer(module.input_quantizers[0], rmin, rmax, device, inp_enc, verbose):
+                        _set_quantizer_allow_overwrite(module.input_quantizers[0], allow_overwrite)
                         loaded_count += 1
                         loaded_types.add(type(module).__name__)
             # output: 对应 output_quantizers[0], [1], ...
@@ -241,12 +246,14 @@ def load_quantizer_encodings(
                     rmin = item.get("real_min")
                     rmax = item.get("real_max")
                     if rmin is not None and rmax is not None and _apply_aimet_encoding_to_quantizer(q, rmin, rmax, device, item, verbose):
+                        _set_quantizer_allow_overwrite(q, allow_overwrite)
                         loaded_count += 1
                         loaded_types.add(type(module).__name__)
             elif isinstance(out_enc, dict):
                 rmin, rmax = out_enc.get("real_min"), out_enc.get("real_max")
                 if hasattr(module, 'output_quantizers') and len(module.output_quantizers) > 0 and module.output_quantizers[0] is not None and rmin is not None and rmax is not None:
                     if _apply_aimet_encoding_to_quantizer(module.output_quantizers[0], rmin, rmax, device, out_enc, verbose):
+                        _set_quantizer_allow_overwrite(module.output_quantizers[0], allow_overwrite)
                         loaded_count += 1
                         loaded_types.add(type(module).__name__)
         # 2) 非 GRU 的 param_encodings：通用解析 key 为 "module_name.param_name"（与 param_quantizers 匹配）
@@ -274,6 +281,7 @@ def load_quantizer_encodings(
                 skipped_count += 1
                 continue
             if _apply_aimet_encoding_to_quantizer(q, rmin, rmax, device, enc, verbose):
+                _set_quantizer_allow_overwrite(q, allow_overwrite)
                 loaded_count += 1
                 loaded_types.add(type(module).__name__)
         if verbose:
@@ -320,6 +328,7 @@ def load_quantizer_encodings(
                 quantizer = module.param_quantizers[param_name]
                 if quantizer is not None:
                     _apply_encoding_to_quantizer(quantizer, encoding_info)
+                    _set_quantizer_allow_overwrite(quantizer, allow_overwrite)
                     loaded_count += 1
                     loaded_types.add(module_type)
                     if verbose:
@@ -340,6 +349,7 @@ def load_quantizer_encodings(
                 quantizer = module.output_quantizers[quantizer_idx]
                 if quantizer is not None:
                     _apply_encoding_to_quantizer(quantizer, encoding_info)
+                    _set_quantizer_allow_overwrite(quantizer, allow_overwrite)
                     loaded_count += 1
                     loaded_types.add(module_type)
                     if verbose:
@@ -626,129 +636,553 @@ def _apply_encoding_to_quantizer(quantizer, encoding_info: Dict):
         pass
 
 
+def _set_quantizer_allow_overwrite(quantizer, allow_overwrite: Optional[bool]) -> None:
+    """设置量化器后续是否允许被 compute_encodings 覆盖。"""
+    if quantizer is None or allow_overwrite is None:
+        return
+    if hasattr(quantizer, 'allow_overwrite'):
+        quantizer.allow_overwrite(allow_overwrite)
+    elif hasattr(quantizer, '_allow_overwrite'):
+        quantizer._allow_overwrite = allow_overwrite
+
+
 def _has_active_quantizers(module) -> bool:
-    """检查模块是否有任何非 None 的 input/output quantizer（即量化未被禁用）"""
-    if hasattr(module, 'input_quantizers'):
-        if any(q is not None for q in module.input_quantizers):
-            return True
-    if hasattr(module, 'output_quantizers'):
-        if any(q is not None for q in module.output_quantizers):
-            return True
+    """检查模块是否还有启用的 input/output quantizer。"""
+    if hasattr(module, 'input_quantizers') and any(q is not None for q in module.input_quantizers):
+        return True
+    if hasattr(module, 'output_quantizers') and any(q is not None for q in module.output_quantizers):
+        return True
     return False
 
 
-def _find_next_call_module_users(node) -> list:
-    """
-    从 node.users 中找到紧邻的 call_module 后继节点。
+def _is_initialized_quantizer(quantizer) -> bool:
+    """判断量化器是否已初始化且能提供 encodings。"""
+    if quantizer is None or not hasattr(quantizer, 'is_initialized'):
+        return False
+    if not quantizer.is_initialized():
+        return False
+    encoding = quantizer.get_encodings() if hasattr(quantizer, 'get_encodings') else None
+    return encoding is not None
 
-    - call_function / call_method 节点（view/reshape/permute/contiguous 等）视为透明，
-      递归进入其 users 继续查找。
-    - 遇到 call_module 节点立即返回，不穿透。
-    - 其他类型节点（output/placeholder 等）直接忽略。
+
+def _leaf_module_name(module_name: str) -> str:
+    """返回模块路径最后一级名称。"""
+    return module_name.split(".")[-1] if module_name else module_name
+
+
+def _is_transparent_call_module(module_name: str, module, transparent_prefixes: Tuple[str, ...]) -> bool:
+    """
+    判断 call_module 节点是否视为透明节点。
+
+    透明节点允许图遍历继续穿透，典型用于：
+    - module_clamp_* 这类禁用量化的中间节点
+    - 所有 input/output quantizer 都被禁用的模块
+    """
+    leaf_name = _leaf_module_name(module_name)
+    if any(leaf_name.startswith(prefix) for prefix in transparent_prefixes):
+        return True
+    return not _has_active_quantizers(module)
+
+
+def _dedup_nodes(nodes: list) -> list:
+    """按出现顺序去重 FX 节点。"""
+    seen = set()
+    result = []
+    for node in nodes:
+        node_id = id(node)
+        if node_id in seen:
+            continue
+        seen.add(node_id)
+        result.append(node)
+    return result
+
+
+def _dedup_indices(indices: list[int]) -> list[int]:
+    """按顺序去重索引列表。"""
+    seen = set()
+    result = []
+    for idx in indices:
+        if idx in seen:
+            continue
+        seen.add(idx)
+        result.append(idx)
+    return result
+
+
+def _find_next_quantized_call_modules(node, module_map: dict, transparent_prefixes: Tuple[str, ...], stats: Dict[str, int]) -> list:
+    """
+    从当前节点开始向下游查找真正的量化目标模块。
+
+    - call_function / call_method 节点视为透明
+    - 禁用量化的 call_module 视为透明，可继续穿透
+    - 遇到启用量化的 call_module 则返回为目标节点
     """
     result = []
     for user in node.users:
         if user.op == 'call_module':
-            result.append(user)
+            module = module_map.get(user.target)
+            if module is None:
+                continue
+            if _is_transparent_call_module(user.target, module, transparent_prefixes):
+                stats['passthrough_disabled'] += 1
+                result.extend(_find_next_quantized_call_modules(user, module_map, transparent_prefixes, stats))
+            else:
+                result.append(user)
         elif user.op in ('call_function', 'call_method'):
-            # 透明算子：继续递归查找其后继
-            result.extend(_find_next_call_module_users(user))
+            result.extend(_find_next_quantized_call_modules(user, module_map, transparent_prefixes, stats))
+    return _dedup_nodes(result)
+
+
+def _find_prev_quantized_call_modules(arg_obj, module_map: dict, transparent_prefixes: Tuple[str, ...], stats: Dict[str, int], visited: Optional[Set[int]] = None) -> list:
+    """
+    从当前输入参数对象向上游回溯，查找真正的量化源模块。
+
+    - call_function / call_method 节点视为透明
+    - 禁用量化的 call_module 视为透明，可继续穿透
+    - 遇到启用量化的 call_module 则返回为源节点
+    """
+    if visited is None:
+        visited = set()
+
+    result = []
+
+    if isinstance(arg_obj, (list, tuple)):
+        for item in arg_obj:
+            result.extend(_find_prev_quantized_call_modules(item, module_map, transparent_prefixes, stats, visited))
+        return _dedup_nodes(result)
+
+    if not hasattr(arg_obj, 'op'):
+        return result
+
+    node_id = id(arg_obj)
+    if node_id in visited:
+        return result
+    visited.add(node_id)
+
+    if arg_obj.op == 'call_module':
+        module = module_map.get(arg_obj.target)
+        if module is None:
+            return result
+        if _is_transparent_call_module(arg_obj.target, module, transparent_prefixes):
+            stats['passthrough_disabled'] += 1
+            for prev_arg in arg_obj.args:
+                result.extend(_find_prev_quantized_call_modules(prev_arg, module_map, transparent_prefixes, stats, visited))
+            return _dedup_nodes(result)
+        return [arg_obj]
+
+    if arg_obj.op in ('call_function', 'call_method'):
+        for prev_arg in arg_obj.args:
+            result.extend(_find_prev_quantized_call_modules(prev_arg, module_map, transparent_prefixes, stats, visited))
+        return _dedup_nodes(result)
+
     return result
 
 
-def sync_adjacent_quantizers(sim_model, verbose: bool = True) -> Dict[str, int]:
-    """
-    通过 FX Graph 遍历，将已初始化的 output_quantizers[0] 传播给
-    相邻且未初始化的 input_quantizers[0]。
+def _sync_quantizer_range(src_q, dst_q) -> None:
+    """将源量化器的 min/max 同步到目标量化器。"""
+    src_encoding = src_q.get_encodings()
+    device = next(dst_q.parameters()).device
+    dst_q.set_range(src_encoding.min.to(device), src_encoding.max.to(device))
 
-    传播规则：
-    1. src_q (output_q) 已初始化 且 dst_q (input_q) 未初始化 → 传播
-    2. call_function/call_method 节点（view/reshape/permute 等）→ 透明跳过
-    3. 量化被禁用的 call_module（所有 quantizer 均为 None）→ 停止，不修改，不继续
+
+def _format_encoding_range(encoding) -> str:
+    """格式化 encodings 的 min/max 以便日志打印。"""
+    min_v = encoding.min.item() if encoding.min.numel() == 1 else encoding.min.tolist()
+    max_v = encoding.max.item() if encoding.max.numel() == 1 else encoding.max.tolist()
+    if isinstance(min_v, float) and isinstance(max_v, float):
+        return f"[{min_v:.4f}, {max_v:.4f}]"
+    return f"[{min_v}, {max_v}]"
+
+
+def _get_non_none_input_quantizer_indices(module) -> list[int]:
+    """返回模块中所有非 None 的 input quantizer 索引。"""
+    if not hasattr(module, 'input_quantizers'):
+        return []
+    return [idx for idx, q in enumerate(module.input_quantizers) if q is not None]
+
+
+def _resolve_downstream_input_indices(
+    dst_node,
+    dst_module,
+    source_node,
+    module_map: dict,
+    transparent_prefixes: Tuple[str, ...],
+) -> list[int]:
+    """
+    解析下游模块中真正应该同步的 input quantizer 索引。
+
+    规则：
+    1. 优先使用 FX 参数依赖能直接命中的 idx
+    2. 仅保留非 None 的 input quantizer 槽位
+    3. 若直接命中为空，但模块只有一个非 None input quantizer，
+       则回退到该唯一槽位（适用于 Snake2d 一类多输入但只量化主输入的模块）
+    4. 若直接命中存在，但还包含 None 槽位，且模块只有一个非 None 槽位，
+       则把该槽位作为后备候选追加进去
+    """
+    if not hasattr(dst_module, 'input_quantizers') or len(dst_module.input_quantizers) == 0:
+        return []
+
+    input_quantizers = list(dst_module.input_quantizers)
+    non_none_indices = _get_non_none_input_quantizer_indices(dst_module)
+    dependent_arg_indices = [
+        idx for idx in range(min(len(dst_node.args), len(input_quantizers)))
+        if _arg_depends_on_node(
+            dst_node.args[idx],
+            source_node,
+            module_map,
+            transparent_prefixes,
+        )
+    ]
+
+    resolved = [idx for idx in dependent_arg_indices if idx in non_none_indices]
+
+    if len(non_none_indices) == 1:
+        sole_idx = non_none_indices[0]
+        if dependent_arg_indices and sole_idx not in resolved:
+            resolved.append(sole_idx)
+        elif not resolved:
+            resolved = [sole_idx]
+
+    return _dedup_indices(resolved)
+
+
+def _sync_and_verify_quantizer_range(src_q, dst_q) -> bool:
+    """同步量化器范围，并验证目标量化器已真正初始化。"""
+    _sync_quantizer_range(src_q, dst_q)
+    return _is_initialized_quantizer(dst_q)
+
+
+def sync_quantizer_pair_by_name(
+    sim_model,
+    src_module_name: str,
+    dst_module_name: str,
+    src_output_idx: int = 0,
+    dst_input_idx: int = 0,
+    overwrite_initialized: bool = True,
+    dst_quantizer_allow_overwrite: Optional[bool] = None,
+    verbose: bool = True,
+) -> bool:
+    """
+    按模块名精确同步一对量化器：
+    `src_module.output_quantizers[src_output_idx] -> dst_module.input_quantizers[dst_input_idx]`
+
+    适用于 FX 图遍历难以稳定命中的特例链路。
+    """
+    module_map = dict(sim_model.named_modules())
+    src_module = module_map.get(src_module_name)
+    dst_module = module_map.get(dst_module_name)
+
+    if src_module is None or dst_module is None:
+        if verbose:
+            print(f"  ⚠️  精确同步失败: 模块不存在 {src_module_name} -> {dst_module_name}")
+        return False
+
+    if not hasattr(src_module, 'output_quantizers') or src_output_idx >= len(src_module.output_quantizers):
+        if verbose:
+            print(f"  ⚠️  精确同步失败: 源 output_quantizer 不存在 {src_module_name}[{src_output_idx}]")
+        return False
+
+    if not hasattr(dst_module, 'input_quantizers') or dst_input_idx >= len(dst_module.input_quantizers):
+        if verbose:
+            print(f"  ⚠️  精确同步失败: 目标 input_quantizer 不存在 {dst_module_name}[{dst_input_idx}]")
+        return False
+
+    src_q = src_module.output_quantizers[src_output_idx]
+    dst_q = dst_module.input_quantizers[dst_input_idx]
+
+    if not _is_initialized_quantizer(src_q):
+        if verbose:
+            print(f"  ⚠️  精确同步失败: 源量化器未初始化 {src_module_name}.output_q[{src_output_idx}]")
+        return False
+
+    if dst_q is None:
+        if verbose:
+            print(f"  ⚠️  精确同步失败: 目标量化器为 None {dst_module_name}.input_q[{dst_input_idx}]")
+        return False
+
+    if dst_q.is_initialized() and not overwrite_initialized:
+        if verbose:
+            print(f"  ⏭  精确同步跳过: 目标已初始化 {dst_module_name}.input_q[{dst_input_idx}]")
+        return False
+
+    try:
+        if not _sync_and_verify_quantizer_range(src_q, dst_q):
+            raise RuntimeError("目标量化器在 set_range 后仍未初始化")
+        _set_quantizer_allow_overwrite(dst_q, dst_quantizer_allow_overwrite)
+        if verbose:
+            print(
+                f"  🎯 {src_module_name}.output_q[{src_output_idx}] => "
+                f"{dst_module_name}.input_q[{dst_input_idx}]  "
+                f"{_format_encoding_range(src_q.get_encodings())}"
+            )
+        return True
+    except Exception as e:
+        if verbose:
+            print(f"  ⚠️  精确同步失败 {src_module_name} -> {dst_module_name}: {e}")
+        return False
+
+
+def _arg_depends_on_node(arg_obj, source_node, module_map: dict, transparent_prefixes: Tuple[str, ...], visited: Optional[Set[int]] = None) -> bool:
+    """
+    判断某个下游输入参数是否来自指定 source_node。
+
+    允许穿透：
+    - call_function / call_method
+    - 透明 call_module（如 module_clamp_* 或量化禁用模块）
+    """
+    if visited is None:
+        visited = set()
+
+    if isinstance(arg_obj, (list, tuple)):
+        return any(
+            _arg_depends_on_node(item, source_node, module_map, transparent_prefixes, visited)
+            for item in arg_obj
+        )
+
+    if not hasattr(arg_obj, 'op'):
+        return False
+
+    node_id = id(arg_obj)
+    if node_id in visited:
+        return False
+    visited.add(node_id)
+
+    if arg_obj is source_node:
+        return True
+
+    if arg_obj.op == 'call_module':
+        module = module_map.get(arg_obj.target)
+        if module is None:
+            return False
+        if not _is_transparent_call_module(arg_obj.target, module, transparent_prefixes):
+            return False
+        return any(
+            _arg_depends_on_node(prev_arg, source_node, module_map, transparent_prefixes, visited)
+            for prev_arg in arg_obj.args
+        )
+
+    if arg_obj.op in ('call_function', 'call_method'):
+        return any(
+            _arg_depends_on_node(prev_arg, source_node, module_map, transparent_prefixes, visited)
+            for prev_arg in arg_obj.args
+        )
+
+    return False
+
+
+def sync_adjacent_quantizers(
+    sim_model,
+    verbose: bool = True,
+    sync_input_from_upstream: bool = True,
+    sync_output_to_downstream: bool = True,
+    overwrite_initialized: bool = False,
+    synced_quantizer_allow_overwrite: Optional[bool] = None,
+    transparent_module_name_prefixes: Tuple[str, ...] = ("module_clamp_",),
+) -> Dict[str, int]:
+    """
+    在 FX Graph 上同步相邻量化器边界，使已初始化模块与上下游保持一致。
+
+    新版策略：
+    1. 不再只处理 Conv，任何已初始化的量化模块都可作为锚点
+    2. 支持双向同步
+       - module.input_q  <- 上游 output_q
+       - module.output_q -> 下游 input_q
+    3. 支持穿透透明节点
+       - call_function / call_method
+       - 禁用量化的 call_module
+       - 名称匹配 transparent_module_name_prefixes 的中间节点（如 module_clamp_*）
+    4. 对上游多来源默认跳过，避免不明确的反向覆盖
 
     Args:
         sim_model: AIMET QuantizationSimModel.model（FX GraphModule）
-        verbose:   是否打印详细日志
+        verbose: 是否打印详细日志
+        sync_input_from_upstream: 是否同步锚点 input_q 到上游 output_q
+        sync_output_to_downstream: 是否同步锚点 output_q 到下游 input_q
+        overwrite_initialized: 目标量化器已初始化时是否覆盖
+        synced_quantizer_allow_overwrite: 对被同步的目标量化器设置 allow_overwrite；
+                                         设为 False 可在后续 calibration 中锁定
+        transparent_module_name_prefixes: 允许穿透的透明模块名前缀
 
     Returns:
-        {'synced': int, 'skipped_disabled': int}
+        统计信息字典
     """
     if not hasattr(sim_model, 'graph'):
         if verbose:
             print("  ⚠️  sim_model 没有 .graph 属性，跳过 sync_adjacent_quantizers")
-        return {'synced': 0, 'skipped_disabled': 0}
+        return {
+            'synced': 0,
+            'upstream_synced': 0,
+            'downstream_synced': 0,
+            'skipped_disabled': 0,
+            'skipped_initialized': 0,
+            'skipped_multi_source': 0,
+            'skipped_missing_quantizer': 0,
+            'passthrough_disabled': 0,
+        }
 
-    # 构建 node.target → module 映射
     module_map = dict(sim_model.named_modules())
-
-    synced_count = 0
-    skipped_disabled = 0
+    stats = {
+        'synced': 0,
+        'upstream_synced': 0,
+        'downstream_synced': 0,
+        'skipped_disabled': 0,          # 兼容旧返回字段，等价于 passthrough_disabled
+        'skipped_initialized': 0,
+        'skipped_multi_source': 0,
+        'skipped_missing_quantizer': 0,
+        'passthrough_disabled': 0,
+    }
 
     for node in sim_model.graph.nodes:
         if node.op != 'call_module':
             continue
 
-        src_module = module_map.get(node.target)
-        if src_module is None:
+        anchor_module = module_map.get(node.target)
+        if anchor_module is None:
             continue
 
-        # 检查 output_q[0] 是否存在且已初始化
-        if not (hasattr(src_module, 'output_quantizers') and
-                len(src_module.output_quantizers) > 0 and
-                src_module.output_quantizers[0] is not None and
-                src_module.output_quantizers[0].is_initialized()):
+        has_initialized_input = (
+            hasattr(anchor_module, 'input_quantizers') and
+            len(anchor_module.input_quantizers) > 0 and
+            any(_is_initialized_quantizer(q) for q in anchor_module.input_quantizers)
+        )
+        has_initialized_output = (
+            hasattr(anchor_module, 'output_quantizers') and
+            len(anchor_module.output_quantizers) > 0 and
+            any(_is_initialized_quantizer(q) for q in anchor_module.output_quantizers)
+        )
+
+        if not has_initialized_input and not has_initialized_output:
             continue
 
-        src_q = src_module.output_quantizers[0]
-        src_encoding = src_q.get_encodings()
-        if src_encoding is None:
-            continue
+        # 1) 反向同步：anchor.input_q <- upstream.output_q
+        if sync_input_from_upstream and has_initialized_input:
+            input_quantizers = list(getattr(anchor_module, 'input_quantizers', []))
+            max_input_args = min(len(node.args), len(input_quantizers))
 
-        # 找相邻 call_module 后继节点（透明跳过 call_function/call_method）
-        next_nodes = _find_next_call_module_users(node)
+            for idx in range(max_input_args):
+                anchor_input_q = input_quantizers[idx]
+                if not _is_initialized_quantizer(anchor_input_q):
+                    continue
 
-        for next_node in next_nodes:
-            dst_module = module_map.get(next_node.target)
-            if dst_module is None:
-                continue
-
-            # 后继模块量化被禁用 → STOP
-            if not _has_active_quantizers(dst_module):
-                skipped_disabled += 1
-                if verbose:
-                    print(f"  ⏹  {node.target} → {next_node.target}: "
-                          f"后继模块量化已禁用，停止传播")
-                continue
-
-            # input_q[0] 存在但未初始化 → 传播
-            if not (hasattr(dst_module, 'input_quantizers') and
-                    len(dst_module.input_quantizers) > 0 and
-                    dst_module.input_quantizers[0] is not None):
-                continue
-
-            dst_q = dst_module.input_quantizers[0]
-            if dst_q.is_initialized():
-                continue  # 已初始化，不覆盖
-
-            try:
-                device = next(dst_q.parameters()).device
-                dst_q.set_range(
-                    src_encoding.min.to(device),
-                    src_encoding.max.to(device)
+                upstream_sources = _find_prev_quantized_call_modules(
+                    node.args[idx],
+                    module_map,
+                    transparent_module_name_prefixes,
+                    stats,
                 )
-                synced_count += 1
-                if verbose:
-                    min_v = src_encoding.min.item() if src_encoding.min.numel() == 1 else src_encoding.min.tolist()
-                    max_v = src_encoding.max.item() if src_encoding.max.numel() == 1 else src_encoding.max.tolist()
-                    print(f"  🔗 {node.target}.output_q → {next_node.target}.input_q  "
-                          f"[{min_v:.4f}, {max_v:.4f}]")
-            except Exception as e:
-                if verbose:
-                    print(f"  ⚠️  {node.target} → {next_node.target}: 传播失败 - {e}")
+
+                if len(upstream_sources) == 0:
+                    stats['skipped_missing_quantizer'] += 1
+                    continue
+                if len(upstream_sources) > 1:
+                    stats['skipped_multi_source'] += 1
+                    if verbose:
+                        names = ", ".join(src.target for src in upstream_sources)
+                        print(f"  ⚠️  {node.target}.input[{idx}] 存在多个上游来源，跳过反向同步: {names}")
+                    continue
+
+                src_node = upstream_sources[0]
+                src_module = module_map.get(src_node.target)
+                if src_module is None or not hasattr(src_module, 'output_quantizers') or len(src_module.output_quantizers) == 0:
+                    stats['skipped_missing_quantizer'] += 1
+                    continue
+
+                src_output_q = src_module.output_quantizers[0]
+                if src_output_q is None:
+                    stats['skipped_missing_quantizer'] += 1
+                    continue
+                if src_output_q.is_initialized() and not overwrite_initialized:
+                    stats['skipped_initialized'] += 1
+                    continue
+
+                try:
+                    _sync_quantizer_range(anchor_input_q, src_output_q)
+                    _set_quantizer_allow_overwrite(src_output_q, synced_quantizer_allow_overwrite)
+                    stats['upstream_synced'] += 1
+                    stats['synced'] += 1
+                    if verbose:
+                        print(
+                            f"  🔁 {src_node.target}.output_q <- {node.target}.input_q[{idx}]  "
+                            f"{_format_encoding_range(anchor_input_q.get_encodings())}"
+                        )
+                except Exception as e:
+                    if verbose:
+                        print(f"  ⚠️  {src_node.target} <- {node.target}.input[{idx}]: 反向同步失败 - {e}")
+
+        # 2) 正向同步：anchor.output_q -> downstream.input_q
+        if sync_output_to_downstream and has_initialized_output:
+            output_quantizers = list(getattr(anchor_module, 'output_quantizers', []))
+
+            for out_idx, anchor_output_q in enumerate(output_quantizers):
+                if not _is_initialized_quantizer(anchor_output_q):
+                    continue
+
+                downstream_targets = _find_next_quantized_call_modules(
+                    node,
+                    module_map,
+                    transparent_module_name_prefixes,
+                    stats,
+                )
+
+                for dst_node in downstream_targets:
+                    dst_module = module_map.get(dst_node.target)
+                    if dst_module is None or not hasattr(dst_module, 'input_quantizers') or len(dst_module.input_quantizers) == 0:
+                        stats['skipped_missing_quantizer'] += 1
+                        continue
+
+                    input_quantizers = list(dst_module.input_quantizers)
+                    candidate_input_indices = _resolve_downstream_input_indices(
+                        dst_node,
+                        dst_module,
+                        node,
+                        module_map,
+                        transparent_module_name_prefixes,
+                    )
+                    if not candidate_input_indices:
+                        stats['skipped_missing_quantizer'] += 1
+                        continue
+
+                    synced_this_dst = False
+                    for dst_idx in candidate_input_indices:
+                        dst_input_q = input_quantizers[dst_idx]
+                        if dst_input_q is None:
+                            stats['skipped_missing_quantizer'] += 1
+                            continue
+                        if dst_input_q.is_initialized() and not overwrite_initialized:
+                            stats['skipped_initialized'] += 1
+                            continue
+
+                        try:
+                            if not _sync_and_verify_quantizer_range(anchor_output_q, dst_input_q):
+                                raise RuntimeError("目标量化器在 set_range 后仍未初始化")
+                            _set_quantizer_allow_overwrite(dst_input_q, synced_quantizer_allow_overwrite)
+                            stats['downstream_synced'] += 1
+                            stats['synced'] += 1
+                            synced_this_dst = True
+                            if verbose:
+                                print(
+                                    f"  🔗 {node.target}.output_q[{out_idx}] -> {dst_node.target}.input_q[{dst_idx}]  "
+                                    f"{_format_encoding_range(anchor_output_q.get_encodings())}"
+                                )
+                            break
+                        except Exception as e:
+                            if verbose:
+                                print(f"  ⚠️  {node.target} -> {dst_node.target}.input[{dst_idx}]: 正向同步失败 - {e}")
+
+                    if not synced_this_dst:
+                        stats['skipped_missing_quantizer'] += 1
+
+    stats['skipped_disabled'] = stats['passthrough_disabled']
 
     if verbose:
-        print(f"\n✅ sync_adjacent_quantizers 完成: "
-              f"传播 {synced_count} 个, 跳过 disabled {skipped_disabled} 个")
+        print("\n✅ sync_adjacent_quantizers 完成:")
+        print(f"   总传播: {stats['synced']}")
+        print(f"   上游同步: {stats['upstream_synced']}")
+        print(f"   下游同步: {stats['downstream_synced']}")
+        print(f"   穿透 disabled/transparent 节点: {stats['passthrough_disabled']}")
+        print(f"   跳过已初始化目标: {stats['skipped_initialized']}")
+        print(f"   跳过多上游来源: {stats['skipped_multi_source']}")
+        print(f"   跳过缺失量化器: {stats['skipped_missing_quantizer']}")
 
-    return {'synced': synced_count, 'skipped_disabled': skipped_disabled}
+    return stats
 

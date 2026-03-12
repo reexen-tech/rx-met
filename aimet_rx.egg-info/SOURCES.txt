@@ -1,9 +1,6 @@
 LICENSE
 MANIFEST.in
 README.md
-mixed_precision_bitwidth_config.json
-model_fp.pth
-mrnn_quantsim_config_custom_mixed_precision_v2.json
 pyproject.toml
 requirements.txt
 setup.py
