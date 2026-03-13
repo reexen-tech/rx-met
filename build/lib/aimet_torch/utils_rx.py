@@ -866,11 +866,28 @@ def load_mixed_precision_config(config_file: str) -> Dict[str, Any]:
             # 设置输出量化参数
             if hasattr(module, 'output_quantizers') and len(module.output_quantizers) > 0:
                 output_quantizer = module.output_quantizers[0]
+                output_bw = layer_config.get('output_bitwidth')
+                output_sym = layer_config.get('output_symmetric')
+                if output_quantizer is None and output_bw is not None:
+                    try:
+                        from aimet_torch.v2.quantization.affine import QuantizeDequantize
+                        import torch.nn as _nn
+                        sym = output_sym if output_sym is not None else True
+                        new_q = QuantizeDequantize(shape=(), bitwidth=output_bw, symmetric=sym)
+                        slots = list(module.output_quantizers)
+                        slots[0] = new_q
+                        module.output_quantizers = _nn.ModuleList(slots)
+                        output_quantizer = new_q
+                        if verbose:
+                            label = f"pattern: {matched_pattern}" if match_type == 'pattern' else match_type
+                            print(f"  ➕ [{label}] {name}.output[0]: 创建新 quantizer {output_bw}-bit {'sym' if sym else 'asym'}")
+                    except Exception as _e:
+                        if verbose:
+                            print(f"  ⚠️  {name}.output[0]: 创建 quantizer 失败 - {_e}")
                 if output_quantizer is not None:
                     changes = []
                     
                     # 位宽
-                    output_bw = layer_config.get('output_bitwidth')
                     if output_bw:
                         output_quantizer.bitwidth = output_bw
                         # 🔧 FIX: 更新 qmin 和 qmax 以匹配新的位宽
@@ -885,7 +902,6 @@ def load_mixed_precision_config(config_file: str) -> Dict[str, Any]:
                         changes.append(f"{output_bw}-bit")
                     
                     # 对称性
-                    output_sym = layer_config.get('output_symmetric')
                     if output_sym is not None:
                         output_quantizer.symmetric = output_sym
                         # 🔧 如果改变了对称性，需要重新计算 qmin/qmax
@@ -1206,11 +1222,28 @@ def apply_mixed_precision_bitwidth(sim_model, config_file: str, verbose: bool = 
             # 设置输出量化参数
             if hasattr(module, 'output_quantizers') and len(module.output_quantizers) > 0:
                 output_quantizer = module.output_quantizers[0]
+                output_bw = layer_config.get('output_bitwidth')
+                output_sym = layer_config.get('output_symmetric')
+                if output_quantizer is None and output_bw is not None:
+                    try:
+                        from aimet_torch.v2.quantization.affine import QuantizeDequantize
+                        import torch.nn as _nn
+                        sym = output_sym if output_sym is not None else True
+                        new_q = QuantizeDequantize(shape=(), bitwidth=output_bw, symmetric=sym)
+                        slots = list(module.output_quantizers)
+                        slots[0] = new_q
+                        module.output_quantizers = _nn.ModuleList(slots)
+                        output_quantizer = new_q
+                        if verbose:
+                            label = f"pattern: {matched_pattern}" if match_type == 'pattern' else match_type
+                            print(f"  ➕ [{label}] {name}.output[0]: 创建新 quantizer {output_bw}-bit {'sym' if sym else 'asym'}")
+                    except Exception as _e:
+                        if verbose:
+                            print(f"  ⚠️  {name}.output[0]: 创建 quantizer 失败 - {_e}")
                 if output_quantizer is not None:
                     changes = []
                     
                     # 位宽
-                    output_bw = layer_config.get('output_bitwidth')
                     if output_bw:
                         output_quantizer.bitwidth = output_bw
                         # 🔧 FIX: 更新 qmin 和 qmax 以匹配新的位宽
@@ -1225,7 +1258,6 @@ def apply_mixed_precision_bitwidth(sim_model, config_file: str, verbose: bool = 
                         changes.append(f"{output_bw}-bit")
                     
                     # 对称性
-                    output_sym = layer_config.get('output_symmetric')
                     if output_sym is not None:
                         output_quantizer.symmetric = output_sym
                         # 🔧 FIX: 如果改变了对称性，需要重新计算 qmin/qmax

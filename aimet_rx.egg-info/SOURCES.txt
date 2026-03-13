@@ -1,3 +1,4 @@
+.gitignore
 LICENSE
 MANIFEST.in
 README.md

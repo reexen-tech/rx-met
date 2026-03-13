@@ -735,6 +735,10 @@ def _is_transparent_call_module(module_name: str, module, transparent_prefixes: 
     leaf_name = _leaf_module_name(module_name)
     if any(leaf_name.startswith(prefix) for prefix in transparent_prefixes):
         return True
+    module_type_name = type(module).__name__
+    if module_type_name in {"Concat", "QuantizedConcat", "FakeQuantizedConcat"}:
+        # Concat 是真实的多输入汇聚边界，不能仅因量化器关闭就被当作透明节点穿透。
+        return False
     return not _has_active_quantizers(module)
 
 
@@ -761,6 +765,27 @@ def _dedup_indices(indices: list[int]) -> list[int]:
         seen.add(idx)
         result.append(idx)
     return result
+
+
+def _find_prev_quantized_from_prev_args(prev_args, module_map: dict, transparent_prefixes: Tuple[str, ...], stats: Dict[str, int], visited: Set[int]) -> list:
+    """
+    在一组上游参数中优先返回“最近命中”的真实量化源。
+
+    对 view/permute/reshape/getitem 等 FX 透明节点，后续参数往往只是 shape/index 等元信息。
+    继续遍历这些元信息参数会把更早祖先误收进来，导致“最近边界”被污染。
+    因此这里按参数顺序查找，一旦命中真实上游源就立即返回。
+    """
+    for prev_arg in prev_args:
+        found = _find_prev_quantized_call_modules(
+            prev_arg,
+            module_map,
+            transparent_prefixes,
+            stats,
+            visited,
+        )
+        if found:
+            return _dedup_nodes(found)
+    return []
 
 
 def _find_next_quantized_call_modules(node, module_map: dict, transparent_prefixes: Tuple[str, ...], stats: Dict[str, int]) -> list:
@@ -801,9 +826,13 @@ def _find_prev_quantized_call_modules(arg_obj, module_map: dict, transparent_pre
     result = []
 
     if isinstance(arg_obj, (list, tuple)):
-        for item in arg_obj:
-            result.extend(_find_prev_quantized_call_modules(item, module_map, transparent_prefixes, stats, visited))
-        return _dedup_nodes(result)
+        return _find_prev_quantized_from_prev_args(
+            arg_obj,
+            module_map,
+            transparent_prefixes,
+            stats,
+            visited,
+        )
 
     if not hasattr(arg_obj, 'op'):
         return result
@@ -819,15 +848,23 @@ def _find_prev_quantized_call_modules(arg_obj, module_map: dict, transparent_pre
             return result
         if _is_transparent_call_module(arg_obj.target, module, transparent_prefixes):
             stats['passthrough_disabled'] += 1
-            for prev_arg in arg_obj.args:
-                result.extend(_find_prev_quantized_call_modules(prev_arg, module_map, transparent_prefixes, stats, visited))
-            return _dedup_nodes(result)
+            return _find_prev_quantized_from_prev_args(
+                arg_obj.args,
+                module_map,
+                transparent_prefixes,
+                stats,
+                visited,
+            )
         return [arg_obj]
 
     if arg_obj.op in ('call_function', 'call_method'):
-        for prev_arg in arg_obj.args:
-            result.extend(_find_prev_quantized_call_modules(prev_arg, module_map, transparent_prefixes, stats, visited))
-        return _dedup_nodes(result)
+        return _find_prev_quantized_from_prev_args(
+            arg_obj.args,
+            module_map,
+            transparent_prefixes,
+            stats,
+            visited,
+        )
 
     return result
 

@@ -182,11 +182,15 @@ def load_quantizer_encodings(
                         if verbose:
                             print(f"  ⚠️ 警告：{module_name} 的 aimet_onnx_name 未设置，使用模块路径名称作为后备")
                 
-                if module.load_quant_params_from_aimet_format(
+                loaded_ok = module.load_quant_params_from_aimet_format(
                     encodings_dict,
                     module_name=target_name,
                     verbose=verbose
-                ):
+                )
+                if loaded_ok and allow_overwrite is not None:
+                    module.set_quant_params_locked(not allow_overwrite)
+
+                if loaded_ok:
                     loaded_count += 1
                     loaded_types.add("QuantGRU")
                     if verbose:
@@ -225,14 +229,18 @@ def load_quantizer_encodings(
                     q = module.input_quantizers[idx]
                     rmin = item.get("real_min")
                     rmax = item.get("real_max")
-                    if rmin is not None and rmax is not None and _apply_aimet_encoding_to_quantizer(q, rmin, rmax, device, item, verbose):
+                    if rmin is not None and rmax is not None and _apply_aimet_encoding_to_quantizer(
+                        q, rmin, rmax, device, item, verbose
+                    ):
                         _set_quantizer_allow_overwrite(q, allow_overwrite)
                         loaded_count += 1
                         loaded_types.add(type(module).__name__)
             elif isinstance(inp_enc, dict):
                 rmin, rmax = inp_enc.get("real_min"), inp_enc.get("real_max")
                 if hasattr(module, 'input_quantizers') and len(module.input_quantizers) > 0 and module.input_quantizers[0] is not None and rmin is not None and rmax is not None:
-                    if _apply_aimet_encoding_to_quantizer(module.input_quantizers[0], rmin, rmax, device, inp_enc, verbose):
+                    if _apply_aimet_encoding_to_quantizer(
+                        module.input_quantizers[0], rmin, rmax, device, inp_enc, verbose
+                    ):
                         _set_quantizer_allow_overwrite(module.input_quantizers[0], allow_overwrite)
                         loaded_count += 1
                         loaded_types.add(type(module).__name__)
@@ -245,14 +253,18 @@ def load_quantizer_encodings(
                     q = module.output_quantizers[idx]
                     rmin = item.get("real_min")
                     rmax = item.get("real_max")
-                    if rmin is not None and rmax is not None and _apply_aimet_encoding_to_quantizer(q, rmin, rmax, device, item, verbose):
+                    if rmin is not None and rmax is not None and _apply_aimet_encoding_to_quantizer(
+                        q, rmin, rmax, device, item, verbose
+                    ):
                         _set_quantizer_allow_overwrite(q, allow_overwrite)
                         loaded_count += 1
                         loaded_types.add(type(module).__name__)
             elif isinstance(out_enc, dict):
                 rmin, rmax = out_enc.get("real_min"), out_enc.get("real_max")
                 if hasattr(module, 'output_quantizers') and len(module.output_quantizers) > 0 and module.output_quantizers[0] is not None and rmin is not None and rmax is not None:
-                    if _apply_aimet_encoding_to_quantizer(module.output_quantizers[0], rmin, rmax, device, out_enc, verbose):
+                    if _apply_aimet_encoding_to_quantizer(
+                        module.output_quantizers[0], rmin, rmax, device, out_enc, verbose
+                    ):
                         _set_quantizer_allow_overwrite(module.output_quantizers[0], allow_overwrite)
                         loaded_count += 1
                         loaded_types.add(type(module).__name__)
@@ -280,7 +292,9 @@ def load_quantizer_encodings(
             if q is None:
                 skipped_count += 1
                 continue
-            if _apply_aimet_encoding_to_quantizer(q, rmin, rmax, device, enc, verbose):
+            if _apply_aimet_encoding_to_quantizer(
+                q, rmin, rmax, device, enc, verbose
+            ):
                 _set_quantizer_allow_overwrite(q, allow_overwrite)
                 loaded_count += 1
                 loaded_types.add(type(module).__name__)
@@ -553,7 +567,41 @@ def _get_model_device(sim_model):
     return None
 
 
-def _apply_aimet_encoding_to_quantizer(quantizer, real_min, real_max, device=None, enc_entry=None, verbose=False):
+def _align_tensor_to_shape(value_t: torch.Tensor, target_shape: torch.Size) -> torch.Tensor:
+    """
+    将输入张量对齐到目标形状，兼容常见标量/单元素场景：
+    - [] -> [1]（expand）
+    - [1] -> []（reshape/squeeze 为标量）
+    """
+    if value_t.shape == target_shape:
+        return value_t
+
+    # 目标为标量：单元素张量可安全压为标量
+    if len(target_shape) == 0 and value_t.numel() == 1:
+        return value_t.reshape(target_shape).contiguous()
+
+    # 输入为标量，目标为向量/多维：可广播扩展
+    if value_t.numel() == 1:
+        return value_t.expand(target_shape).contiguous()
+
+    # 元素个数一致：尝试重排形状
+    target_numel = 1
+    for dim in target_shape:
+        target_numel *= int(dim)
+    if value_t.numel() == target_numel:
+        return value_t.reshape(target_shape).contiguous()
+
+    return value_t
+
+
+def _apply_aimet_encoding_to_quantizer(
+    quantizer,
+    real_min,
+    real_max,
+    device=None,
+    enc_entry=None,
+    verbose=False
+):
     """
     将 AIMET 导出格式的 real_min/real_max 应用到量化器（调用 set_range）。
     real_min, real_max 可为标量或列表，会转为 tensor。
@@ -575,9 +623,15 @@ def _apply_aimet_encoding_to_quantizer(quantizer, real_min, real_max, device=Non
         min_t = min_t.to(device)
         max_t = max_t.to(device)
     try:
-        if hasattr(quantizer, 'min') and isinstance(quantizer.min, torch.Tensor) and quantizer.min.numel() > 1 and min_t.numel() == 1:
-            min_t = min_t.expand(quantizer.min.shape).contiguous()
-            max_t = max_t.expand(quantizer.max.shape).contiguous()
+        # 对齐输入形状到 quantizer 参数形状，覆盖常见 [] -> [1] 场景
+        if hasattr(quantizer, 'min') and isinstance(quantizer.min, torch.Tensor):
+            q_min_shape = quantizer.min.shape
+            min_t = _align_tensor_to_shape(min_t, q_min_shape)
+
+        if hasattr(quantizer, 'max') and isinstance(quantizer.max, torch.Tensor):
+            q_max_shape = quantizer.max.shape
+            max_t = _align_tensor_to_shape(max_t, q_max_shape)
+
         quantizer.set_range(min_t, max_t)
         return True
     except Exception as e:
@@ -681,6 +735,10 @@ def _is_transparent_call_module(module_name: str, module, transparent_prefixes: 
     leaf_name = _leaf_module_name(module_name)
     if any(leaf_name.startswith(prefix) for prefix in transparent_prefixes):
         return True
+    module_type_name = type(module).__name__
+    if module_type_name in {"Concat", "QuantizedConcat", "FakeQuantizedConcat"}:
+        # Concat 是真实的多输入汇聚边界，不能仅因量化器关闭就被当作透明节点穿透。
+        return False
     return not _has_active_quantizers(module)
 
 
@@ -707,6 +765,27 @@ def _dedup_indices(indices: list[int]) -> list[int]:
         seen.add(idx)
         result.append(idx)
     return result
+
+
+def _find_prev_quantized_from_prev_args(prev_args, module_map: dict, transparent_prefixes: Tuple[str, ...], stats: Dict[str, int], visited: Set[int]) -> list:
+    """
+    在一组上游参数中优先返回“最近命中”的真实量化源。
+
+    对 view/permute/reshape/getitem 等 FX 透明节点，后续参数往往只是 shape/index 等元信息。
+    继续遍历这些元信息参数会把更早祖先误收进来，导致“最近边界”被污染。
+    因此这里按参数顺序查找，一旦命中真实上游源就立即返回。
+    """
+    for prev_arg in prev_args:
+        found = _find_prev_quantized_call_modules(
+            prev_arg,
+            module_map,
+            transparent_prefixes,
+            stats,
+            visited,
+        )
+        if found:
+            return _dedup_nodes(found)
+    return []
 
 
 def _find_next_quantized_call_modules(node, module_map: dict, transparent_prefixes: Tuple[str, ...], stats: Dict[str, int]) -> list:
@@ -747,9 +826,13 @@ def _find_prev_quantized_call_modules(arg_obj, module_map: dict, transparent_pre
     result = []
 
     if isinstance(arg_obj, (list, tuple)):
-        for item in arg_obj:
-            result.extend(_find_prev_quantized_call_modules(item, module_map, transparent_prefixes, stats, visited))
-        return _dedup_nodes(result)
+        return _find_prev_quantized_from_prev_args(
+            arg_obj,
+            module_map,
+            transparent_prefixes,
+            stats,
+            visited,
+        )
 
     if not hasattr(arg_obj, 'op'):
         return result
@@ -765,15 +848,23 @@ def _find_prev_quantized_call_modules(arg_obj, module_map: dict, transparent_pre
             return result
         if _is_transparent_call_module(arg_obj.target, module, transparent_prefixes):
             stats['passthrough_disabled'] += 1
-            for prev_arg in arg_obj.args:
-                result.extend(_find_prev_quantized_call_modules(prev_arg, module_map, transparent_prefixes, stats, visited))
-            return _dedup_nodes(result)
+            return _find_prev_quantized_from_prev_args(
+                arg_obj.args,
+                module_map,
+                transparent_prefixes,
+                stats,
+                visited,
+            )
         return [arg_obj]
 
     if arg_obj.op in ('call_function', 'call_method'):
-        for prev_arg in arg_obj.args:
-            result.extend(_find_prev_quantized_call_modules(prev_arg, module_map, transparent_prefixes, stats, visited))
-        return _dedup_nodes(result)
+        return _find_prev_quantized_from_prev_args(
+            arg_obj.args,
+            module_map,
+            transparent_prefixes,
+            stats,
+            visited,
+        )
 
     return result
 
