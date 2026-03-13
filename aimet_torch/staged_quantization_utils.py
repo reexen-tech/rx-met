@@ -182,11 +182,15 @@ def load_quantizer_encodings(
                         if verbose:
                             print(f"  ⚠️ 警告：{module_name} 的 aimet_onnx_name 未设置，使用模块路径名称作为后备")
                 
-                if module.load_quant_params_from_aimet_format(
+                loaded_ok = module.load_quant_params_from_aimet_format(
                     encodings_dict,
                     module_name=target_name,
                     verbose=verbose
-                ):
+                )
+                if loaded_ok and allow_overwrite is not None:
+                    module.set_quant_params_locked(not allow_overwrite)
+
+                if loaded_ok:
                     loaded_count += 1
                     loaded_types.add("QuantGRU")
                     if verbose:
