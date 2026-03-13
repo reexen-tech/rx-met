@@ -229,14 +229,18 @@ def load_quantizer_encodings(
                     q = module.input_quantizers[idx]
                     rmin = item.get("real_min")
                     rmax = item.get("real_max")
-                    if rmin is not None and rmax is not None and _apply_aimet_encoding_to_quantizer(q, rmin, rmax, device, item, verbose):
+                    if rmin is not None and rmax is not None and _apply_aimet_encoding_to_quantizer(
+                        q, rmin, rmax, device, item, verbose
+                    ):
                         _set_quantizer_allow_overwrite(q, allow_overwrite)
                         loaded_count += 1
                         loaded_types.add(type(module).__name__)
             elif isinstance(inp_enc, dict):
                 rmin, rmax = inp_enc.get("real_min"), inp_enc.get("real_max")
                 if hasattr(module, 'input_quantizers') and len(module.input_quantizers) > 0 and module.input_quantizers[0] is not None and rmin is not None and rmax is not None:
-                    if _apply_aimet_encoding_to_quantizer(module.input_quantizers[0], rmin, rmax, device, inp_enc, verbose):
+                    if _apply_aimet_encoding_to_quantizer(
+                        module.input_quantizers[0], rmin, rmax, device, inp_enc, verbose
+                    ):
                         _set_quantizer_allow_overwrite(module.input_quantizers[0], allow_overwrite)
                         loaded_count += 1
                         loaded_types.add(type(module).__name__)
@@ -249,14 +253,18 @@ def load_quantizer_encodings(
                     q = module.output_quantizers[idx]
                     rmin = item.get("real_min")
                     rmax = item.get("real_max")
-                    if rmin is not None and rmax is not None and _apply_aimet_encoding_to_quantizer(q, rmin, rmax, device, item, verbose):
+                    if rmin is not None and rmax is not None and _apply_aimet_encoding_to_quantizer(
+                        q, rmin, rmax, device, item, verbose
+                    ):
                         _set_quantizer_allow_overwrite(q, allow_overwrite)
                         loaded_count += 1
                         loaded_types.add(type(module).__name__)
             elif isinstance(out_enc, dict):
                 rmin, rmax = out_enc.get("real_min"), out_enc.get("real_max")
                 if hasattr(module, 'output_quantizers') and len(module.output_quantizers) > 0 and module.output_quantizers[0] is not None and rmin is not None and rmax is not None:
-                    if _apply_aimet_encoding_to_quantizer(module.output_quantizers[0], rmin, rmax, device, out_enc, verbose):
+                    if _apply_aimet_encoding_to_quantizer(
+                        module.output_quantizers[0], rmin, rmax, device, out_enc, verbose
+                    ):
                         _set_quantizer_allow_overwrite(module.output_quantizers[0], allow_overwrite)
                         loaded_count += 1
                         loaded_types.add(type(module).__name__)
@@ -284,7 +292,9 @@ def load_quantizer_encodings(
             if q is None:
                 skipped_count += 1
                 continue
-            if _apply_aimet_encoding_to_quantizer(q, rmin, rmax, device, enc, verbose):
+            if _apply_aimet_encoding_to_quantizer(
+                q, rmin, rmax, device, enc, verbose
+            ):
                 _set_quantizer_allow_overwrite(q, allow_overwrite)
                 loaded_count += 1
                 loaded_types.add(type(module).__name__)
@@ -557,7 +567,41 @@ def _get_model_device(sim_model):
     return None
 
 
-def _apply_aimet_encoding_to_quantizer(quantizer, real_min, real_max, device=None, enc_entry=None, verbose=False):
+def _align_tensor_to_shape(value_t: torch.Tensor, target_shape: torch.Size) -> torch.Tensor:
+    """
+    将输入张量对齐到目标形状，兼容常见标量/单元素场景：
+    - [] -> [1]（expand）
+    - [1] -> []（reshape/squeeze 为标量）
+    """
+    if value_t.shape == target_shape:
+        return value_t
+
+    # 目标为标量：单元素张量可安全压为标量
+    if len(target_shape) == 0 and value_t.numel() == 1:
+        return value_t.reshape(target_shape).contiguous()
+
+    # 输入为标量，目标为向量/多维：可广播扩展
+    if value_t.numel() == 1:
+        return value_t.expand(target_shape).contiguous()
+
+    # 元素个数一致：尝试重排形状
+    target_numel = 1
+    for dim in target_shape:
+        target_numel *= int(dim)
+    if value_t.numel() == target_numel:
+        return value_t.reshape(target_shape).contiguous()
+
+    return value_t
+
+
+def _apply_aimet_encoding_to_quantizer(
+    quantizer,
+    real_min,
+    real_max,
+    device=None,
+    enc_entry=None,
+    verbose=False
+):
     """
     将 AIMET 导出格式的 real_min/real_max 应用到量化器（调用 set_range）。
     real_min, real_max 可为标量或列表，会转为 tensor。
@@ -579,9 +623,15 @@ def _apply_aimet_encoding_to_quantizer(quantizer, real_min, real_max, device=Non
         min_t = min_t.to(device)
         max_t = max_t.to(device)
     try:
-        if hasattr(quantizer, 'min') and isinstance(quantizer.min, torch.Tensor) and quantizer.min.numel() > 1 and min_t.numel() == 1:
-            min_t = min_t.expand(quantizer.min.shape).contiguous()
-            max_t = max_t.expand(quantizer.max.shape).contiguous()
+        # 对齐输入形状到 quantizer 参数形状，覆盖常见 [] -> [1] 场景
+        if hasattr(quantizer, 'min') and isinstance(quantizer.min, torch.Tensor):
+            q_min_shape = quantizer.min.shape
+            min_t = _align_tensor_to_shape(min_t, q_min_shape)
+
+        if hasattr(quantizer, 'max') and isinstance(quantizer.max, torch.Tensor):
+            q_max_shape = quantizer.max.shape
+            max_t = _align_tensor_to_shape(max_t, q_max_shape)
+
         quantizer.set_range(min_t, max_t)
         return True
     except Exception as e:
