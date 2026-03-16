@@ -17,6 +17,7 @@ from collections import Counter
 
 import onnx
 import torch
+import torch.nn as nn
 from .custom_gru_onnx import (
     ensure_custom_gru_op_registered,
     replace_optimized_gru_modules,
@@ -28,10 +29,105 @@ from .postprocess_refactor import postprocess_all
 STATIC_DUMMY_INPUT_SHAPE: Tuple[int, int, int] = (1, 16000, 1)
 
 
+# 尝试导入 QuantGRU（如果已通过 pip install 安装，可以直接导入）
+try:
+    from quant_gru import QuantGRU
+except ImportError:
+    QuantGRU = None  # 如果未安装，设为 None
+
+try:
+    from aimet_torch.optimized_quantizable_gru import OptimizedQuantizableGRU
+except ImportError:
+    try:
+        from aimet_rx.aimet_torch.optimized_quantizable_gru import OptimizedQuantizableGRU
+    except ImportError:
+        OptimizedQuantizableGRU = None  # 如果导入失败，设为 None
+
+
 # ---------- Internal helpers ----------
 def _is_truthy_env(name: str) -> bool:
     v = os.getenv(name, "").strip()
     return v not in ("", "0", "false", "False", "FALSE", "no", "No", "NO")
+
+
+def _replace_quantgru_with_optimized(module: nn.Module, parent_name: str = "") -> list:
+    """
+    递归地将 QuantGRU 替换为 OptimizedQuantizableGRU
+
+    QuantGRU 是 CUDA 实现，导出 ONNX 需要临时替换为 CPU 兼容版本。
+
+    Returns:
+        replacements: [(full_name, original_module, replacement), ...]
+    """
+    if QuantGRU is None or OptimizedQuantizableGRU is None:
+        return []
+
+    replacements = []
+    for name, child in list(module.named_children()):
+        full_name = f"{parent_name}.{name}" if parent_name else name
+        if isinstance(child, QuantGRU):
+            replacement = OptimizedQuantizableGRU(
+                input_size=child.input_size,
+                hidden_size=child.hidden_size,
+                batch_first=child.batch_first,
+                num_layers=child.num_layers,
+            )
+
+            # 从 QuantGRU state_dict 迁移权重到 OptimizedQuantizableGRU
+            try:
+                child_state = child.state_dict()
+
+                weight_ih = child_state.get("weight_ih_l0")
+                if weight_ih is None:
+                    weight_ih = child_state.get("_weight_ih_l0")
+
+                weight_hh = child_state.get("weight_hh_l0")
+                if weight_hh is None:
+                    weight_hh = child_state.get("_weight_hh_l0")
+
+                bias_ih = child_state.get("bias_ih_l0")
+                if bias_ih is None:
+                    bias_ih = child_state.get("_bias_ih_l0")
+
+                bias_hh = child_state.get("bias_hh_l0")
+                if bias_hh is None:
+                    bias_hh = child_state.get("_bias_hh_l0")
+
+                if weight_ih is not None:
+                    replacement.cells[0].weight_ih.weight.data = weight_ih.cpu().clone()
+                if weight_hh is not None:
+                    replacement.cells[0].weight_hh.weight.data = weight_hh.cpu().clone()
+                if bias_ih is not None:
+                    replacement.cells[0].weight_ih.bias.data = bias_ih.cpu().clone()
+                if bias_hh is not None:
+                    replacement.cells[0].weight_hh.bias.data = bias_hh.cpu().clone()
+
+                print(f"    ✅ {full_name}: 权重已复制")
+            except Exception as e:  # noqa: BLE001
+                print(f"  ⚠️ 警告：无法复制 {full_name} 的权重: {e}")
+                print("     将使用随机初始化权重（导出可能不准确）")
+
+            setattr(module, name, replacement)
+            replacements.append((full_name, child, replacement))
+            print(f"  ✅ {full_name}: QuantGRU -> OptimizedQuantizableGRU")
+        else:
+            replacements.extend(_replace_quantgru_with_optimized(child, full_name))
+    return replacements
+
+
+def _restore_quantgru_modules(root_module: nn.Module, quant_gru_replacements: list) -> None:
+    """将 _replace_quantgru_with_optimized 的替换恢复回原 QuantGRU 模块。"""
+    if not quant_gru_replacements:
+        return
+
+    print("\n♻️ 恢复 QuantGRU 模块...")
+    for full_name, original_module, _ in quant_gru_replacements:
+        parts = full_name.split(".")
+        parent = root_module
+        for part in parts[:-1]:
+            parent = getattr(parent, part)
+        setattr(parent, parts[-1], original_module)
+        print(f"  ✅ {full_name}: OptimizedQuantizableGRU -> QuantGRU")
 
 
 def _pick_encodings_input_path(export_dir: str, filename_prefix: str) -> str:
@@ -154,69 +250,125 @@ def export_onnx_json(
 
     if not hasattr(sim, "get_original_model"):
         raise RuntimeError("sim 没有 get_original_model()，无法走 sim.export 链路")
-    
-    
-    #---------------------------------------------------------------------------------------------------------------------
-    # 将 OptimizedQuantizableGRU替换为 ExportOptimizedQuantizableGRU
-    #---------------------------------------------------------------------------------------------------------------------
 
-    original_model = sim.get_original_model(sim.model, qdq_weights=False)  
-    original_model = original_model.cpu().eval()
-    original_model = replace_optimized_gru_modules(original_model)
-    original_model = replace_quantizable_batchnorm_modules(original_model)
+    # 临时替换 QuantGRU 为 OptimizedQuantizableGRU（导出完成后会恢复）
+    quant_gru_replacements = []
+    if QuantGRU is not None:
+        has_quantgru = any(isinstance(m, QuantGRU) for m in sim.model.modules())
+        if has_quantgru:
+            print("⚠️ 检测到 QuantGRU 模块，临时替换为 OptimizedQuantizableGRU 以便在 CPU 上导出 ONNX...")
+            quant_gru_replacements = _replace_quantgru_with_optimized(sim.model)
+            if quant_gru_replacements:
+                print(f"✅ 共替换 {len(quant_gru_replacements)} 个 QuantGRU 模块")
 
-    onnx_export_args = {
-        "opset_version": opset,
-        "input_names": ["input"],
-        "output_names": ["output"],
-        "do_constant_folding": True,
-        # 关键：强制 legacy exporter，避免 dynamo/export 路径导致自定义 symbolic 不命中
-        "dynamo": False,
-        # 关键：告诉 exporter 这些自定义 domain 的 opset version
-        "custom_opsets": {"custom_gru": 1, "custom_bn": 1},
-    }
+    try:
+        # -------------------------------------------------------------------------------------------------------------
+        # 将 OptimizedQuantizableGRU 替换为 ExportOptimizedQuantizableGRU
+        # -------------------------------------------------------------------------------------------------------------
+        original_model = sim.get_original_model(sim.model, qdq_weights=False)
+        original_model = original_model.cpu().eval()
+        original_model = replace_optimized_gru_modules(original_model)
+        original_model = replace_quantizable_batchnorm_modules(original_model)
 
-    onnx_path = os.path.join(export_dir, filename_prefix + ".onnx")
-    sim.__class__.export_onnx_model_and_encodings(  # type: ignore[attr-defined]
-        export_dir,
-        filename_prefix,
-        original_model,
-        sim.model,
-        dummy_input,
-        onnx_export_args,
-        propagate_encodings=False,
-        module_marker_map=getattr(sim, "_module_marker_map", None),
-        is_conditional=getattr(sim, "_is_conditional", False),
-        excluded_layer_names=getattr(sim, "_excluded_layer_names", None),
-        quantizer_args=getattr(sim, "quant_args", None),
-        export_model=True,
-        filename_prefix_encodings=filename_prefix,
-    )
+        onnx_export_args = {
+            "opset_version": opset,
+            "input_names": ["input"],
+            "output_names": ["output"],
+            "do_constant_folding": True,
+            # 关键：强制 legacy exporter，避免 dynamo/export 路径导致自定义 symbolic 不命中
+            "dynamo": False,
+            # 关键：告诉 exporter 这些自定义 domain 的 opset version
+            "custom_opsets": {"custom_gru": 1, "custom_bn": 1},
+        }
 
-    #---------------------------------------------------------------------------------------------------------------------
-    # 后处理 ONNX（去除辅助节点/If 并补齐静态 shape）
-    #---------------------------------------------------------------------------------------------------------------------
+        onnx_path = os.path.join(export_dir, filename_prefix + ".onnx")
+        sim.__class__.export_onnx_model_and_encodings(  # type: ignore[attr-defined]
+            export_dir,
+            filename_prefix,
+            original_model,
+            sim.model,
+            dummy_input,
+            onnx_export_args,
+            propagate_encodings=False,
+            module_marker_map=getattr(sim, "_module_marker_map", None),
+            is_conditional=getattr(sim, "_is_conditional", False),
+            excluded_layer_names=getattr(sim, "_excluded_layer_names", None),
+            quantizer_args=getattr(sim, "quant_args", None),
+            export_model=True,
+            filename_prefix_encodings=filename_prefix,
+        )
 
-    enc_in_path = _pick_encodings_input_path(export_dir, filename_prefix)
-    if not enc_in_path:
-        raise RuntimeError("未找到 AIMET 导出的 encodings 文件（.encodings/.json）")
+        # -------------------------------------------------------------------------------------------------------------
+        # 后处理 ONNX（去除辅助节点/If 并补齐静态 shape）
+        # -------------------------------------------------------------------------------------------------------------
+        enc_in_path = _pick_encodings_input_path(export_dir, filename_prefix)
+        if not enc_in_path:
+            raise RuntimeError("未找到 AIMET 导出的 encodings 文件（.encodings/.json）")
 
-    # 最终对外输出路径固定为 {prefix}.encodings（避免调用侧需要跟随 *_torch.encodings）
-    enc_out_path = os.path.join(export_dir, filename_prefix + ".encodings")
+        # 最终对外输出路径固定为 {prefix}.encodings（避免调用侧需要跟随 *_torch.encodings）
+        enc_out_path = os.path.join(export_dir, filename_prefix + ".encodings")
 
-    _maybe_keep_raw_exports(
-        export_dir=export_dir,
-        filename_prefix=filename_prefix,
-        onnx_path=onnx_path,
-        enc_in_path=enc_in_path,
-    )
-    _postprocess_with_retry(
-        onnx_path=onnx_path,
-        enc_in_path=enc_in_path,
-        enc_out_path=enc_out_path,
-        input_shape=dummy_input_shape,
-    )
+        _maybe_keep_raw_exports(
+            export_dir=export_dir,
+            filename_prefix=filename_prefix,
+            onnx_path=onnx_path,
+            enc_in_path=enc_in_path,
+        )
+        _postprocess_with_retry(
+            onnx_path=onnx_path,
+            enc_in_path=enc_in_path,
+            enc_out_path=enc_out_path,
+            input_shape=dummy_input_shape,
+        )
 
-    return onnx_path, enc_out_path
+        # -------------------------------------------------------------------------------------------------------------
+        # 从 ONNX 模型提取 GRU 节点名，并回填到原 QuantGRU 模块
+        # -------------------------------------------------------------------------------------------------------------
+        if quant_gru_replacements and QuantGRU is not None:
+            try:
+                onnx_model = onnx.load(onnx_path)
+                gru_node_names = {}
+                for node in onnx_model.graph.node:
+                    if node.op_type == "GRU":
+                        node_name = node.name
+                        gru_node_names[node_name] = node_name
+
+                print("\n📝 提取 AIMET 分配的 GRU 节点名称...")
+                for full_name, original_module, _ in quant_gru_replacements:
+                    onnx_name = gru_node_names.get(full_name, full_name)
+                    original_module.aimet_onnx_name = onnx_name
+                    print(f"  ✅ {full_name}: ONNX 名称 = {onnx_name}")
+            except Exception as e:  # noqa: BLE001
+                print(f"  ⚠️ 警告：无法提取 ONNX 节点名称: {e}")
+
+        # -------------------------------------------------------------------------------------------------------------
+        # 将原 QuantGRU 的量化参数补回到 AIMET encodings
+        # -------------------------------------------------------------------------------------------------------------
+        if quant_gru_replacements and QuantGRU is not None:
+            try:
+                import json
+
+                with open(enc_out_path, "r", encoding="utf-8") as f:
+                    aimet_encodings = json.load(f)
+
+                print("\n📤 导出 QuantGRU 量化参数到 AIMET 格式...")
+                for full_name, original_module, _ in quant_gru_replacements:
+                    if isinstance(original_module, QuantGRU) and original_module.is_calibrated():
+                        module_name = getattr(original_module, "aimet_onnx_name", None) or full_name
+                        original_module.export_quant_params_to_aimet_format(
+                            aimet_encodings,
+                            module_name=module_name,
+                            verbose=True,
+                        )
+
+                with open(enc_out_path, "w", encoding="utf-8") as f:
+                    json.dump(aimet_encodings, f, indent=2, ensure_ascii=False)
+                print(f"  ✅ 已保存更新后的 encodings 到 {enc_out_path}")
+            except Exception as e:  # noqa: BLE001
+                print(f"  ⚠️ 警告：导出 QuantGRU 量化参数失败: {e}")
+
+        return onnx_path, enc_out_path
+    finally:
+        _restore_quantgru_modules(sim.model, quant_gru_replacements)
 
 
