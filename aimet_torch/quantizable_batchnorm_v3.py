@@ -6,10 +6,13 @@
 - ✅ 使用 PyTorch 函数式 API（torch.mean, torch.var 等）
 - ✅ 让 model_preparer 自动转换函数式操作为模块
 - ✅ 保留模块层级名称（如 pre_bn.module_mean）
+- ✅ 若 AIMET v2 可用，自动注册量化版本（无需用户手动实现）
 """
 
 import torch
 import torch.nn as nn
+
+from aimet_torch.v2.nn import QuantizationMixin as _QuantizationMixin
 
 
 class QuantizableBatchNorm2d(nn.Module):
@@ -126,6 +129,40 @@ class QuantizableBatchNorm2d(nn.Module):
             f'{self.num_features}, eps={self.eps}, momentum={self.momentum}, '
             f'affine={self.affine}, track_running_stats={self.track_running_stats}'
         )
+
+
+
+#
+# 量化方案：
+#   - weight / bias       : 由 super().__quant_init__() 自动创建 param_quantizers
+#   - input / output      : 标准 AIMET 激活量化器（1 输入 1 输出）
+#   - running_mean / var  : buffer（非 Parameter），不经 AIMET 量化器模拟；
+#                           其量化参数由 bn_params.py 在后处理阶段依据实际浮点值
+#                           计算 per-tensor、no-clip、对称 Po2 编码并写入 encodings。
+#                           （running_mean 必须 per-tensor 以与 per-tensor 输入保持
+#                            相同 scale 粒度，确保定点减法在硬件上合法）
+
+
+
+@_QuantizationMixin.implements(QuantizableBatchNorm2d)
+class QuantizedQuantizableBatchNorm2d(_QuantizationMixin, QuantizableBatchNorm2d):
+    """AIMET v2 自动注册的量化版 QuantizableBatchNorm2d，无需用户手动声明。"""
+
+    def __quant_init__(self):
+        super().__quant_init__()
+        self.input_quantizers  = nn.ModuleList([None])
+        self.output_quantizers = nn.ModuleList([None])
+
+    def forward(self, x):
+        if self.input_quantizers[0]:
+            x = self.input_quantizers[0](x)
+        with self._patch_quantized_parameters():
+            out = QuantizableBatchNorm2d.forward(self, x)
+        if self.output_quantizers[0]:
+            out = self.output_quantizers[0](out)
+        return out
+
+
 
 
 class QuantizableBatchNorm1d(nn.Module):

@@ -1,8 +1,104 @@
 """
-ONNX 导出后的图清理与重命名工具。
+兼容入口：postprocess 已拆分到 `postprocess_refactor/` 目录。
+外部仍可继续使用 `from .postprocess import ...`。
 """
 
 from __future__ import annotations
+
+from .postprocess_refactor import (
+    add_gru_input_from_internal_ops,
+    add_gru_output_from_internal_ops,
+    compact_per_channel_param_encodings,
+    fix_slice_end_constants,
+    flatten_activation_io_index_dict,
+    load_encodings,
+    merge_bn_activation_encodings,
+    merge_gru_activation_encodings,
+    merge_gru_bias_param_encodings,
+    normalize_dtype_with_bitwidth,
+    normalize_quant_fields_add_n,
+    postprocess_all,
+    postprocess_encodings_file,
+    postprocess_encodings_inplace,
+    postprocess_onnx_graph_inplace,
+    rename_gru_initializers_and_change_gru_json_format,
+    rename_gru_internal_ops_keys,
+    save_encodings,
+)
+
+__all__ = [
+    "postprocess_onnx_graph_inplace",
+    "fix_slice_end_constants",
+    "load_encodings",
+    "save_encodings",
+    "merge_gru_activation_encodings",
+    "rename_gru_internal_ops_keys",
+    "add_gru_output_from_internal_ops",
+    "add_gru_input_from_internal_ops",
+    "merge_bn_activation_encodings",
+    "merge_gru_bias_param_encodings",
+    "compact_per_channel_param_encodings",
+    "flatten_activation_io_index_dict",
+    "normalize_quant_fields_add_n",
+    "normalize_dtype_with_bitwidth",
+    "postprocess_encodings_inplace",
+    "postprocess_encodings_file",
+    "rename_gru_initializers_and_change_gru_json_format",
+    "postprocess_all",
+]
+"""
+兼容入口：postprocess 已拆分到 `postprocess_refactor/` 目录。
+外部仍可继续使用 `from .postprocess import ...`。
+"""
+
+# 注意：该文件历史内容保留在此，不再作为主实现入口。
+
+from .postprocess_refactor import (
+    postprocess_onnx_graph_inplace,
+    fix_slice_end_constants,
+    load_encodings,
+    save_encodings,
+    merge_gru_activation_encodings,
+    rename_gru_internal_ops_keys,
+    add_gru_output_from_internal_ops,
+    add_gru_input_from_internal_ops,
+    merge_bn_activation_encodings,
+    merge_gru_bias_param_encodings,
+    compact_per_channel_param_encodings,
+    flatten_activation_io_index_dict,
+    normalize_quant_fields_add_n,
+    normalize_dtype_with_bitwidth,
+    postprocess_encodings_inplace,
+    postprocess_encodings_file,
+    rename_gru_initializers_and_change_gru_json_format,
+    postprocess_all,
+)
+
+__all__ = [
+    "postprocess_onnx_graph_inplace",
+    "fix_slice_end_constants",
+    "load_encodings",
+    "save_encodings",
+    "merge_gru_activation_encodings",
+    "rename_gru_internal_ops_keys",
+    "add_gru_output_from_internal_ops",
+    "add_gru_input_from_internal_ops",
+    "merge_bn_activation_encodings",
+    "merge_gru_bias_param_encodings",
+    "compact_per_channel_param_encodings",
+    "flatten_activation_io_index_dict",
+    "normalize_quant_fields_add_n",
+    "normalize_dtype_with_bitwidth",
+    "postprocess_encodings_inplace",
+    "postprocess_encodings_file",
+    "rename_gru_initializers_and_change_gru_json_format",
+    "postprocess_all",
+]
+"""
+ONNX 导出后的图清理与重命名工具。
+"""
+
+# from __future__ import annotations
 
 import logging
 from typing import Dict, Tuple, Any, List, Optional
@@ -249,7 +345,233 @@ def postprocess_onnx_graph_inplace(onnx_path: str, input_shape: Tuple[int, int, 
     """
     对导出的 ONNX 执行强制图清理（inplace 写回原文件）。
     """
+    def _make_unique_gru_initial_h_names_inplace(model: onnx.ModelProto) -> onnx.ModelProto:
+        """
+        让每个 GRU 的 initial_h 输入拥有独立的名字：<gru_node_name>.initial_h。
+
+        重要说明（为什么不能“只改名”）：
+        - 如果多个 GRU 共享同一个 initial_h value（比如 simplify 后变成同一个 onnx::Expand_556），
+          你无法仅通过重命名让它们“看起来不同”——因为它们引用的是同一个张量名。
+        - 为了避免共享，我们需要为每个 GRU 复制一份 initial_h 的“源头”：
+          - 若 initial_h 来自 initializer：复制 initializer（同数值不同名字）
+          - 若 initial_h 来自某个节点输出（常见 Expand）：复制该节点（同输入同属性不同输出名）
+        - 这样不会引入 Identity（你不希望出现的额外算子），但会多出少量“源头节点/initializer”的拷贝。
+
+        注意：
+        - 这个步骤必须放在最后一次 simplify 之后，并且之后不要再跑 simplify，
+          否则 onnx-simplifier 仍可能把等价子图再次 CSE 合并。
+        """
+        g = model.graph
+
+        # --------- 收集已有名字（避免冲突）---------
+        existing_names = set()
+        for vi in list(g.value_info) + list(g.input) + list(g.output):
+            existing_names.add(vi.name)
+        for init in g.initializer:
+            existing_names.add(init.name)
+        for n in g.node:
+            for x in n.input:
+                if x:
+                    existing_names.add(x)
+            for y in n.output:
+                if y:
+                    existing_names.add(y)
+
+        # produced_by: output_name -> producer_node_index
+        produced_by: Dict[str, int] = {}
+        for i, n in enumerate(g.node):
+            for o in n.output:
+                if o:
+                    produced_by[o] = i
+
+        # consumers: value_name -> count
+        consumers: Dict[str, int] = {}
+        for n in g.node:
+            for x in n.input:
+                if not x:
+                    continue
+                consumers[x] = consumers.get(x, 0) + 1
+
+        init_map = {init.name: init for init in g.initializer}
+
+        # 预先决定：哪些 GRU 需要“独立 initial_h”
+        # gru_need: node_index -> (old_h_name, new_h_name, action)
+        # action: "rename_source" | "clone_init" | "clone_node" | "skip"
+        gru_need: Dict[int, Tuple[str, str, str]] = {}
+
+        for idx, node in enumerate(g.node):
+            if node.op_type != "GRU":
+                continue
+            # ONNX GRU inputs: X, W, R, B, sequence_lens(optional), initial_h(optional)
+            if len(node.input) < 6:
+                continue
+            h_in = node.input[5]
+            if not h_in:
+                continue
+
+            base = f"{node.name or f'GRU_{idx}'}.initial_h"
+            new_name = base
+            k = 0
+            while new_name in existing_names:
+                k += 1
+                new_name = f"{base}_{k}"
+
+            # 若该 value 只有这一处消费，并且源头也只有这一份，则可以“原地重命名源头”
+            only_this_consumer = consumers.get(h_in, 0) == 1
+            if only_this_consumer:
+                if h_in in init_map:
+                    gru_need[idx] = (h_in, new_name, "rename_source")
+                elif h_in in produced_by:
+                    gru_need[idx] = (h_in, new_name, "rename_source")
+                else:
+                    # 既不是 initializer，也找不到 producer（可能是 graph input / optional placeholder），保守跳过
+                    gru_need[idx] = (h_in, new_name, "skip")
+                continue
+
+            # 多处消费：必须 clone，才能让每个 GRU 独立命名
+            if h_in in init_map:
+                gru_need[idx] = (h_in, new_name, "clone_init")
+            elif h_in in produced_by:
+                gru_need[idx] = (h_in, new_name, "clone_node")
+            else:
+                # 无法 clone（比如是 graph input），只能跳过（避免引入 Identity）
+                gru_need[idx] = (h_in, new_name, "skip")
+
+        if not gru_need:
+            return model
+
+        # --------- 执行：重建 node list（需要在 GRU 前插入 clone_node）---------
+        import copy as _copy
+        old_nodes = list(g.node)
+        new_nodes: List[onnx.NodeProto] = []
+
+        def _safe_unique(name: str) -> str:
+            if name not in existing_names:
+                existing_names.add(name)
+                return name
+            k = 0
+            cand = name
+            while cand in existing_names:
+                k += 1
+                cand = f"{name}_{k}"
+            existing_names.add(cand)
+            return cand
+
+        # 先处理“rename_source”：这类不需要插入新节点
+        for node_idx, (old_h, new_h, action) in list(gru_need.items()):
+            if action != "rename_source":
+                continue
+            # 1) initializer 重命名
+            if old_h in init_map:
+                init_map[old_h].name = new_h
+                # 同时更新所有引用（这里 consumers==1，理论只影响该 GRU）
+                for n in old_nodes:
+                    n.input[:] = [new_h if x == old_h else x for x in n.input]
+                # value_info/input/output 里若有也同步
+                for vi in list(g.value_info) + list(g.input) + list(g.output):
+                    if vi.name == old_h:
+                        vi.name = new_h
+                existing_names.add(new_h)
+                continue
+            # 2) producer node 的 output 重命名
+            prod_i = produced_by.get(old_h)
+            if prod_i is not None:
+                prod = old_nodes[prod_i]
+                prod.output[:] = [new_h if o == old_h else o for o in prod.output]
+                # 同步所有引用（consumers==1，理论只影响该 GRU）
+                for n in old_nodes:
+                    n.input[:] = [new_h if x == old_h else x for x in n.input]
+                for vi in list(g.value_info) + list(g.input) + list(g.output):
+                    if vi.name == old_h:
+                        vi.name = new_h
+                existing_names.add(new_h)
+                continue
+
+        # 再处理 clone_*：需要在对应 GRU 前插入节点/initializer，并把 GRU input[5] 改掉
+        # 注意：rename_source 可能已经把某些 old_h 改没了，因此这里重新读取 GRU 的 current input[5]
+        for i, node in enumerate(old_nodes):
+            # 若是 GRU 且需要 clone_node，则先插入 clone
+            need = gru_need.get(i)
+            if node.op_type == "GRU" and need is not None:
+                old_h, new_h, action = need
+                # 这里以 node.input[5] 为准（可能已被 rename_source 改过）
+                cur_h = node.input[5] if len(node.input) >= 6 else old_h
+
+                if action == "clone_init":
+                    init = init_map.get(cur_h)
+                    if init is not None:
+                        new_init = _copy.deepcopy(init)
+                        new_init.name = _safe_unique(new_h)
+                        g.initializer.extend([new_init])
+                        node.input[5] = new_init.name
+                elif action == "clone_node":
+                    prod_i = produced_by.get(cur_h)
+                    if prod_i is not None:
+                        prod = old_nodes[prod_i]
+                        prod_clone = _copy.deepcopy(prod)
+                        prod_clone.name = _safe_unique(f"{new_h}_producer")
+                        # 输出重命名：如果多输出，未用输出也要给唯一名避免冲突
+                        out_new = []
+                        for j, o in enumerate(prod_clone.output):
+                            if o == cur_h:
+                                out_new.append(_safe_unique(new_h))
+                            else:
+                                out_new.append(_safe_unique(f"{new_h}_aux{j}"))
+                        prod_clone.output[:] = out_new
+                        # 把 GRU 的 initial_h 指到 clone 的对应输出（第一个匹配项）
+                        node.input[5] = out_new[0]
+                        # 把 clone 放到 GRU 前（保持拓扑顺序）
+                        new_nodes.append(prod_clone)
+                # action == skip: 不做任何事
+
+            new_nodes.append(node)
+
+        g.ClearField("node")
+        g.node.extend(new_nodes)
+        return model
+
     m = onnx.load(onnx_path)
+    
+    # 修复重复的 initializer 名称（ONNX 简化要求 initializer 名称唯一）
+    def _deduplicate_initializers(model):
+        """去重 ONNX 图中的 initializer，重命名重复的 initializer 并更新引用"""
+        g = model.graph
+        seen_names = {}  # name -> (init, count)
+        rename_map = {}  # old_name -> new_name
+        unique_inits = []
+        
+        for init in g.initializer:
+            if init.name in seen_names:
+                # 重复的 initializer，重命名
+                count = seen_names[init.name][1] + 1
+                seen_names[init.name] = (seen_names[init.name][0], count)
+                new_name = f"{init.name}_dup_{count}"
+                old_name = init.name
+                init.name = new_name
+                rename_map[old_name] = new_name
+                print(f"⚠️ 重复的 initializer：{old_name} -> {new_name}")
+            else:
+                seen_names[init.name] = (init, 0)
+            unique_inits.append(init)
+        
+        if rename_map:
+            # 更新所有节点中对重命名 initializer 的引用
+            for node in g.node:
+                new_inputs = []
+                for inp in node.input:
+                    if inp in rename_map:
+                        new_inputs.append(rename_map[inp])
+                    else:
+                        new_inputs.append(inp)
+                node.ClearField("input")
+                node.input.extend(new_inputs)
+            
+            g.ClearField("initializer")
+            g.initializer.extend(unique_inits)
+        return model
+    
+    m = _deduplicate_initializers(m)
+    
     m, ok = simplify(m, overwrite_input_shapes={"input": list(input_shape)})
     if not ok:
         raise RuntimeError("onnx-simplifier 校验失败")
@@ -269,6 +591,9 @@ def postprocess_onnx_graph_inplace(onnx_path: str, input_shape: Tuple[int, int, 
     if not ok:
         raise RuntimeError("onnx-simplifier（三次）校验失败")
     m = shape_inference.infer_shapes(m, data_prop=True)
+
+    # 最终：让每个 GRU 的 initial_h 名字都变成 <gru_name>.initial_h（必要时 clone 源头，避免共享）
+    m = _make_unique_gru_initial_h_names_inplace(m)
     onnx.save(m, onnx_path)
 
 
@@ -429,6 +754,9 @@ def _match_gru_name_by_json(base_name: str, json_keys: list[str]) -> str | None:
     # 取最短候选，兼顾通用性（可能出现 .cells.0 或其他后缀）
     candidates.sort(key=len)
     return candidates[0]
+
+
+ 
 
 
 def _rename_initializer_and_refs(model: onnx.ModelProto, old_name: str, new_name: str) -> bool:
@@ -996,10 +1324,10 @@ def _build_symmetric_po2_param_encoding(
       {bitwidth, dtype, is_symmetric, min, max, offset, scale}
 
     注意：
-    - 这里使用“unsigned 存储域 + offset=-2^(bw-1)”的等价表达，和你现有 encodings 文件保持一致：
-        real = (q + offset) * scale, 其中 q in [0, 2^bw-1]
+    - 这里按“标准 signed 对称量化”表达：zero_point=0（本文件里用 offset 字段承载，后续会规范化为 zero_point）
+        real = (q - zero_point) * scale, 其中 q in [qmin, qmax] 且 zero_point=0
       对应的 representable 实数范围为：
-        [offset*scale, (2^bw-1+offset)*scale] = [-2^(bw-1)*scale, (2^(bw-1)-1)*scale]
+        [qmin*scale, qmax*scale]
     """
     # 目前仅支持对称量化（与硬件/文档一致）
     if not symmetric:
@@ -1011,7 +1339,8 @@ def _build_symmetric_po2_param_encoding(
 
     qmin_s = -(2 ** (bw - 1))
     qmax_s = (2 ** (bw - 1)) - 1
-    offset = int(qmin_s)  # 与现有 encodings 一致：offset=-128 (int8)
+    # 对称量化：zero_point=0
+    offset = 0
 
     arr_f = np.asarray(arr).astype(np.float64)
     max_abs = float(np.max(np.abs(arr_f))) if arr_f.size else 0.0
@@ -1020,7 +1349,7 @@ def _build_symmetric_po2_param_encoding(
     scale0 = max_abs / float(qmax_s)
     scale, _ = _find_closest_power_of_2_scale(scale0)
 
-    real_min = float(offset) * float(scale)
+    real_min = float(qmin_s) * float(scale)
     real_max = float(qmax_s) * float(scale)
 
     return {
