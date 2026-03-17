@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict, Tuple
+from typing import Any, Dict, List, Tuple
 
 import onnx
 
@@ -30,6 +30,20 @@ def _strip_hash_suffix(name: str) -> str:
 
 
 def _match_gru_name_by_json(base_name: str, json_keys: list[str]) -> str | None:
+    """
+    根据 activation_encodings 中的键名，为 GRU ONNX 节点推导最终公开命名。
+
+    优先级：
+      1. base_name 精确匹配（已经是正确名字）。
+      2. base_name 是某个 json_keys 条目的前缀（json key 更具体）。
+      3. 当 base_name 以 ".gru" 结尾时（ExportOptimizedQuantizableGRU 的内部
+         self.gru = nn.GRU(...) 产生的实现细节后缀）：
+         a. 先检查父模块路径（strip ".gru"）是否已在 json_keys（新格式，
+            QuantGRU 路径，activation_encodings key 就是 module_path）。
+         b. 再检查 parent.cells.0 / parent.cells.N（旧 OptimizableGRU 格式）。
+         c. 无论如何，用父模块路径作为最终名（去掉 ".gru" 实现细节后缀），
+            避免与 AIMET 给同名模块下其他非 GRU 节点（如 Transpose）重名。
+    """
     if base_name in json_keys:
         return base_name
     prefix = base_name + "."
@@ -38,11 +52,18 @@ def _match_gru_name_by_json(base_name: str, json_keys: list[str]) -> str | None:
         candidates.sort(key=len)
         return candidates[0]
 
-    # 单向 GRU 的特殊情况：ExportOptimizedQuantizableGRU 用 self.gru = nn.GRU(...)，
-    # 因此 ONNX 节点名为 "...seq_t.gru"，而 encodings 键名为 "...seq_t.cells.0"。
-    # 回退：当节点名以 ".gru" 结尾时，尝试匹配对应的 ".cells.0" 键。
+    # 单向 GRU：ExportOptimizedQuantizableGRU 用 self.gru = nn.GRU(...)，
+    # AIMET 会同时将 Transpose 和 GRU op 都命名为 "...seq_t.gru"（depth=0），
+    # 导致重名。解决方案：把 GRU op 收敛到父模块路径（去掉 ".gru" 后缀），
+    # 与 activation_encodings 中的 module-path 风格键名一致。
     if base_name.endswith(".gru"):
         parent = base_name[: -len(".gru")]
+
+        # 优先：父模块路径已作为激活量化键（QuantGRU / 后处理后的新格式）
+        if parent in json_keys:
+            return parent
+
+        # 其次：旧格式，activation_encodings 键名为 parent.cells.0
         cells_key = parent + ".cells.0"
         if cells_key in json_keys:
             return cells_key
@@ -52,7 +73,38 @@ def _match_gru_name_by_json(base_name: str, json_keys: list[str]) -> str | None:
             cells_candidates.sort(key=len)
             return cells_candidates[0]
 
+        # 兜底：无论 encodings 中是否有对应键，都去掉 ".gru" 后缀，
+        # 消除与同模块其他非 GRU ONNX 节点（Transpose 等）的重名冲突。
+        return parent
+
     return None
+
+
+def _check_gru_name_collisions(model: onnx.ModelProto, act_keys: List[str]) -> None:
+    """
+    扫描所有 GRU op 节点，提前检测规范化后的节点名是否会产生冲突。
+    如果有两个不同的 GRU 节点规范化到同一个名字，抛出带上下文的错误。
+    """
+    from collections import defaultdict
+    canonical_to_raw: Dict[str, List[str]] = defaultdict(list)
+
+    for node in model.graph.node:
+        if node.op_type != "GRU":
+            continue
+        base_name = _strip_hash_suffix(node.name)
+        matched = _match_gru_name_by_json(base_name, act_keys)
+        canonical = matched if matched is not None else base_name
+        canonical_to_raw[canonical].append(node.name)
+
+    collisions = {c: raws for c, raws in canonical_to_raw.items() if len(raws) > 1}
+    if collisions:
+        details = "; ".join(
+            f"'{canonical}' <- {raws}" for canonical, raws in collisions.items()
+        )
+        raise RuntimeError(
+            f"GRU 节点命名冲突：{len(collisions)} 组 GRU 节点规范化后同名。"
+            f"冲突详情: {details}。请检查模型结构或 _match_gru_name_by_json 逻辑。"
+        )
 
 
 def _rename_initializer_and_refs(model: onnx.ModelProto, old_name: str, new_name: str) -> bool:
@@ -100,13 +152,16 @@ def rename_gru_initializers_and_change_gru_json_format(
     except Exception as exc:  # noqa: BLE001
         raise RuntimeError(f"无法加载 ONNX: {exc}") from exc
 
+    # 提前检测命名冲突，失败快速
+    _check_gru_name_collisions(model, act_keys)
+
     gru_renamed = False
     param_renamed = False
     for node in model.graph.node:
         if node.op_type == "GRU":
             base_name = _strip_hash_suffix(node.name)
             matched = _match_gru_name_by_json(base_name, act_keys)
-            new_name = matched or base_name
+            new_name = matched if matched is not None else base_name
             if new_name != node.name:
                 if verbose:
                     logger.info("重命名 GRU 节点: %s -> %s", node.name, new_name)
