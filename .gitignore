@@ -3,3 +3,7 @@
 /tmp/
 __pycache__/
 
+aimet_rx.egg-info/
+build/
+dist/
+
