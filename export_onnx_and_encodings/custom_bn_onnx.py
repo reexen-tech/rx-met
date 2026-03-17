@@ -17,7 +17,7 @@ from __future__ import annotations
 import torch
 import torch.nn as nn
 
-from aimet_torch.quantizable_batchnorm_v3 import QuantizableBatchNorm2d
+from aimet_torch.quantizable_batchnorm import QuantizableBatchNorm2d
 
 
 class ExportQuantizableBatchNorm2d(nn.BatchNorm2d):
