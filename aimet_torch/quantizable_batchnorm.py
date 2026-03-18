@@ -4,6 +4,8 @@ import torch.nn.functional as F
 from torch import Tensor
 from typing import Optional, Tuple
 
+from aimet_torch.v2.nn.true_quant import QuantizationMixin
+
 
 class QuantizableBatchNorm2d(nn.Module):
     """自定义BatchNorm2d，功能与nn.BatchNorm2d完全相同"""
@@ -124,88 +126,25 @@ class QuantizableBatchNorm2d(nn.Module):
                 f'affine={self.affine}, track_running_stats={self.track_running_stats}')
 
 
-# 测试函数，验证我们的实现与PyTorch官方实现的一致性
-def test_custom_batchnorm():
-    # 设置随机种子以确保可重复性
-    torch.manual_seed(42)
-    
-    # 创建测试数据
-    batch_size = 4
-    channels = 3
-    height = 32
-    width = 32
-    x = torch.randn(batch_size, channels, height, width)
-    
-    # 创建PyTorch官方版本和我们的自定义版本
-    official_bn = nn.BatchNorm2d(channels, eps=1e-5, momentum=0.1, affine=True, track_running_stats=True)
-    custom_bn = CustomBatchNorm2d(channels, eps=1e-5, momentum=0.1, affine=True, track_running_stats=True)
-    
-    # 确保参数相同
-    with torch.no_grad():
-        custom_bn.weight.copy_(official_bn.weight)
-        custom_bn.bias.copy_(official_bn.bias)
-        custom_bn.running_mean.copy_(official_bn.running_mean)
-        custom_bn.running_var.copy_(official_bn.running_var)
-    
-    # 训练模式测试
-    official_bn.train()
-    custom_bn.train()
-    
-    # 前向传播
-    official_output = official_bn(x)
-    custom_output = custom_bn(x)
-    
-    # 检查输出是否相同
-    output_diff = torch.abs(official_output - custom_output).max().item()
-    print(f"训练模式输出最大差异: {output_diff:.6e}")
-    assert output_diff < 1e-6, "训练模式输出不匹配！"
-    
-    # 检查running statistics是否相同
-    running_mean_diff = torch.abs(official_bn.running_mean - custom_bn.running_mean).max().item()
-    running_var_diff = torch.abs(official_bn.running_var - custom_bn.running_var).max().item()
-    print(f"训练后running_mean最大差异: {running_mean_diff:.6e}")
-    print(f"训练后running_var最大差异: {running_var_diff:.6e}")
-    
-    # 推理模式测试
-    official_bn.eval()
-    custom_bn.eval()
-    
-    # 再次前向传播（应该使用running statistics）
-    official_output_eval = official_bn(x)
-    custom_output_eval = custom_bn(x)
-    
-    # 检查输出是否相同
-    output_diff_eval = torch.abs(official_output_eval - custom_output_eval).max().item()
-    print(f"推理模式输出最大差异: {output_diff_eval:.6e}")
-    assert output_diff_eval < 1e-6, "推理模式输出不匹配！"
-    
-    # 测试梯度计算
-    official_bn.train()
-    custom_bn.train()
-    
-    # 计算梯度
-    official_output.sum().backward()
-    custom_output.sum().backward()
-    
-    # 检查梯度是否相同
-    weight_grad_diff = torch.abs(official_bn.weight.grad - custom_bn.weight.grad).max().item()
-    bias_grad_diff = torch.abs(official_bn.bias.grad - custom_bn.bias.grad).max().item()
-    print(f"weight梯度最大差异: {weight_grad_diff:.6e}")
-    print(f"bias梯度最大差异: {bias_grad_diff:.6e}")
-    
-    # 测试无affine参数的情况
-    official_bn_no_affine = nn.BatchNorm2d(channels, affine=False)
-    custom_bn_no_affine = CustomBatchNorm2d(channels, affine=False)
-    
-    # 前向传播
-    official_output_no_affine = official_bn_no_affine(x)
-    custom_output_no_affine = custom_bn_no_affine(x)
-    
-    output_diff_no_affine = torch.abs(official_output_no_affine - custom_output_no_affine).max().item()
-    print(f"无affine参数输出最大差异: {output_diff_no_affine:.6e}")
-    
-    print("\n所有测试通过！CustomBatchNorm2d与nn.BatchNorm2d功能完全一致")
+@QuantizationMixin.implements(QuantizableBatchNorm2d)
+class QuantizedQuantizableBatchNorm2d(QuantizationMixin, QuantizableBatchNorm2d):
+    """AIMET v2 quantized wrapper for QuantizableBatchNorm2d."""
+
+    def __quant_init__(self):
+        super().__quant_init__()
+        self.input_quantizers = torch.nn.ModuleList([None])
+        self.output_quantizers = torch.nn.ModuleList([None])
+
+    def forward(self, x: Tensor) -> Tensor:
+        if self.input_quantizers[0]:
+            x = self.input_quantizers[0](x)
+
+        with self._patch_quantized_parameters():
+            ret = super().forward(x)
+
+        if self.output_quantizers[0]:
+            ret = self.output_quantizers[0](ret)
+
+        return ret
 
 
-if __name__ == "__main__":
-    test_custom_batchnorm()
