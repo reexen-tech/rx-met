@@ -724,6 +724,18 @@ def _leaf_module_name(module_name: str) -> str:
     return module_name.split(".")[-1] if module_name else module_name
 
 
+_NON_TRANSPARENT_UNQUANTIZED_MODULE_TYPES = {
+    "GRU",
+    "GRUCell",
+    "LSTM",
+    "LSTMCell",
+    "RNN",
+    "RNNCell",
+    "OptimizedQuantizableGRU",
+    "QuantGRU",
+}
+
+
 def _is_transparent_call_module(module_name: str, module, transparent_prefixes: Tuple[str, ...]) -> bool:
     """
     判断 call_module 节点是否视为透明节点。
@@ -738,6 +750,9 @@ def _is_transparent_call_module(module_name: str, module, transparent_prefixes: 
     module_type_name = type(module).__name__
     if module_type_name in {"Concat", "QuantizedConcat", "FakeQuantizedConcat"}:
         # Concat 是真实的多输入汇聚边界，不能仅因量化器关闭就被当作透明节点穿透。
+        return False
+    if module_type_name in _NON_TRANSPARENT_UNQUANTIZED_MODULE_TYPES:
+        # 循环层即使当前未挂量化器，也会显著改变张量分布，不能按透明节点穿透。
         return False
     return not _has_active_quantizers(module)
 
@@ -767,6 +782,104 @@ def _dedup_indices(indices: list[int]) -> list[int]:
     return result
 
 
+def _iter_fx_nodes(arg_obj):
+    """递归展开参数中的 FX 节点。"""
+    if isinstance(arg_obj, (list, tuple)):
+        for item in arg_obj:
+            yield from _iter_fx_nodes(item)
+    elif hasattr(arg_obj, "op"):
+        yield arg_obj
+
+
+def _callable_target_name(target) -> str:
+    """返回 FX target 的可比对名称。"""
+    return getattr(target, "__name__", str(target))
+
+
+def _is_metadata_only_node(
+    node,
+    module_map: dict,
+    transparent_prefixes: Tuple[str, ...],
+    visited: Optional[Set[int]] = None,
+) -> bool:
+    """
+    判断节点是否只参与 shape/index 等元信息计算，而不承载真实张量数据。
+
+    典型例子：
+    - getattr(x, "shape")
+    - getitem(shape, i)
+    - view/reshape 的尺寸参数派生链
+    - 仅对 shape 标量做运算得到的 module_mul_*
+    """
+    if visited is None:
+        visited = set()
+
+    if isinstance(node, (list, tuple)):
+        fx_nodes = list(_iter_fx_nodes(node))
+        return bool(fx_nodes) and all(
+            _is_metadata_only_node(item, module_map, transparent_prefixes, visited)
+            for item in fx_nodes
+        )
+
+    if not hasattr(node, "op"):
+        return False
+
+    node_id = id(node)
+    if node_id in visited:
+        return False
+    visited.add(node_id)
+
+    if node.op in ("placeholder", "get_attr"):
+        return False
+
+    if node.op == "call_function":
+        target_name = _callable_target_name(node.target)
+        if (
+            target_name == "getattr"
+            and len(node.args) >= 2
+            and node.args[1] in ("shape", "size")
+        ):
+            return True
+        if target_name == "getitem" and len(node.args) >= 1:
+            return _is_metadata_only_node(
+                node.args[0], module_map, transparent_prefixes, visited
+            )
+
+    if node.op == "call_method" and str(node.target) in {
+        "size",
+        "dim",
+        "ndim",
+        "numel",
+        "stride",
+    }:
+        return True
+
+    if node.op == "call_module":
+        module = module_map.get(node.target)
+        if module is None:
+            return False
+        if _is_transparent_call_module(node.target, module, transparent_prefixes):
+            fx_args = list(_iter_fx_nodes(node.args))
+            return bool(fx_args) and all(
+                _is_metadata_only_node(arg, module_map, transparent_prefixes, visited)
+                for arg in fx_args
+            )
+
+    fx_args = list(_iter_fx_nodes(getattr(node, "args", ())))
+    return bool(fx_args) and all(
+        _is_metadata_only_node(arg, module_map, transparent_prefixes, visited)
+        for arg in fx_args
+    )
+
+
+def _iter_data_users(node, module_map: dict, transparent_prefixes: Tuple[str, ...]):
+    """仅返回真实数据流上的下游 users，跳过 shape/index 元信息分支。"""
+    for user in getattr(node, "users", ()):
+        if _is_metadata_only_node(user, module_map, transparent_prefixes):
+            continue
+        yield user
+
+
 def _find_prev_quantized_from_prev_args(prev_args, module_map: dict, transparent_prefixes: Tuple[str, ...], stats: Dict[str, int], visited: Set[int]) -> list:
     """
     在一组上游参数中优先返回“最近命中”的真实量化源。
@@ -788,28 +901,77 @@ def _find_prev_quantized_from_prev_args(prev_args, module_map: dict, transparent
     return []
 
 
-def _find_next_quantized_call_modules(node, module_map: dict, transparent_prefixes: Tuple[str, ...], stats: Dict[str, int]) -> list:
+def _find_next_quantized_from_next_users(next_users, module_map: dict, transparent_prefixes: Tuple[str, ...], stats: Dict[str, int], visited: Set[int]) -> list:
     """
-    从当前节点开始向下游查找真正的量化目标模块。
+    在一组下游 users 中，按“每条路径只取最近一个真实量化边界”的规则查找目标。
 
-    - call_function / call_method 节点视为透明
-    - 禁用量化的 call_module 视为透明，可继续穿透
-    - 遇到启用量化的 call_module 则返回为目标节点
+    这样可以避免：
+    conv2d_out -> ... -> module_mul_17 -> ... -> module_mul_18
+    这种链路里同时返回最近边界 module_mul_17 和更远边界 module_mul_18。
     """
     result = []
-    for user in node.users:
+    for user in next_users:
+        if not hasattr(user, 'op'):
+            continue
+
+        node_id = id(user)
+        if node_id in visited:
+            continue
+        visited.add(node_id)
+
         if user.op == 'call_module':
             module = module_map.get(user.target)
             if module is None:
                 continue
             if _is_transparent_call_module(user.target, module, transparent_prefixes):
                 stats['passthrough_disabled'] += 1
-                result.extend(_find_next_quantized_call_modules(user, module_map, transparent_prefixes, stats))
+                found = _find_next_quantized_from_next_users(
+                    _iter_data_users(user, module_map, transparent_prefixes),
+                    module_map,
+                    transparent_prefixes,
+                    stats,
+                    visited,
+                )
+                if found:
+                    result.extend(found)
             else:
                 result.append(user)
         elif user.op in ('call_function', 'call_method'):
-            result.extend(_find_next_quantized_call_modules(user, module_map, transparent_prefixes, stats))
+            found = _find_next_quantized_from_next_users(
+                _iter_data_users(user, module_map, transparent_prefixes),
+                module_map,
+                transparent_prefixes,
+                stats,
+                visited,
+            )
+            if found:
+                result.extend(found)
+
     return _dedup_nodes(result)
+
+
+def _find_next_quantized_call_modules(node, module_map: dict, transparent_prefixes: Tuple[str, ...], stats: Dict[str, int], visited: Optional[Set[int]] = None) -> list:
+    """
+    从当前节点开始向下游查找真正的量化目标模块。
+
+    规则：
+    - call_function / call_method 节点视为透明
+    - 禁用量化的 call_module 视为透明，可继续穿透
+    - 对每条路径，遇到第一个启用量化的 call_module 就停止，不再继续搜更远下游
+    """
+    if visited is None:
+        visited = set()
+
+    if not hasattr(node, 'users'):
+        return []
+
+    return _find_next_quantized_from_next_users(
+        _iter_data_users(node, module_map, transparent_prefixes),
+        module_map,
+        transparent_prefixes,
+        stats,
+        visited,
+    )
 
 
 def _find_prev_quantized_call_modules(arg_obj, module_map: dict, transparent_prefixes: Tuple[str, ...], stats: Dict[str, int], visited: Optional[Set[int]] = None) -> list:
@@ -1024,6 +1186,9 @@ def _arg_depends_on_node(arg_obj, source_node, module_map: dict, transparent_pre
     if visited is None:
         visited = set()
 
+    if _is_metadata_only_node(arg_obj, module_map, transparent_prefixes):
+        return False
+
     if isinstance(arg_obj, (list, tuple)):
         return any(
             _arg_depends_on_node(item, source_node, module_map, transparent_prefixes, visited)
@@ -1059,6 +1224,56 @@ def _arg_depends_on_node(arg_obj, source_node, module_map: dict, transparent_pre
         )
 
     return False
+
+
+def _has_blocking_call_module_between(
+    arg_obj,
+    source_node,
+    module_map: dict,
+    transparent_prefixes: Tuple[str, ...],
+    visited: Optional[Set[int]] = None,
+) -> bool:
+    """
+    判断从 arg_obj 回溯到 source_node 的路径上，是否还存在 source_node 之前的
+    非透明 call_module 阻断边界。
+
+    用于避免：
+    pre_act -> seq_t(GRU) -> reshape -> conv_t
+    这类链路把 pre_act 错当作 conv_t 的“相邻上游量化边界”。
+    """
+    if visited is None:
+        visited = set()
+
+    if _is_metadata_only_node(arg_obj, module_map, transparent_prefixes):
+        return False
+
+    if isinstance(arg_obj, (list, tuple)):
+        return any(
+            _has_blocking_call_module_between(item, source_node, module_map, transparent_prefixes, visited)
+            for item in arg_obj
+        )
+
+    if not hasattr(arg_obj, 'op'):
+        return False
+
+    node_id = id(arg_obj)
+    if node_id in visited:
+        return False
+    visited.add(node_id)
+
+    if arg_obj.op == 'call_module':
+        module = module_map.get(arg_obj.target)
+        if module is None:
+            return False
+        if arg_obj.target == source_node.target:
+            return False
+        if not _is_transparent_call_module(arg_obj.target, module, transparent_prefixes):
+            return True
+
+    return any(
+        _has_blocking_call_module_between(prev_arg, source_node, module_map, transparent_prefixes, visited)
+        for prev_arg in getattr(arg_obj, 'args', ())
+    )
 
 
 def sync_adjacent_quantizers(
@@ -1120,6 +1335,7 @@ def sync_adjacent_quantizers(
         'skipped_initialized': 0,
         'skipped_multi_source': 0,
         'skipped_missing_quantizer': 0,
+        'skipped_blocked_path': 0,
         'passthrough_disabled': 0,
     }
 
@@ -1173,6 +1389,32 @@ def sync_adjacent_quantizers(
                     continue
 
                 src_node = upstream_sources[0]
+                if verbose and _leaf_module_name(node.target) in {"conv_t", "conv_f"}:
+                    debug_blocked = _has_blocking_call_module_between(
+                        node.args[idx],
+                        src_node,
+                        module_map,
+                        transparent_module_name_prefixes,
+                    )
+                    print(
+                        f"  [debug-upstream] {node.target}.input[{idx}] "
+                        f"sources={[src.target for src in upstream_sources]} "
+                        f"chosen={src_node.target} blocked={debug_blocked}"
+                    )
+                if _has_blocking_call_module_between(
+                    node.args[idx],
+                    src_node,
+                    module_map,
+                    transparent_module_name_prefixes,
+                ):
+                    stats['skipped_blocked_path'] += 1
+                    if verbose:
+                        print(
+                            f"  ⏭  {src_node.target} -> {node.target}.input[{idx}] "
+                            f"之间存在非透明中间模块，跳过反向同步"
+                        )
+                    continue
+
                 src_module = module_map.get(src_node.target)
                 if src_module is None or not hasattr(src_module, 'output_quantizers') or len(src_module.output_quantizers) == 0:
                     stats['skipped_missing_quantizer'] += 1
@@ -1274,6 +1516,7 @@ def sync_adjacent_quantizers(
         print(f"   跳过已初始化目标: {stats['skipped_initialized']}")
         print(f"   跳过多上游来源: {stats['skipped_multi_source']}")
         print(f"   跳过缺失量化器: {stats['skipped_missing_quantizer']}")
+        print(f"   跳过存在中间阻断模块的路径: {stats['skipped_blocked_path']}")
 
     return stats
 
