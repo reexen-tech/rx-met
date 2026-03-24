@@ -71,6 +71,7 @@ def _replace_quantgru_with_optimized(module: nn.Module, parent_name: str = "") -
                 hidden_size=child.hidden_size,
                 batch_first=child.batch_first,
                 num_layers=child.num_layers,
+                bidirectional=child.bidirectional,
             )
 
             # 从 QuantGRU state_dict 迁移权重到 OptimizedQuantizableGRU
@@ -93,6 +94,22 @@ def _replace_quantgru_with_optimized(module: nn.Module, parent_name: str = "") -
                 if bias_hh is None:
                     bias_hh = child_state.get("_bias_hh_l0")
 
+                weight_ih_reverse = child_state.get("weight_ih_l0_reverse")
+                if weight_ih_reverse is None:
+                    weight_ih_reverse = child_state.get("_weight_ih_l0_reverse")
+
+                weight_hh_reverse = child_state.get("weight_hh_l0_reverse")
+                if weight_hh_reverse is None:
+                    weight_hh_reverse = child_state.get("_weight_hh_l0_reverse")
+
+                bias_ih_reverse = child_state.get("bias_ih_l0_reverse")
+                if bias_ih_reverse is None:
+                    bias_ih_reverse = child_state.get("_bias_ih_l0_reverse")
+
+                bias_hh_reverse = child_state.get("bias_hh_l0_reverse")
+                if bias_hh_reverse is None:
+                    bias_hh_reverse = child_state.get("_bias_hh_l0_reverse")
+
                 if weight_ih is not None:
                     replacement.cells[0].weight_ih.weight.data = weight_ih.cpu().clone()
                 if weight_hh is not None:
@@ -102,10 +119,21 @@ def _replace_quantgru_with_optimized(module: nn.Module, parent_name: str = "") -
                 if bias_hh is not None:
                     replacement.cells[0].weight_hh.bias.data = bias_hh.cpu().clone()
 
+                if child.bidirectional and replacement.reverse_cells is not None:
+                    if weight_ih_reverse is not None:
+                        replacement.reverse_cells[0].weight_ih.weight.data = weight_ih_reverse.cpu().clone()
+                    if weight_hh_reverse is not None:
+                        replacement.reverse_cells[0].weight_hh.weight.data = weight_hh_reverse.cpu().clone()
+                    if bias_ih_reverse is not None:
+                        replacement.reverse_cells[0].weight_ih.bias.data = bias_ih_reverse.cpu().clone()
+                    if bias_hh_reverse is not None:
+                        replacement.reverse_cells[0].weight_hh.bias.data = bias_hh_reverse.cpu().clone()
+
                 print(f"    ✅ {full_name}: 权重已复制")
             except Exception as e:  # noqa: BLE001
-                print(f"  ⚠️ 警告：无法复制 {full_name} 的权重: {e}")
-                print("     将使用随机初始化权重（导出可能不准确）")
+                raise RuntimeError(
+                    f"无法复制 QuantGRU 模块 {full_name} 的权重，已终止导出。"
+                ) from e
 
             setattr(module, name, replacement)
             replacements.append((full_name, child, replacement))
