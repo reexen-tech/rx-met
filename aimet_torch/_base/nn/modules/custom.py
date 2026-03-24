@@ -791,7 +791,9 @@ class Snake2d(torch.nn.Module):
     
     def forward(self, x: torch.Tensor, alpha: torch.Tensor) -> torch.Tensor:
         """
-        Forward-pass routine for Snake2d activation
+        Forward-pass routine for Snake2d activation.
+        Computation expanded into primitive ops to avoid FX tracing issues
+        (reciprocal / pow(2) etc. can be wrapped as opaque modules).
         
         Args:
             x: Input tensor
@@ -800,7 +802,13 @@ class Snake2d(torch.nn.Module):
         Returns:
             Output tensor after Snake2d activation
         """
-        x = x + (alpha + 1e-9).reciprocal() * torch.sin(alpha * x).pow(2)
+        eps = 1e-9
+        alpha_eps = alpha + eps
+        inv_alpha = torch.pow(alpha_eps, -1.0)
+        alpha_x = alpha * x
+        sin_alpha_x = torch.sin(alpha_x)
+        sin_sq = sin_alpha_x * sin_alpha_x
+        x = x + inv_alpha * sin_sq
         return x
 
 def _lazy_import_spconv():
