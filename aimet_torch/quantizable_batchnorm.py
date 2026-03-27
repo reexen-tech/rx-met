@@ -1,8 +1,6 @@
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 from torch import Tensor
-from typing import Optional, Tuple
 
 from aimet_torch.v2.nn.true_quant import QuantizationMixin
 

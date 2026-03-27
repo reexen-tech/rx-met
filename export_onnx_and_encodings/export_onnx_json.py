@@ -29,19 +29,15 @@ from .postprocess_refactor import postprocess_all
 STATIC_DUMMY_INPUT_SHAPE: Tuple[int, int, int] = (1, 16000, 1)
 
 
-# 尝试导入 QuantGRU（如果已通过 pip install 安装，可以直接导入）
+# 尝试导入 QuantGRU（如果已通过 pip install 安装，可以直接导入）,因为不一定使用了Qua
 try:
     from quant_gru import QuantGRU
 except ImportError:
     QuantGRU = None  # 如果未安装，设为 None
+    
 
-try:
-    from aimet_torch.optimized_quantizable_gru import OptimizedQuantizableGRU
-except ImportError:
-    try:
-        from aimet_rx.aimet_torch.optimized_quantizable_gru import OptimizedQuantizableGRU
-    except ImportError:
-        OptimizedQuantizableGRU = None  # 如果导入失败，设为 None
+from aimet_rx.aimet_torch.optimized_quantizable_gru import OptimizedQuantizableGRU
+
 
 
 # ---------- Internal helpers ----------
