@@ -107,6 +107,92 @@ def _check_gru_name_collisions(model: onnx.ModelProto, act_keys: List[str]) -> N
         )
 
 
+def _build_gru_public_name_map(model: onnx.ModelProto, act_keys: List[str]) -> Dict[int, str]:
+    """为每个 GRU 节点计算最终公开名，并确保不同 GRU 之间不会同名。"""
+    from collections import defaultdict
+
+    idx_to_name: Dict[int, str] = {}
+    canonical_to_raw: Dict[str, List[str]] = defaultdict(list)
+
+    for idx, node in enumerate(model.graph.node):
+        if node.op_type != "GRU":
+            continue
+        base_name = _strip_hash_suffix(node.name)
+        matched = _match_gru_name_by_json(base_name, act_keys)
+        canonical = matched if matched is not None else base_name
+        idx_to_name[idx] = canonical
+        canonical_to_raw[canonical].append(node.name)
+
+    collisions = {c: raws for c, raws in canonical_to_raw.items() if len(raws) > 1}
+    if collisions:
+        details = "; ".join(
+            f"'{canonical}' <- {raws}" for canonical, raws in collisions.items()
+        )
+        raise RuntimeError(
+            f"GRU 节点命名冲突：{len(collisions)} 组 GRU 节点规范化后同名。"
+            f"冲突详情: {details}。请检查模型结构或 _match_gru_name_by_json 逻辑。"
+        )
+    return idx_to_name
+
+
+def _make_unique_name(preferred: str, used_names: set[str], reserved_names: set[str]) -> str:
+    if preferred not in used_names and preferred not in reserved_names:
+        return preferred
+
+    suffix = 1
+    while True:
+        candidate = f"{preferred}_{suffix}"
+        if candidate not in used_names and candidate not in reserved_names:
+            return candidate
+        suffix += 1
+
+
+def _rename_non_gru_nodes_conflicting_with_gru_names(
+    model: onnx.ModelProto,
+    gru_public_names: set[str],
+    verbose: bool = True,
+) -> bool:
+    """
+    若非 GRU 节点已占用目标 GRU 名字，则优先重命名这些非 GRU 节点。
+    这样可以保留 GRU 节点与 activation_encodings key 的对应关系。
+    """
+    renamed = False
+    used_names = {node.name for node in model.graph.node if node.name}
+
+    for node in model.graph.node:
+        if node.op_type == "GRU" or not node.name:
+            continue
+        if node.name not in gru_public_names:
+            continue
+
+        preferred = f"{node.name}.{node.op_type.lower()}"
+        used_names.discard(node.name)
+        new_name = _make_unique_name(preferred, used_names, gru_public_names)
+        if verbose:
+            logger.info(
+                "重命名非 GRU 冲突节点: %s (%s) -> %s",
+                node.name,
+                node.op_type,
+                new_name,
+            )
+        node.name = new_name
+        used_names.add(new_name)
+        renamed = True
+
+    return renamed
+
+
+def _check_named_node_collisions(model: onnx.ModelProto) -> None:
+    """检查最终 ONNX 中是否仍有非空节点名重复。"""
+    from collections import Counter
+
+    counts = Counter(node.name for node in model.graph.node if node.name)
+    collisions = {name: count for name, count in counts.items() if count > 1}
+    if collisions:
+        details = "; ".join(f"'{name}' x{count}" for name, count in collisions.items())
+        raise RuntimeError(f"后处理后仍存在重复节点名: {details}")
+
+
 def _rename_initializer_and_refs(model: onnx.ModelProto, old_name: str, new_name: str) -> bool:
     if old_name == new_name:
         return False
@@ -152,16 +238,19 @@ def rename_gru_initializers_and_change_gru_json_format(
     except Exception as exc:  # noqa: BLE001
         raise RuntimeError(f"无法加载 ONNX: {exc}") from exc
 
-    # 提前检测命名冲突，失败快速
-    _check_gru_name_collisions(model, act_keys)
+    # 提前计算 GRU 公开名；若不同 GRU 规范化后同名，失败快速
+    gru_name_map = _build_gru_public_name_map(model, act_keys)
+    non_gru_renamed = _rename_non_gru_nodes_conflicting_with_gru_names(
+        model,
+        set(gru_name_map.values()),
+        verbose=verbose,
+    )
 
     gru_renamed = False
     param_renamed = False
-    for node in model.graph.node:
+    for idx, node in enumerate(model.graph.node):
         if node.op_type == "GRU":
-            base_name = _strip_hash_suffix(node.name)
-            matched = _match_gru_name_by_json(base_name, act_keys)
-            new_name = matched if matched is not None else base_name
+            new_name = gru_name_map[idx]
             if new_name != node.name:
                 if verbose:
                     logger.info("重命名 GRU 节点: %s -> %s", node.name, new_name)
@@ -219,7 +308,8 @@ def rename_gru_initializers_and_change_gru_json_format(
                     param_renamed = True
             node.input[:] = inputs
 
-    if gru_renamed or param_renamed or onnx_out != onnx_path:
+    if non_gru_renamed or gru_renamed or param_renamed or onnx_out != onnx_path:
+        _check_named_node_collisions(model)
         onnx.save(model, onnx_out)
     else:
         onnx_out = onnx_path
