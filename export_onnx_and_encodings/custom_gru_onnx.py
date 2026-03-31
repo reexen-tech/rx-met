@@ -86,6 +86,7 @@ def ensure_custom_gru_op_registered(opset: int = 18) -> None:
             h0,
             hidden_size_i=int(hidden_size_i),
             direction_s="forward",
+            linear_before_reset_i=1,
             outputs=2,
         )
 
@@ -114,6 +115,7 @@ def ensure_custom_gru_op_registered(opset: int = 18) -> None:
             h0,
             hidden_size_i=int(hidden_size_i),
             direction_s="bidirectional",
+            linear_before_reset_i=1,
             outputs=2,
         )
 
