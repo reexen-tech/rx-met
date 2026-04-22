@@ -37,6 +37,7 @@
 """Quantized definitions for custom modules of AIMET"""
 
 import copy
+import importlib
 from typing import Optional
 import torch
 from torch import Tensor
@@ -54,6 +55,11 @@ from ..true_quant import (
 
 # NOTE: Disabling due to pylint false alarm in ModuleList
 # pylint: disable=not-callable
+
+try:
+    _OptionalQuantGRU = importlib.import_module("quant_gru").QuantGRU
+except (ImportError, AttributeError):
+    _OptionalQuantGRU = None
 
 
 @QuantizationMixin.implements(Sin)
@@ -888,6 +894,21 @@ class QuantizedCustomSiLU(QuantizationMixin, CustomSiLU):
             out = output_qtzr(out)
 
         return out
+
+
+if _OptionalQuantGRU is not None:
+    @QuantizationMixin.implements(_OptionalQuantGRU)
+    class QuantizedQuantGRU(QuantizationMixin, _OptionalQuantGRU):
+        """Pass-through AIMET wrapper for QuantGRU."""
+
+        def __quant_init__(self):
+            super().__quant_init__()
+            # QuantGRU has its own internal quantization implementation.
+            self.input_quantizers = nn.ModuleList([None, None])
+            self.output_quantizers = nn.ModuleList([None, None])
+
+        def forward(self, input: torch.Tensor, hx=None):
+            return super().forward(input, hx)
 
 
 # @QuantizationMixin.implements(StridedSlice)
