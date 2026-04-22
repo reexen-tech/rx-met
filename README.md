@@ -10,6 +10,19 @@
 
 ## 更新日志
 
+### v1.3.6 (2026-04-21)
+
+#### ✨ 新增功能
+- **添加 QuantGRU 的源码级集成支持** (`aimet_torch/v2/nn/modules/custom.py`, `aimet_torch/model_preparer.py`)
+  - 在 AIMET v2 自定义量化模块注册表中增加 `QuantGRU` 的透传包装器
+  - `QuantGRU` 继续使用其自身的内部量化实现，不额外叠加 AIMET 输入/输出量化器
+
+#### 🔧 改进
+- 增强 `prepare_model` 对 `QuantGRU` 的处理逻辑：
+  - 自动将 `QuantGRU` 识别为 leaf module，避免 FX 展开其内部实现
+  - 使用 `QuantGRU` 时，无需在业务脚本中额外手动配置 `module_classes_to_exclude=[QuantGRU]`
+  - 降低 `quant-gru-pytorch` 接入 AIMET 的样板代码和使用门槛
+
 ### v1.2.2 (2024-12-24)
 
 #### 🐛 Bug 修复
