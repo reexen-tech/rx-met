@@ -21,6 +21,10 @@
 pip install aimet_rx-1.0.0-py3-none-any.whl
 ```
 
+## 外部依赖
+
+ `QuantGRU` 来自上游的 [**CX9898/quant-gru-pytorch**](https://github.com/CX9898/quant-gru-pytorch) 仓库（包含 CUDA / C++ 扩展，需要从源码编译安装）。本仓库不打包该模块，详细说明（用途、安装与编译步骤）见 [`quant-gru-pytorch/`](./quant-gru-pytorch/)。
+
 ## 使用示例
 
 ### PyTorch 模型量化
