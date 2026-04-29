@@ -15,7 +15,7 @@ import torch
 import torch.nn as nn
 from torch.onnx import register_custom_op_symbolic, symbolic_helper
 
-from aimet_rx.aimet_torch.optimized_quantizable_gru import OptimizedQuantizableGRU
+from aimet_torch.optimized_quantizable_gru import OptimizedQuantizableGRU
 
 # torch.library 必须全局持有，否则 op 可能“消失”
 _CUSTOM_GRU_LIB: Optional[torch.library.Library] = None

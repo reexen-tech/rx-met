@@ -36,7 +36,7 @@ except ImportError:
     QuantGRU = None  # 如果未安装，设为 None
     
 
-from aimet_rx.aimet_torch.optimized_quantizable_gru import OptimizedQuantizableGRU
+from aimet_torch.optimized_quantizable_gru import OptimizedQuantizableGRU
 
 
 

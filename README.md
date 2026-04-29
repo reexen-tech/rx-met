@@ -10,45 +10,8 @@
 
 ## 更新日志
 
-### v1.3.6 (2026-04-21)
-
-#### ✨ 新增功能
-- **添加 QuantGRU 的源码级集成支持** (`aimet_torch/v2/nn/modules/custom.py`, `aimet_torch/model_preparer.py`)
-  - 在 AIMET v2 自定义量化模块注册表中增加 `QuantGRU` 的透传包装器
-  - `QuantGRU` 继续使用其自身的内部量化实现，不额外叠加 AIMET 输入/输出量化器
-
-#### 🔧 改进
-- 增强 `prepare_model` 对 `QuantGRU` 的处理逻辑：
-  - 自动将 `QuantGRU` 识别为 leaf module，避免 FX 展开其内部实现
-  - 使用 `QuantGRU` 时，无需在业务脚本中额外手动配置 `module_classes_to_exclude=[QuantGRU]`
-  - 降低 `quant-gru-pytorch` 接入 AIMET 的样板代码和使用门槛
-
-### v1.2.2 (2024-12-24)
-
-#### 🐛 Bug 修复
-- **修复对称量化配置问题** (`aimet_torch/utils_rx.py`)
-  - 修复了 `apply_mixed_precision_bitwidth` 函数在设置对称量化时，`qmin`/`qmax` 没有正确更新的问题
-  - 修复前：设置 `symmetric=True` 后，qmin/qmax 仍然保持非对称值（如 0, 255）
-  - 修复后：正确更新为对称范围（如 8-bit: -128, 127；2-bit: -2, 1）
-  - 影响范围：所有通过 JSON 配置文件设置 `input_symmetric` 和 `output_symmetric` 的量化器
-
-#### ✨ 改进
-- 增强了量化参数设置逻辑：
-  - 位宽变更时自动根据对称性更新 qmin/qmax
-  - 对称性变更时自动根据当前位宽更新 qmin/qmax
-  - 确保量化器状态始终一致
-
-### v1.2.1 (2024-12-23)
-
-#### ✨ 新增功能
-- 添加混合精度位宽配置工具函数
-- 支持通过 JSON 配置文件灵活控制量化参数
-
-### v1.2.0 (2024-12-20)
-
-#### ✨ 初始版本
-- 基于 AIMET 官方版本构建
-- 提供 PyTorch 和 ONNX 量化支持
+完整版本历史见 [CHANGELOG.md](./CHANGELOG.md)。最新版本：**v1.3.7 (2026-04-29)** ——
+修复 1.3.6 wheel 中 `export_onnx_and_encodings` 子模块的 import 路径错误。
 
 ## 安装
 
@@ -57,6 +20,10 @@
 ```bash
 pip install aimet_rx-1.0.0-py3-none-any.whl
 ```
+
+## 外部依赖
+
+ `QuantGRU` 来自上游的 [**CX9898/quant-gru-pytorch**](https://github.com/CX9898/quant-gru-pytorch) 仓库（包含 CUDA / C++ 扩展，需要从源码编译安装）。本仓库不打包该模块，详细说明（用途、安装与编译步骤）见 [`quant-gru-pytorch/`](./quant-gru-pytorch/)。
 
 ## 使用示例
 
@@ -162,7 +129,7 @@ python -m build
 ### 安装
 
 ```bash
-pip install dist/aimet_rx-1.2.2-py3-none-any.whl
+pip install dist/aimet_rx-1.3.7-py3-none-any.whl
 ```
 
 ## 许可证

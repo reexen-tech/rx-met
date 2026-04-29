@@ -1028,11 +1028,24 @@ def apply_mixed_precision_bitwidth(sim_model, config_file: str, verbose: bool = 
         'type_matched_count': 0,
         'default_count': 0
     }
-    
+
+    # QuantGRU 模块由内部的 use_quantization 属性管理量化开关，
+    # 不走 AIMET 的通用 input/output/param_quantizers 流程；提前导入用于跳过判断。
+    try:
+        from quant_gru import QuantGRU as _QuantGRUType
+    except ImportError:
+        _QuantGRUType = None
+
     # 遍历所有模块
     for name, module in sim_model.named_modules():
         module_type = type(module).__name__
-        
+
+        # 跳过 QuantGRU：它的 param_quantizers 含 weight_ih_l0/weight_hh_l0 等占位键
+        # （值均为 None），会让通用启发式误判为"有量化器"并错误地计入 disabled_count。
+        # QuantGRU 的位宽配置由后面单独的 load_bitwidth_config 处理。
+        if _QuantGRUType is not None and isinstance(module, _QuantGRUType):
+            continue
+
         # 确定使用哪个配置
         # 优先级：精确名称 > 类型 > 模式匹配 > 默认
         #   类型 > 模式：避免宽泛通配符（如 *.act*）意外覆盖子模块的类型配置；
@@ -1286,50 +1299,57 @@ def apply_mixed_precision_bitwidth(sim_model, config_file: str, verbose: bool = 
                     elif 'Subtract' in module_type:
                         stats['subtract_count'] += 1
     
-    # 处理 QuantGRU 模块：直接使用 load_bitwidth_config
-    try:
-        from quant_gru import QuantGRU
-        quant_gru_count = 0
+    # 处理 QuantGRU 模块：调用 load_bitwidth_config，并按 use_quantization 区分开/关
+    if _QuantGRUType is not None:
+        quant_gru_total = 0
+        quant_gru_enabled = 0
+        quant_gru_disabled = 0
         for name, module in sim_model.named_modules():
-            if isinstance(module, QuantGRU):
-                # 检查是否已校准，如果已校准则跳过（load_bitwidth_config 内部会处理并输出说明）
-                was_calibrated = module.is_calibrated()
-                try:
-                    # 直接使用 JSON 文件路径调用 load_bitwidth_config
-                    # 注意：如果已校准，load_bitwidth_config 会直接返回（不抛出异常，但会输出说明）
-                    module.load_bitwidth_config(config_file, verbose=verbose)
-                    # 只有在未校准且成功加载配置时才计数和输出成功信息
-                    if not was_calibrated:
-                        quant_gru_count += 1
-                        if verbose:
-                            print(f"  ✅ [QuantGRU] {name}: 已从配置文件加载位宽设置")
-                except Exception as e:
-                    if verbose:
-                        print(f"  ⚠️  [QuantGRU] {name}: 加载配置失败 - {str(e)}")
-        
-        if quant_gru_count > 0:
-            stats['quant_gru_count'] = quant_gru_count
-    except ImportError:
-        pass  # QuantGRU 未安装，跳过
+            if not isinstance(module, _QuantGRUType):
+                continue
+            quant_gru_total += 1
+
+            # 加载位宽配置（已校准的 QuantGRU 会被 load_bitwidth_config 内部跳过）
+            was_calibrated = module.is_calibrated()
+            try:
+                module.load_bitwidth_config(config_file, verbose=verbose)
+                if verbose and not was_calibrated:
+                    print(f"  ✅ [QuantGRU] {name}: 已从配置文件加载位宽设置")
+            except Exception as e:
+                if verbose:
+                    print(f"  ⚠️  [QuantGRU] {name}: 加载配置失败 - {e}")
+
+            # 直接读 QuantGRU 自身的 use_quantization 属性判断量化是否启用
+            if bool(getattr(module, 'use_quantization', False)):
+                quant_gru_enabled += 1
+            else:
+                quant_gru_disabled += 1
+
+        if quant_gru_total > 0:
+            # 兼容旧字段（保留 quant_gru_count 作为总数），同时新增明确的开/关计数
+            stats['quant_gru_count'] = quant_gru_total
+            stats['quant_gru_enabled'] = quant_gru_enabled
+            stats['quant_gru_disabled'] = quant_gru_disabled
     
     # 打印统计
     if verbose:
         print("="*70)
         print(f"📊 位宽设置统计:")
-        print(f"  • Conv 层:         {stats['conv_count']} 个")
-        print(f"  • Linear 层:       {stats['linear_count']} 个")
-        print(f"  • Add 层:          {stats['add_count']} 个")
-        print(f"  • Multiply 层:     {stats['multiply_count']} 个")
-        print(f"  • Subtract 层:     {stats['subtract_count']} 个")
-        print(f"  • 激活函数层:      {stats['activation_count']} 个")
+        print(f"  • Conv 层:             {stats['conv_count']} 个")
+        print(f"  • Linear 层:           {stats['linear_count']} 个")
+        print(f"  • Add 层:              {stats['add_count']} 个")
+        print(f"  • Multiply 层:         {stats['multiply_count']} 个")
+        print(f"  • Subtract 层:         {stats['subtract_count']} 个")
+        print(f"  • 激活函数层:          {stats['activation_count']} 个")
         if 'quant_gru_count' in stats:
-            print(f"  • QuantGRU 层:     {stats['quant_gru_count']} 个")
-        print(f"  • 禁用量化层:      {stats['disabled_count']} 个")
-        print(f"  • 按名称匹配:      {stats['name_matched_count']} 个")
-        print(f"  • 按类型匹配:      {stats['type_matched_count']} 个")
-        print(f"  • 使用默认值:      {stats['default_count']} 个")
+            print(f"  • QuantGRU 层:         {stats['quant_gru_count']} 个 "
+                  f"(启用量化: {stats['quant_gru_enabled']}, 未启用: {stats['quant_gru_disabled']})")
+        print(f"  • 禁用量化层:          {stats['disabled_count']} 个")
+        print(f"  • 按名称匹配:          {stats['name_matched_count']} 个")
+        print(f"  • 按类型匹配:          {stats['type_matched_count']} 个")
+        print(f"  • 使用默认值:          {stats['default_count']} 个")
         print("="*70)
-    
+
     return stats
 
 def _disable_quantization(module, name: str, verbose: bool):
