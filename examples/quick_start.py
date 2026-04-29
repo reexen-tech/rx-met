@@ -7,7 +7,7 @@ AIMET 量化演示 — 标准用法
         → apply_power_of_2_workflow (NPU 友好的 Po2 量化)
         → freeze_quantizer_parameters + QAT 微调
         → state_dict + ONNX + .encodings 三件套保存
-        → 重建 sim → load_state_dict → load_quantizer_encodings → 兜底 calib → 精度对比
+        → 重建 sim → load_state_dict → load_quantizer_encodings → 精度对比
 
 主流程见文件末尾的 main()，所有标准 AIMET API 调用都直接内联在 main 里，
 便于直接照抄；前面的函数只负责"非 AIMET"的辅助逻辑（数据集、模型定义、训练循环）。
@@ -554,6 +554,10 @@ def main():
     #   - prepare_model 把 forward 中的 functional 调用 / 复用算子重构成
     #     可被 sim 抓住的 nn.Module 节点；QuantGRU、nn.BatchNorm2d 当 leaf
     #     处理（不进入它们的内部 trace）。
+    #   - stateless_modules_to_preserve: 列出的自定义无状态 Module 不会被
+    #     fx 展开成 functional 节点，保持原模块作为 leaf。⚠️ 训练侧与重建
+    #     侧（步骤 8）必须传完全相同的列表，否则 graph 不一致 → quantizer
+    #     名称错位 → load_state_dict / load_quantizer_encodings 加载错位。
     #   - QuantizationSimModel 给模型注入 input/output/param quantizer。
     #   - apply_mixed_precision_bitwidth 用 JSON 配置覆盖默认位宽（如对
     #     bias 用 16bit、把 FloorDivide/Pad 整体 disable 等）。
@@ -583,7 +587,6 @@ def main():
     # 步骤 4: 校准 (PTQ)
     #   compute_encodings 是 AIMET 的核心 API：进入上下文时让 quantizer 进
     #   入"观察模式"，跑一批数据后退出时根据观察值推算 scale/zero-point。
-    #   QuantGRU 的内部 calibrating 标志也会被同时切到 True / False。
     # ------------------------------------------------------------------
     with stage("步骤 4: 校准 (PTQ)", timings):
         sim.model.to(DEVICE).eval()
@@ -614,11 +617,12 @@ def main():
 
     # ------------------------------------------------------------------
     # 步骤 6: QAT 微调
-    #   - freeze_quantizer_parameters: 冻结 quantizer 的 min/max 与 BN
-    #     的 running mean/var、affine 参数；只让模型权重和 bias 参与
-    #     反向传播。
-    #   - 训练循环本身就是普通 PyTorch（见 qat_finetune），唯一变化
-    #     是用 set_train_mode_freeze_bn 替代普通 model.train()。
+    #   - freeze_quantizer_parameters: 冻结 quantizer 的 min/max（让 QAT
+    #     训练只更新模型权重而不漂移量化范围）；freeze_bn_affine=True 时
+    #     额外冻结 BN 的 affine 参数 (gamma/beta)。
+    #   - 训练循环本身就是普通 PyTorch（见 qat_finetune），唯一变化是用
+    #     set_train_mode_freeze_bn 替代普通 model.train()——它把模型整体
+    #     置为 train()，但单独把 BN 的 running mean/var 锁在 eval 模式。
     # ------------------------------------------------------------------
     with stage("步骤 6: QAT 微调", timings):
         freeze_quantizer_parameters(sim.model, verbose=True, freeze_bn_affine=True)
@@ -636,11 +640,11 @@ def main():
     #                        本仓库定制的 ONNX 导出工具，相比 sim.export 增加了
     #                        QuantGRU / QuantizableBatchNorm2d 等自定义算子的
     #                        符号化处理，一次性产出：
-    #                          * <prefix>.onnx              部署用 ONNX 模型
+    #                          * <prefix>.onnx              部署用 ONNX 模型，可被
+    #                                                       ONNX Runtime / QNN / NPU 工具链直接消费
     #                          * <prefix>.encodings         最终对外 encodings（PyTorch 模块名格式，
     #                                                       配合 load_quantizer_encodings）
     #                          * <prefix>_torch.encodings   AIMET 原生中间产物（调用侧无需关心）
-    #                        ONNX 文件 ONNX Runtime / QNN / NPU 工具链直接消费
     #
     # 该函数要求 sim.model 在 CPU，先搬回 CPU 再导出。
     # ------------------------------------------------------------------
