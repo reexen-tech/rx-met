@@ -637,10 +637,10 @@ def main():
     #                        QuantGRU / QuantizableBatchNorm2d 等自定义算子的
     #                        符号化处理，一次性产出：
     #                          * <prefix>.onnx              部署用 ONNX 模型
-    #                          * <prefix>.encodings         ONNX node 名格式
-    #                          * <prefix>_torch.encodings   PyTorch 模块名格式
-    #                                                       （配合 load_quantizer_encodings）
-    #                        ONNX Runtime / QNN / NPU 工具链直接消费
+    #                          * <prefix>.encodings         最终对外 encodings（PyTorch 模块名格式，
+    #                                                       配合 load_quantizer_encodings）
+    #                          * <prefix>_torch.encodings   AIMET 原生中间产物（调用侧无需关心）
+    #                        ONNX 文件 ONNX Runtime / QNN / NPU 工具链直接消费
     #
     # 该函数要求 sim.model 在 CPU，先搬回 CPU 再导出。
     # ------------------------------------------------------------------
