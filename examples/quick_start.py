@@ -1,74 +1,137 @@
 """
-AIMET 量化演示 - 简洁版
-使用 utils.py 工具函数，代码结构清晰
+AIMET 量化演示 — 标准用法
+
+本脚本演示 AIMET v2 在 SpeechCommands + MRNN（关键词识别）上的完整量化流程：
+    FP 训练 → prepare_model → QuantizationSimModel + 混合精度位宽
+        → compute_encodings 校准 (PTQ)
+        → apply_power_of_2_workflow (NPU 友好的 Po2 量化)
+        → freeze_quantizer_parameters + QAT 微调
+        → state_dict + ONNX + .encodings 三件套保存
+        → 重建 sim → load_state_dict → load_quantizer_encodings → 兜底 calib → 精度对比
+
+主流程见文件末尾的 main()，所有标准 AIMET API 调用都直接内联在 main 里，
+便于直接照抄；前面的函数只负责"非 AIMET"的辅助逻辑（数据集、模型定义、训练循环）。
 """
 
-import sys
-sys.path.append(r'/home/sdong/Program/aimet_whl/aimet_rx')
-sys.path.append(r'/home/sdong/Program/aimet_whl/')
-sys.path.append(r'/home/sdong/Program/aimet_whl/quant-gru-pytorch/pytorch')
+# ============================================================================
+# 基础导入
+# ============================================================================
+import os
+import math
+import random
+import time
+import contextlib
+from pathlib import Path
 
-
+import numpy as np
 import torch
 import torch.nn as nn
-from torch.utils.data import Dataset, DataLoader
-from aimet_torch.v2 import quantsim
-from aimet_torch import model_preparer
-import aimet_torch.v2 as aimet
-
-
-from pathlib import Path
-from tqdm import tqdm
-import random
-import math
 import torchaudio
-from torchaudio.transforms import MelSpectrogram, AmplitudeToDB, TimeMasking, FrequencyMasking
+from torch.utils.data import Dataset, DataLoader
+from tqdm import tqdm
 
-from aimet_rx.export_onnx_and_encodings.export_onnx_json import export_onnx_json
-
-# 设置 torchaudio 后端以避免 torchcodec 依赖问题
-try:
-    torchaudio.set_audio_backend("soundfile")  # 使用 soundfile 后端
-except:
-    try:
-        torchaudio.set_audio_backend("sox_io")  # 或使用 sox_io 后端
-    except:
-        pass  # 使用默认后端
-
-
-# 导入工具函数
+# AIMET 安装包公共 API
+import aimet_torch.v2 as aimet
+from aimet_torch import model_preparer
+from aimet_torch.v2 import quantsim
 from aimet_torch.utils_rx import (
-    setup_percentile_calibration,
-    setup_selective_percentile_calibration,  # 新增：选择性 Percentile 校准
-    verify_percentile_calibration,
+    apply_mixed_precision_bitwidth,
     apply_power_of_2_workflow,
     freeze_quantizer_parameters,
     set_train_mode_freeze_bn,
-    apply_mixed_precision_bitwidth,  # 新增：混合精度位宽配置
-    check_bn_params_status  # 新增：检查 BN 参数状态
 )
+from aimet_torch.staged_quantization_utils import load_quantizer_encodings
+from aimet_torch.quantizable_batchnorm import QuantizableBatchNorm2d
+from quant_gru import QuantGRU
 
-# 导入模型定义
+# 仓库自定义的 ONNX 导出工具（含 QuantGRU / QuantizableBatchNorm2d 的自定义符号化逻辑），
+# 已随安装包一起发布
+from export_onnx_and_encodings.export_onnx_json import export_onnx_json
+
+# 当前 demo 的本地辅助模块（与本脚本同目录），运行 demo 时请进入 examples/ 后再启动
 from common.fft2band import BandConverter
 from common.torch_stft import STFT
-from aimet_torch.optimized_quantizable_gru import OptimizedQuantizableGRU
-from aimet_torch.quantizable_batchnorm import QuantizableBatchNorm2d  # ✅ 使用可量化BN
 
 
+# ============================================================================
+# 全局配置
+# ============================================================================
+SEED = 42
+EPS = 1e-8
+DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-def list_from_txt(p):
-    with open(p, "r") as f:
+DATA_ROOT = "/mnt/data8t/share/datasets/speech_commands/SpeechCommands/speech_commands_v0.02"
+NUM_CLASSES = 35
+BATCH_SIZE = 64
+NUM_WORKERS = 4
+
+FP_EPOCHS = 1
+QAT_EPOCHS = 1
+FP_LR = 1e-4
+QAT_LR = 1e-4
+
+# 量化方案 —— AIMET QuantizationSimModel.quant_scheme 接受以下输入：
+#   字符串别名:  "min_max" | "tf" | "tf_enhanced" | "percentile"   ("tf" 是 "min_max" 的别名)
+#   枚举:        QuantScheme.min_max | QuantScheme.post_training_tf_enhanced
+#                | QuantScheme.post_training_percentile
+# 注：QuantGRU 校准方法会从该值自动推断（minmax / sqnr / percentile）。
+QUANT_SCHEME = "percentile"
+PERCENTILE_VALUE = 99.99       # 仅 QUANT_SCHEME == "percentile" 时生效（其他 scheme 下 set_percentile_value 是空操作）
+DEFAULT_BW = 8
+MAX_CALIB_BATCHES = 100
+RELOAD_CALIB_BATCHES = 32
+
+_HERE = Path(__file__).resolve().parent
+CONFIG_FILE = _HERE / "config" / "mrnn_quantsim_config_custom_mixed_precision_v2.json"
+BITWIDTH_CONFIG_FILE = _HERE / "config" / "quick_start_full_quant.json"
+OUTPUT_DIR = _HERE / "output" / "quick_start"
+FP_MODEL_PATH = _HERE / "model_fp.pth"
+
+
+# ============================================================================
+# 复现性 / 环境辅助
+# ============================================================================
+def set_seed(seed: int = SEED) -> None:
+    """统一设置 random / numpy / torch / cuDNN 的随机种子。"""
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+    os.environ["PYTHONHASHSEED"] = str(seed)
+
+
+def worker_init_fn(worker_id: int) -> None:
+    seed = SEED + worker_id
+    random.seed(seed)
+    np.random.seed(seed)
+
+
+def setup_audio_backend() -> None:
+    """torchaudio 后端选择，避免对 torchcodec 的硬依赖。"""
+    for backend in ("soundfile", "sox_io"):
+        try:
+            torchaudio.set_audio_backend(backend)
+            return
+        except Exception:
+            continue
+
+
+# ============================================================================
+# 数据集（非 AIMET 标准用法，与量化无关）
+# ============================================================================
+def list_from_txt(path: str) -> list:
+    with open(path, "r") as f:
         return [ln.strip() for ln in f if ln.strip()]
 
+
 class SpeechCommands(Dataset):
-    """
-    Builds train/val/test from speech_commands_v0.02 directory.
-    Produces (sequence[T, F], label_idx).
-    """
+    """从 speech_commands_v0.02 目录构建 train/val/test。返回 (sequence[T, 1], label_idx)。"""
+
     def __init__(self, root, split="train", sample_rate=16000,
-                 n_mels=1, win_ms=25.0, hop_ms=10.0,
-                 time_mask_p=0.2, freq_mask_p=0.2, add_noise_p=0.6,
-                 time_shift_max=0.1, target_dur=1.0):
+                 add_noise_p=0.6, time_shift_max=0.1, target_dur=1.0):
         self.root = Path(root)
         assert self.root.exists(), f"Data root not found: {root}"
         self.split = split
@@ -76,15 +139,13 @@ class SpeechCommands(Dataset):
         self.target_len = int(target_dur * sample_rate)
         self.time_shift_max = time_shift_max
         self.add_noise_p = add_noise_p
-        self.time_mask_p = time_mask_p
-        self.freq_mask_p = freq_mask_p
 
-        # Build label list from subfolders (exclude background noise)
-        self.labels = sorted([d.name for d in self.root.iterdir()
-                              if d.is_dir() and not d.name.startswith('_')])
+        self.labels = sorted(
+            d.name for d in self.root.iterdir()
+            if d.is_dir() and not d.name.startswith("_")
+        )
         self.label_to_idx = {c: i for i, c in enumerate(self.labels)}
 
-        # Split using official lists
         val_list = set(list_from_txt(self.root / "validation_list.txt"))
         test_list = set(list_from_txt(self.root / "testing_list.txt"))
 
@@ -104,7 +165,6 @@ class SpeechCommands(Dataset):
         if len(self.items) == 0:
             raise RuntimeError(f"No items for split={split} at {root}")
 
-        # Load background noise wavs (for augmentation only)
         self.bg_noises = []
         noise_dir = self.root / "_background_noise_"
         if noise_dir.exists():
@@ -112,19 +172,7 @@ class SpeechCommands(Dataset):
                 wav, sr = torchaudio.load(w)
                 if sr != self.sr:
                     wav = torchaudio.functional.resample(wav, sr, self.sr)
-                self.bg_noises.append(wav.squeeze(0))  # mono
-        
-        # Feature pipeline
-        win_length = int(self.sr * (win_ms / 1000.0))
-        hop_length = int(self.sr * (hop_ms / 1000.0))
-        n_fft = 1
-        while n_fft < win_length:
-            n_fft *= 2
-        self.db = AmplitudeToDB()
-        self.tmask = TimeMasking(time_mask_param=10)
-        self.fmask = FrequencyMasking(freq_mask_param=8)
-    
-    
+                self.bg_noises.append(wav.squeeze(0))
 
     def __len__(self):
         return len(self.items)
@@ -132,8 +180,7 @@ class SpeechCommands(Dataset):
     def _pad_or_crop(self, wav, train=True):
         L = wav.shape[-1]
         if L < self.target_len:
-            pad = self.target_len - L
-            wav = torch.nn.functional.pad(wav, (0, pad))
+            wav = torch.nn.functional.pad(wav, (0, self.target_len - L))
         elif L > self.target_len:
             if self.split == "train" and train:
                 start = random.randint(0, L - self.target_len)
@@ -159,543 +206,529 @@ class SpeechCommands(Dataset):
         start = random.randint(0, noise.numel() - self.target_len)
         noise_seg = noise[start:start + self.target_len].unsqueeze(0)
 
-        # Random SNR from ~[-3, 15] dB
         snr_db = random.uniform(-3.0, 15.0)
         sig_pow = wav.pow(2).mean()
         noi_pow = noise_seg.pow(2).mean() + 1e-9
         k = math.sqrt(sig_pow / (noi_pow * (10 ** (snr_db / 10.0))))
-        mixed = torch.clamp(wav + k * noise_seg, -1.0, 1.0)
-        return mixed
-
-    def _specaug(self, spec):
-        if self.split == "train":
-            if random.random() < self.time_mask_p:
-                spec = self.tmask(spec)
-            if random.random() < self.freq_mask_p:
-                spec = self.fmask(spec)
-        return spec
+        return torch.clamp(wav + k * noise_seg, -1.0, 1.0)
 
     def __getitem__(self, idx):
         path, label = self.items[idx]
         wav, sr = torchaudio.load(path)
-        # mono
         if wav.shape[0] > 1:
             wav = wav.mean(dim=0, keepdim=True)
-        else:
-            # ensure [1, T]
-            pass
-        # resample if needed
         if sr != self.sr:
             wav = torchaudio.functional.resample(wav, sr, self.sr)
 
-        # training-time waveform augmentation
         train_mode = (self.split == "train")
         wav = self._pad_or_crop(wav, train=train_mode)
         if train_mode:
             wav = self._time_shift(wav)
             wav = self._mix_bg_noise(wav)
 
-        wav_tc = wav.T # from [1,T] to [T, 1]
-
+        wav_tc = wav.T  # [1, T] -> [T, 1]
         y = torch.tensor(self.label_to_idx[label], dtype=torch.long)
         return wav_tc, y
 
-# 2) Define the MRNN model
-EPS = 1e-8
 
-# ============= 新增：将 power_compress 和 hypot_fun 改成 nn.Module =============
+def collate(batch):
+    xs, ys = zip(*batch)
+    return torch.stack(xs, dim=0), torch.stack(ys, dim=0)
+
+
+def build_dataloaders(root: str):
+    """构建 train / test / val / calib 四个 DataLoader（带固定种子 generator）。"""
+    train_ds = SpeechCommands(root, split="train", add_noise_p=0.0)
+    test_ds = SpeechCommands(root, split="test", add_noise_p=0.0)
+    val_ds = SpeechCommands(root, split="val", add_noise_p=0.0)
+
+    g_train = torch.Generator(); g_train.manual_seed(SEED)
+    g_calib = torch.Generator(); g_calib.manual_seed(SEED)
+
+    def _make(ds, *, shuffle, generator=None, drop_last=False):
+        return DataLoader(
+            ds, batch_size=BATCH_SIZE, shuffle=shuffle, num_workers=NUM_WORKERS,
+            pin_memory=True, collate_fn=collate, drop_last=drop_last,
+            worker_init_fn=worker_init_fn if shuffle else None,
+            generator=generator,
+        )
+
+    return {
+        "train": _make(train_ds, shuffle=True, generator=g_train, drop_last=True),
+        "test":  _make(test_ds,  shuffle=False),
+        "val":   _make(val_ds,   shuffle=False),
+        "calib": _make(test_ds,  shuffle=True, generator=g_calib, drop_last=True),
+    }
+
+
+# ============================================================================
+# 模型定义（非 AIMET 标准用法，与量化无关）
+# ============================================================================
 class PowerCompress(nn.Module):
-    """Power compression module: (abs(x) ** 0.5) * sign(x)"""
+    """Power compression: (|x| ** 0.5) * sign(x)"""
+
     def forward(self, x):
-        o = (torch.abs(x) ** 0.5) * torch.sign(x)
-        return o
+        return (torch.abs(x) ** 0.5) * torch.sign(x)
+
 
 class HypotFun(nn.Module):
-    """Hypot function module: sqrt(x^2 + y^2 + EPS)"""
+    """Hypot function: sqrt(x^2 + y^2 + EPS)"""
+
     def forward(self, x, y):
-        o = torch.sqrt(x ** 2 + y ** 2 + EPS)
-        return o
-# ============================================================================
+        return torch.sqrt(x ** 2 + y ** 2 + EPS)
 
 
-# ??????????
 class CLN(nn.Module):
+    """通道层归一化（按 (C, F) 维度对每个 (B, T) 做幅度归一化）。"""
+
     def __init__(self, factor=32):
-        super(CLN, self).__init__()
+        super().__init__()
         self.factor = factor
 
     def forward(self, x):
-        std = torch.mean(x**2, dim=(1, 3), keepdim=True)  # [B, 1, T, 1]
-        std = torch.sqrt(std + EPS)  # [1, 1, 26, 1]
-        x = x / std
-        return x
+        std = torch.mean(x ** 2, dim=(1, 3), keepdim=True)
+        std = torch.sqrt(std + EPS)
+        return x / std
 
-class cfLN2D(nn.Module):
-    def __init__(self, channel_size):
-        super(cfLN2D, self).__init__()
-        self.gamma = nn.Parameter(torch.Tensor(1, channel_size, 1, 1))  # [1, N, 1]
-        self.beta = nn.Parameter(torch.Tensor(1, channel_size, 1, 1))  # [1, N, 1]
-        self.reset_parameters()
-
-    def reset_parameters(self):
-        self.gamma.data.fill_(1)
-        self.beta.data.zero_()
-
-    def forward(self, y):
-        """
-        Args:
-            y: [B C T F]
-        Returns:
-            o: [B C T F]
-        """
-        mean = torch.mean(y, dim=1, keepdim=True) # [B, 1, T, F]
-        var = torch.var(y, dim=1, keepdim=True, unbiased=False)  # [B, 1, T, F]
-        o = self.gamma * (y - mean) / torch.pow(var + EPS, 0.5) + self.beta
-        return o
 
 class RNN2D(nn.Module):
-    def __init__(self, H, layers=1, idx=0):
-        """
-        Args:
-            H: Number of channels
-            causal: causal or non-causal
-        """
-        super(RNN2D, self).__init__()
-        # ✅ 使用优化版 GRU，共享算术 Module（减少 62.5% Module 数量）
-        #self.seq_t = OptimizedQuantizableGRU(input_size=H, hidden_size=H, batch_first=True, num_layers=layers)
-        self.seq_t = nn.GRU(input_size=H, hidden_size=H, batch_first=True, num_layers=layers)
+    """
+    使用 QuantGRU 的 RNN2D 模块（单向）。
+    """
+
+    def __init__(self, H):
+        super().__init__()
+        self.H = H
+        self.seq_t = QuantGRU(input_size=H, hidden_size=H, batch_first=True,
+                              num_layers=1, bidirectional=False)
         self.conv_t = nn.Conv2d(H, H, (1, 1))
-        self.idx = idx
-        # self.rnn2d_bn = nn.BatchNorm2d(H, affine=False, momentum=0.01)
-        self.rnn2d_bn = QuantizableBatchNorm2d(H, affine=False, momentum=0.01)  # ✅ 使用可量化BN
+        self.rnn2d_bn = QuantizableBatchNorm2d(H, affine=False, momentum=0.01)
         self.cln = CLN(factor=32)
 
     def forward(self, x):
         x = self.rnn2d_bn(x)
-        #x = torch.clamp(x, -4, 4)
         x = self.cln(x)
-        #x = torch.clamp(x, 0, 4)
-        # o = rearrange(x, 'b c t f -> (b f) t c')  # ????????????, ??????
         b, c, t, f = x.shape
         o = x.permute(0, 3, 2, 1).contiguous().view(b * f, t, c)
-        o = self.seq_t(o)[0]
-        #o_t = rearrange(o, '(b f) t c -> b c t f', f=x.shape[-1])
-        o_t = o.view(b, f, t, c).permute(0, 3, 2, 1).contiguous()
-        o_t = self.conv_t(o_t)
-        return o_t
+        o, _ = self.seq_t(o)
+        o = o.view(b, f, t, self.H).permute(0, 3, 2, 1).contiguous()
+        return self.conv_t(o)
 
 
 class FrequencyDownSampling(nn.Module):
     def __init__(self, in_size, out_size, stride=(1, 4), kernel_size=(1, 4)):
-        super(FrequencyDownSampling, self).__init__()
-        self.conv2d = nn.Conv2d(in_channels=in_size, out_channels=out_size, kernel_size=kernel_size,
-                                stride=stride, padding=(kernel_size[0] // 2, 0))
+        super().__init__()
+        self.conv2d = nn.Conv2d(
+            in_channels=in_size, out_channels=out_size,
+            kernel_size=kernel_size, stride=stride,
+            padding=(kernel_size[0] // 2, 0),
+        )
 
     def forward(self, ipt):
-        """
-        Args:
-            ipts: [B, C, T, F1]
-        Returns:
-           opts: [B, C', T, F2]
-        """
         ipt = torch.clamp(ipt, -0, 2)
         out = self.conv2d(ipt)
-        out = torch.clamp(out, -2, 2)
-        return out
+        return torch.clamp(out, -2, 2)
+
 
 class MRNN(nn.Module):
-    def __init__(self, output_dim=256, # CNENDE
-                 mic_num=1, fs=16000, NFFT=512, frame_size=160, fbank_num=240,
-                 TimeMask=False, FreqMask=False, PixelMask=False):
-        super(MRNN, self).__init__()
-        self.TimeMask, self.FreqMask, self.PixelMask = TimeMask, FreqMask, PixelMask
+    """KWS 主模型：STFT → BandConverter → 多级 RNN2D + 频率下采样 → FC。"""
 
-        self.mic_num = mic_num
-        self.fs, self.NFFT, self.frame_size = fs, NFFT, frame_size
+    def __init__(self, output_dim=NUM_CLASSES, NFFT=512, frame_size=160, fbank_num=240):
+        super().__init__()
         channels = [120, 240, 320]
-        self.trans = STFT(filter_length=NFFT, hop_length=frame_size)
         freq_bins = NFFT // 2
 
+        self.trans = STFT(filter_length=NFFT, hop_length=frame_size)
+        self.pre_bn = QuantizableBatchNorm2d(freq_bins, affine=True, momentum=0.01)
+        self.fft2band = BandConverter(band_num=fbank_num, freq_bins=freq_bins)
+
+        self.power_compress_1 = PowerCompress()
+        self.power_compress_2 = PowerCompress()
+        self.hypot_fun = HypotFun()
+
         self.conv_in = nn.Conv2d(1, channels[0], (3, 3), stride=(1, 2), padding=(1, 1), groups=1)
+
         self.enc_seqs, self.freq_downs, self.neck_seqs = nn.ModuleList(), nn.ModuleList(), nn.ModuleList()
-        self.freq_downs.append(FrequencyDownSampling(in_size=channels[0], out_size=channels[0], kernel_size=(2, 4), stride=(2, 4)))
+        self.freq_downs.append(FrequencyDownSampling(channels[0], channels[0], kernel_size=(2, 4), stride=(2, 4)))
         self.enc_seqs.append(RNN2D(channels[0]))
-        self.freq_downs.append(FrequencyDownSampling(in_size=channels[0], out_size=channels[1], kernel_size=(2, 5), stride=(2, 5)))
+        self.freq_downs.append(FrequencyDownSampling(channels[0], channels[1], kernel_size=(2, 5), stride=(2, 5)))
         self.enc_seqs.append(RNN2D(channels[1]))
-        self.freq_downs.append(FrequencyDownSampling(in_size=channels[1], out_size=channels[2], kernel_size=(1, 6), stride=(1, 6)))
-        self.neck_seqs.append(RNN2D(channels[-1], layers=1))
-        self.neck_seqs.append(RNN2D(channels[-1], layers=1))
+        self.freq_downs.append(FrequencyDownSampling(channels[1], channels[2], kernel_size=(1, 6), stride=(1, 6)))
+        self.neck_seqs.append(RNN2D(channels[-1]))
+        self.neck_seqs.append(RNN2D(channels[-1]))
+
         self.fc0 = nn.Linear(channels[-1], output_dim)
 
-        #self.sigmoid0 = nn.Sigmoid()
-        #self.pre_bn = nn.BatchNorm2d(freq_bins, affine=True, momentum=0.01)
-        self.pre_bn = QuantizableBatchNorm2d(freq_bins, affine=True, momentum=0.01)  # ✅ 使用可量化BN
-        self.fft2band = BandConverter(band_num=fbank_num, freq_bins=freq_bins)
-        
-        # ============= 注册 power_compress 和 hypot_fun 为子模块 =============
-        self.power_compress_1 = PowerCompress()  # 第1次调用（Line 336）
-        self.power_compress_2 = PowerCompress()  # 第2次调用（Line 351）
-        self.hypot_fun = HypotFun()              # hypot_fun（Line 347）
-        # ====================================================================
-
     def forward(self, ipt):
-        """
-        Args:
-            ipt: [B T C] C = mic_num
-            wav_len: B
-        returns:
-            opt: [B T2 classes]: probability of each class
-        """
-        #assert ipt.shape[-1] == self.mic_num, f"input shape should be [B T {self.mic_num}], but got {ipt.shape}"
-        iptc = self.trans.transform_cpx(ipt)  # (B C T F 2)
-        iptc = self.power_compress_1(iptc[:, :, :, 1:, :])  # ← 使用 power_compress_1
-        #iptc = rearrange(iptc, 'b c t f r -> b f t (c r)')
-        iptc = iptc.permute(0, 3, 2, 1, 4).contiguous()  # (B, F, T, C, R)
-        iptc = iptc.flatten(-2)                          # (B, F, T, C*R)
+        iptc = self.trans.transform_cpx(ipt)                      # (B C T F 2)
+        iptc = self.power_compress_1(iptc[:, :, :, 1:, :])
+        iptc = iptc.permute(0, 3, 2, 1, 4).contiguous().flatten(-2)
         iptc = self.pre_bn(iptc)
         iptc = torch.clamp(iptc, -4, 4)
-        #iptc = rearrange(iptc, 'b f t (c r) -> b c t f r', r=2)
+
         b, f, t, cr = iptc.shape
-        r = 2
-        c = cr // r
-        iptc = iptc.view(b, f, t, c, r).permute(0, 3, 2, 1, 4).contiguous()
-        mag = self.hypot_fun(iptc[..., 0], iptc[..., 1])  # ← 使用 self.hypot_fun
+        c = cr // 2
+        iptc = iptc.view(b, f, t, c, 2).permute(0, 3, 2, 1, 4).contiguous()
+        mag = self.hypot_fun(iptc[..., 0], iptc[..., 1])
         mag = torch.clamp(mag, 0, 4)
-        opt = self.fft2band(mag)  # ??dp02 BM\BS
+
+        opt = self.fft2band(mag)
         opt = torch.clamp(opt, 0, 4)
-        opt = self.power_compress_2(opt)  # ← 使用 power_compress_2
+        opt = self.power_compress_2(opt)
         opt = torch.clamp(opt, 0, 2)
+
         opt = self.conv_in(opt)
         opt = self.freq_downs[0](opt)
         for i in range(len(self.enc_seqs)):
             opt = self.enc_seqs[i](opt)
             opt = self.freq_downs[i + 1](opt)
-        for i in range(len(self.neck_seqs)):
-            opt = self.neck_seqs[i](opt)
-        
-        #opt = torch.clamp(opt, 0, 4)
+        for layer in self.neck_seqs:
+            opt = layer(opt)
+
         opt = opt.squeeze(-1).transpose(-1, -2)
         opt = self.fc0(opt)
-        #opt = torch.clamp(opt, -8, 8)
-        # opt = opt.mean(dim=1) 
-        opt = torch.mean(opt, dim=1)
-        return opt
+        return torch.mean(opt, dim=1)
 
 
-def evaluate(model, loader, device):
-    """评估模型精度"""
+# ============================================================================
+# 通用工具
+# ============================================================================
+def evaluate(model, loader, device) -> float:
+    """返回 top-1 精度（[0, 1]）。"""
     model.eval()
-    correct = 0
-    total = 0
+    correct, total = 0, 0
     with torch.no_grad():
         for inputs, labels in loader:
             inputs, labels = inputs.to(device), labels.to(device)
-            outputs = model(inputs)
-            _, predicted = outputs.max(1)
+            preds = model(inputs).max(1).indices
             total += labels.size(0)
-            correct += predicted.eq(labels).sum().item()
+            correct += preds.eq(labels).sum().item()
     return correct / total
 
 
-# ========================================================================
-# 1. 初始化
-# ========================================================================
-print("\n" + "="*70)
-print("步骤 1: 初始化")
-print("="*70)
-device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-print("="*70)
-print("AIMET 量化演示 - 简洁版")
-print("="*70)
-print(f"\n使用设备: {device}")
-
-# ========================================================================
-# 2. 加载数据和模型
-# ========================================================================
-print("\n" + "="*70)
-print("步骤 2: 加载数据和模型")
-print("="*70)
-root_path = "/home/sdong/Dataset/speech_commands_v0.02"  # Provide path to SpeechCommands dataset
-train_dataset = SpeechCommands(root_path, split='train',time_mask_p=0.0, freq_mask_p=0.0, add_noise_p=0.0)
-test_dataset = SpeechCommands(root_path, split='test',time_mask_p=0.0, freq_mask_p=0.0, add_noise_p=0.0)
-val_dataset = SpeechCommands(root_path, split='val',time_mask_p=0.0, freq_mask_p=0.0, add_noise_p=0.0)
-
-def collate(batch):
-    # All sequences are equal length after our preprocessing, so just stack.
-        xs, ys = zip(*batch)
-        return torch.stack(xs, dim=0), torch.stack(ys, dim=0)
-
-train_loader = DataLoader(train_dataset, batch_size=64, shuffle=True,num_workers=4, pin_memory=True, collate_fn=collate, drop_last=True)
-test_loader = DataLoader(test_dataset, batch_size=64, shuffle=False,num_workers=4, pin_memory=True, collate_fn=collate)
-val_loader = DataLoader(val_dataset, batch_size=64, shuffle=False,num_workers=4, pin_memory=True, collate_fn=collate)
-calib_loader = DataLoader(test_dataset, batch_size=64, shuffle=True,num_workers=4, pin_memory=True, collate_fn=collate, drop_last=True)
+@contextlib.contextmanager
+def stage(name: str, timings: dict | None = None):
+    """打印阶段标题 + 计时；不会折叠任何业务调用，保证 with 块里的代码原样可见。"""
+    print("\n" + "=" * 70)
+    print(name)
+    print("=" * 70)
+    t0 = time.time()
+    try:
+        yield
+    finally:
+        dur = time.time() - t0
+        if timings is not None:
+            timings[name] = dur
+        if dur < 60:
+            print(f"⏱️  耗时: {dur:.2f} 秒")
+        else:
+            print(f"⏱️  耗时: {dur:.2f} 秒 ({dur / 60:.2f} 分钟)")
 
 
-# 3) Instantiate and train the model
-model = MRNN(output_dim=35)  # Assuming 12 classes for speech commands
-model.to(device)
+# ============================================================================
+# 训练循环（标准 PyTorch 训练，与 AIMET 解耦）
+# ============================================================================
+def train_floating_point(model, train_loader, test_loader, device,
+                         epochs: int = FP_EPOCHS, lr: float = FP_LR,
+                         save_path=FP_MODEL_PATH) -> float:
+    """训练浮点模型，保存权重并返回测试精度。"""
+    loss_fn = nn.CrossEntropyLoss()
+    optim = torch.optim.Adam(model.parameters(), lr=lr)
 
-# ========================================================================
-# 3. 浮点模型训练和评估
-# ========================================================================
-print("\n" + "="*70)
-print("步骤 3: 浮点模型训练和评估")
-print("="*70)
-# 3.1) 损失函数和优化器
-loss_fn = torch.nn.CrossEntropyLoss()
-optimizer = torch.optim.Adam(model.parameters(), lr=1e-4)
-epoch_fp = 1
-fp_model_path = "model_fp.pth"
-# 3.2) 训练模型
-for epoch in range(1,epoch_fp+1):
-    model.train()
-    pbar = tqdm(train_loader, desc=f"Epoch {epoch}/{epoch_fp}")
-    running_loss = 0.0
-    for batch_idx, (x, y) in enumerate(pbar, 1):
-        x, y = x.to(device), y.to(device)
-        output = model(x)
-        loss = loss_fn(output, y)
-        loss.backward()
-        optimizer.step()
-        optimizer.zero_grad()
-        running_loss += loss.item()
-        pbar.set_postfix(loss=f"{running_loss / batch_idx:.4f}")
-    # Save the trained floating-point model
-    torch.save(model.state_dict(), fp_model_path)
-    print(f"Floating-point model saved to: {fp_model_path}")
-# 3.3) 评估浮点模型
+    for epoch in range(1, epochs + 1):
+        model.train()
+        running_loss, batch_idx = 0.0, 0
+        pbar = tqdm(train_loader, desc=f"FP Epoch {epoch}/{epochs}")
+        for batch_idx, (x, y) in enumerate(pbar, 1):
+            x, y = x.to(device), y.to(device)
+            optim.zero_grad()
+            loss = loss_fn(model(x), y)
+            loss.backward()
+            optim.step()
+            running_loss += loss.item()
+            pbar.set_postfix(loss=f"{running_loss / batch_idx:.4f}")
+        print(f"[FP] Epoch {epoch}/{epochs} - Loss: {running_loss / max(batch_idx, 1):.4f}")
+        torch.save(model.state_dict(), save_path)
 
-model.load_state_dict(torch.load(fp_model_path, map_location=device),strict=False)
-model.eval()
-fp_accuracy = evaluate(model, test_loader, device)
-print(f"Floating point accuracy: {fp_accuracy}")
-# ========================================================================
-# 4. 准备模型
-# ========================================================================
-print("\n" + "="*70)
-print("步骤 4: 准备模型")
-print("="*70)
-prepared_model = model_preparer.prepare_model(
-    model,
-    module_classes_to_exclude=[OptimizedQuantizableGRU], 
-    stateless_modules_to_preserve=[PowerCompress, HypotFun, CLN, QuantizableBatchNorm2d]  # 其他无状态模块
-)
-
-# ========================================================================
-# 5. 创建 QuantizationSimModel
-# ========================================================================
-print("\n" + "="*70)
-print("步骤 5: 创建 QuantizationSimModel")
-print("="*70)
-sample_input, _ = next(iter(train_loader))
-
-config_file = "/home/sdong/Program/aimet_whl/config/mrnn_quantsim_config_custom_mixed_precision_v2.json"
-
-print(f"✅ 使用量化配置文件: {config_file}")
-print("📝 JSON 配置控制: is_quantized, per_channel_quantization, is_symmetric 等")
-print("📝 位宽需要通过 Python 代码手动设置（AIMET v2 不支持 JSON 控制位宽）")
+    model.load_state_dict(torch.load(save_path, map_location=device), strict=False)
+    return evaluate(model, test_loader, device)
 
 
+def qat_finetune(sim, train_loader, device,
+                 epochs: int = QAT_EPOCHS, lr: float = QAT_LR) -> None:
+    """
+    QAT 训练循环（标准 PyTorch 训练循环 + AIMET ``set_train_mode_freeze_bn``）。
+    调用前应已经通过 ``freeze_quantizer_parameters`` 冻结 quantizer / BN affine。
+    """
+    optim = torch.optim.Adam(
+        [p for p in sim.model.parameters() if p.requires_grad], lr=lr,
+    )
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optim, T_max=epochs)
+    loss_fn = nn.CrossEntropyLoss()
 
-sim = quantsim.QuantizationSimModel(
-    prepared_model,
-    dummy_input=sample_input.to(device),
-    quant_scheme='percentile',  #tf, tf_enhanced, percentile
-    config_file=str(config_file),  # 转换为字符串，JSON 控制量化类型、per_channel 等
-    default_output_bw=8,  # 默认激活值位宽
-    default_param_bw=8   # 默认权重位宽
-)
-sim.set_percentile_value(99.99)
-print(sim.model)
-# ========================================================================
-# 🔧 使用 JSON 配置文件设置混合精度位宽
-# ========================================================================
-# 使用工具函数从 JSON 配置文件应用混合精度位宽（跨平台路径）
-# bitwidth_config_file = "/home/sdong/Program/aimet_whl/config/power_compress_config.json"
-# stats = apply_mixed_precision_bitwidth(
-#     sim.model,
-#     config_file=str(bitwidth_config_file),
-#     verbose=True
-# )
+    for epoch in range(1, epochs + 1):
+        # set_train_mode_freeze_bn: 对模型整体设 train()，但对 BN running stats 保持 eval
+        set_train_mode_freeze_bn(sim.model)
 
-
-# ========================================================================
-# 7. 校准量化参数
-# ========================================================================
-print("\n" + "="*70)
-print("步骤 7: 校准量化参数")
-print("="*70)
-
-# 根据数据集大小调整校准批次数量
-max_calib_batches = min(100, len(calib_loader))
-print(f"数据集批次总数: {len(calib_loader)}, 使用校准批次: {max_calib_batches}")
-sim.model.to(device)
-batch_count = 0
-
-print(f"\n开始校准（这可能需要几分钟，请耐心等待）...")
-import time
-start_time = time.time()
-
-with aimet.nn.compute_encodings(sim.model):
-    pbar = tqdm(enumerate(calib_loader), total=max_calib_batches, desc="校准进度")
-    for idx, (x, _) in pbar:
-        if idx >= max_calib_batches:
-            break
-        x = x.to(device)
-        sim.model(x)
-        batch_count = idx + 1
-        pbar.set_postfix({"批次": f"{batch_count}/{max_calib_batches}"})
-
-elapsed = time.time() - start_time
-print(f"✅ 校准完成，使用了 {batch_count} 个批次，耗时: {elapsed:.1f} 秒")
+        running_loss, valid = 0.0, 0
+        pbar = tqdm(train_loader, desc=f"QAT Epoch {epoch}/{epochs}")
+        for x, y in pbar:
+            x, y = x.to(device), y.to(device)
+            optim.zero_grad()
+            loss = loss_fn(sim.model(x), y)
+            loss.backward()
+            optim.step()
+            running_loss += loss.item()
+            valid += 1
+            pbar.set_postfix(
+                loss=f"{running_loss / valid:.4f}",
+                lr=f"{scheduler.get_last_lr()[0]:.2e}",
+            )
+        print(f"[QAT] Epoch {epoch}/{epochs} - Loss: {running_loss / max(valid, 1):.4f}, "
+              f"LR: {scheduler.get_last_lr()[0]:.2e}")
+        scheduler.step()
 
 
-
-# ========================================================================
-# 8. PTQ 评估
-# ========================================================================
-print("\n" + "="*70)
-print("步骤 8: PTQ 评估")
-print("="*70)
-ptq_accuracy = evaluate(sim.model, test_loader, device)
-print(f"PTQ 量化精度: {ptq_accuracy*100:.2f}%")
-
-# ========================================================================
-# 9. Power-of-2 量化（使用工具函数）
-# ========================================================================
-print("\n" + "="*70)
-print("步骤 9: Power-of-2 量化")
-print("="*70)
-
-# ✅ 使用工具函数完成所有 Power-of-2 量化步骤
-# 包括：打印量化器信息、收集修改前信息、应用 Po2、验证、对比、Bias Scale 对齐
-# method 参数说明：
-#   - "round": 全部四舍五入到最近的 2^n（默认，现有方法）
-#   - "cover_range": 智能策略
-#       - 如果 real_max - real_min 接近 2^n（容差 tolerance，默认 2%）：使用四舍五入
-#       - 否则：增大 scale 使得覆盖原范围
-# tolerance 参数说明（仅 method="cover_range" 时生效）：
-#   - 判断 real_range 是否接近 2^n 的相对容差（默认 0.02 即 2%）
-#   - 例如：real_range=2.007884 与 2.0 的相对误差 0.39% < 2%，被视为 2^n
-# align_bias_scale 参数说明：
-#   - True: 将卷积层的 bias scale 对齐到 Sx * Sw（适合硬件优化）
-#   - False: 不对齐（默认）
-po2_results = apply_power_of_2_workflow(
-    sim.model, 
-    method="round", 
-    tolerance=0.02, 
-    align_bias_scale=True,  # 🔑 启用 bias scale 对齐
-    verbose=True
-)
-
-# 评估 Power-of-2 量化后的精度
-po2_accuracy = evaluate(sim.model, test_loader, device)
-print(f"Power-of-2 量化精度: {po2_accuracy*100:.2f}%")
-
-# ========================================================================
-# 10. QAT 微调
-# ========================================================================
-print("\n" + "="*70)
-print("步骤 10: QAT 微调")
-print("="*70)
+# ============================================================================
+# 总结打印
+# ============================================================================
+def print_accuracy_summary(fp_acc, ptq_acc, po2_acc, qat_acc, reload_acc):
+    print("\n" + "=" * 70)
+    print("精度汇总")
+    print("=" * 70)
+    print(f"  浮点模型精度:           {fp_acc * 100:.2f}%")
+    print(f"  PTQ 量化精度:           {ptq_acc * 100:.2f}%")
+    print(f"  Power-of-2 量化精度:    {po2_acc * 100:.2f}%")
+    print(f"  QAT 微调后精度:         {qat_acc * 100:.2f}%")
+    print(f"  重新加载后精度:         {reload_acc * 100:.2f}%  (差距 {abs(qat_acc - reload_acc) * 100:.3f}%)")
+    print("=" * 70)
 
 
-# 10.1) 冻结量化器参数和 BatchNorm affine 参数（使用工具函数）
-print("\n--- 10.1: 冻结量化器和 BN 参数 ---")
-freeze_result = freeze_quantizer_parameters(sim.model, verbose=True, freeze_bn_affine=True)
+def print_stage_timings(timings: dict):
+    print("\n" + "=" * 70)
+    print("耗时汇总")
+    print("=" * 70)
+    total = sum(timings.values())
+    for name, dur in timings.items():
+        pct = (dur / total * 100) if total > 0 else 0
+        if dur < 60:
+            print(f"  {name:35s} {dur:8.2f} 秒 ({pct:5.1f}%)")
+        else:
+            print(f"  {name:35s} {dur:8.2f} 秒 ({dur / 60:6.2f} 分钟, {pct:5.1f}%)")
+    print("-" * 70)
+    if total < 3600:
+        print(f"  {'总计':35s} {total:8.2f} 秒 ({total / 60:6.2f} 分钟)")
+    else:
+        print(f"  {'总计':35s} {total:8.2f} 秒 ({total / 3600:.2f} 小时)")
+    print("=" * 70)
 
-# 10.1.1) 验证 BatchNorm 参数已被冻结
-print("\n--- 10.1.1: 验证参数冻结状态 ---")
-bn_status_after = check_bn_params_status(sim.model, verbose=True)
 
-# 10.2) 训练
-qat_epochs = 1
-optimizer = torch.optim.Adam([p for p in sim.model.parameters() if p.requires_grad], lr=1e-4)
-scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=qat_epochs)
-loss_fn = nn.CrossEntropyLoss()
+# ============================================================================
+# 主流程：标准 AIMET 量化 + 加载验证
+# ============================================================================
+def main():
+    set_seed(SEED)
+    setup_audio_backend()
+    timings: dict = {}
 
+    print("=" * 70)
+    print("AIMET 量化演示 — 标准用法（QuantGRU + 混合精度位宽 JSON）")
+    print("=" * 70)
+    print(f"使用设备: {DEVICE}")
 
-for epoch in range(1, qat_epochs + 1):
-    print(f"\n--- Epoch {epoch}/{qat_epochs} ---")
-    set_train_mode_freeze_bn(sim.model)
-    
-    running_loss = 0.0
-    valid_batches = 0
-    pbar = tqdm(train_loader, desc=f"QAT Epoch {epoch}/{qat_epochs}")
+    # ------------------------------------------------------------------
+    # 步骤 1: 准备数据 + 浮点模型
+    # ------------------------------------------------------------------
+    with stage("步骤 1: 加载数据和模型", timings):
+        loaders = build_dataloaders(DATA_ROOT)
+        model = MRNN(output_dim=NUM_CLASSES).to(DEVICE)
 
-    for batch_idx, (x, y) in enumerate(pbar, 1):
-        inputs, labels = x.to(device), y.to(device)
-        optimizer.zero_grad()
-        outputs = sim.model(inputs)
-        loss = loss_fn(outputs, labels)
-        loss.backward()
-        optimizer.step()
-        running_loss += loss.item()
-        valid_batches += 1
-        pbar.set_postfix(
-            loss=f"{running_loss / valid_batches:.4f}", 
-            lr=f"{scheduler.get_last_lr()[0]:.2e}"
+    # ------------------------------------------------------------------
+    # 步骤 2: 浮点训练 + 评估
+    # ------------------------------------------------------------------
+    with stage("步骤 2: 浮点训练 + 评估", timings):
+        fp_accuracy = train_floating_point(model, loaders["train"], loaders["test"], DEVICE)
+        print(f"浮点精度: {fp_accuracy * 100:.2f}%")
+
+    # ------------------------------------------------------------------
+    # 步骤 3: prepare_model + 创建 QuantizationSimModel
+    #   - prepare_model 把 forward 中的 functional 调用 / 复用算子重构成
+    #     可被 sim 抓住的 nn.Module 节点；QuantGRU、nn.BatchNorm2d 当 leaf
+    #     处理（不进入它们的内部 trace）。
+    #   - QuantizationSimModel 给模型注入 input/output/param quantizer。
+    #   - apply_mixed_precision_bitwidth 用 JSON 配置覆盖默认位宽（如对
+    #     bias 用 16bit、把 FloorDivide/Pad 整体 disable 等）。
+    # ------------------------------------------------------------------
+    with stage("步骤 3: prepare_model + 创建 sim", timings):
+        prepared_model = model_preparer.prepare_model(
+            model,
+            stateless_modules_to_preserve=[PowerCompress, HypotFun, CLN, QuantizableBatchNorm2d],
+        )
+        sample_input, _ = next(iter(loaders["train"]))
+        dummy_input = sample_input.to(DEVICE)
+
+        sim = quantsim.QuantizationSimModel(
+            prepared_model,
+            dummy_input=dummy_input,
+            quant_scheme=QUANT_SCHEME,
+            config_file=str(CONFIG_FILE),
+            default_output_bw=DEFAULT_BW,
+            default_param_bw=DEFAULT_BW,
+        )
+        sim.set_percentile_value(PERCENTILE_VALUE)
+        apply_mixed_precision_bitwidth(
+            sim.model, config_file=str(BITWIDTH_CONFIG_FILE), verbose=True,
         )
 
-# ========================================================================
-# 11. 最终评估
-# ========================================================================
-print("\n" + "="*70)
-print("步骤 11: 最终评估")
-print("="*70)
-qat_accuracy = evaluate(sim.model, test_loader, device)
+    # ------------------------------------------------------------------
+    # 步骤 4: 校准 (PTQ)
+    #   compute_encodings 是 AIMET 的核心 API：进入上下文时让 quantizer 进
+    #   入"观察模式"，跑一批数据后退出时根据观察值推算 scale/zero-point。
+    #   QuantGRU 的内部 calibrating 标志也会被同时切到 True / False。
+    # ------------------------------------------------------------------
+    with stage("步骤 4: 校准 (PTQ)", timings):
+        sim.model.to(DEVICE).eval()
+        with torch.no_grad(), aimet.nn.compute_encodings(sim.model):
+            for idx, (x, _) in enumerate(tqdm(loaders["calib"], desc="校准", total=MAX_CALIB_BATCHES)):
+                if idx >= MAX_CALIB_BATCHES:
+                    break
+                sim.model(x.to(DEVICE))
 
-# ========================================================================
-# 12. 打印总结
-# ========================================================================
-print("\n" + "="*70)
-print("步骤 12: 量化精度总结")
-print("="*70)
-print(f"浮点模型精度:           {fp_accuracy*100:.2f}%")
-print(f"PTQ 量化精度:           {ptq_accuracy*100:.2f}%")
-print(f"Power-of-2 量化精度:    {po2_accuracy*100:.2f}%")
-print(f"QAT 微调后精度:         {qat_accuracy*100:.2f}%")
-print("="*70)
+        ptq_accuracy = evaluate(sim.model, loaders["test"], DEVICE)
+        print(f"PTQ 量化精度: {ptq_accuracy * 100:.2f}%")
 
-# ========================================================================
-# 13. 保存模型
-# ========================================================================
-print("\n" + "="*70)
-print("步骤 13: 保存模型")
-print("="*70)
-# 创建量化模型输出目录
-quantized_model_dir = Path("/home/sdong/Program/aimet_whl/quantized_model")
-quantized_model_dir.mkdir(parents=True, exist_ok=True)
+    # ------------------------------------------------------------------
+    # 步骤 5: Power-of-2 量化（NPU 友好的 scale 对齐）
+    #   把所有 scale 调整到 2^n，便于在定点硬件上用移位实现 dequant。
+    #   align_bias_scale=True 把 Conv bias 的 scale 对齐到 Sx*Sw。
+    # ------------------------------------------------------------------
+    with stage("步骤 5: Power-of-2 量化", timings):
+        apply_power_of_2_workflow(
+            sim.model,
+            method="round",
+            tolerance=0.02,
+            align_bias_scale=True,
+            verbose=True,
+        )
+        po2_accuracy = evaluate(sim.model, loaders["test"], DEVICE)
+        print(f"Power-of-2 量化精度: {po2_accuracy * 100:.2f}%")
 
-# ⚠️ 导出前必须将模型和输入移到 CPU，避免设备不匹配错误
-# print("\n📝 正在将模型移到 CPU 准备导出...")
-# sim.model.cpu()
-# sim.model.eval()
+    # ------------------------------------------------------------------
+    # 步骤 6: QAT 微调
+    #   - freeze_quantizer_parameters: 冻结 quantizer 的 min/max 与 BN
+    #     的 running mean/var、affine 参数；只让模型权重和 bias 参与
+    #     反向传播。
+    #   - 训练循环本身就是普通 PyTorch（见 qat_finetune），唯一变化
+    #     是用 set_train_mode_freeze_bn 替代普通 model.train()。
+    # ------------------------------------------------------------------
+    with stage("步骤 6: QAT 微调", timings):
+        freeze_quantizer_parameters(sim.model, verbose=False, freeze_bn_affine=True)
+        qat_finetune(sim, loaders["train"], DEVICE)
+        qat_accuracy = evaluate(sim.model, loaders["test"], DEVICE)
+        print(f"QAT 微调后精度: {qat_accuracy * 100:.2f}%")
 
-# # 准备 CPU 上的 dummy_input
-# dummy_input_cpu = sample_input.cpu()
+    # ------------------------------------------------------------------
+    # 步骤 7: 保存量化产物
+    #   两类产物：
+    #     1) 训练态权重    -> torch.save(sim.model.state_dict(), *.pth)
+    #                        含 quantizer 的 min/max 等参数，下次重建 sim 后
+    #                        load_state_dict(strict=False) 即可恢复
+    #     2) 部署产物      -> export_onnx_json(sim, ...)
+    #                        本仓库定制的 ONNX 导出工具，相比 sim.export 增加了
+    #                        QuantGRU / QuantizableBatchNorm2d 等自定义算子的
+    #                        符号化处理，一次性产出：
+    #                          * <prefix>.onnx              部署用 ONNX 模型
+    #                          * <prefix>.encodings         ONNX node 名格式
+    #                          * <prefix>_torch.encodings   PyTorch 模块名格式
+    #                                                       （配合 load_quantizer_encodings）
+    #                        ONNX Runtime / QNN / NPU 工具链直接消费
+    #
+    # 该函数要求 sim.model 在 CPU，先搬回 CPU 再导出。
+    # ------------------------------------------------------------------
+    with stage("步骤 7: 保存量化产物", timings):
+        OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+        qat_state_pth = OUTPUT_DIR / "mrnn_kws_qat.pth"
+        torch.save({"model": sim.model.state_dict()}, qat_state_pth)
 
-# # 导出模型
-# print("📝 正在导出 ONNX 模型...")
-# sim.export(str(quantized_model_dir), 'quantized_mrnn', dummy_input=dummy_input_cpu)
-# print(f"\n✅ 模型已保存到: {quantized_model_dir}")
+        sim.model.cpu().eval()
+        onnx_path, enc_path = export_onnx_json(
+            sim,
+            export_dir=OUTPUT_DIR,
+            filename_prefix="mrnn_kws",
+            dummy_input_shape=(1, 16000, 1),
+            opset=18,
+        )
+        sim.model.to(DEVICE)
+        print(f"训练态权重: {qat_state_pth}")
+        print(f"ONNX:       {onnx_path}")
+        print(f"encodings:  {enc_path}")
+
+    # ------------------------------------------------------------------
+    # 步骤 8: 重新加载并验证（生产侧标准复现流程）
+    #   1) 重建 prepared_model + 重建 QuantizationSimModel（参数与训练时一致）
+    #   2) load_state_dict(strict=False) 加载权重
+    #   3) load_quantizer_encodings(allow_overwrite=False) 加载量化参数并锁定
+    #   4) compute_encodings 兜底：处理 sim 里有但 sidecar 没写的 quantizer
+    #   5) 评估精度，与训练侧 QAT 精度做闭环对比
+    # ------------------------------------------------------------------
+    with stage("步骤 8: 重新加载并验证", timings):
+        # (1) 重建模型 + sim
+        fresh_model = MRNN(output_dim=NUM_CLASSES).to(DEVICE).eval()
+        fresh_prepared = model_preparer.prepare_model(
+            fresh_model,
+            stateless_modules_to_preserve=[PowerCompress, HypotFun, CLN, QuantizableBatchNorm2d],
+        )
+        fresh_sim = quantsim.QuantizationSimModel(
+            fresh_prepared,
+            dummy_input=dummy_input,
+            quant_scheme=QUANT_SCHEME,
+            config_file=str(CONFIG_FILE),
+            default_output_bw=DEFAULT_BW,
+            default_param_bw=DEFAULT_BW,
+        )
+        fresh_sim.set_percentile_value(PERCENTILE_VALUE)
+        apply_mixed_precision_bitwidth(
+            fresh_sim.model, config_file=str(BITWIDTH_CONFIG_FILE), verbose=False,
+        )
+
+        # (2) 加载权重
+        ckpt = torch.load(qat_state_pth, map_location=DEVICE, weights_only=False)
+        state = ckpt["model"] if isinstance(ckpt, dict) and "model" in ckpt else ckpt
+        fresh_sim.model.load_state_dict(state, strict=False)
+
+        # (3) 加载量化参数（allow_overwrite=False 锁定，下一步只动未初始化 quantizer）
+        load_quantizer_encodings(
+            fresh_sim.model,
+            load_path=str(enc_path),
+            verbose=False,
+            allow_overwrite=False,
+        )
+
+        # (4) 兜底校准：覆盖 sidecar 没写的 quantizer
+        fresh_sim.model.eval()
+        with torch.no_grad(), aimet.nn.compute_encodings(fresh_sim.model):
+            for idx, (x, _) in enumerate(loaders["calib"]):
+                if idx >= RELOAD_CALIB_BATCHES:
+                    break
+                fresh_sim.model(x.to(DEVICE))
+
+        # (5) 精度对比
+        reload_accuracy = evaluate(fresh_sim.model, loaders["test"], DEVICE)
+        gap = abs(qat_accuracy - reload_accuracy) * 100
+        print(f"QAT 保存前精度:    {qat_accuracy * 100:.2f}%")
+        print(f"重新加载后精度:    {reload_accuracy * 100:.2f}%")
+        if gap < 0.5:
+            print(f"✅ 精度差异 {gap:.3f}%，加载验证通过")
+        else:
+            print(f"⚠️  精度差异 {gap:.3f}% 偏大，请检查 sim 配置 / 权重 / encodings 一致性")
+
+    # ------------------------------------------------------------------
+    # 总结
+    # ------------------------------------------------------------------
+    print_accuracy_summary(fp_accuracy, ptq_accuracy, po2_accuracy, qat_accuracy, reload_accuracy)
+    print_stage_timings(timings)
+    print("\n量化流程完成（已通过加载验证）\n")
 
 
-# 导出 ONNX + encodings
-sim.model.cpu()
-sim.model.eval()
-
-onnx_path, enc_path = export_onnx_json(
-    sim,
-    export_dir=quantized_model_dir,
-    filename_prefix="mrnn_kws",
-    dummy_input_shape=(1, 16000, 1),
-    opset=18,
-)
-print(f"✅ 单节点 GRU ONNX 导出完成: {onnx_path}")
-print(f"✅ encodings sidecar 写入: {enc_path}")
-
-print("\n" + "="*70)
-print("量化流程完成！")
-print("="*70)
-
+if __name__ == "__main__":
+    main()
