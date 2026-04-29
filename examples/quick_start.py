@@ -79,7 +79,6 @@ QUANT_SCHEME = "percentile"
 PERCENTILE_VALUE = 99.99       # 仅 QUANT_SCHEME == "percentile" 时生效（其他 scheme 下 set_percentile_value 是空操作）
 DEFAULT_BW = 8
 MAX_CALIB_BATCHES = 100
-RELOAD_CALIB_BATCHES = 32
 
 _HERE = Path(__file__).resolve().parent
 CONFIG_FILE = _HERE / "config" / "mrnn_quantsim_config_custom_mixed_precision_v2.json"
@@ -622,7 +621,7 @@ def main():
     #     是用 set_train_mode_freeze_bn 替代普通 model.train()。
     # ------------------------------------------------------------------
     with stage("步骤 6: QAT 微调", timings):
-        freeze_quantizer_parameters(sim.model, verbose=False, freeze_bn_affine=True)
+        freeze_quantizer_parameters(sim.model, verbose=True, freeze_bn_affine=True)
         qat_finetune(sim, loaders["train"], DEVICE)
         qat_accuracy = evaluate(sim.model, loaders["test"], DEVICE)
         print(f"QAT 微调后精度: {qat_accuracy * 100:.2f}%")
@@ -667,9 +666,8 @@ def main():
     # 步骤 8: 重新加载并验证（生产侧标准复现流程）
     #   1) 重建 prepared_model + 重建 QuantizationSimModel（参数与训练时一致）
     #   2) load_state_dict(strict=False) 加载权重
-    #   3) load_quantizer_encodings(allow_overwrite=False) 加载量化参数并锁定
-    #   4) compute_encodings 兜底：处理 sim 里有但 sidecar 没写的 quantizer
-    #   5) 评估精度，与训练侧 QAT 精度做闭环对比
+    #   3) load_quantizer_encodings 加载量化参数
+    #   4) 评估精度，与训练侧 QAT 精度做闭环对比
     # ------------------------------------------------------------------
     with stage("步骤 8: 重新加载并验证", timings):
         # (1) 重建模型 + sim
@@ -688,7 +686,7 @@ def main():
         )
         fresh_sim.set_percentile_value(PERCENTILE_VALUE)
         apply_mixed_precision_bitwidth(
-            fresh_sim.model, config_file=str(BITWIDTH_CONFIG_FILE), verbose=False,
+            fresh_sim.model, config_file=str(BITWIDTH_CONFIG_FILE), verbose=True,
         )
 
         # (2) 加载权重
@@ -696,23 +694,14 @@ def main():
         state = ckpt["model"] if isinstance(ckpt, dict) and "model" in ckpt else ckpt
         fresh_sim.model.load_state_dict(state, strict=False)
 
-        # (3) 加载量化参数（allow_overwrite=False 锁定，下一步只动未初始化 quantizer）
+        # (3) 加载量化参数
         load_quantizer_encodings(
             fresh_sim.model,
             load_path=str(enc_path),
-            verbose=False,
-            allow_overwrite=False,
+            verbose=True,
         )
 
-        # (4) 兜底校准：覆盖 sidecar 没写的 quantizer
-        fresh_sim.model.eval()
-        with torch.no_grad(), aimet.nn.compute_encodings(fresh_sim.model):
-            for idx, (x, _) in enumerate(loaders["calib"]):
-                if idx >= RELOAD_CALIB_BATCHES:
-                    break
-                fresh_sim.model(x.to(DEVICE))
-
-        # (5) 精度对比
+        # (4) 精度对比
         reload_accuracy = evaluate(fresh_sim.model, loaders["test"], DEVICE)
         gap = abs(qat_accuracy - reload_accuracy) * 100
         print(f"QAT 保存前精度:    {qat_accuracy * 100:.2f}%")
