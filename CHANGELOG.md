@@ -9,6 +9,28 @@
 
 <!-- 在下次发版前，把新增条目写到这里 -->
 
+## [1.3.8] - 2026-06-09
+
+### ✨ 新增功能
+
+- **`export_onnx_json` 支持按 GRU 模块类型自动分发导出逻辑**
+  - 自动识别 `QuantGRU` / `OptimizedQuantizableGRU`，选择匹配的 ONNX 导出路径
+  - 减少下游脚本对具体 GRU 实现的手动分支判断
+  - 影响范围：使用 `export_onnx_and_encodings.export_onnx_json` 导出 GRU 模型的流程
+
+### 🔧 改进
+
+- 更新 quick start 示例与完整量化配置示例，保持示例参数和当前导出流程一致
+
+### 📦 发布与升级
+
+```bash
+pip install --upgrade --force-reinstall aimet_rx-1.3.8-py3-none-any.whl
+
+# 安装后自检
+python -c "from export_onnx_and_encodings.export_onnx_json import export_onnx_json; print('OK')"
+```
+
 ## [1.3.7] - 2026-04-29
 
 ### 🐛 Bug 修复
@@ -96,7 +118,8 @@ python -c "from export_onnx_and_encodings.export_onnx_json import export_onnx_js
 <!--
 版本对比链接（在使用 GitHub/GitLab 时填入对应仓库 URL，例如：
 
-[Unreleased]: https://github.com/<org>/aimet-rx/compare/v1.3.7...HEAD
+[Unreleased]: https://github.com/<org>/aimet-rx/compare/v1.3.8...HEAD
+[1.3.8]: https://github.com/<org>/aimet-rx/compare/v1.3.7...v1.3.8
 [1.3.7]: https://github.com/<org>/aimet-rx/compare/v1.3.6...v1.3.7
 [1.3.6]: https://github.com/<org>/aimet-rx/compare/v1.2.2...v1.3.6
 [1.2.2]:  https://github.com/<org>/aimet-rx/compare/v1.2.1...v1.2.2
