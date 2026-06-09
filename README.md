@@ -10,8 +10,8 @@
 
 ## 更新日志
 
-完整版本历史见 [CHANGELOG.md](./CHANGELOG.md)。最新版本：**v1.3.7 (2026-04-29)** ——
-修复 1.3.6 wheel 中 `export_onnx_and_encodings` 子模块的 import 路径错误。
+完整版本历史见 [CHANGELOG.md](./CHANGELOG.md)。最新版本：**v1.3.8 (2026-06-09)** ——
+`export_onnx_json` 支持按 GRU 模块类型自动分发导出逻辑。
 
 ## 安装
 
@@ -129,7 +129,7 @@ python -m build
 ### 安装
 
 ```bash
-pip install dist/aimet_rx-1.3.7-py3-none-any.whl
+pip install dist/aimet_rx-1.3.8-py3-none-any.whl
 ```
 
 ## 许可证
