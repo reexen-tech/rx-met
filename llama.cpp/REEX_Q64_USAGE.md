@@ -2,6 +2,30 @@
 
 极简版:如何调用不同量化类型 + 不同位宽截断精度。
 
+## 0. 先编译 + 转 FP16 GGUF(必做)
+
+```bash
+# 1) 编译(先做)
+# CPU
+cd /path/to/llama.cpp
+cmake -B build_cpu
+cmake --build build_cpu --config Release -j
+# GPU
+cd /path/to/llama.cpp
+cmake -B build_cuda -DGGML_CUDA=ON
+cmake --build build_cuda --config Release -j
+
+# 2) 检查是否成功
+./build_cuda/bin/llama-cli --help
+./build_cuda/bin/llama-quantize --help
+
+# 3) Hugging Face -> FP16 GGUF(再做)
+python convert_hf_to_gguf.py /path/to/hf_model \
+  --outtype f16 --outfile /path/to/model-f16.gguf
+```
+
+`llama-quantize` 的输入是 GGUF,所以通常是:HF -> f16.gguf -> Qx_*.gguf。
+
 ## 1. 量化(选类型)
 
 ```bash
