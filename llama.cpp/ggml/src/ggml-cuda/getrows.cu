@@ -6,6 +6,11 @@
 #include "reex/reex_turboquant_dequant.cuh"
 #endif
 
+#ifdef GGML_USE_REEX_Q64
+#include "reex/reex_q64_dequant.cuh"
+#include "reex/reex_q64_kquant_getrows.cuh"
+#endif
+
 template<int qk, int qr, dequantize_kernel_t dequantize_kernel, typename dst_t>
 static __global__ void k_get_rows(
         const void * __restrict__ src0, const int32_t * __restrict__ src1, dst_t * __restrict__ dst,
@@ -228,6 +233,67 @@ static void ggml_cuda_get_rows_switch_src0_type(
             reex_turboquant_get_rows_tq_v_polar4_cuda<dst_t>(src0_d, src1_d, dst_d,
                 ne00, nb01, nb02, nb03, ne10, ne11, ne12, nb10, nb11, nb12, nb1, nb2, nb3, stream);
             break;
+#endif
+#ifdef GGML_USE_REEX_Q64
+        // === REEX_Q64 BEGIN ===
+        case GGML_TYPE_Q4_0_64:
+            get_rows_cuda_q<QK4_0_64, 2, dequantize_q4_0_64>(src0_d, src1_d, dst_d,
+                ne00, nb01, nb02, nb03, ne10, ne11, ne12, nb10, nb11, nb12, nb1, nb2, nb3, stream);
+            break;
+        case GGML_TYPE_Q8_0_64:
+            get_rows_cuda_q<QK8_0_64, 1, dequantize_q8_0_64>(src0_d, src1_d, dst_d,
+                ne00, nb01, nb02, nb03, ne10, ne11, ne12, nb10, nb11, nb12, nb1, nb2, nb3, stream);
+            break;
+        case GGML_TYPE_Q4_1_64:
+            get_rows_cuda_q<QK4_1_64, 2, dequantize_q4_1_64>(src0_d, src1_d, dst_d,
+                ne00, nb01, nb02, nb03, ne10, ne11, ne12, nb10, nb11, nb12, nb1, nb2, nb3, stream);
+            break;
+        case GGML_TYPE_Q5_0_64:
+            get_rows_cuda_q<QK5_0_64, 2, dequantize_q5_0_64>(src0_d, src1_d, dst_d,
+                ne00, nb01, nb02, nb03, ne10, ne11, ne12, nb10, nb11, nb12, nb1, nb2, nb3, stream);
+            break;
+        case GGML_TYPE_Q5_1_64:
+            get_rows_cuda_q<QK5_1_64, 2, dequantize_q5_1_64>(src0_d, src1_d, dst_d,
+                ne00, nb01, nb02, nb03, ne10, ne11, ne12, nb10, nb11, nb12, nb1, nb2, nb3, stream);
+            break;
+        case GGML_TYPE_Q8_1_64:
+            get_rows_cuda_q<QK8_1_64, 1, dequantize_q8_1_64>(src0_d, src1_d, dst_d,
+                ne00, nb01, nb02, nb03, ne10, ne11, ne12, nb10, nb11, nb12, nb1, nb2, nb3, stream);
+            break;
+        // K-quant block-64: dedicated gather+dequant (per-element, super-block=256)
+        case GGML_TYPE_Q4_K_64:
+            reex_q64k_get_rows_q4_K_64_cuda(src0_d, src1_d, dst_d,
+                ne00, nb01, nb02, nb03, ne10, ne11, ne12, nb10, nb11, nb12, nb1, nb2, nb3, stream);
+            break;
+        case GGML_TYPE_Q2_K_64:
+            reex_q64k_get_rows_q2_K_64_cuda(src0_d, src1_d, dst_d,
+                ne00, nb01, nb02, nb03, ne10, ne11, ne12, nb10, nb11, nb12, nb1, nb2, nb3, stream);
+            break;
+        case GGML_TYPE_Q3_K_64:
+            reex_q64k_get_rows_q3_K_64_cuda(src0_d, src1_d, dst_d,
+                ne00, nb01, nb02, nb03, ne10, ne11, ne12, nb10, nb11, nb12, nb1, nb2, nb3, stream);
+            break;
+        case GGML_TYPE_Q5_K_64:
+            reex_q64k_get_rows_q5_K_64_cuda(src0_d, src1_d, dst_d,
+                ne00, nb01, nb02, nb03, ne10, ne11, ne12, nb10, nb11, nb12, nb1, nb2, nb3, stream);
+            break;
+        case GGML_TYPE_Q6_K_64:
+            reex_q64k_get_rows_q6_K_64_cuda(src0_d, src1_d, dst_d,
+                ne00, nb01, nb02, nb03, ne10, ne11, ne12, nb10, nb11, nb12, nb1, nb2, nb3, stream);
+            break;
+        case GGML_TYPE_Q5_K_64S:
+            reex_q64k_get_rows_q5_K_64S_cuda(src0_d, src1_d, dst_d,
+                ne00, nb01, nb02, nb03, ne10, ne11, ne12, nb10, nb11, nb12, nb1, nb2, nb3, stream);
+            break;
+        case GGML_TYPE_Q4_K_64S:
+            reex_q64k_get_rows_q4_K_64S_cuda(src0_d, src1_d, dst_d,
+                ne00, nb01, nb02, nb03, ne10, ne11, ne12, nb10, nb11, nb12, nb1, nb2, nb3, stream);
+            break;
+        case GGML_TYPE_Q2_K_64S:
+            reex_q64k_get_rows_q2_K_64S_cuda(src0_d, src1_d, dst_d,
+                ne00, nb01, nb02, nb03, ne10, ne11, ne12, nb10, nb11, nb12, nb1, nb2, nb3, stream);
+            break;
+        // === REEX_Q64 END ===
 #endif
         default:
             // TODO: k-quants

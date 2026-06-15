@@ -2365,6 +2365,22 @@ static bool ggml_cuda_should_fuse_mul_mat_vec_q(const ggml_tensor * tensor) {
     bool use_mul_mat_vec_q = ggml_is_quantized(src0->type) && !bad_padding_clear && src1->type == GGML_TYPE_F32 &&
                              dst->type == GGML_TYPE_F32 && src1->ne[1] <= MMVQ_MAX_BATCH_SIZE;
 
+#ifdef GGML_USE_REEX_Q64
+    // K-quant block-64 (Phase 2): plain MMVQ is enabled, but defer the fused
+    // gate+up MMVQ path until the standalone kernel is validated. Non-fused MMVQ
+    // still runs for these via the regular mul_mat dispatch.
+    if (src0->type == GGML_TYPE_Q4_K_64 ||
+        src0->type == GGML_TYPE_Q2_K_64 ||
+        src0->type == GGML_TYPE_Q3_K_64 ||
+        src0->type == GGML_TYPE_Q5_K_64 ||
+        src0->type == GGML_TYPE_Q6_K_64 ||
+        src0->type == GGML_TYPE_Q5_K_64S ||
+        src0->type == GGML_TYPE_Q4_K_64S ||
+        src0->type == GGML_TYPE_Q2_K_64S) {
+        return false;
+    }
+#endif
+
     // fusion is not universally faster on Pascal
     const int cc = ggml_cuda_info().devices[ggml_cuda_get_device()].cc;
     if (cc <= GGML_CUDA_CC_PASCAL) {
@@ -2474,6 +2490,11 @@ static void ggml_cuda_mul_mat(ggml_backend_cuda_context & ctx, const ggml_tensor
     // === REEX_TURBOQUANT END ===
 #endif
 
+    // === REEX_Q64 ===
+    // K-quant block-64 (Phase 3): MMVQ (decode) + MMQ (prefill) kernels both
+    // implemented; no override needed — should_use_mmq / use_mul_mat_vec_q gate
+    // them like upstream quant types. cuBLAS dequant remains the final fallback.
+
     bool any_gpus_with_slow_fp16 = false;
 
     if (split) {
@@ -2500,6 +2521,30 @@ static void ggml_cuda_mul_mat(ggml_backend_cuda_context & ctx, const ggml_tensor
         use_mul_mat_vec_f       = use_mul_mat_vec_f         && ggml_cuda_should_use_mmvf(src0->type, cc, src0->ne, src0->nb, src1->ne[1]);
         any_gpus_with_slow_fp16 = any_gpus_with_slow_fp16   || !fast_fp16_hardware_available(cc);
     }
+
+#ifdef GGML_USE_REEX_Q64
+    // === REEX_Q64 ===
+    // For block-64 types, route BOTH decode and prefill through the CPU-aligned
+    // MMVQ vec_dot (per-64/256 activation, 64-element integer Psum + truncation)
+    // instead of MMQ, so GPU == CPU for the fixed-point datapath. MMVQ supports
+    // only ncols<=8 per launch, but ggml_cuda_mul_mat_vec_q chunks the batch.
+    // Restricted to the non-split single-GPU path (the chunking lives there).
+    switch (src0->type) {
+        case GGML_TYPE_Q4_0_64: case GGML_TYPE_Q4_1_64: case GGML_TYPE_Q5_0_64:
+        case GGML_TYPE_Q5_1_64: case GGML_TYPE_Q8_0_64: case GGML_TYPE_Q8_1_64:
+        case GGML_TYPE_Q4_K_64: case GGML_TYPE_Q2_K_64: case GGML_TYPE_Q3_K_64:
+        case GGML_TYPE_Q5_K_64: case GGML_TYPE_Q6_K_64: case GGML_TYPE_Q5_K_64S:
+        case GGML_TYPE_Q4_K_64S: case GGML_TYPE_Q2_K_64S:
+            if (!split && !bad_padding_clear &&
+                src1->type == GGML_TYPE_F32 && dst->type == GGML_TYPE_F32) {
+                use_mul_mat_vec_q = true;   // any batch -> chunked MMVQ
+                use_mul_mat_q     = false;
+            }
+            break;
+        default:
+            break;
+    }
+#endif
 
     // debug helpers
     //printf("src0: %8d %8d %8d %8d\n", src0->ne[0], src0->ne[1], src0->ne[2], src0->ne[3]);
@@ -5064,6 +5109,34 @@ static bool ggml_backend_cuda_device_supports_op(ggml_backend_dev_t dev, const g
                         return true;
                     // === REEX_TURBOQUANT END ===
 #endif
+#ifdef GGML_USE_REEX_Q64
+                    // === REEX_Q64 BEGIN ===
+                    // block-64 legacy types: dequant->cuBLAS fallback only,
+                    // B == F32 and dst == F32 (no MMQ/MMVQ, no MUL_MAT_ID).
+                    case GGML_TYPE_Q4_0_64:
+                    case GGML_TYPE_Q8_0_64:
+                    case GGML_TYPE_Q4_1_64:
+                    case GGML_TYPE_Q5_0_64:
+                    case GGML_TYPE_Q5_1_64:
+                    case GGML_TYPE_Q8_1_64:
+                    // K-quant block-64: Phase 1 dequant->cuBLAS only (no MMQ/MMVQ yet).
+                    case GGML_TYPE_Q4_K_64:
+                    case GGML_TYPE_Q2_K_64:
+                    case GGML_TYPE_Q3_K_64:
+                    case GGML_TYPE_Q5_K_64:
+                    case GGML_TYPE_Q6_K_64:
+                    case GGML_TYPE_Q5_K_64S:
+                    case GGML_TYPE_Q4_K_64S:
+                    case GGML_TYPE_Q2_K_64S:
+                        if (op->op == GGML_OP_MUL_MAT_ID) {
+                            return false;
+                        }
+                        if (b->type != GGML_TYPE_F32 || op->type != GGML_TYPE_F32) {
+                            return false;
+                        }
+                        return true;
+                    // === REEX_Q64 END ===
+#endif
                     default:
                         return false;
                 }
@@ -5093,6 +5166,25 @@ static bool ggml_backend_cuda_device_supports_op(ggml_backend_dev_t dev, const g
                     case GGML_TYPE_TQ_V_POLAR4:
                         return true;
                     // === REEX_TURBOQUANT END ===
+#endif
+#ifdef GGML_USE_REEX_Q64
+                    // === REEX_Q64 BEGIN ===
+                    case GGML_TYPE_Q4_0_64:
+                    case GGML_TYPE_Q8_0_64:
+                    case GGML_TYPE_Q4_1_64:
+                    case GGML_TYPE_Q5_0_64:
+                    case GGML_TYPE_Q5_1_64:
+                    case GGML_TYPE_Q8_1_64:
+                    case GGML_TYPE_Q4_K_64:
+                    case GGML_TYPE_Q2_K_64:
+                    case GGML_TYPE_Q3_K_64:
+                    case GGML_TYPE_Q5_K_64:
+                    case GGML_TYPE_Q6_K_64:
+                    case GGML_TYPE_Q5_K_64S:
+                    case GGML_TYPE_Q4_K_64S:
+                    case GGML_TYPE_Q2_K_64S:
+                        return true;
+                    // === REEX_Q64 END ===
 #endif
                     default:
                         return false;

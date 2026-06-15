@@ -176,6 +176,12 @@ if (CUDAToolkit_FOUND)
                              ${GGML_SOURCES_CUDA}
                             )
 
+    if (GGML_USE_REEX_Q64)
+        # block-64 legacy quant: CUDA dequant->cuBLAS path. Header-only kernels
+        # in reex/reex_q64_dequant.cuh, guarded by GGML_USE_REEX_Q64.
+        target_compile_definitions(ggml-cuda PRIVATE GGML_USE_REEX_Q64)
+    endif()
+
     if (GGML_USE_REEX)
         target_compile_definitions(ggml-cuda PRIVATE GGML_USE_REEX)
         # REEX LUT uses __constant__ memory defined in unary.cu but referenced

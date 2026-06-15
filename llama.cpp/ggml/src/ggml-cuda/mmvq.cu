@@ -3,12 +3,65 @@
 #include "unary.cuh"
 #include "vecdotq.cuh"
 
+#ifdef GGML_USE_REEX_Q64
+#include "reex/ggml-reex-q64.h"   // reex_q64_psum_bits()
+// Device-side target bit-width B for fixed-point Psum truncation (K-quant MMVQ).
+// Defined here, before the vec_dot headers that read it, so the symbol resolves
+// within this single TU (no RDC required). Synced once per device from the
+// REEX_Q64_PSUM_BITS env var via reex_q64_sync_psum_bits().
+__constant__ int reex_q64_psum_bits_dev;
+#include "reex/reex_q64_vecdotq.cuh"
+#include "reex/reex_q64_kquant_vecdotq.cuh"
+#include "reex/reex_q64_quantize.cuh"
+
+static __forceinline__ bool reex_q64_is_kquant(ggml_type t) {
+    return t == GGML_TYPE_Q4_K_64 || t == GGML_TYPE_Q2_K_64 || t == GGML_TYPE_Q3_K_64 ||
+           t == GGML_TYPE_Q5_K_64 || t == GGML_TYPE_Q6_K_64 || t == GGML_TYPE_Q5_K_64S ||
+           t == GGML_TYPE_Q4_K_64S || t == GGML_TYPE_Q2_K_64S;
+}
+static __forceinline__ bool reex_q64_is_legacy(ggml_type t) {
+    return t == GGML_TYPE_Q4_0_64 || t == GGML_TYPE_Q4_1_64 || t == GGML_TYPE_Q5_0_64 ||
+           t == GGML_TYPE_Q5_1_64 || t == GGML_TYPE_Q8_0_64 || t == GGML_TYPE_Q8_1_64;
+}
+#endif
+
 #include <cstdint>
+
+#ifdef GGML_USE_REEX_Q64
+static void reex_q64_sync_psum_bits() {
+    static int  s_cached[GGML_CUDA_MAX_DEVICES];
+    static bool s_init  [GGML_CUDA_MAX_DEVICES] = { false };
+    int dev = 0;
+    CUDA_CHECK(cudaGetDevice(&dev));
+    const int b = reex_q64_psum_bits();
+    if (!s_init[dev] || s_cached[dev] != b) {
+        CUDA_CHECK(cudaMemcpyToSymbol(reex_q64_psum_bits_dev, &b, sizeof(int)));
+        s_cached[dev] = b;
+        s_init[dev]   = true;
+    }
+}
+#endif
 
 typedef float (*vec_dot_q_cuda_t)(const void * __restrict__ vbq, const block_q8_1 * __restrict__ bq8_1, const int & kbx, const int & iqs);
 
 static constexpr __device__ vec_dot_q_cuda_t get_vec_dot_q_cuda(ggml_type type) {
     switch (type) {
+#ifdef GGML_USE_REEX_Q64
+        case GGML_TYPE_Q4_0_64: return vec_dot_q4_0_64_q8_1;
+        case GGML_TYPE_Q4_1_64: return vec_dot_q4_1_64_q8_1;
+        case GGML_TYPE_Q5_0_64: return vec_dot_q5_0_64_q8_1;
+        case GGML_TYPE_Q5_1_64: return vec_dot_q5_1_64_q8_1;
+        case GGML_TYPE_Q8_0_64: return vec_dot_q8_0_64_q8_1;
+        case GGML_TYPE_Q8_1_64: return vec_dot_q8_1_64_q8_1;
+        case GGML_TYPE_Q4_K_64: return vec_dot_q4_K_64_q8_1;
+        case GGML_TYPE_Q2_K_64: return vec_dot_q2_K_64_q8_1;
+        case GGML_TYPE_Q3_K_64: return vec_dot_q3_K_64_q8_1;
+        case GGML_TYPE_Q5_K_64: return vec_dot_q5_K_64_q8_1;
+        case GGML_TYPE_Q6_K_64: return vec_dot_q6_K_64_q8_1;
+        case GGML_TYPE_Q5_K_64S: return vec_dot_q5_K_64S_q8_1;
+        case GGML_TYPE_Q4_K_64S: return vec_dot_q4_K_64S_q8_1;
+        case GGML_TYPE_Q2_K_64S: return vec_dot_q2_K_64S_q8_1;
+#endif
         case GGML_TYPE_Q1_0:    return vec_dot_q1_0_q8_1;
         case GGML_TYPE_Q4_0:    return vec_dot_q4_0_q8_1;
         case GGML_TYPE_Q4_1:    return vec_dot_q4_1_q8_1;
@@ -37,6 +90,22 @@ static constexpr __device__ vec_dot_q_cuda_t get_vec_dot_q_cuda(ggml_type type) 
 
 static constexpr __host__ __device__ int get_vdr_mmvq(ggml_type type) {
     switch (type) {
+#ifdef GGML_USE_REEX_Q64
+        case GGML_TYPE_Q4_0_64: return VDR_Q4_0_64_Q8_1_MMVQ;
+        case GGML_TYPE_Q4_1_64: return VDR_Q4_1_64_Q8_1_MMVQ;
+        case GGML_TYPE_Q5_0_64: return VDR_Q5_0_64_Q8_1_MMVQ;
+        case GGML_TYPE_Q5_1_64: return VDR_Q5_1_64_Q8_1_MMVQ;
+        case GGML_TYPE_Q8_0_64: return VDR_Q8_0_64_Q8_1_MMVQ;
+        case GGML_TYPE_Q8_1_64: return VDR_Q8_1_64_Q8_1_MMVQ;
+        case GGML_TYPE_Q4_K_64: return VDR_Q4_K_64_Q8_1_MMVQ;
+        case GGML_TYPE_Q2_K_64: return VDR_Q2_K_64_Q8_1_MMVQ;
+        case GGML_TYPE_Q3_K_64: return VDR_Q3_K_64_Q8_1_MMVQ;
+        case GGML_TYPE_Q5_K_64: return VDR_Q5_K_64_Q8_1_MMVQ;
+        case GGML_TYPE_Q6_K_64: return VDR_Q6_K_64_Q8_1_MMVQ;
+        case GGML_TYPE_Q5_K_64S: return VDR_Q5_K_64S_Q8_1_MMVQ;
+        case GGML_TYPE_Q4_K_64S: return VDR_Q4_K_64S_Q8_1_MMVQ;
+        case GGML_TYPE_Q2_K_64S: return VDR_Q2_K_64S_Q8_1_MMVQ;
+#endif
         case GGML_TYPE_Q1_0:    return VDR_Q1_0_Q8_1_MMVQ;
         case GGML_TYPE_Q4_0:    return VDR_Q4_0_Q8_1_MMVQ;
         case GGML_TYPE_Q4_1:    return VDR_Q4_1_Q8_1_MMVQ;
@@ -887,7 +956,96 @@ static void mul_mat_vec_q_switch_type(
         const int stride_channel_x, const int stride_channel_y, const int stride_channel_dst,
         const int nsamples_x, const int nsamples_dst, const int stride_sample_x, const int stride_sample_y, const int stride_sample_dst,
         const int ids_stride, cudaStream_t stream) {
+#ifdef GGML_USE_REEX_Q64
+    reex_q64_sync_psum_bits(); // refresh device-side Psum truncation bit-width (cached)
+#endif
     switch (type_x) {
+#ifdef GGML_USE_REEX_Q64
+        case GGML_TYPE_Q4_0_64:
+            mul_mat_vec_q_switch_ncols_dst<GGML_TYPE_Q4_0_64>
+                (vx, vy, ids, fusion, dst, ncols_x, nrows_x, ncols_dst, stride_row_x, stride_col_y, stride_col_dst,
+                 nchannels_x, nchannels_y, nchannels_dst, stride_channel_x, stride_channel_y, stride_channel_dst,
+                 nsamples_x, nsamples_dst, stride_sample_x, stride_sample_y, stride_sample_dst, ids_stride, stream);
+            break;
+        case GGML_TYPE_Q4_1_64:
+            mul_mat_vec_q_switch_ncols_dst<GGML_TYPE_Q4_1_64>
+                (vx, vy, ids, fusion, dst, ncols_x, nrows_x, ncols_dst, stride_row_x, stride_col_y, stride_col_dst,
+                 nchannels_x, nchannels_y, nchannels_dst, stride_channel_x, stride_channel_y, stride_channel_dst,
+                 nsamples_x, nsamples_dst, stride_sample_x, stride_sample_y, stride_sample_dst, ids_stride, stream);
+            break;
+        case GGML_TYPE_Q5_0_64:
+            mul_mat_vec_q_switch_ncols_dst<GGML_TYPE_Q5_0_64>
+                (vx, vy, ids, fusion, dst, ncols_x, nrows_x, ncols_dst, stride_row_x, stride_col_y, stride_col_dst,
+                 nchannels_x, nchannels_y, nchannels_dst, stride_channel_x, stride_channel_y, stride_channel_dst,
+                 nsamples_x, nsamples_dst, stride_sample_x, stride_sample_y, stride_sample_dst, ids_stride, stream);
+            break;
+        case GGML_TYPE_Q5_1_64:
+            mul_mat_vec_q_switch_ncols_dst<GGML_TYPE_Q5_1_64>
+                (vx, vy, ids, fusion, dst, ncols_x, nrows_x, ncols_dst, stride_row_x, stride_col_y, stride_col_dst,
+                 nchannels_x, nchannels_y, nchannels_dst, stride_channel_x, stride_channel_y, stride_channel_dst,
+                 nsamples_x, nsamples_dst, stride_sample_x, stride_sample_y, stride_sample_dst, ids_stride, stream);
+            break;
+        case GGML_TYPE_Q8_0_64:
+            mul_mat_vec_q_switch_ncols_dst<GGML_TYPE_Q8_0_64>
+                (vx, vy, ids, fusion, dst, ncols_x, nrows_x, ncols_dst, stride_row_x, stride_col_y, stride_col_dst,
+                 nchannels_x, nchannels_y, nchannels_dst, stride_channel_x, stride_channel_y, stride_channel_dst,
+                 nsamples_x, nsamples_dst, stride_sample_x, stride_sample_y, stride_sample_dst, ids_stride, stream);
+            break;
+        case GGML_TYPE_Q8_1_64:
+            mul_mat_vec_q_switch_ncols_dst<GGML_TYPE_Q8_1_64>
+                (vx, vy, ids, fusion, dst, ncols_x, nrows_x, ncols_dst, stride_row_x, stride_col_y, stride_col_dst,
+                 nchannels_x, nchannels_y, nchannels_dst, stride_channel_x, stride_channel_y, stride_channel_dst,
+                 nsamples_x, nsamples_dst, stride_sample_x, stride_sample_y, stride_sample_dst, ids_stride, stream);
+            break;
+        case GGML_TYPE_Q4_K_64:
+            mul_mat_vec_q_switch_ncols_dst<GGML_TYPE_Q4_K_64>
+                (vx, vy, ids, fusion, dst, ncols_x, nrows_x, ncols_dst, stride_row_x, stride_col_y, stride_col_dst,
+                 nchannels_x, nchannels_y, nchannels_dst, stride_channel_x, stride_channel_y, stride_channel_dst,
+                 nsamples_x, nsamples_dst, stride_sample_x, stride_sample_y, stride_sample_dst, ids_stride, stream);
+            break;
+        case GGML_TYPE_Q2_K_64:
+            mul_mat_vec_q_switch_ncols_dst<GGML_TYPE_Q2_K_64>
+                (vx, vy, ids, fusion, dst, ncols_x, nrows_x, ncols_dst, stride_row_x, stride_col_y, stride_col_dst,
+                 nchannels_x, nchannels_y, nchannels_dst, stride_channel_x, stride_channel_y, stride_channel_dst,
+                 nsamples_x, nsamples_dst, stride_sample_x, stride_sample_y, stride_sample_dst, ids_stride, stream);
+            break;
+        case GGML_TYPE_Q3_K_64:
+            mul_mat_vec_q_switch_ncols_dst<GGML_TYPE_Q3_K_64>
+                (vx, vy, ids, fusion, dst, ncols_x, nrows_x, ncols_dst, stride_row_x, stride_col_y, stride_col_dst,
+                 nchannels_x, nchannels_y, nchannels_dst, stride_channel_x, stride_channel_y, stride_channel_dst,
+                 nsamples_x, nsamples_dst, stride_sample_x, stride_sample_y, stride_sample_dst, ids_stride, stream);
+            break;
+        case GGML_TYPE_Q5_K_64:
+            mul_mat_vec_q_switch_ncols_dst<GGML_TYPE_Q5_K_64>
+                (vx, vy, ids, fusion, dst, ncols_x, nrows_x, ncols_dst, stride_row_x, stride_col_y, stride_col_dst,
+                 nchannels_x, nchannels_y, nchannels_dst, stride_channel_x, stride_channel_y, stride_channel_dst,
+                 nsamples_x, nsamples_dst, stride_sample_x, stride_sample_y, stride_sample_dst, ids_stride, stream);
+            break;
+        case GGML_TYPE_Q6_K_64:
+            mul_mat_vec_q_switch_ncols_dst<GGML_TYPE_Q6_K_64>
+                (vx, vy, ids, fusion, dst, ncols_x, nrows_x, ncols_dst, stride_row_x, stride_col_y, stride_col_dst,
+                 nchannels_x, nchannels_y, nchannels_dst, stride_channel_x, stride_channel_y, stride_channel_dst,
+                 nsamples_x, nsamples_dst, stride_sample_x, stride_sample_y, stride_sample_dst, ids_stride, stream);
+            break;
+        case GGML_TYPE_Q5_K_64S:
+            mul_mat_vec_q_switch_ncols_dst<GGML_TYPE_Q5_K_64S>
+                (vx, vy, ids, fusion, dst, ncols_x, nrows_x, ncols_dst, stride_row_x, stride_col_y, stride_col_dst,
+                 nchannels_x, nchannels_y, nchannels_dst, stride_channel_x, stride_channel_y, stride_channel_dst,
+                 nsamples_x, nsamples_dst, stride_sample_x, stride_sample_y, stride_sample_dst, ids_stride, stream);
+            break;
+        case GGML_TYPE_Q4_K_64S:
+            mul_mat_vec_q_switch_ncols_dst<GGML_TYPE_Q4_K_64S>
+                (vx, vy, ids, fusion, dst, ncols_x, nrows_x, ncols_dst, stride_row_x, stride_col_y, stride_col_dst,
+                 nchannels_x, nchannels_y, nchannels_dst, stride_channel_x, stride_channel_y, stride_channel_dst,
+                 nsamples_x, nsamples_dst, stride_sample_x, stride_sample_y, stride_sample_dst, ids_stride, stream);
+            break;
+        case GGML_TYPE_Q2_K_64S:
+            mul_mat_vec_q_switch_ncols_dst<GGML_TYPE_Q2_K_64S>
+                (vx, vy, ids, fusion, dst, ncols_x, nrows_x, ncols_dst, stride_row_x, stride_col_y, stride_col_dst,
+                 nchannels_x, nchannels_y, nchannels_dst, stride_channel_x, stride_channel_y, stride_channel_dst,
+                 nsamples_x, nsamples_dst, stride_sample_x, stride_sample_y, stride_sample_dst, ids_stride, stream);
+            break;
+#endif
         case GGML_TYPE_Q1_0:
             mul_mat_vec_q_switch_ncols_dst<GGML_TYPE_Q1_0>
                 (vx, vy, ids, fusion, dst, ncols_x, nrows_x, ncols_dst, stride_row_x, stride_col_y, stride_col_dst,
@@ -1094,7 +1252,20 @@ void ggml_cuda_mul_mat_vec_q(
         const int64_t s11 = src1->nb[1] / ts_src1;
         const int64_t s12 = src1->nb[2] / ts_src1;
         const int64_t s13 = src1->nb[3] / ts_src1;
-        quantize_row_q8_1_cuda(src1_d, nullptr, src1_q8_1.get(), src0->type, ne10, s11, s12, s13, ne10_padded, ne11, ne12, ne13, stream);
+#ifdef GGML_USE_REEX_Q64
+        if (reex_q64_is_kquant(src0->type)) {
+            // CPU-aligned activation: one scale per 256 super-block (q8_K-style)
+            // so the K-quant vec_dot accumulates a 64-element integer Psum.
+            reex_q64_quantize_q8_1_grp_cuda<256>(src1_d, src1_q8_1.get(), ne10, s11, s12, s13, ne10_padded, ne11, ne12, ne13, stream);
+        } else if (reex_q64_is_legacy(src0->type)) {
+            // CPU-aligned activation: one scale per 64 elements (q8_0_64/q8_1_64)
+            // so the legacy vec_dot accumulates a 64-element integer Psum.
+            reex_q64_quantize_q8_1_grp_cuda<64>(src1_d, src1_q8_1.get(), ne10, s11, s12, s13, ne10_padded, ne11, ne12, ne13, stream);
+        } else
+#endif
+        {
+            quantize_row_q8_1_cuda(src1_d, nullptr, src1_q8_1.get(), src0->type, ne10, s11, s12, s13, ne10_padded, ne11, ne12, ne13, stream);
+        }
     }
 
     const int64_t s01 = src0->nb[1] / ts_src0;
@@ -1118,6 +1289,27 @@ void ggml_cuda_mul_mat_vec_q(
     const int64_t stride_channel_y   = ids ? s11  : s12;
 
     const int64_t ids_stride = ids ? ids->nb[1] / ggml_type_size(ids->type) : 0;
+
+#ifdef GGML_USE_REEX_Q64
+    // REEX block-64: prefill (large batch) is routed here so it reuses the
+    // CPU-aligned MMVQ vec_dot (64/256 activation, 64-element integer Psum +
+    // truncation). The MMVQ kernel only supports ncols_dst <= MMVQ_MAX_BATCH_SIZE
+    // per launch, so split the dst columns into chunks. Only for the non-ids
+    // MUL_MAT path (MUL_MAT_ID is disabled for these types).
+    if (!ids && ncols_dst > MMVQ_MAX_BATCH_SIZE &&
+        (reex_q64_is_kquant(src0->type) || reex_q64_is_legacy(src0->type))) {
+        const block_q8_1 * vy = (const block_q8_1 *) src1_q8_1.get();
+        for (int64_t c = 0; c < ncols_dst; c += MMVQ_MAX_BATCH_SIZE) {
+            const int64_t w = (ncols_dst - c) < MMVQ_MAX_BATCH_SIZE ? (ncols_dst - c) : MMVQ_MAX_BATCH_SIZE;
+            mul_mat_vec_q_switch_type(
+                src0->data, src0->type, vy + c*stride_col_y, ids_d, fusion_local, dst_d + c*stride_col_dst, ne00,
+                ne01,              w,             s01, stride_col_y,     stride_col_dst,
+                ne02, nchannels_y, nchannels_dst, s02, stride_channel_y, stride_channel_dst,
+                ne03,              ne3,           s03, s13,              s3,               ids_stride, stream);
+        }
+        return;
+    }
+#endif
 
     mul_mat_vec_q_switch_type(
         src0->data, src0->type, src1_q8_1.get(), ids_d, fusion_local, dst_d, ne00,

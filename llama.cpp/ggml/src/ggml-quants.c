@@ -6,6 +6,10 @@
 #include "ggml-cpu/ggml-cpu-impl.h"
 #include "ggml-cpu.h"
 
+#ifdef GGML_USE_REEX_Q64
+#include "reex/ggml-reex-q64-common.h"
+#endif
+
 #include <math.h>
 #include <string.h>
 #include <assert.h>
@@ -5480,6 +5484,66 @@ bool ggml_validate_row_data(enum ggml_type type, const void * data, size_t nbyte
         case GGML_TYPE_I64:
             // nothing to validate
             break;
+#ifdef GGML_USE_REEX_Q64
+        // === REEX_Q64 BEGIN ===
+        case GGML_TYPE_Q4_0_64:
+            {
+                VALIDATE_ROW_DATA_D_F16_IMPL(block_q4_0_64, data, nb);
+            } break;
+        case GGML_TYPE_Q8_0_64:
+            {
+                VALIDATE_ROW_DATA_D_F16_IMPL(block_q8_0_64, data, nb);
+            } break;
+        case GGML_TYPE_Q4_1_64:
+            {
+                VALIDATE_ROW_DATA_DM_F16_IMPL(block_q4_1_64, data, nb, d, m);
+            } break;
+        case GGML_TYPE_Q5_0_64:
+            {
+                VALIDATE_ROW_DATA_D_F16_IMPL(block_q5_0_64, data, nb);
+            } break;
+        case GGML_TYPE_Q5_1_64:
+            {
+                VALIDATE_ROW_DATA_DM_F16_IMPL(block_q5_1_64, data, nb, d, m);
+            } break;
+        case GGML_TYPE_Q4_K_64:
+            {
+                VALIDATE_ROW_DATA_DM_F16_IMPL(block_q4_K_64, data, nb, d, dmin);
+            } break;
+        case GGML_TYPE_Q2_K_64:
+            {
+                VALIDATE_ROW_DATA_DM_F16_IMPL(block_q2_K_64, data, nb, d, dmin);
+            } break;
+        case GGML_TYPE_Q3_K_64:
+            {
+                VALIDATE_ROW_DATA_D_F16_IMPL(block_q3_K_64, data, nb);
+            } break;
+        case GGML_TYPE_Q5_K_64:
+            {
+                VALIDATE_ROW_DATA_DM_F16_IMPL(block_q5_K_64, data, nb, d, dmin);
+            } break;
+        case GGML_TYPE_Q6_K_64:
+            {
+                VALIDATE_ROW_DATA_D_F16_IMPL(block_q6_K_64, data, nb);
+            } break;
+        case GGML_TYPE_Q5_K_64S:
+            {
+                VALIDATE_ROW_DATA_D_F16_IMPL(block_q5_K_64S, data, nb);
+            } break;
+        case GGML_TYPE_Q4_K_64S:
+            {
+                VALIDATE_ROW_DATA_D_F16_IMPL(block_q4_K_64S, data, nb);
+            } break;
+        case GGML_TYPE_Q2_K_64S:
+            {
+                VALIDATE_ROW_DATA_D_F16_IMPL(block_q2_K_64S, data, nb);
+            } break;
+        case GGML_TYPE_Q8_1_64:
+            {
+                VALIDATE_ROW_DATA_DM_F16_IMPL(block_q8_1_64, data, nb, d, s);
+            } break;
+        // === REEX_Q64 END ===
+#endif
         default:
             {
                 fprintf(stderr, "%s: invalid type %d\n", __func__, type);

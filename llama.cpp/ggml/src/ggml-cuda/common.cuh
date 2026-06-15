@@ -1074,6 +1074,100 @@ struct ggml_cuda_type_traits<GGML_TYPE_IQ3_S> {
     static constexpr int qi = QI3_S;
 };
 
+#ifdef GGML_USE_REEX_Q64
+// REEX block-64: one fp16 scale per 64 quants; qs holds 8 32-bit ints.
+// qk=64 makes each weight block span 2 q8_1 (QK8_1=32) activation blocks.
+template<>
+struct ggml_cuda_type_traits<GGML_TYPE_Q4_0_64> {
+    static constexpr int qk = 64;
+    static constexpr int qr = 2;
+    static constexpr int qi = 8;
+};
+template<>
+struct ggml_cuda_type_traits<GGML_TYPE_Q4_1_64> {
+    static constexpr int qk = 64;
+    static constexpr int qr = 2;
+    static constexpr int qi = 8;
+};
+template<>
+struct ggml_cuda_type_traits<GGML_TYPE_Q5_0_64> {
+    static constexpr int qk = 64;
+    static constexpr int qr = 2;
+    static constexpr int qi = 8;
+};
+template<>
+struct ggml_cuda_type_traits<GGML_TYPE_Q5_1_64> {
+    static constexpr int qk = 64;
+    static constexpr int qr = 2;
+    static constexpr int qi = 8;
+};
+// 8-bit block-64: qs holds 16 ints (no nibble split), qr = 1.
+template<>
+struct ggml_cuda_type_traits<GGML_TYPE_Q8_0_64> {
+    static constexpr int qk = 64;
+    static constexpr int qr = 1;
+    static constexpr int qi = 16;
+};
+template<>
+struct ggml_cuda_type_traits<GGML_TYPE_Q8_1_64> {
+    static constexpr int qk = 64;
+    static constexpr int qr = 1;
+    static constexpr int qi = 16;
+};
+// K-quant block-64: super-block = 256, 4 sub-blocks of 64. For MMVQ we use
+// qi=4 / vdr=1 so the framework spawns 4 cooperating threads per super-block
+// (one per sub-block) and passes iqs = sub-block index. qr only matters for the
+// dequant/getrows traits path (unused for these via the dedicated dequant cuda).
+template<>
+struct ggml_cuda_type_traits<GGML_TYPE_Q4_K_64> {
+    static constexpr int qk = 256;
+    static constexpr int qr = 2;
+    static constexpr int qi = 4;
+};
+template<>
+struct ggml_cuda_type_traits<GGML_TYPE_Q2_K_64> {
+    static constexpr int qk = 256;
+    static constexpr int qr = 2;
+    static constexpr int qi = 4;
+};
+template<>
+struct ggml_cuda_type_traits<GGML_TYPE_Q3_K_64> {
+    static constexpr int qk = 256;
+    static constexpr int qr = 2;
+    static constexpr int qi = 4;
+};
+template<>
+struct ggml_cuda_type_traits<GGML_TYPE_Q5_K_64> {
+    static constexpr int qk = 256;
+    static constexpr int qr = 2;
+    static constexpr int qi = 4;
+};
+template<>
+struct ggml_cuda_type_traits<GGML_TYPE_Q6_K_64> {
+    static constexpr int qk = 256;
+    static constexpr int qr = 2;
+    static constexpr int qi = 4;
+};
+template<>
+struct ggml_cuda_type_traits<GGML_TYPE_Q5_K_64S> {
+    static constexpr int qk = 256;
+    static constexpr int qr = 2;
+    static constexpr int qi = 4;
+};
+template<>
+struct ggml_cuda_type_traits<GGML_TYPE_Q4_K_64S> {
+    static constexpr int qk = 256;
+    static constexpr int qr = 2;
+    static constexpr int qi = 4;
+};
+template<>
+struct ggml_cuda_type_traits<GGML_TYPE_Q2_K_64S> {
+    static constexpr int qk = 256;
+    static constexpr int qr = 2;
+    static constexpr int qi = 4;
+};
+#endif // GGML_USE_REEX_Q64
+
 //////////////////////
 
 struct ggml_cuda_device_info {

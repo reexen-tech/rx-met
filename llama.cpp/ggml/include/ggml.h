@@ -448,7 +448,28 @@ extern "C" {
         GGML_TYPE_TQ_V_POLAR2 = 45, // 2-bit V (rotated via V WHT; Lloyd-Max codebook + norm correction; block=128; P4 A2.5 V-beta)
         GGML_TYPE_TQ_V_POLAR4 = 46, // 4-bit V (rotated via V WHT; Lloyd-Max codebook + norm correction; block=128; P4 A2.5 V-beta)
         // === REEX_TURBOQUANT END ===
-        GGML_TYPE_COUNT   = 47,
+
+        // === REEX_Q64 BEGIN ===
+        // Hardware-aligned block=64 legacy quantization (vs upstream block=32).
+        // New ids; implemented entirely under reex/. Same GGUF-id contract as the
+        // TQ_* note above: once a tensor is persisted with these ids the numbers
+        // are part of this fork's file format and must not silently change.
+        GGML_TYPE_Q4_0_64 = 47, // 4-bit symmetric weight, block=64
+        GGML_TYPE_Q8_0_64 = 48, // 8-bit symmetric, block=64 (Q4_0_64 activation companion / standalone)
+        GGML_TYPE_Q4_1_64 = 49, // 4-bit asymmetric weight, block=64
+        GGML_TYPE_Q5_0_64 = 50, // 5-bit symmetric weight, block=64
+        GGML_TYPE_Q5_1_64 = 51, // 5-bit asymmetric weight, block=64
+        GGML_TYPE_Q8_1_64 = 52, // 8-bit symmetric+sum, block=64 (Q4_1_64/Q5_1_64 activation companion / standalone)
+        GGML_TYPE_Q4_K_64 = 53, // 4-bit K-quant weight, super-block=256, sub-block=64
+        GGML_TYPE_Q2_K_64 = 54, // 2-bit K-quant weight, super-block=256, sub-block=64
+        GGML_TYPE_Q3_K_64 = 55, // 3-bit K-quant weight, super-block=256, sub-block=64
+        GGML_TYPE_Q5_K_64 = 56, // 5-bit K-quant weight, super-block=256, sub-block=64
+        GGML_TYPE_Q6_K_64 = 57, // 6-bit K-quant weight, super-block=256, sub-block=64
+        GGML_TYPE_Q5_K_64S = 58, // 5-bit K-quant weight, SYMMETRIC (int6 signed scale, no min), super-block=256, sub-block=64
+        GGML_TYPE_Q4_K_64S = 59, // 4-bit K-quant weight, SYMMETRIC (int6 signed scale, no min), super-block=256, sub-block=64
+        GGML_TYPE_Q2_K_64S = 60, // 2-bit K-quant weight, SYMMETRIC (int4 signed scale, no min), super-block=256, sub-block=64
+        // === REEX_Q64 END ===
+        GGML_TYPE_COUNT   = 61,
     };
 
     // precision

@@ -156,6 +156,25 @@ extern "C" {
         LLAMA_FTYPE_MOSTLY_NVFP4         = 39, // except 1d tensors
         LLAMA_FTYPE_MOSTLY_Q1_0          = 40, // except 1d tensors
 
+        // === REEX_Q64 BEGIN ===
+        // Hardware-aligned block=64 legacy quant. Requires ggml built with
+        // GGML_USE_REEX_Q64; otherwise quantization aborts at runtime.
+        LLAMA_FTYPE_MOSTLY_Q4_0_64       = 41, // except 1d tensors
+        LLAMA_FTYPE_MOSTLY_Q8_0_64       = 42, // except 1d tensors
+        LLAMA_FTYPE_MOSTLY_Q4_1_64       = 43, // except 1d tensors
+        LLAMA_FTYPE_MOSTLY_Q5_0_64       = 44, // except 1d tensors
+        LLAMA_FTYPE_MOSTLY_Q5_1_64       = 45, // except 1d tensors
+        LLAMA_FTYPE_MOSTLY_Q8_1_64       = 46, // except 1d tensors
+        LLAMA_FTYPE_MOSTLY_Q4_K_64       = 47, // except 1d tensors (K-quant, sub-block=64)
+        LLAMA_FTYPE_MOSTLY_Q2_K_64       = 48, // except 1d tensors (K-quant, sub-block=64)
+        LLAMA_FTYPE_MOSTLY_Q3_K_64       = 49, // except 1d tensors (K-quant, sub-block=64)
+        LLAMA_FTYPE_MOSTLY_Q5_K_64       = 50, // except 1d tensors (K-quant, sub-block=64)
+        LLAMA_FTYPE_MOSTLY_Q6_K_64       = 51, // except 1d tensors (K-quant, sub-block=64)
+        LLAMA_FTYPE_MOSTLY_Q5_K_64S      = 52, // except 1d tensors (K-quant SYMMETRIC, sub-block=64)
+        LLAMA_FTYPE_MOSTLY_Q4_K_64S      = 53, // except 1d tensors (K-quant SYMMETRIC, sub-block=64)
+        LLAMA_FTYPE_MOSTLY_Q2_K_64S      = 54, // except 1d tensors (K-quant SYMMETRIC, sub-block=64)
+        // === REEX_Q64 END ===
+
         LLAMA_FTYPE_GUESSED = 1024, // not specified in the model file
     };
 

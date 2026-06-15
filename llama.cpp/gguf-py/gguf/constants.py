@@ -4025,6 +4025,22 @@ class GGMLQuantizationType(IntEnum):
     MXFP4   = 39
     NVFP4   = 40
     Q1_0    = 41
+    # === REEX_Q64 BEGIN ===
+    Q4_0_64 = 47  # hardware-aligned block=64 legacy quant
+    Q8_0_64 = 48
+    Q4_1_64 = 49
+    Q5_0_64 = 50
+    Q5_1_64 = 51
+    Q8_1_64 = 52
+    Q4_K_64 = 53  # K-quant, super-block=256, sub-block=64
+    Q2_K_64 = 54  # K-quant, super-block=256, sub-block=64
+    Q3_K_64 = 55  # K-quant, super-block=256, sub-block=64
+    Q5_K_64 = 56  # K-quant, super-block=256, sub-block=64
+    Q6_K_64 = 57  # K-quant, super-block=256, sub-block=64
+    Q5_K_64S = 58  # K-quant SYMMETRIC (int6 signed scale, no min), super-block=256, sub-block=64
+    Q4_K_64S = 59  # K-quant SYMMETRIC (int6 signed scale, no min), super-block=256, sub-block=64
+    Q2_K_64S = 60  # K-quant SYMMETRIC (int4 signed scale, no min), super-block=256, sub-block=64
+    # === REEX_Q64 END ===
 
 
 class ExpertGatingFuncType(IntEnum):
@@ -4079,6 +4095,22 @@ class LlamaFileType(IntEnum):
     MOSTLY_MXFP4_MOE     = 38  # except 1d tensors
     MOSTLY_NVFP4         = 39  # except 1d tensors
     MOSTLY_Q1_0          = 40  # except 1d tensors
+    # === REEX_Q64 BEGIN ===
+    MOSTLY_Q4_0_64       = 41  # except 1d tensors (hardware-aligned block=64)
+    MOSTLY_Q8_0_64       = 42  # except 1d tensors (hardware-aligned block=64)
+    MOSTLY_Q4_1_64       = 43  # except 1d tensors (hardware-aligned block=64)
+    MOSTLY_Q5_0_64       = 44  # except 1d tensors (hardware-aligned block=64)
+    MOSTLY_Q5_1_64       = 45  # except 1d tensors (hardware-aligned block=64)
+    MOSTLY_Q8_1_64       = 46  # except 1d tensors (hardware-aligned block=64)
+    MOSTLY_Q4_K_64       = 47  # except 1d tensors (K-quant, sub-block=64)
+    MOSTLY_Q2_K_64       = 48  # except 1d tensors (K-quant, sub-block=64)
+    MOSTLY_Q3_K_64       = 49  # except 1d tensors (K-quant, sub-block=64)
+    MOSTLY_Q5_K_64       = 50  # except 1d tensors (K-quant, sub-block=64)
+    MOSTLY_Q6_K_64       = 51  # except 1d tensors (K-quant, sub-block=64)
+    MOSTLY_Q5_K_64S      = 52  # except 1d tensors (K-quant SYMMETRIC, sub-block=64)
+    MOSTLY_Q4_K_64S      = 53  # except 1d tensors (K-quant SYMMETRIC, sub-block=64)
+    MOSTLY_Q2_K_64S      = 54  # except 1d tensors (K-quant SYMMETRIC, sub-block=64)
+    # === REEX_Q64 END ===
 
     GUESSED              = 1024  # not specified in the model file
 
@@ -4197,6 +4229,22 @@ GGML_QUANT_SIZES: dict[GGMLQuantizationType, tuple[int, int]] = {
     GGMLQuantizationType.MXFP4:   (32, 1 + 16),
     GGMLQuantizationType.NVFP4:   (64, 4 + 32),
     GGMLQuantizationType.Q1_0:    (128, 2 + 16),
+    # === REEX_Q64 BEGIN ===
+    GGMLQuantizationType.Q4_0_64: (64, 2 + 32),
+    GGMLQuantizationType.Q8_0_64: (64, 2 + 64),
+    GGMLQuantizationType.Q4_1_64: (64, 2 + 2 + 32),
+    GGMLQuantizationType.Q5_0_64: (64, 2 + 8 + 32),
+    GGMLQuantizationType.Q5_1_64: (64, 2 + 2 + 8 + 32),
+    GGMLQuantizationType.Q8_1_64: (64, 2 + 2 + 64),
+    GGMLQuantizationType.Q4_K_64: (256, 2 + 2 + 6 + 128),
+    GGMLQuantizationType.Q2_K_64: (256, 2 + 2 + 4 + 64),
+    GGMLQuantizationType.Q3_K_64: (256, 2 + 32 + 64 + 4),
+    GGMLQuantizationType.Q5_K_64: (256, 2 + 2 + 6 + 32 + 128),
+    GGMLQuantizationType.Q6_K_64: (256, 2 + 4 + 128 + 64),
+    GGMLQuantizationType.Q5_K_64S: (256, 2 + 4 + 32 + 128),
+    GGMLQuantizationType.Q4_K_64S: (256, 2 + 4 + 128),
+    GGMLQuantizationType.Q2_K_64S: (256, 2 + 2 + 64),
+    # === REEX_Q64 END ===
 }
 
 

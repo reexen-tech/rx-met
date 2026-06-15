@@ -4944,6 +4944,24 @@ void ggml_compute_forward_get_rows(
         case GGML_TYPE_TQ_V_POLAR4:
         // === REEX_TURBOQUANT END ===
 #endif
+#ifdef GGML_USE_REEX_Q64
+        // === REEX_Q64 BEGIN ===
+        case GGML_TYPE_Q4_0_64:
+        case GGML_TYPE_Q8_0_64:
+        case GGML_TYPE_Q4_1_64:
+        case GGML_TYPE_Q5_0_64:
+        case GGML_TYPE_Q5_1_64:
+        case GGML_TYPE_Q8_1_64:
+        case GGML_TYPE_Q4_K_64:
+        case GGML_TYPE_Q2_K_64:
+        case GGML_TYPE_Q3_K_64:
+        case GGML_TYPE_Q5_K_64:
+        case GGML_TYPE_Q6_K_64:
+        case GGML_TYPE_Q5_K_64S:
+        case GGML_TYPE_Q4_K_64S:
+        case GGML_TYPE_Q2_K_64S:
+        // === REEX_Q64 END ===
+#endif
             {
                 ggml_compute_forward_get_rows_q(params, dst);
             } break;
@@ -5789,6 +5807,22 @@ void ggml_compute_forward_clamp(
         case GGML_TYPE_TQ_V_POLAR2:
         case GGML_TYPE_TQ_V_POLAR4:
         // === REEX_TURBOQUANT END ===
+        // === REEX_Q64 BEGIN ===
+        case GGML_TYPE_Q4_0_64:
+        case GGML_TYPE_Q8_0_64:
+        case GGML_TYPE_Q4_1_64:
+        case GGML_TYPE_Q5_0_64:
+        case GGML_TYPE_Q5_1_64:
+        case GGML_TYPE_Q8_1_64:
+        case GGML_TYPE_Q4_K_64:
+        case GGML_TYPE_Q2_K_64:
+        case GGML_TYPE_Q3_K_64:
+        case GGML_TYPE_Q5_K_64:
+        case GGML_TYPE_Q6_K_64:
+        case GGML_TYPE_Q5_K_64S:
+        case GGML_TYPE_Q4_K_64S:
+        case GGML_TYPE_Q2_K_64S:
+        // === REEX_Q64 END ===
         case GGML_TYPE_COUNT:
             {
                 GGML_ABORT("fatal error");

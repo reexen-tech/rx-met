@@ -5,6 +5,41 @@
 
 static void ggml_cuda_mul_mat_q_switch_type(ggml_backend_cuda_context & ctx, const mmq_args & args, cudaStream_t stream) {
     switch (args.type_x) {
+#ifdef GGML_USE_REEX_Q64
+        case GGML_TYPE_Q4_0_64:
+            mul_mat_q_case<GGML_TYPE_Q4_0_64>(ctx, args, stream);
+            break;
+        case GGML_TYPE_Q5_0_64:
+            mul_mat_q_case<GGML_TYPE_Q5_0_64>(ctx, args, stream);
+            break;
+        case GGML_TYPE_Q8_0_64:
+            mul_mat_q_case<GGML_TYPE_Q8_0_64>(ctx, args, stream);
+            break;
+        case GGML_TYPE_Q8_1_64:
+            mul_mat_q_case<GGML_TYPE_Q8_1_64>(ctx, args, stream);
+            break;
+        case GGML_TYPE_Q4_1_64:
+            mul_mat_q_case<GGML_TYPE_Q4_1_64>(ctx, args, stream);
+            break;
+        case GGML_TYPE_Q5_1_64:
+            mul_mat_q_case<GGML_TYPE_Q5_1_64>(ctx, args, stream);
+            break;
+        case GGML_TYPE_Q4_K_64:
+            mul_mat_q_case<GGML_TYPE_Q4_K_64>(ctx, args, stream);
+            break;
+        case GGML_TYPE_Q5_K_64:
+            mul_mat_q_case<GGML_TYPE_Q5_K_64>(ctx, args, stream);
+            break;
+        case GGML_TYPE_Q2_K_64:
+            mul_mat_q_case<GGML_TYPE_Q2_K_64>(ctx, args, stream);
+            break;
+        case GGML_TYPE_Q3_K_64:
+            mul_mat_q_case<GGML_TYPE_Q3_K_64>(ctx, args, stream);
+            break;
+        case GGML_TYPE_Q6_K_64:
+            mul_mat_q_case<GGML_TYPE_Q6_K_64>(ctx, args, stream);
+            break;
+#endif
         case GGML_TYPE_Q1_0:
             mul_mat_q_case<GGML_TYPE_Q1_0>(ctx, args, stream);
             break;
@@ -273,6 +308,19 @@ bool ggml_cuda_should_use_mmq(enum ggml_type type, int cc, int64_t ne11, int64_t
     bool mmq_supported;
 
     switch (type) {
+#ifdef GGML_USE_REEX_Q64
+        case GGML_TYPE_Q4_0_64:
+        case GGML_TYPE_Q5_0_64:
+        case GGML_TYPE_Q8_0_64:
+        case GGML_TYPE_Q8_1_64:
+        case GGML_TYPE_Q4_1_64:
+        case GGML_TYPE_Q5_1_64:
+        case GGML_TYPE_Q4_K_64:
+        case GGML_TYPE_Q5_K_64:
+        case GGML_TYPE_Q2_K_64:
+        case GGML_TYPE_Q3_K_64:
+        case GGML_TYPE_Q6_K_64:
+#endif
         case GGML_TYPE_Q1_0:
         case GGML_TYPE_Q4_0:
         case GGML_TYPE_Q4_1:

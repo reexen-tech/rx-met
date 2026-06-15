@@ -16,6 +16,14 @@
 // === REEX_TURBOQUANT END ===
 #endif
 
+// === REEX_Q64 BEGIN ===
+// Always include the POD layout (sizeof / blck_size for the type table).
+#include "reex/ggml-reex-q64-common.h"
+#ifdef GGML_USE_REEX_Q64
+#include "reex/ggml-reex-q64.h"
+#endif
+// === REEX_Q64 END ===
+
 #ifdef GGML_USE_CPU_HBM
 #include <hbwmalloc.h>
 #endif
@@ -980,6 +988,148 @@ static const struct ggml_type_traits type_traits[GGML_TYPE_COUNT] = {
 #endif
     },
     // === REEX_TURBOQUANT END ===
+    // === REEX_Q64 BEGIN ===
+    [GGML_TYPE_Q4_0_64] = {
+        .type_name                = "q4_0_64",
+        .blck_size                = QK4_0_64,
+        .type_size                = sizeof(block_q4_0_64),
+        .is_quantized             = true,
+#ifdef GGML_USE_REEX_Q64
+        .to_float                 = (ggml_to_float_t) dequantize_row_q4_0_64,
+        .from_float_ref           = (ggml_from_float_t) quantize_row_q4_0_64_ref,
+#endif
+    },
+    [GGML_TYPE_Q8_0_64] = {
+        .type_name                = "q8_0_64",
+        .blck_size                = QK8_0_64,
+        .type_size                = sizeof(block_q8_0_64),
+        .is_quantized             = true,
+#ifdef GGML_USE_REEX_Q64
+        .to_float                 = (ggml_to_float_t) dequantize_row_q8_0_64,
+        .from_float_ref           = (ggml_from_float_t) quantize_row_q8_0_64_ref,
+#endif
+    },
+    [GGML_TYPE_Q4_1_64] = {
+        .type_name                = "q4_1_64",
+        .blck_size                = QK4_1_64,
+        .type_size                = sizeof(block_q4_1_64),
+        .is_quantized             = true,
+#ifdef GGML_USE_REEX_Q64
+        .to_float                 = (ggml_to_float_t) dequantize_row_q4_1_64,
+        .from_float_ref           = (ggml_from_float_t) quantize_row_q4_1_64_ref,
+#endif
+    },
+    [GGML_TYPE_Q5_0_64] = {
+        .type_name                = "q5_0_64",
+        .blck_size                = QK5_0_64,
+        .type_size                = sizeof(block_q5_0_64),
+        .is_quantized             = true,
+#ifdef GGML_USE_REEX_Q64
+        .to_float                 = (ggml_to_float_t) dequantize_row_q5_0_64,
+        .from_float_ref           = (ggml_from_float_t) quantize_row_q5_0_64_ref,
+#endif
+    },
+    [GGML_TYPE_Q5_1_64] = {
+        .type_name                = "q5_1_64",
+        .blck_size                = QK5_1_64,
+        .type_size                = sizeof(block_q5_1_64),
+        .is_quantized             = true,
+#ifdef GGML_USE_REEX_Q64
+        .to_float                 = (ggml_to_float_t) dequantize_row_q5_1_64,
+        .from_float_ref           = (ggml_from_float_t) quantize_row_q5_1_64_ref,
+#endif
+    },
+    [GGML_TYPE_Q8_1_64] = {
+        .type_name                = "q8_1_64",
+        .blck_size                = QK8_1_64,
+        .type_size                = sizeof(block_q8_1_64),
+        .is_quantized             = true,
+#ifdef GGML_USE_REEX_Q64
+        .to_float                 = (ggml_to_float_t) dequantize_row_q8_1_64,
+        .from_float_ref           = (ggml_from_float_t) quantize_row_q8_1_64_ref,
+#endif
+    },
+    [GGML_TYPE_Q4_K_64] = {
+        .type_name                = "q4_K_64",
+        .blck_size                = QK_K_64,
+        .type_size                = sizeof(block_q4_K_64),
+        .is_quantized             = true,
+#ifdef GGML_USE_REEX_Q64
+        .to_float                 = (ggml_to_float_t) dequantize_row_q4_K_64,
+        .from_float_ref           = (ggml_from_float_t) quantize_row_q4_K_64_ref,
+#endif
+    },
+    [GGML_TYPE_Q2_K_64] = {
+        .type_name                = "q2_K_64",
+        .blck_size                = QK_K_64,
+        .type_size                = sizeof(block_q2_K_64),
+        .is_quantized             = true,
+#ifdef GGML_USE_REEX_Q64
+        .to_float                 = (ggml_to_float_t) dequantize_row_q2_K_64,
+        .from_float_ref           = (ggml_from_float_t) quantize_row_q2_K_64_ref,
+#endif
+    },
+    [GGML_TYPE_Q3_K_64] = {
+        .type_name                = "q3_K_64",
+        .blck_size                = QK_K_64,
+        .type_size                = sizeof(block_q3_K_64),
+        .is_quantized             = true,
+#ifdef GGML_USE_REEX_Q64
+        .to_float                 = (ggml_to_float_t) dequantize_row_q3_K_64,
+        .from_float_ref           = (ggml_from_float_t) quantize_row_q3_K_64_ref,
+#endif
+    },
+    [GGML_TYPE_Q5_K_64] = {
+        .type_name                = "q5_K_64",
+        .blck_size                = QK_K_64,
+        .type_size                = sizeof(block_q5_K_64),
+        .is_quantized             = true,
+#ifdef GGML_USE_REEX_Q64
+        .to_float                 = (ggml_to_float_t) dequantize_row_q5_K_64,
+        .from_float_ref           = (ggml_from_float_t) quantize_row_q5_K_64_ref,
+#endif
+    },
+    [GGML_TYPE_Q6_K_64] = {
+        .type_name                = "q6_K_64",
+        .blck_size                = QK_K_64,
+        .type_size                = sizeof(block_q6_K_64),
+        .is_quantized             = true,
+#ifdef GGML_USE_REEX_Q64
+        .to_float                 = (ggml_to_float_t) dequantize_row_q6_K_64,
+        .from_float_ref           = (ggml_from_float_t) quantize_row_q6_K_64_ref,
+#endif
+    },
+    [GGML_TYPE_Q5_K_64S] = {
+        .type_name                = "q5_K_64S",
+        .blck_size                = QK_K_64,
+        .type_size                = sizeof(block_q5_K_64S),
+        .is_quantized             = true,
+#ifdef GGML_USE_REEX_Q64
+        .to_float                 = (ggml_to_float_t) dequantize_row_q5_K_64S,
+        .from_float_ref           = (ggml_from_float_t) quantize_row_q5_K_64S_ref,
+#endif
+    },
+    [GGML_TYPE_Q4_K_64S] = {
+        .type_name                = "q4_K_64S",
+        .blck_size                = QK_K_64,
+        .type_size                = sizeof(block_q4_K_64S),
+        .is_quantized             = true,
+#ifdef GGML_USE_REEX_Q64
+        .to_float                 = (ggml_to_float_t) dequantize_row_q4_K_64S,
+        .from_float_ref           = (ggml_from_float_t) quantize_row_q4_K_64S_ref,
+#endif
+    },
+    [GGML_TYPE_Q2_K_64S] = {
+        .type_name                = "q2_K_64S",
+        .blck_size                = QK_K_64,
+        .type_size                = sizeof(block_q2_K_64S),
+        .is_quantized             = true,
+#ifdef GGML_USE_REEX_Q64
+        .to_float                 = (ggml_to_float_t) dequantize_row_q2_K_64S,
+        .from_float_ref           = (ggml_from_float_t) quantize_row_q2_K_64S_ref,
+#endif
+    },
+    // === REEX_Q64 END ===
 };
 
 const struct ggml_type_traits * ggml_get_type_traits(enum ggml_type type) {
@@ -7873,6 +8023,24 @@ size_t ggml_quantize_chunk(
         case GGML_TYPE_TQ_V_POLAR2: result = quantize_tq_v_polar2(src + start, (char *) dst + start_row * row_size, nrows, n_per_row, imatrix); break;
         case GGML_TYPE_TQ_V_POLAR4: result = quantize_tq_v_polar4(src + start, (char *) dst + start_row * row_size, nrows, n_per_row, imatrix); break;
         // === REEX_TURBOQUANT END ===
+#endif
+#ifdef GGML_USE_REEX_Q64
+        // === REEX_Q64 BEGIN ===
+        case GGML_TYPE_Q4_0_64: result = quantize_q4_0_64(src + start, (char *) dst + start_row * row_size, nrows, n_per_row, imatrix); break;
+        case GGML_TYPE_Q8_0_64: result = quantize_q8_0_64(src + start, (char *) dst + start_row * row_size, nrows, n_per_row, imatrix); break;
+        case GGML_TYPE_Q4_1_64: result = quantize_q4_1_64(src + start, (char *) dst + start_row * row_size, nrows, n_per_row, imatrix); break;
+        case GGML_TYPE_Q5_0_64: result = quantize_q5_0_64(src + start, (char *) dst + start_row * row_size, nrows, n_per_row, imatrix); break;
+        case GGML_TYPE_Q5_1_64: result = quantize_q5_1_64(src + start, (char *) dst + start_row * row_size, nrows, n_per_row, imatrix); break;
+        case GGML_TYPE_Q8_1_64: result = quantize_q8_1_64(src + start, (char *) dst + start_row * row_size, nrows, n_per_row, imatrix); break;
+        case GGML_TYPE_Q4_K_64: result = quantize_q4_K_64(src + start, (char *) dst + start_row * row_size, nrows, n_per_row, imatrix); break;
+        case GGML_TYPE_Q2_K_64: result = quantize_q2_K_64(src + start, (char *) dst + start_row * row_size, nrows, n_per_row, imatrix); break;
+        case GGML_TYPE_Q3_K_64: result = quantize_q3_K_64(src + start, (char *) dst + start_row * row_size, nrows, n_per_row, imatrix); break;
+        case GGML_TYPE_Q5_K_64: result = quantize_q5_K_64(src + start, (char *) dst + start_row * row_size, nrows, n_per_row, imatrix); break;
+        case GGML_TYPE_Q6_K_64: result = quantize_q6_K_64(src + start, (char *) dst + start_row * row_size, nrows, n_per_row, imatrix); break;
+        case GGML_TYPE_Q5_K_64S: result = quantize_q5_K_64S(src + start, (char *) dst + start_row * row_size, nrows, n_per_row, imatrix); break;
+        case GGML_TYPE_Q4_K_64S: result = quantize_q4_K_64S(src + start, (char *) dst + start_row * row_size, nrows, n_per_row, imatrix); break;
+        case GGML_TYPE_Q2_K_64S: result = quantize_q2_K_64S(src + start, (char *) dst + start_row * row_size, nrows, n_per_row, imatrix); break;
+        // === REEX_Q64 END ===
 #endif
         default:
             assert(false);

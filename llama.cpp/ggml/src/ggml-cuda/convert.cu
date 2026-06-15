@@ -5,6 +5,11 @@
 #include "reex/reex_turboquant_dequant.cuh"
 #endif
 
+#ifdef GGML_USE_REEX_Q64
+#include "reex/reex_q64_dequant.cuh"
+#include "reex/reex_q64_kquant_dequant.cuh"
+#endif
+
 #include <cstdint>
 
 #define CUDA_Q8_0_NE_ALIGN 2048
@@ -790,6 +795,24 @@ to_fp16_cuda_t ggml_get_to_fp16_cuda(ggml_type type) {
         case GGML_TYPE_TQ_V_POLAR4:
             return reex_turboquant_to_t_tq_v_polar4_cuda<half>;
 #endif
+#ifdef GGML_USE_REEX_Q64
+        // === REEX_Q64 BEGIN ===
+        case GGML_TYPE_Q4_0_64: return reex_q64_to_t_q4_0_64_cuda<half>;
+        case GGML_TYPE_Q8_0_64: return reex_q64_to_t_q8_0_64_cuda<half>;
+        case GGML_TYPE_Q4_1_64: return reex_q64_to_t_q4_1_64_cuda<half>;
+        case GGML_TYPE_Q5_0_64: return reex_q64_to_t_q5_0_64_cuda<half>;
+        case GGML_TYPE_Q5_1_64: return reex_q64_to_t_q5_1_64_cuda<half>;
+        case GGML_TYPE_Q8_1_64: return reex_q64_to_t_q8_1_64_cuda<half>;
+        case GGML_TYPE_Q4_K_64: return reex_q64_to_t_q4_K_64_cuda<half>;
+        case GGML_TYPE_Q2_K_64: return reex_q64_to_t_q2_K_64_cuda<half>;
+        case GGML_TYPE_Q3_K_64: return reex_q64_to_t_q3_K_64_cuda<half>;
+        case GGML_TYPE_Q5_K_64: return reex_q64_to_t_q5_K_64_cuda<half>;
+        case GGML_TYPE_Q6_K_64: return reex_q64_to_t_q6_K_64_cuda<half>;
+        case GGML_TYPE_Q5_K_64S: return reex_q64_to_t_q5_K_64S_cuda<half>;
+        case GGML_TYPE_Q4_K_64S: return reex_q64_to_t_q4_K_64S_cuda<half>;
+        case GGML_TYPE_Q2_K_64S: return reex_q64_to_t_q2_K_64S_cuda<half>;
+        // === REEX_Q64 END ===
+#endif
         default:
             return nullptr;
     }
@@ -856,6 +879,24 @@ to_fp32_cuda_t ggml_get_to_fp32_cuda(ggml_type type) {
             return reex_turboquant_to_t_tq_v_polar2_cuda<float>;
         case GGML_TYPE_TQ_V_POLAR4:
             return reex_turboquant_to_t_tq_v_polar4_cuda<float>;
+#endif
+#ifdef GGML_USE_REEX_Q64
+        // === REEX_Q64 BEGIN ===
+        case GGML_TYPE_Q4_0_64: return reex_q64_to_t_q4_0_64_cuda<float>;
+        case GGML_TYPE_Q8_0_64: return reex_q64_to_t_q8_0_64_cuda<float>;
+        case GGML_TYPE_Q4_1_64: return reex_q64_to_t_q4_1_64_cuda<float>;
+        case GGML_TYPE_Q5_0_64: return reex_q64_to_t_q5_0_64_cuda<float>;
+        case GGML_TYPE_Q5_1_64: return reex_q64_to_t_q5_1_64_cuda<float>;
+        case GGML_TYPE_Q8_1_64: return reex_q64_to_t_q8_1_64_cuda<float>;
+        case GGML_TYPE_Q4_K_64: return reex_q64_to_t_q4_K_64_cuda<float>;
+        case GGML_TYPE_Q2_K_64: return reex_q64_to_t_q2_K_64_cuda<float>;
+        case GGML_TYPE_Q3_K_64: return reex_q64_to_t_q3_K_64_cuda<float>;
+        case GGML_TYPE_Q5_K_64: return reex_q64_to_t_q5_K_64_cuda<float>;
+        case GGML_TYPE_Q6_K_64: return reex_q64_to_t_q6_K_64_cuda<float>;
+        case GGML_TYPE_Q5_K_64S: return reex_q64_to_t_q5_K_64S_cuda<float>;
+        case GGML_TYPE_Q4_K_64S: return reex_q64_to_t_q4_K_64S_cuda<float>;
+        case GGML_TYPE_Q2_K_64S: return reex_q64_to_t_q2_K_64S_cuda<float>;
+        // === REEX_Q64 END ===
 #endif
         default:
             return nullptr;

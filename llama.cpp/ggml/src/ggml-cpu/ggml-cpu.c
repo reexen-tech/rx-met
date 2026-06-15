@@ -23,6 +23,10 @@
 #include "reex/reex_lut.h"
 #endif
 
+#if defined(GGML_USE_REEX_Q64)
+#include "reex/reex_q64_quants.h"
+#endif
+
 #ifdef REEX_TURBOQUANT
 // === REEX_TURBOQUANT BEGIN ===
 #include "reex_turboquant_quants.h"
@@ -470,6 +474,94 @@ static const struct ggml_type_traits_cpu type_traits_cpu[GGML_TYPE_COUNT] = {
         .nrows                    = 1,
     },
     // === REEX_TURBOQUANT END ===
+#endif
+#ifdef GGML_USE_REEX_Q64
+    // === REEX_Q64 BEGIN ===
+    [GGML_TYPE_Q4_0_64] = {
+        .from_float               = quantize_row_q4_0_64,
+        .vec_dot                  = ggml_vec_dot_q4_0_64_q8_0_64,
+        .vec_dot_type             = GGML_TYPE_Q8_0_64,
+        .nrows                    = 1,
+    },
+    [GGML_TYPE_Q8_0_64] = {
+        .from_float               = quantize_row_q8_0_64,
+        .vec_dot                  = ggml_vec_dot_q8_0_64_q8_0_64,
+        .vec_dot_type             = GGML_TYPE_Q8_0_64,
+        .nrows                    = 1,
+    },
+    [GGML_TYPE_Q4_1_64] = {
+        .from_float               = quantize_row_q4_1_64,
+        .vec_dot                  = ggml_vec_dot_q4_1_64_q8_1_64,
+        .vec_dot_type             = GGML_TYPE_Q8_1_64,
+        .nrows                    = 1,
+    },
+    [GGML_TYPE_Q5_0_64] = {
+        .from_float               = quantize_row_q5_0_64,
+        .vec_dot                  = ggml_vec_dot_q5_0_64_q8_0_64,
+        .vec_dot_type             = GGML_TYPE_Q8_0_64,
+        .nrows                    = 1,
+    },
+    [GGML_TYPE_Q5_1_64] = {
+        .from_float               = quantize_row_q5_1_64,
+        .vec_dot                  = ggml_vec_dot_q5_1_64_q8_1_64,
+        .vec_dot_type             = GGML_TYPE_Q8_1_64,
+        .nrows                    = 1,
+    },
+    [GGML_TYPE_Q8_1_64] = {
+        .from_float               = quantize_row_q8_1_64,
+        .vec_dot                  = ggml_vec_dot_q8_1_64_q8_1_64,
+        .vec_dot_type             = GGML_TYPE_Q8_1_64,
+        .nrows                    = 1,
+    },
+    [GGML_TYPE_Q4_K_64] = {
+        .from_float               = quantize_row_q4_K_64,
+        .vec_dot                  = ggml_vec_dot_q4_K_64_q8_K,
+        .vec_dot_type             = GGML_TYPE_Q8_K,
+        .nrows                    = 1,
+    },
+    [GGML_TYPE_Q2_K_64] = {
+        .from_float               = quantize_row_q2_K_64,
+        .vec_dot                  = ggml_vec_dot_q2_K_64_q8_K,
+        .vec_dot_type             = GGML_TYPE_Q8_K,
+        .nrows                    = 1,
+    },
+    [GGML_TYPE_Q3_K_64] = {
+        .from_float               = quantize_row_q3_K_64,
+        .vec_dot                  = ggml_vec_dot_q3_K_64_q8_K,
+        .vec_dot_type             = GGML_TYPE_Q8_K,
+        .nrows                    = 1,
+    },
+    [GGML_TYPE_Q5_K_64] = {
+        .from_float               = quantize_row_q5_K_64,
+        .vec_dot                  = ggml_vec_dot_q5_K_64_q8_K,
+        .vec_dot_type             = GGML_TYPE_Q8_K,
+        .nrows                    = 1,
+    },
+    [GGML_TYPE_Q6_K_64] = {
+        .from_float               = quantize_row_q6_K_64,
+        .vec_dot                  = ggml_vec_dot_q6_K_64_q8_K,
+        .vec_dot_type             = GGML_TYPE_Q8_K,
+        .nrows                    = 1,
+    },
+    [GGML_TYPE_Q5_K_64S] = {
+        .from_float               = quantize_row_q5_K_64S,
+        .vec_dot                  = ggml_vec_dot_q5_K_64S_q8_K,
+        .vec_dot_type             = GGML_TYPE_Q8_K,
+        .nrows                    = 1,
+    },
+    [GGML_TYPE_Q4_K_64S] = {
+        .from_float               = quantize_row_q4_K_64S,
+        .vec_dot                  = ggml_vec_dot_q4_K_64S_q8_K,
+        .vec_dot_type             = GGML_TYPE_Q8_K,
+        .nrows                    = 1,
+    },
+    [GGML_TYPE_Q2_K_64S] = {
+        .from_float               = quantize_row_q2_K_64S,
+        .vec_dot                  = ggml_vec_dot_q2_K_64S_q8_K,
+        .vec_dot_type             = GGML_TYPE_Q8_K,
+        .nrows                    = 1,
+    },
+    // === REEX_Q64 END ===
 #endif
 };
 

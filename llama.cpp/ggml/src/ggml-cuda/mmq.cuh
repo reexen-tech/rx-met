@@ -57,6 +57,26 @@ static_assert(sizeof(block_fp4_mmq)  == sizeof(block_q8_1_mmq),    "Unexpected b
 
 static mmq_q8_1_ds_layout mmq_get_q8_1_ds_layout(const ggml_type type_x) {
     switch (type_x) {
+#ifdef GGML_USE_REEX_Q64
+        // symmetric block-64 types reuse the q8_0 MMQ tile (D4, no act-sum)
+        case GGML_TYPE_Q4_0_64:
+        case GGML_TYPE_Q5_0_64:
+        case GGML_TYPE_Q8_0_64:
+        case GGML_TYPE_Q8_1_64:
+            return MMQ_Q8_1_DS_LAYOUT_D4;
+        // asymmetric block-64 types reuse the q8_1 MMQ tile (DS4, needs act-sum)
+        case GGML_TYPE_Q4_1_64:
+        case GGML_TYPE_Q5_1_64:
+            return MMQ_Q8_1_DS_LAYOUT_DS4;
+        // K-quant block-64: affine (min) -> q8_1 tile (DS4); symmetric -> q8_0 (D4)
+        case GGML_TYPE_Q2_K_64:
+        case GGML_TYPE_Q4_K_64:
+        case GGML_TYPE_Q5_K_64:
+            return MMQ_Q8_1_DS_LAYOUT_DS4;
+        case GGML_TYPE_Q3_K_64:
+        case GGML_TYPE_Q6_K_64:
+            return MMQ_Q8_1_DS_LAYOUT_D4;
+#endif
         case GGML_TYPE_Q1_0:
             return MMQ_Q8_1_DS_LAYOUT_D4;
         case GGML_TYPE_Q4_0:
@@ -187,6 +207,19 @@ static constexpr __device__ int get_mmq_y_device() {
 
 static constexpr __host__ __device__ tile_x_sizes mmq_get_dp4a_tile_x_sizes(ggml_type type, int mmq_y) {
     switch (type) {
+#ifdef GGML_USE_REEX_Q64
+        case GGML_TYPE_Q4_0_64: return MMQ_DP4A_TXS_Q8_0;
+        case GGML_TYPE_Q5_0_64: return MMQ_DP4A_TXS_Q8_0;
+        case GGML_TYPE_Q8_0_64: return MMQ_DP4A_TXS_Q8_0;
+        case GGML_TYPE_Q8_1_64: return MMQ_DP4A_TXS_Q8_0;
+        case GGML_TYPE_Q4_1_64: return MMQ_DP4A_TXS_Q8_1;
+        case GGML_TYPE_Q5_1_64: return MMQ_DP4A_TXS_Q8_1;
+        case GGML_TYPE_Q2_K_64: return MMQ_DP4A_TXS_Q8_1;
+        case GGML_TYPE_Q4_K_64: return MMQ_DP4A_TXS_Q8_1;
+        case GGML_TYPE_Q5_K_64: return MMQ_DP4A_TXS_Q8_1;
+        case GGML_TYPE_Q3_K_64: return MMQ_DP4A_TXS_Q8_0;
+        case GGML_TYPE_Q6_K_64: return MMQ_DP4A_TXS_Q8_0;
+#endif
         case GGML_TYPE_Q1_0:    return MMQ_DP4A_TXS_Q8_0;
         case GGML_TYPE_Q4_0:    return MMQ_DP4A_TXS_Q4_0;
         case GGML_TYPE_Q4_1:    return MMQ_DP4A_TXS_Q4_1;
@@ -232,6 +265,19 @@ static_assert(MMQ_MMA_TILE_X_K_NVFP4 % 8 == 4, "Wrong padding.");
 
 static constexpr __host__ __device__ int mmq_get_mma_tile_x_k(ggml_type type) {
     switch (type) {
+#ifdef GGML_USE_REEX_Q64
+        case GGML_TYPE_Q4_0_64: return MMQ_MMA_TILE_X_K_Q8_0;
+        case GGML_TYPE_Q5_0_64: return MMQ_MMA_TILE_X_K_Q8_0;
+        case GGML_TYPE_Q8_0_64: return MMQ_MMA_TILE_X_K_Q8_0;
+        case GGML_TYPE_Q8_1_64: return MMQ_MMA_TILE_X_K_Q8_0;
+        case GGML_TYPE_Q4_1_64: return MMQ_MMA_TILE_X_K_Q8_1;
+        case GGML_TYPE_Q5_1_64: return MMQ_MMA_TILE_X_K_Q8_1;
+        case GGML_TYPE_Q2_K_64: return MMQ_MMA_TILE_X_K_Q8_1;
+        case GGML_TYPE_Q4_K_64: return MMQ_MMA_TILE_X_K_Q8_1;
+        case GGML_TYPE_Q5_K_64: return MMQ_MMA_TILE_X_K_Q8_1;
+        case GGML_TYPE_Q3_K_64: return MMQ_MMA_TILE_X_K_Q8_0;
+        case GGML_TYPE_Q6_K_64: return MMQ_MMA_TILE_X_K_Q8_0;
+#endif
         case GGML_TYPE_Q1_0:    return MMQ_MMA_TILE_X_K_Q8_0;
         case GGML_TYPE_Q4_0:    return MMQ_MMA_TILE_X_K_Q8_0;
         case GGML_TYPE_Q4_1:    return MMQ_MMA_TILE_X_K_Q8_1;
@@ -3203,8 +3249,98 @@ static __device__ __forceinline__ void mmq_write_back_mma(
 
 // -------------------------------------------------------------------------------------------------------------------------------------
 
+#ifdef GGML_USE_REEX_Q64
+#include "reex/reex_q64_mmq.cuh"
+#include "reex/reex_q64_kquant_mmq.cuh"
+#endif
+
 template <int mmq_x, int mmq_y, bool need_check, ggml_type type>
 struct mmq_type_traits;
+
+#ifdef GGML_USE_REEX_Q64
+// symmetric block-64 types: custom load_tiles -> q8_0 tile, reuse q8_0 vec_dot.
+template <int mmq_x, int mmq_y, bool need_check>
+struct mmq_type_traits<mmq_x, mmq_y, need_check, GGML_TYPE_Q4_0_64> {
+    static constexpr int              vdr          = VDR_Q8_0_Q8_1_MMQ;
+    static constexpr load_tiles_mmq_t load_tiles   = load_tiles_q4_0_64<mmq_y, need_check>;
+    static constexpr vec_dot_mmq_t    vec_dot_mma  = vec_dot_q8_0_q8_1_mma<mmq_x, mmq_y, MMQ_Q8_1_DS_LAYOUT_D4>;
+    static constexpr vec_dot_mmq_t    vec_dot_dp4a = vec_dot_q8_0_q8_1_dp4a<mmq_x, mmq_y>;
+};
+template <int mmq_x, int mmq_y, bool need_check>
+struct mmq_type_traits<mmq_x, mmq_y, need_check, GGML_TYPE_Q5_0_64> {
+    static constexpr int              vdr          = VDR_Q8_0_Q8_1_MMQ;
+    static constexpr load_tiles_mmq_t load_tiles   = load_tiles_q5_0_64<mmq_y, need_check>;
+    static constexpr vec_dot_mmq_t    vec_dot_mma  = vec_dot_q8_0_q8_1_mma<mmq_x, mmq_y, MMQ_Q8_1_DS_LAYOUT_D4>;
+    static constexpr vec_dot_mmq_t    vec_dot_dp4a = vec_dot_q8_0_q8_1_dp4a<mmq_x, mmq_y>;
+};
+template <int mmq_x, int mmq_y, bool need_check>
+struct mmq_type_traits<mmq_x, mmq_y, need_check, GGML_TYPE_Q8_0_64> {
+    static constexpr int              vdr          = VDR_Q8_0_Q8_1_MMQ;
+    static constexpr load_tiles_mmq_t load_tiles   = load_tiles_q8_0_64<mmq_y, need_check>;
+    static constexpr vec_dot_mmq_t    vec_dot_mma  = vec_dot_q8_0_q8_1_mma<mmq_x, mmq_y, MMQ_Q8_1_DS_LAYOUT_D4>;
+    static constexpr vec_dot_mmq_t    vec_dot_dp4a = vec_dot_q8_0_q8_1_dp4a<mmq_x, mmq_y>;
+};
+template <int mmq_x, int mmq_y, bool need_check>
+struct mmq_type_traits<mmq_x, mmq_y, need_check, GGML_TYPE_Q8_1_64> {
+    static constexpr int              vdr          = VDR_Q8_0_Q8_1_MMQ;
+    static constexpr load_tiles_mmq_t load_tiles   = load_tiles_q8_1_64<mmq_y, need_check>;
+    static constexpr vec_dot_mmq_t    vec_dot_mma  = vec_dot_q8_0_q8_1_mma<mmq_x, mmq_y, MMQ_Q8_1_DS_LAYOUT_D4>;
+    static constexpr vec_dot_mmq_t    vec_dot_dp4a = vec_dot_q8_0_q8_1_dp4a<mmq_x, mmq_y>;
+};
+// asymmetric block-64 types: custom load_tiles -> q8_1 tile (raw nibbles + half2
+// (d,m)), reuse vec_dot_q8_1_q8_1 (DS4 layout w/ activation-sum carrying min).
+template <int mmq_x, int mmq_y, bool need_check>
+struct mmq_type_traits<mmq_x, mmq_y, need_check, GGML_TYPE_Q4_1_64> {
+    static constexpr int              vdr          = VDR_Q4_1_Q8_1_MMQ;
+    static constexpr load_tiles_mmq_t load_tiles   = load_tiles_q4_1_64<mmq_y, need_check>;
+    static constexpr vec_dot_mmq_t    vec_dot_mma  = vec_dot_q8_1_q8_1_mma<mmq_x, mmq_y>;
+    static constexpr vec_dot_mmq_t    vec_dot_dp4a = vec_dot_q8_1_q8_1_dp4a<mmq_x, mmq_y>;
+};
+template <int mmq_x, int mmq_y, bool need_check>
+struct mmq_type_traits<mmq_x, mmq_y, need_check, GGML_TYPE_Q5_1_64> {
+    static constexpr int              vdr          = VDR_Q5_1_Q8_1_MMQ;
+    static constexpr load_tiles_mmq_t load_tiles   = load_tiles_q5_1_64<mmq_y, need_check>;
+    static constexpr vec_dot_mmq_t    vec_dot_mma  = vec_dot_q8_1_q8_1_mma<mmq_x, mmq_y>;
+    static constexpr vec_dot_mmq_t    vec_dot_dp4a = vec_dot_q8_1_q8_1_dp4a<mmq_x, mmq_y>;
+};
+// K-quant block-64: affine (Q2/Q4/Q5_K) dequant -> q8_1 tile, reuse q8_1 vec_dot;
+// symmetric (Q3/Q6_K) dequant -> q8_0 tile (offset folded), reuse q8_0 vec_dot.
+template <int mmq_x, int mmq_y, bool need_check>
+struct mmq_type_traits<mmq_x, mmq_y, need_check, GGML_TYPE_Q4_K_64> {
+    static constexpr int              vdr          = VDR_Q4_1_Q8_1_MMQ;
+    static constexpr load_tiles_mmq_t load_tiles   = load_tiles_q4_K_64<mmq_y, need_check>;
+    static constexpr vec_dot_mmq_t    vec_dot_mma  = vec_dot_q8_1_q8_1_mma<mmq_x, mmq_y>;
+    static constexpr vec_dot_mmq_t    vec_dot_dp4a = vec_dot_q8_1_q8_1_dp4a<mmq_x, mmq_y>;
+};
+template <int mmq_x, int mmq_y, bool need_check>
+struct mmq_type_traits<mmq_x, mmq_y, need_check, GGML_TYPE_Q5_K_64> {
+    static constexpr int              vdr          = VDR_Q5_1_Q8_1_MMQ;
+    static constexpr load_tiles_mmq_t load_tiles   = load_tiles_q5_K_64<mmq_y, need_check>;
+    static constexpr vec_dot_mmq_t    vec_dot_mma  = vec_dot_q8_1_q8_1_mma<mmq_x, mmq_y>;
+    static constexpr vec_dot_mmq_t    vec_dot_dp4a = vec_dot_q8_1_q8_1_dp4a<mmq_x, mmq_y>;
+};
+template <int mmq_x, int mmq_y, bool need_check>
+struct mmq_type_traits<mmq_x, mmq_y, need_check, GGML_TYPE_Q2_K_64> {
+    static constexpr int              vdr          = VDR_Q4_1_Q8_1_MMQ;
+    static constexpr load_tiles_mmq_t load_tiles   = load_tiles_q2_K_64<mmq_y, need_check>;
+    static constexpr vec_dot_mmq_t    vec_dot_mma  = vec_dot_q8_1_q8_1_mma<mmq_x, mmq_y>;
+    static constexpr vec_dot_mmq_t    vec_dot_dp4a = vec_dot_q8_1_q8_1_dp4a<mmq_x, mmq_y>;
+};
+template <int mmq_x, int mmq_y, bool need_check>
+struct mmq_type_traits<mmq_x, mmq_y, need_check, GGML_TYPE_Q3_K_64> {
+    static constexpr int              vdr          = VDR_Q8_0_Q8_1_MMQ;
+    static constexpr load_tiles_mmq_t load_tiles   = load_tiles_q3_K_64<mmq_y, need_check>;
+    static constexpr vec_dot_mmq_t    vec_dot_mma  = vec_dot_q8_0_q8_1_mma<mmq_x, mmq_y, MMQ_Q8_1_DS_LAYOUT_D4>;
+    static constexpr vec_dot_mmq_t    vec_dot_dp4a = vec_dot_q8_0_q8_1_dp4a<mmq_x, mmq_y>;
+};
+template <int mmq_x, int mmq_y, bool need_check>
+struct mmq_type_traits<mmq_x, mmq_y, need_check, GGML_TYPE_Q6_K_64> {
+    static constexpr int              vdr          = VDR_Q8_0_Q8_1_MMQ;
+    static constexpr load_tiles_mmq_t load_tiles   = load_tiles_q6_K_64<mmq_y, need_check>;
+    static constexpr vec_dot_mmq_t    vec_dot_mma  = vec_dot_q8_0_q8_1_mma<mmq_x, mmq_y, MMQ_Q8_1_DS_LAYOUT_D4>;
+    static constexpr vec_dot_mmq_t    vec_dot_dp4a = vec_dot_q8_0_q8_1_dp4a<mmq_x, mmq_y>;
+};
+#endif // GGML_USE_REEX_Q64
 
 template <int mmq_x, int mmq_y, bool need_check>
 struct mmq_type_traits<mmq_x, mmq_y, need_check, GGML_TYPE_Q1_0> {
@@ -4077,6 +4213,19 @@ void mul_mat_q_case(ggml_backend_cuda_context & ctx, const mmq_args & args, cuda
 #define DECL_MMQ_CASE(type)                                                        \
     template void mul_mat_q_case<type>(ggml_backend_cuda_context & ctx, const mmq_args & args, cudaStream_t stream) \
 
+#ifdef GGML_USE_REEX_Q64
+extern DECL_MMQ_CASE(GGML_TYPE_Q4_0_64);
+extern DECL_MMQ_CASE(GGML_TYPE_Q5_0_64);
+extern DECL_MMQ_CASE(GGML_TYPE_Q8_0_64);
+extern DECL_MMQ_CASE(GGML_TYPE_Q8_1_64);
+extern DECL_MMQ_CASE(GGML_TYPE_Q4_1_64);
+extern DECL_MMQ_CASE(GGML_TYPE_Q5_1_64);
+extern DECL_MMQ_CASE(GGML_TYPE_Q4_K_64);
+extern DECL_MMQ_CASE(GGML_TYPE_Q5_K_64);
+extern DECL_MMQ_CASE(GGML_TYPE_Q2_K_64);
+extern DECL_MMQ_CASE(GGML_TYPE_Q3_K_64);
+extern DECL_MMQ_CASE(GGML_TYPE_Q6_K_64);
+#endif
 extern DECL_MMQ_CASE(GGML_TYPE_Q4_0);
 extern DECL_MMQ_CASE(GGML_TYPE_Q4_1);
 extern DECL_MMQ_CASE(GGML_TYPE_Q5_0);

@@ -88,6 +88,17 @@ function(ggml_add_cpu_backend_variant_impl tag_name)
             ggml-cpu/reex/reex_lut_normalized.h
             )
     endif()
+    # === REEX_Q64 BEGIN ===
+    if (GGML_USE_REEX_Q64)
+        target_compile_definitions(${GGML_CPU_NAME} PRIVATE GGML_USE_REEX_Q64)
+        target_include_directories(${GGML_CPU_NAME} PRIVATE ..)
+        list(APPEND GGML_CPU_SOURCES
+            ggml-cpu/reex/reex_q64_quants.c
+            ggml-cpu/reex/reex_q64_quants.h
+            )
+    endif()
+    # === REEX_Q64 END ===
+
     if (GGML_REEX_FP16_PIPELINE)
         target_compile_definitions(${GGML_CPU_NAME} PRIVATE GGML_REEX_FP16_PIPELINE)
     endif()
