@@ -92,14 +92,44 @@ done
 Psum 截断(Q4_K_64):off=18.29 → B=12/10/8≈18.2~18.4 → B=6=19.92 → B=4 崩溃。
 GPU(`-ngl 99`)与 CPU(`-ngl 0`)在 B=8 下均为 **18.3640**,完全对齐。
 
-TODO:
-单卡
-Qwen3.5-35B-A3B: RX_llama.cpp and llama.cpp
-不同的量化类型下的PPL
-不同截断位宽下的PPL(推荐8) 
+## 4. 实测(Qwen3.5-35B-A3B,4×4090 layer split)
 
-Later: 
-多卡
-CPU(`-ngl 0`)
+```bash
+F16=/path/Qwen3.5-35B-A3B-f16.gguf
+F=models/q64test/wikitext-2-raw/wiki.test.raw
 
+# 量化(MoE,每类型约 5~10 分钟)
+./build_cuda/bin/llama-quantize $F16 models/q64test_35b/Qwen3.5-35B-A3B-Q4_K_64.gguf Q4_K_64
 
+# 跑分(多卡)
+CUDA_VISIBLE_DEVICES=0,1,2,3 ./build_cuda/bin/llama-perplexity \
+    -m models/q64test_35b/Qwen3.5-35B-A3B-Q4_K_64.gguf -ngl 99 -f $F -c 512 --chunks 8
+```
+
+### 结果(wikitext-2,`-c 512 --chunks 8`,f16 基线 = 6.1040,65G)
+
+| 类型 | 大小 | PPL | 类型 | 大小 | PPL |
+|---|---|---|---|---|---|
+| Q8_0_64 | 34G | 6.1100 | Q6_K_64 | 26G | 6.1305 |
+| Q8_1_64 | 35G | 6.1100 | Q5_K_64 | 22G | 6.1530 |
+| Q5_0_64 | 22G | 6.1153 | Q4_K_64 | 18G | 6.4427 |
+| Q5_1_64 | 23G | 6.2120 | Q4_K_64S | 18G | 6.4983 |
+| Q4_0_64 | 18G | 6.4812 | Q3_K_64 | 6.1G | 8.0138 |
+| Q4_1_64 | 19G | 6.6158 | Q2_K_64 | 9.5G | 566.38(崩溃) |
+
+- 8/6/5-bit 近无损;4-bit 退化 ~6%;3-bit 勉强可用;2-bit 崩溃(MoE 纯 2-bit 需 imatrix)。
+- 单卡 ≡ 多卡(layer split)结果一致;`--split-mode row` 会破坏 64 元素 Psum 对齐,勿用。
+
+### 位宽截断(Q4_K_64)
+
+```bash
+M=models/q64test_35b/Qwen3.5-35B-A3B-Q4_K_64.gguf
+REEX_Q64_PSUM_BITS=8 CUDA_VISIBLE_DEVICES=0,1,2,3 ./build_cuda/bin/llama-perplexity -m $M -ngl 99 -f $F -c 512 --chunks 8  # GPU
+REEX_Q64_PSUM_BITS=8 CUDA_VISIBLE_DEVICES=""        ./build_cuda/bin/llama-perplexity -m $M -ngl 0  -f $F -c 512 --chunks 8  # CPU
+```
+
+| 配置 | PPL |
+|---|---|
+| 不截断 | 6.4427 |
+| B=8 GPU | 6.4540 |
+| B=8 CPU | 6.4768 |

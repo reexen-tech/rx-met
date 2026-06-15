@@ -52,6 +52,8 @@ ENV/
 
 # ===== 项目临时目录 =====
 /tmp/
+llama.cpp/models/q64test_35b
+/llama.cpp/models/q64test
 
 # ===== 训练 / 量化 产物 =====
 # 模型权重

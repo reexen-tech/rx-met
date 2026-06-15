@@ -47,7 +47,7 @@
 | `ggml/src/ggml-cuda/mmvq.cu` | MMVQ 分发(vec_dot / vdr / switch_type) |
 | `ggml/src/ggml-cuda/mmq.cu` | MMQ 分发 + `should_use_mmq` |
 | `ggml/src/ggml-cuda/mmq.cuh` | MMQ tile 尺寸 / `mmq_type_traits` / ds_layout |
-| `ggml/src/ggml-cuda/ggml-cuda.cu` | `supports_op`、`mul_mat` 路径分发、`get_rows` 类型白名单、fusion 门控 |
+| `ggml/src/ggml-cuda/ggml-cuda.cu` | `supports_op`(含 `MUL_MAT_ID`)、`mul_mat` 路径分发、`mul_mat_id` 分块 MMVQ(MoE)、`get_rows` 类型白名单、fusion 门控、`ggml_reex_is_q64_type` 谓词 |
 | `include/llama.h` | `llama_ftype` 新增 11 项 |
 | `src/llama-quant.cpp` | ftype→ggml_type 映射 + tensor 回退逻辑 |
 | `src/llama-model-loader.cpp` | ftype 字符串/类型映射 |
@@ -65,10 +65,13 @@
 | CUDA 反量化(cuBLAS) | ✅ | ✅ |
 | CUDA MMVQ(decode) | ✅ | ✅(标量) |
 | CUDA prefill(大 batch) | ✅ 分块 MMVQ | ✅ 分块 MMVQ |
+| CUDA `MUL_MAT_ID`(MoE,decode + prefill) | ✅ 分块 MMVQ | ✅ 分块 MMVQ |
 | CUDA `get_rows` | ✅ | ✅ |
 | 量化工具链 / GGUF | ✅ | ✅ |
 
 > prefill 不再走 MMQ:block-64 类型在 `ggml_cuda_mul_mat` 被强制路由到 CPU 对齐的 MMVQ(见下文),MMQ 内核虽仍编译但不被这些类型使用。
+>
+> **MoE(`MUL_MAT_ID`)CUDA 支持**:`supports_op` 现对 block-64 放开 `MUL_MAT_ID`(F32 激活/输出),`ggml_cuda_mul_mat_id` 把专家张量按 token 维度切成 `≤MMVQ_MAX_BATCH_SIZE(8)` 的子张量,逐块复用 CPU 对齐的 `ggml_cuda_mul_mat_vec_q`(MoE 多 token kernel,每 warp 一个 token),decode 与 prefill 都走该路径,绝不回退 MMQ / dequant→cuBLAS。融合门控 `ggml_cuda_should_fuse_mul_mat_vec_q` 对全部 14 种 block-64 关闭,确保走已验证的非融合路径。在此之前 MoE 专家因 `supports_op` 返回 false 而整块回退 CPU(权重留在 host),补齐后专家完整上 GPU。已在 Qwen3.5-35B-A3B(MoE)验证 GPU≡CPU:Q4_K_64 默认 6.41/6.43、`REEX_Q64_PSUM_BITS=8` 截断 6.473/6.477(截断后差异 <0.1%);Q8_0_64/Q6_K_64/Q4_K_64S ≈ f16;2-bit Q2_K_64 GPU 559 ≈ CPU 579(均为 2-bit 量化质量崩坏,非内核问题,数值仍对齐)。
 >
 > 对称 K-quant(`Q2_K_64S`/`Q4_K_64S`/`Q5_K_64S`)功能与 5 个非对称 K-quant 一致(CPU/反量化/MMVQ decode+prefill/get_rows/工具链/GGUF),复用 q8_K 激活、走对称分支(无 min 修正项),并因 prefill 统一走 MMVQ 而无需 MMQ 实例。子块有符号 scale 用 signed-biased 打包(int6→value+32 复用 `q64_pack4x6`;int4→value+8 新增 `q64_pack4x4`),反量化 `w = d·scale·(q−mid)`。已验证 GPU≡CPU(默认 PPL 仅小数点后第 3–4 位差异;`REEX_Q64_PSUM_BITS` 截断下同样对齐)。
 

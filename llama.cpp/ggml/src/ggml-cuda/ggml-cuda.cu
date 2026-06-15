@@ -2318,6 +2318,22 @@ static bool ggml_cuda_should_fuse_mul_mat(const ggml_tensor * ffn_up,
     return true;
 }
 
+#ifdef GGML_USE_REEX_Q64
+// True for every REEX block-64 quant type (legacy + K-quant + symmetric K-quant).
+static bool ggml_reex_is_q64_type(ggml_type t) {
+    switch (t) {
+        case GGML_TYPE_Q4_0_64: case GGML_TYPE_Q4_1_64: case GGML_TYPE_Q5_0_64:
+        case GGML_TYPE_Q5_1_64: case GGML_TYPE_Q8_0_64: case GGML_TYPE_Q8_1_64:
+        case GGML_TYPE_Q4_K_64: case GGML_TYPE_Q2_K_64: case GGML_TYPE_Q3_K_64:
+        case GGML_TYPE_Q5_K_64: case GGML_TYPE_Q6_K_64: case GGML_TYPE_Q5_K_64S:
+        case GGML_TYPE_Q4_K_64S: case GGML_TYPE_Q2_K_64S:
+            return true;
+        default:
+            return false;
+    }
+}
+#endif
+
 static bool ggml_cuda_should_fuse_mul_mat_vec_f(const ggml_tensor * tensor) {
     ggml_tensor *       src0 = tensor->src[0];
     ggml_tensor *       src1 = tensor->src[1];
@@ -2366,17 +2382,10 @@ static bool ggml_cuda_should_fuse_mul_mat_vec_q(const ggml_tensor * tensor) {
                              dst->type == GGML_TYPE_F32 && src1->ne[1] <= MMVQ_MAX_BATCH_SIZE;
 
 #ifdef GGML_USE_REEX_Q64
-    // K-quant block-64 (Phase 2): plain MMVQ is enabled, but defer the fused
-    // gate+up MMVQ path until the standalone kernel is validated. Non-fused MMVQ
-    // still runs for these via the regular mul_mat dispatch.
-    if (src0->type == GGML_TYPE_Q4_K_64 ||
-        src0->type == GGML_TYPE_Q2_K_64 ||
-        src0->type == GGML_TYPE_Q3_K_64 ||
-        src0->type == GGML_TYPE_Q5_K_64 ||
-        src0->type == GGML_TYPE_Q6_K_64 ||
-        src0->type == GGML_TYPE_Q5_K_64S ||
-        src0->type == GGML_TYPE_Q4_K_64S ||
-        src0->type == GGML_TYPE_Q2_K_64S) {
+    // block-64: plain (non-fused) MMVQ is the validated CPU-aligned path for both
+    // MUL_MAT and MUL_MAT_ID. Disable the fused gate+up MMVQ path for all block-64
+    // types so they always take the validated non-fused dispatch.
+    if (ggml_reex_is_q64_type(src0->type)) {
         return false;
     }
 #endif
@@ -2622,6 +2631,34 @@ static void ggml_cuda_mul_mat_id(ggml_backend_cuda_context & ctx, ggml_tensor * 
     // [TAG_MUL_MAT_ID_CUDA_GRAPHS]
     if (src1->type == GGML_TYPE_F32 && dst->type == GGML_TYPE_F32) {
         static_assert(MMVQ_MAX_BATCH_SIZE == MMVF_MAX_BATCH_SIZE);
+#ifdef GGML_USE_REEX_Q64
+        // === REEX_Q64 ===
+        // MoE experts for block-64 types must use the CPU-aligned MMVQ vec_dot
+        // (per-64/256 activation, 64-element integer Psum + truncation) so the
+        // GPU result matches the CPU reference. The MMVQ MoE kernel handles at
+        // most MMVQ_MAX_BATCH_SIZE tokens per launch, so chunk the token axis
+        // (src1->ne[2] / ids->ne[1] / dst->ne[2]) into <= 8-token sub-batches and
+        // reuse ggml_cuda_mul_mat_vec_q (which recomputes all strides from the
+        // tensor metadata). Never route block-64 through MMQ / dequant->cuBLAS.
+        if (ggml_reex_is_q64_type(src0->type)) {
+            ggml_reex_cuda_note_q8_mul_mat_id_dispatch(src0);
+            const int64_t n_tokens = dst->ne[2];
+            ggml_tensor src1_chunk = *src1;
+            ggml_tensor ids_chunk  = *ids;
+            ggml_tensor dst_chunk  = *dst;
+            for (int64_t t0 = 0; t0 < n_tokens; t0 += MMVQ_MAX_BATCH_SIZE) {
+                const int64_t w = (n_tokens - t0) < MMVQ_MAX_BATCH_SIZE ? (n_tokens - t0) : MMVQ_MAX_BATCH_SIZE;
+                src1_chunk.data  = (char *) src1->data + t0*src1->nb[2];
+                src1_chunk.ne[2] = w;
+                ids_chunk.data   = (char *) ids->data  + t0*ids->nb[1];
+                ids_chunk.ne[1]  = w;
+                dst_chunk.data   = (char *) dst->data  + t0*dst->nb[2];
+                dst_chunk.ne[2]  = w;
+                ggml_cuda_mul_mat_vec_q(ctx, src0, &src1_chunk, &ids_chunk, &dst_chunk, nullptr);
+            }
+            return;
+        }
+#endif
 #if defined(GGML_USE_REEX_GEMM_CUDA) && defined(GGML_REEX_GEMM_ACTIVATION_Q16)
         if (ggml_reex_cuda_try_mul_mat_id_q16(ctx, src0, src1, ids, dst)) {
             return;
@@ -5111,15 +5148,17 @@ static bool ggml_backend_cuda_device_supports_op(ggml_backend_dev_t dev, const g
 #endif
 #ifdef GGML_USE_REEX_Q64
                     // === REEX_Q64 BEGIN ===
-                    // block-64 legacy types: dequant->cuBLAS fallback only,
-                    // B == F32 and dst == F32 (no MMQ/MMVQ, no MUL_MAT_ID).
+                    // block-64 types: MUL_MAT (dense) and MUL_MAT_ID (MoE experts)
+                    // are both routed through the CPU-aligned chunked MMVQ vec_dot
+                    // (per-64/256 activation, 64-element integer Psum + truncation),
+                    // see ggml_cuda_mul_mat / ggml_cuda_mul_mat_id. Only F32
+                    // activations and F32 output are supported.
                     case GGML_TYPE_Q4_0_64:
                     case GGML_TYPE_Q8_0_64:
                     case GGML_TYPE_Q4_1_64:
                     case GGML_TYPE_Q5_0_64:
                     case GGML_TYPE_Q5_1_64:
                     case GGML_TYPE_Q8_1_64:
-                    // K-quant block-64: Phase 1 dequant->cuBLAS only (no MMQ/MMVQ yet).
                     case GGML_TYPE_Q4_K_64:
                     case GGML_TYPE_Q2_K_64:
                     case GGML_TYPE_Q3_K_64:
@@ -5128,9 +5167,6 @@ static bool ggml_backend_cuda_device_supports_op(ggml_backend_dev_t dev, const g
                     case GGML_TYPE_Q5_K_64S:
                     case GGML_TYPE_Q4_K_64S:
                     case GGML_TYPE_Q2_K_64S:
-                        if (op->op == GGML_OP_MUL_MAT_ID) {
-                            return false;
-                        }
                         if (b->type != GGML_TYPE_F32 || op->type != GGML_TYPE_F32) {
                             return false;
                         }
