@@ -49,3 +49,57 @@ REEX_Q64_PSUM_BITS=8 \
 - `-ngl 99` 走 GPU,`-ngl 0` 走 CPU,二者数值对齐(截断也对齐)。
 - `B` 粒度统一为 **64 元素 Psum**;只截断整数 Psum,min 修正项不截断。
 - 截断对所有类型、CPU 与 GPU(decode + prefill)同时生效;改 `B` 无需重新量化或重编译。
+
+
+
+## 3. 实测(qwen2.5-0.5b)
+
+```bash
+M=models/q64test/qwen2.5-0.5b-Q4_K_64.gguf
+F=models/q64test/wikitext-2-raw/wiki.test.raw
+
+# 跑分(单个类型)
+./build_cuda/bin/llama-perplexity -m $M -ngl 99 -f $F -c 512 --chunks 8
+
+# 位宽截断(B=8)
+REEX_Q64_PSUM_BITS=8 ./build_cuda/bin/llama-perplexity -m $M -ngl 99 -f $F -c 512 --chunks 8
+
+# GPU≡CPU 对齐验证(同一 B 两边结果应完全一致)
+REEX_Q64_PSUM_BITS=8 ./build_cuda/bin/llama-perplexity -m $M -ngl 99 -f $F -c 512 --chunks 8  # GPU
+REEX_Q64_PSUM_BITS=8 ./build_cuda/bin/llama-perplexity -m $M -ngl 0  -f $F -c 512 --chunks 8  # CPU
+
+# 批量对比所有类型
+for t in Q8_0_64 Q8_1_64 Q4_0_64 Q5_0_64 Q4_1_64 Q5_1_64 \
+         Q4_K_64 Q5_K_64 Q6_K_64 Q2_K_64 Q3_K_64 Q4_K_64S Q5_K_64S Q2_K_64S; do
+  ppl=$(./build_cuda/bin/llama-perplexity -m models/q64test/qwen2.5-0.5b-$t.gguf -ngl 99 \
+        -f $F -c 512 --chunks 8 2>&1 | grep -oE "PPL = [0-9.]+" | tail -1)
+  printf "%-12s %s\n" "$t" "$ppl"
+done
+```
+
+### 实测结果(wikitext-2,`-c 512 --chunks 8`,f16 基线 = 15.55)
+
+| 类型 | PPL | 类型 | PPL |
+|---|---|---|---|
+| Q8_0_64 | 15.70 | Q4_K_64 | 18.29 |
+| Q8_1_64 | 15.70 | Q5_K_64 | 16.19 |
+| Q6_K_64 | 15.72 | Q4_K_64S | 18.16 |
+| Q5_1_64 | 16.19 | Q5_K_64S | 16.83 |
+| Q5_0_64 | 16.63 | Q3_K_64 | 18.53 |
+| Q4_1_64 | 18.05 | Q2_K_64 | 25.24 |
+| Q4_0_64 | 18.21 | Q2_K_64S | 33.68 |
+
+Psum 截断(Q4_K_64):off=18.29 → B=12/10/8≈18.2~18.4 → B=6=19.92 → B=4 崩溃。
+GPU(`-ngl 99`)与 CPU(`-ngl 0`)在 B=8 下均为 **18.3640**,完全对齐。
+
+TODO:
+单卡
+Qwen3.5-35B-A3B: RX_llama.cpp and llama.cpp
+不同的量化类型下的PPL
+不同截断位宽下的PPL(推荐8) 
+
+Later: 
+多卡
+CPU(`-ngl 0`)
+
+
