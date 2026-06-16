@@ -358,6 +358,57 @@ static bool tensor_allows_quantization(const llama_model_quantize_params * param
 // tensor type selection
 //
 
+// REEX block-64 (hardware-aligned) helpers
+// -----------------------------------------------------------------------------
+// When the user selects a block-64 ftype the *entire* model must stay 64-aligned.
+// The generic type-selection logic, however, hardcodes upstream block-32/256
+// types in several special cases that are not keyed on ftype (the output tensor,
+// 8-expert attn_v / attn_k, tied token embeddings, ...). Instead of patching each
+// special case, we canonicalize the final choice at the single exit point: any
+// upstream type that has a block-64 counterpart is remapped to it. This is
+// future-proof - any new special case that emits an upstream type is caught too.
+
+static bool llama_ftype_is_reex_q64(llama_ftype ftype) {
+    switch (ftype) {
+        case LLAMA_FTYPE_MOSTLY_Q4_0_64:
+        case LLAMA_FTYPE_MOSTLY_Q8_0_64:
+        case LLAMA_FTYPE_MOSTLY_Q4_1_64:
+        case LLAMA_FTYPE_MOSTLY_Q5_0_64:
+        case LLAMA_FTYPE_MOSTLY_Q5_1_64:
+        case LLAMA_FTYPE_MOSTLY_Q8_1_64:
+        case LLAMA_FTYPE_MOSTLY_Q4_K_64:
+        case LLAMA_FTYPE_MOSTLY_Q2_K_64:
+        case LLAMA_FTYPE_MOSTLY_Q3_K_64:
+        case LLAMA_FTYPE_MOSTLY_Q5_K_64:
+        case LLAMA_FTYPE_MOSTLY_Q6_K_64:
+        case LLAMA_FTYPE_MOSTLY_Q4_K_64S:
+        case LLAMA_FTYPE_MOSTLY_Q5_K_64S:
+        case LLAMA_FTYPE_MOSTLY_Q2_K_64S:
+            return true;
+        default:
+            return false;
+    }
+}
+
+// Map an upstream (block-32/256) ggml_type to its block-64 REEX equivalent.
+// Types without a block-64 counterpart (F16/F32/IQ*/MXFP4/...) are returned as-is.
+static ggml_type llama_reex_q64_canonicalize_type(ggml_type type) {
+    switch (type) {
+        case GGML_TYPE_Q4_0: return GGML_TYPE_Q4_0_64;
+        case GGML_TYPE_Q4_1: return GGML_TYPE_Q4_1_64;
+        case GGML_TYPE_Q5_0: return GGML_TYPE_Q5_0_64;
+        case GGML_TYPE_Q5_1: return GGML_TYPE_Q5_1_64;
+        case GGML_TYPE_Q8_0: return GGML_TYPE_Q8_0_64;
+        case GGML_TYPE_Q8_1: return GGML_TYPE_Q8_1_64;
+        case GGML_TYPE_Q2_K: return GGML_TYPE_Q2_K_64;
+        case GGML_TYPE_Q3_K: return GGML_TYPE_Q3_K_64;
+        case GGML_TYPE_Q4_K: return GGML_TYPE_Q4_K_64;
+        case GGML_TYPE_Q5_K: return GGML_TYPE_Q5_K_64;
+        case GGML_TYPE_Q6_K: return GGML_TYPE_Q6_K_64;
+        default:             return type;
+    }
+}
+
 // incompatible tensor shapes are handled here - fallback to a compatible type
 static ggml_type tensor_type_fallback(quantize_state_impl & qs, const ggml_tensor * t, const ggml_type target_type) {
     ggml_type return_type = target_type;
@@ -396,6 +447,15 @@ static ggml_type tensor_type_fallback(quantize_state_impl & qs, const ggml_tenso
             case GGML_TYPE_Q5_K_64S: return_type = GGML_TYPE_Q5_0_64; break;
             case GGML_TYPE_Q4_K_64S: return_type = GGML_TYPE_Q4_0_64; break;
             case GGML_TYPE_Q2_K_64S: return_type = GGML_TYPE_Q4_0_64; break;
+            // REEX legacy block-64: already at the minimal (64) granularity. If a
+            // tensor's ncols is not even divisible by 64, no smaller block-64 type
+            // can help, so fall back to F16 (never to an upstream block-32 type).
+            case GGML_TYPE_Q4_0_64:
+            case GGML_TYPE_Q4_1_64:
+            case GGML_TYPE_Q5_0_64:
+            case GGML_TYPE_Q5_1_64:
+            case GGML_TYPE_Q8_0_64:
+            case GGML_TYPE_Q8_1_64:  return_type = GGML_TYPE_F16;       break;
             default:
                 throw std::runtime_error(format("no tensor type fallback is defined for type %s",
                                                 ggml_type_name(target_type)));
@@ -702,6 +762,16 @@ static ggml_type llama_tensor_get_type(quantize_state_impl & qs, const llama_mod
         // if not manual - use the standard logic for choosing the quantization type based on the selected mixture
         if (!manual) {
             new_type = llama_tensor_get_type_impl(qs, new_type, tensor, params->ftype, tm.category);
+
+            // REEX: keep block-64 ftypes fully 64-aligned. The generic logic above
+            // may emit upstream block-32/256 types for special-cased tensors
+            // (output, 8-expert attn_v/attn_k, tied embeddings, ...); remap any such
+            // type to its block-64 equivalent so no upstream type leaks into a
+            // hardware-aligned model. The subsequent shape fallback then stays within
+            // the block-64 family (e.g. Q6_K_64 -> Q8_0_64).
+            if (llama_ftype_is_reex_q64(params->ftype)) {
+                new_type = llama_reex_q64_canonicalize_type(new_type);
+            }
         }
 
         // incompatible tensor shapes are handled here - fallback to a compatible type
