@@ -22,6 +22,37 @@ template <bool abort_on_nan> void common_debug_print_tensor(uint8_t * data, ggml
 // in a tensor (useful for stopping debug sessions on first erroneous tensor)
 // The callback data will be passed as the third parameter (user_data)
 template <bool abort_on_nan> bool common_debug_cb_eval(struct ggml_tensor * t, bool ask, void * user_data);
+
+// ---------------------------------------------------------------------------
+// MoE golden-reference dump (for RTL "专家重排" verification).
+//
+// This dump path is compiled UNCONDITIONALLY (it is NOT gated by GGML_USE_REEX,
+// because the Q4_0_64 build only defines GGML_USE_REEX_Q64). It is gated at
+// RUNTIME, either through this configuration API (preferred, used by
+// dump_moe_prefill so the target directory can change per case) or through the
+// environment variables REEX_DUMP_MOE_ONLY=1 + REEX_DUMP_DIR (+ optional
+// REEX_DUMP_LAYER as a single-layer filter, reusing the existing semantics).
+//
+// When active, only MoE-related tensors emitted by build_moe_ffn() are dumped:
+//   ffn_moe_topk-<L>            top-k selected expert ids (i32)
+//   ffn_moe_weights-<L>         router weights (pre-norm)
+//   ffn_moe_weights_norm-<L>    router weights (normalized; used for weighting)
+//   ffn_moe_down-<L>            per-token per-expert output (unweighted)
+//   ffn_moe_weighted-<L>        per-token per-expert output (weighted)
+//   ffn_moe_out-<L>             final summed MoE output (sanity check)
+//
+// Each tensor is written as a raw `.bin` (contiguous in ggml logical order,
+// i0 fastest, runtime dtype preserved) plus a `.json` sidecar capturing the
+// tensor name, ggml dtype, type size, ne[4], nb[4] and layer index. The
+// Python post-processor turns these into normalized `.npy` artifacts.
+//
+// Set dir to a valid directory and (optionally) a list of layer indices to
+// restrict the dump. Pass layers=nullptr or n_layers<=0 to dump all layers.
+void common_debug_moe_dump_set(const char * dir, const int * layers, int n_layers);
+
+// Disable the configuration-API MoE dump (environment-variable mode, if set,
+// still applies afterwards).
+void common_debug_moe_dump_clear();
 struct base_callback_data {
     std::vector<uint8_t>    data;
     std::vector<std::regex> tensor_filters;
