@@ -8354,6 +8354,19 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
         }
     }
 
+#ifdef GGML_USE_REEX_Q64
+    // REEX block-64: validate the per-64 fixed-point MUL_MAT_ID (MoE experts) on
+    // CUDA vs the CPU reference with identical inputs. n (tokens) > 8 exercises the
+    // prefill token-chunking added to ggml_cuda_mul_mat_vec_q.
+    for (ggml_type type_a : {GGML_TYPE_Q4_0_64, GGML_TYPE_Q4_K_64}) {
+        for (int n_used : {2, 8}) {
+            for (int n : {1, 8, 17, 32, 129, 256}) {
+                test_cases.emplace_back(new test_mul_mat_id(type_a, GGML_TYPE_F32, 8, n_used, false, 512, n, 256));
+            }
+        }
+    }
+#endif
+
     for (int bs : {1, 4, 512}) {
         for (ggml_type type_a : {GGML_TYPE_F32, GGML_TYPE_F16, GGML_TYPE_Q4_0, GGML_TYPE_Q4_K}) {
             for (ggml_type type_b : {GGML_TYPE_F32}) {

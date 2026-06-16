@@ -7,6 +7,126 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <set>
+#include <string>
+#include <vector>
+
+// ---------------------------------------------------------------------------
+// MoE golden-reference dump (runtime-gated, compiled unconditionally).
+// ---------------------------------------------------------------------------
+namespace {
+
+struct moe_dump_cfg {
+    bool          active = false;  // set via common_debug_moe_dump_set()
+    std::string   dir;
+    std::set<int> layers;          // empty => all layers
+};
+
+moe_dump_cfg g_moe_dump_cfg;
+
+bool moe_env_truthy(const char * v) {
+    return v && v[0] && strcmp(v, "0") != 0;
+}
+
+// Parse "ffn_moe_down-12" -> base="ffn_moe_down", layer=12.
+// Returns false if the name has no trailing "-<digits>" suffix.
+bool moe_parse_name(const char * name, std::string & base, int & layer) {
+    const char * dash = strrchr(name, '-');
+    if (!dash || dash == name || dash[1] == '\0') {
+        return false;
+    }
+    for (const char * p = dash + 1; *p; ++p) {
+        if (*p < '0' || *p > '9') {
+            return false;
+        }
+    }
+    layer = atoi(dash + 1);
+    base.assign(name, (size_t) (dash - name));
+    return true;
+}
+
+bool moe_is_target_base(const std::string & base) {
+    return base == "ffn_moe_topk"          ||
+           base == "ffn_moe_weights"       ||
+           base == "ffn_moe_weights_norm"  ||
+           base == "ffn_moe_down"          ||
+           base == "ffn_moe_weighted"      ||
+           base == "ffn_moe_out";
+}
+
+// Write one tensor as raw `.bin` (contiguous logical order, dtype preserved)
+// plus a `.json` sidecar with shape/stride/dtype metadata.
+void moe_dump_tensor(const char * dir, const ggml_tensor * t, const uint8_t * data,
+                     int layer, const std::string & base) {
+    const size_t  ts  = ggml_type_size(t->type);
+    const int64_t ne0 = t->ne[0], ne1 = t->ne[1], ne2 = t->ne[2], ne3 = t->ne[3];
+    const int64_t n   = ne0 * ne1 * ne2 * ne3;
+
+    std::vector<uint8_t> buf((size_t) n * ts);
+    size_t out = 0;
+    for (int64_t i3 = 0; i3 < ne3; i3++) {
+        for (int64_t i2 = 0; i2 < ne2; i2++) {
+            for (int64_t i1 = 0; i1 < ne1; i1++) {
+                for (int64_t i0 = 0; i0 < ne0; i0++) {
+                    const size_t off = (size_t) i0 * t->nb[0] + (size_t) i1 * t->nb[1] +
+                                       (size_t) i2 * t->nb[2] + (size_t) i3 * t->nb[3];
+                    memcpy(buf.data() + out, data + off, ts);
+                    out += ts;
+                }
+            }
+        }
+    }
+
+    char path[1200];
+    snprintf(path, sizeof(path), "%s/%s.bin", dir, t->name);
+    if (FILE * f = fopen(path, "wb")) {
+        if (!buf.empty()) {
+            fwrite(buf.data(), 1, buf.size(), f);
+        }
+        fclose(f);
+    } else {
+        LOG_ERR("[moe-dump] failed to open %s for writing\n", path);
+        return;
+    }
+
+    snprintf(path, sizeof(path), "%s/%s.json", dir, t->name);
+    if (FILE * j = fopen(path, "w")) {
+        fprintf(j, "{\n");
+        fprintf(j, "  \"name\": \"%s\",\n", t->name);
+        fprintf(j, "  \"base\": \"%s\",\n", base.c_str());
+        fprintf(j, "  \"layer\": %d,\n", layer);
+        fprintf(j, "  \"ggml_type\": \"%s\",\n", ggml_type_name(t->type));
+        fprintf(j, "  \"ggml_type_enum\": %d,\n", (int) t->type);
+        fprintf(j, "  \"type_size\": %zu,\n", ts);
+        fprintf(j, "  \"ne\": [%lld, %lld, %lld, %lld],\n",
+                (long long) ne0, (long long) ne1, (long long) ne2, (long long) ne3);
+        fprintf(j, "  \"nb\": [%zu, %zu, %zu, %zu],\n",
+                t->nb[0], t->nb[1], t->nb[2], t->nb[3]);
+        fprintf(j, "  \"layout\": \"logical_contiguous\",\n");
+        fprintf(j, "  \"note\": \"bin is contiguous in ggml logical order (i0 fastest); numpy: frombuffer then reshape to (ne3, ne2, ne1, ne0)\"\n");
+        fprintf(j, "}\n");
+        fclose(j);
+    }
+}
+
+} // namespace
+
+void common_debug_moe_dump_set(const char * dir, const int * layers, int n_layers) {
+    g_moe_dump_cfg.active = (dir && dir[0]);
+    g_moe_dump_cfg.dir    = dir ? dir : "";
+    g_moe_dump_cfg.layers.clear();
+    if (layers && n_layers > 0) {
+        for (int i = 0; i < n_layers; i++) {
+            g_moe_dump_cfg.layers.insert(layers[i]);
+        }
+    }
+}
+
+void common_debug_moe_dump_clear() {
+    g_moe_dump_cfg.active = false;
+    g_moe_dump_cfg.dir.clear();
+    g_moe_dump_cfg.layers.clear();
+}
 
 static std::string common_ggml_ne_string(const ggml_tensor * t) {
     std::string str;
@@ -153,6 +273,49 @@ template <bool abort_on_nan> bool common_debug_cb_eval(struct ggml_tensor * t, b
         auto n_bytes = ggml_nbytes(t);
         cb_data->data.resize(n_bytes);
         ggml_backend_tensor_get(t, cb_data->data.data(), 0, n_bytes);
+    }
+
+    // --- MoE golden-reference dump (unconditional compile, runtime-gated) ---
+    // Active either via common_debug_moe_dump_set() (preferred) or via env vars
+    // REEX_DUMP_MOE_ONLY=1 + REEX_DUMP_DIR. Only MoE tensors are written here;
+    // the existing general dump below (GGML_USE_REEX) is untouched.
+    {
+        bool         moe_active = g_moe_dump_cfg.active;
+        const char * moe_dir    = moe_active ? g_moe_dump_cfg.dir.c_str() : nullptr;
+        bool         use_cfg_layers = moe_active && !g_moe_dump_cfg.layers.empty();
+
+        if (!moe_active) {
+            const char * env_only = getenv("REEX_DUMP_MOE_ONLY");
+            const char * env_dir  = getenv("REEX_DUMP_DIR");
+            if (moe_env_truthy(env_only) && env_dir && env_dir[0]) {
+                moe_active = true;
+                moe_dir    = env_dir;
+            }
+        }
+
+        if (moe_active && moe_dir && moe_dir[0] && t->name[0] && !ggml_is_quantized(t->type)) {
+            std::string base;
+            int         layer = -1;
+            if (moe_parse_name(t->name, base, layer) && moe_is_target_base(base)) {
+                bool layer_ok = true;
+                if (use_cfg_layers) {
+                    layer_ok = g_moe_dump_cfg.layers.count(layer) > 0;
+                } else {
+                    // env single-layer filter: REEX_DUMP_LAYER>=0 restricts to that layer.
+                    const char * env_layer = getenv("REEX_DUMP_LAYER");
+                    if (env_layer && env_layer[0]) {
+                        const int dl = atoi(env_layer);
+                        if (dl >= 0) {
+                            layer_ok = (dl == layer);
+                        }
+                    }
+                }
+                if (layer_ok) {
+                    const uint8_t * dptr = is_host ? (const uint8_t *) t->data : cb_data->data.data();
+                    moe_dump_tensor(moe_dir, t, dptr, layer, base);
+                }
+            }
+        }
     }
 
 #ifdef GGML_USE_REEX

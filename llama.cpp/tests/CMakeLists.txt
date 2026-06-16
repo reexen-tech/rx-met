@@ -366,6 +366,11 @@ target_include_directories(test-alloc PRIVATE ${PROJECT_SOURCE_DIR}/ggml/src)
 unset(LLAMA_TEST_NAME)
 llama_build(test-reex/eval_single_token.cpp)
 
+# MoE GPU 采数工具: 8k Prefill, dump router/expert-reorder/expert-result/un-reorder
+# tensors as golden reference for RTL 专家重排 verification (see output/README.md).
+unset(LLAMA_TEST_NAME)
+llama_build(test-reex/dump_moe_prefill.cpp)
+
 # Local TurboQuant integration (REEX) — algorithm reference (oracle).
 #   See docs/turboquant/01_设计与实现计划.md and tests/oracle/README.md.
 #   Only built when REEX_TURBOQUANT=ON; the subdirectory itself early-returns
