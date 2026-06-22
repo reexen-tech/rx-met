@@ -2,6 +2,7 @@
 !*.*
 !test-reex/
 !test-reex/**
+test-reex/results/
 test-reex/dump_single_block/
 test-reex/**/*.log
 test-reex/test.log

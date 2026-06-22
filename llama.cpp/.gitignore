@@ -26,6 +26,7 @@
 
 /.cache/
 /.ccls-cache/
+/.codegraph/
 /.direnv/
 /.envrc
 /.idea/
@@ -49,6 +50,7 @@
 /debug
 /libllama.so
 /llama-*
+/output/
 /vulkan-shaders-gen
 /rpc-server
 /out/
