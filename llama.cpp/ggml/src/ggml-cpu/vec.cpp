@@ -400,6 +400,7 @@ void ggml_vec_dot_f16(int n, float * GGML_RESTRICT s, size_t bs, ggml_fp16_t * G
 
 void ggml_vec_silu_f32(const int n, float * y, const float * x) {
     int i = 0;
+#ifndef GGML_USE_REEX
 #if defined(__AVX512F__) && defined(__AVX512DQ__)
     for (; i + 15 < n; i += 16) {
         _mm512_storeu_ps(y + i, ggml_v_silu(_mm512_loadu_ps(x + i)));
@@ -430,6 +431,7 @@ void ggml_vec_silu_f32(const int n, float * y, const float * x) {
         __riscv_vse32_v_f32m2(&y[i], vy, vl);
     }
 #endif
+#endif // GGML_USE_REEX
     for (; i < n; ++i) {
         y[i] = ggml_silu_f32(x[i]);
     }
@@ -437,6 +439,7 @@ void ggml_vec_silu_f32(const int n, float * y, const float * x) {
 
 void ggml_vec_swiglu_f32(const int n, float * y, const float * x, const float * g) {
     int i = 0;
+#ifndef GGML_USE_REEX
 #if defined(__AVX512F__) && defined(__AVX512DQ__)
     for (; i + 15 < n; i += 16) {
         _mm512_storeu_ps(y + i, _mm512_mul_ps(ggml_v_silu(_mm512_loadu_ps(x + i)), _mm512_loadu_ps(g + i)));
@@ -468,6 +471,7 @@ void ggml_vec_swiglu_f32(const int n, float * y, const float * x, const float * 
         __riscv_vse32_v_f32m2(&y[i], vy, vl);
     }
 #endif
+#endif // GGML_USE_REEX
     for (; i < n; ++i) {
         y[i] = ggml_silu_f32(x[i]) * g[i];
     }

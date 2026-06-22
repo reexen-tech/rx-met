@@ -90,7 +90,8 @@ static __device__ __forceinline__ float op_gelu_erf(float x) {
 static __device__ __forceinline__ float op_gelu_quick(float x) {
     const float GELU_QUICK_COEF = -1.702f;
 #ifdef GGML_USE_REEX
-    return x * (1.0f / (1.0f + ggml_cuda_exp_lut_mixed_fp16_reex(GELU_QUICK_COEF * x)));
+    // gelu_quick(x) = x * sigmoid(1.702*x); 1/(1+exp(COEF*x)) == sigmoid(-COEF*x)
+    return x * ggml_cuda_sigmoid_lut_mixed_fp16_reex(-GELU_QUICK_COEF * x);
 #else
     return x * (1.0f / (1.0f + expf(GELU_QUICK_COEF * x)));
 #endif

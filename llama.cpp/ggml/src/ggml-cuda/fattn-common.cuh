@@ -771,8 +771,8 @@ static __global__ void flash_attn_stream_k_fixup_uniform(
         const float diff_val = max_val - max_val_new;
         const float diff_add = tmp.x   - max_val_new;
 
-        const float scale_val = diff_val >= SOFTMAX_FTZ_THRESHOLD ? expf(diff_val) : 0.0f;
-        const float scale_add = diff_add >= SOFTMAX_FTZ_THRESHOLD ? expf(diff_add) : 0.0f;
+        const float scale_val = diff_val >= SOFTMAX_FTZ_THRESHOLD ? FATTN_EXPF(diff_val) : 0.0f;
+        const float scale_add = diff_add >= SOFTMAX_FTZ_THRESHOLD ? FATTN_EXPF(diff_add) : 0.0f;
 
         dst_val = scale_val*dst_val + scale_add*dst_add;
         rowsum  = scale_val*rowsum  + scale_add*tmp.y;
@@ -781,7 +781,11 @@ static __global__ void flash_attn_stream_k_fixup_uniform(
     }
 
     // Write back final result:
+#ifdef GGML_USE_REEX
+    *dst = dst_val * ggml_cuda_reciprocal_lut_mixed_fp16_reex(rowsum);
+#else
     *dst = dst_val / rowsum;
+#endif
 }
 
 // General fixup kernel for the case where the number of blocks per tile is not uniform across tiles
@@ -889,7 +893,11 @@ static __global__ void flash_attn_stream_k_fixup_general(
     }
 
     // Write back final result:
+#ifdef GGML_USE_REEX
+    *dst = dst_val * ggml_cuda_reciprocal_lut_mixed_fp16_reex(rowsum);
+#else
     *dst = dst_val / rowsum;
+#endif
 }
 
 template<int D> // D == head size
@@ -942,7 +950,11 @@ static __global__ void flash_attn_combine_results(
         VKQ_denominator += KQ_max_scale * meta[l].y;
     }
 
+#ifdef GGML_USE_REEX
+    dst[tid] = VKQ_numerator * ggml_cuda_reciprocal_lut_mixed_fp16_reex(VKQ_denominator);
+#else
     dst[tid] = VKQ_numerator / VKQ_denominator;
+#endif
 }
 
 template <int DV, int ncols1, int ncols2>

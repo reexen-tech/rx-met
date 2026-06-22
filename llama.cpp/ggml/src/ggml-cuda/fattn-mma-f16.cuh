@@ -1495,8 +1495,14 @@ static __device__ __forceinline__ void flash_attn_ext_f16_process_tile(
 
                         if (!needs_fixup && !is_fixup) {
                             const float KQ_rowsum_j = meta_j[1];
+#ifdef GGML_USE_REEX
+                            const float KQ_rowsum_inv = ggml_cuda_reciprocal_lut_mixed_fp16_reex(KQ_rowsum_j);
+                            dstk_val.x *= KQ_rowsum_inv;
+                            dstk_val.y *= KQ_rowsum_inv;
+#else
                             dstk_val.x /= KQ_rowsum_j;
                             dstk_val.y /= KQ_rowsum_j;
+#endif
                         }
 
                         if (is_fixup) {

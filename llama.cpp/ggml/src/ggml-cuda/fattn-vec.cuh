@@ -510,7 +510,11 @@ static __global__ void flash_attn_ext_vec(
                     }
                 }
                 if (gridDim.y == 1) {
+#ifdef GGML_USE_REEX
+                    dst_val *= ggml_cuda_reciprocal_lut_mixed_fp16_reex(KQ_sum[j_VKQ]);
+#else
                     dst_val /= KQ_sum[j_VKQ];
+#endif
                 }
                 dst[(((sequence*int(ne01.z) + ic0 + j_VKQ)*ne02 + head)*gridDim.y + blockIdx.y)*D + i0 + tid] = dst_val;
             }

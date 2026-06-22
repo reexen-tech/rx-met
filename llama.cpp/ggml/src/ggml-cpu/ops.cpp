@@ -3698,7 +3698,11 @@ static void ggml_compute_forward_norm_f32(
                 variance = ggml_vec_cvar_f32(ne00, y, x, mean);
 #endif //GGML_USE_ACCELERATE
 
+#ifdef GGML_USE_REEX
+                const float scale = ggml_rsqrt_lut_mixed_fp16_f32_REEX(variance + eps);
+#else
                 const float scale = 1.0f/sqrtf(variance + eps);
+#endif
                 ggml_vec_scale_f32(ne00, y, scale);
             }
         }
@@ -4098,7 +4102,11 @@ static void ggml_compute_forward_group_norm_f32(
                 }
             }
             const float variance = sum2 / (ne00 * ne01 * step);
+#ifdef GGML_USE_REEX
+            const float scale = ggml_rsqrt_lut_mixed_fp16_f32_REEX(variance + eps);
+#else
             const float scale = 1.0f / sqrtf(variance + eps);
+#endif
 
             for (int64_t i02 = start; i02 < end; i02++) {
                 for (int64_t i01 = 0; i01 < ne01; i01++) {
@@ -4165,7 +4173,12 @@ static void ggml_compute_forward_l2_norm_f32(
 
                 memcpy(y, x, ne00 * sizeof(float));
 
+#ifdef GGML_USE_REEX
+                // 1/max(sqrt(sum), eps) == rsqrt(max(sum, eps^2)) via the REEX rsqrt LUT
+                const float scale = ggml_rsqrt_lut_mixed_fp16_f32_REEX(fmaxf((float) sum, eps*eps));
+#else
                 const float scale = 1.0f/fmaxf(sqrtf(sum), eps);
+#endif
 
                 ggml_vec_scale_f32(ne00, y, scale);
             }
@@ -5435,7 +5448,11 @@ static void ggml_compute_forward_soft_max_f32(
                     sum += (ggml_float) GGML_EXPF(sk[i02] - max);
                 }
 
+#ifdef GGML_USE_REEX
+                sum = (ggml_float) ggml_reciprocal_lut_mixed_fp16_f32_REEX((float) sum);
+#else
                 sum = 1.0/sum;
+#endif
                 ggml_vec_scale_f32(ne00, dp, sum);
 
 #ifndef NDEBUG
@@ -5537,7 +5554,11 @@ static void ggml_compute_forward_soft_max_f16(
                     sum += (ggml_float) GGML_EXPF(sk[i02] - max);
                 }
 
+#ifdef GGML_USE_REEX
+                sum = (ggml_float) ggml_reciprocal_lut_mixed_fp16_f32_REEX((float) sum);
+#else
                 sum = 1.0/sum;
+#endif
                 ggml_vec_scale_f32(ne00, wp, sum);
 
                 for (int i = 0; i < ne00; ++i) {
@@ -8633,7 +8654,11 @@ static void ggml_compute_forward_flash_attn_ext_f16_one_chunk(
             memcpy(partial + 2, VKQ32, DV * sizeof(float));
         } else {
             // V /= S
+#ifdef GGML_USE_REEX
+            const float S_inv = S == 0.0f ? 0.0f : ggml_reciprocal_lut_mixed_fp16_f32_REEX(S);
+#else
             const float S_inv = S == 0.0f ? 0.0f : 1.0f/S;
+#endif
             ggml_vec_scale_f32(DV, VKQ32, S_inv);
 
             // dst indices
@@ -8919,7 +8944,11 @@ static void ggml_compute_forward_flash_attn_ext_tiled(
 
         for (int tq = 0; tq < tile_rows; tq++) {
             // V /= S
+#ifdef GGML_USE_REEX
+            const float S_inv = S[tq] == 0.0f ? 0.0f : ggml_reciprocal_lut_mixed_fp16_f32_REEX(S[tq]);
+#else
             const float S_inv = S[tq] == 0.0f ? 0.0f : 1.0f / S[tq];
+#endif
             ggml_vec_scale_f32(DV, VKQ32 + tq * DV, S_inv);
 
             // dst indices
@@ -8999,7 +9028,11 @@ static void ggml_flash_attn_ext_reduce_partials(
 
         // Normalize and write to output
         if (S_final != 0.0f) {
+#ifdef GGML_USE_REEX
+            const float S_inv = ggml_reciprocal_lut_mixed_fp16_f32_REEX(S_final);
+#else
             const float S_inv = 1.0f / S_final;
+#endif
             ggml_vec_scale_f32(DV, VKQ_final, S_inv);
         }
         // iq1=0, iq3=0 for decode
@@ -10774,14 +10807,14 @@ static void ggml_compute_forward_gated_delta_net_one_chunk(
             if (kda) {
                 // precompute exp(g) into delta scratch (reused below)
                 for (int64_t i = 0; i < S_v; ++i) {
-                    delta[i] = expf(g_d[i]);
+                    delta[i] = GGML_EXPF(g_d[i]);
                 }
                 // S[i][:] *= exp(g[i]) => for each row j of M: M[j][i] *= exp(g[i])
                 for (int64_t j = 0; j < S_v; ++j) {
                     ggml_vec_mul_f32(S_v, &s_out[j * S_v], &s_out[j * S_v], delta);
                 }
             } else {
-                ggml_vec_scale_f32(S_v * S_v, s_out, expf(g_d[0]));
+                ggml_vec_scale_f32(S_v * S_v, s_out, GGML_EXPF(g_d[0]));
             }
 
             // delta[j] = sum_i S[i][j] * k[i] = dot(row j of M, k)
