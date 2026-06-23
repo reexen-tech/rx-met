@@ -1,5 +1,9 @@
 #include "binary-ops.h"
 
+#ifdef GGML_USE_REEX
+#include "reex/reex_lut_normalized.h"
+#endif
+
 #if defined(GGML_USE_ACCELERATE)
 #include <Accelerate/Accelerate.h>
 
@@ -19,7 +23,13 @@ static inline float op_mul(float a, float b) {
 }
 
 static inline float op_div(float a, float b) {
+#ifdef GGML_USE_REEX
+    // Division is realized as a * reciprocal(b) through the REEX reciprocal LUT
+    // so that every division strictly matches the hardware LUT implementation.
+    return a * ggml_reciprocal_lut_mixed_fp16_f32_REEX(b);
+#else
     return a / b;
+#endif
 }
 
 template <float (*op)(float, float), typename src0_t, typename src1_t, typename dst_t>
@@ -71,9 +81,12 @@ static void apply_binary_op(const ggml_compute_params * params, ggml_tensor * ds
             vDSP_op = vDSP_vsub;
         } else if (op == op_mul) {
             vDSP_op = vDSP_vmul;
-        } else if (op == op_div) {
+        }
+#ifndef GGML_USE_REEX
+        else if (op == op_div) {
             vDSP_op = vDSP_vdiv;
         }
+#endif
     }
 #endif
 

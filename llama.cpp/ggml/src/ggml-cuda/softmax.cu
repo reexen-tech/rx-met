@@ -134,7 +134,11 @@ static __global__ void soft_max_f32(
 #endif
     }
 
+#ifdef GGML_USE_REEX
+    const float inv_sum = ggml_cuda_reciprocal_lut_mixed_fp16_reex(tmp);
+#else
     const float inv_sum = 1.0f / tmp;
+#endif
 
 #pragma unroll
     for (int col0 = 0; col0 < ncols; col0 += block_size) {
@@ -241,6 +245,11 @@ static __device__ void soft_max_f32_parallelize_cols_single_row(const float * __
     tmp_expf = block_reduce<block_reduce_method::SUM>(tmp_expf, shared_vals);
 
     // Divide dividend by global sum + store data
+#ifdef GGML_USE_REEX
+    const float inv_expf = ggml_cuda_reciprocal_lut_mixed_fp16_reex(tmp_expf);
+#else
+    const float inv_expf = 1.0f / tmp_expf;
+#endif
     for (int col = col_start; col < p.ncols;) {
 #pragma unroll
         for (int i = 0; i < n_elem_per_thread; i++) {
@@ -251,7 +260,7 @@ static __device__ void soft_max_f32_parallelize_cols_single_row(const float * __
         for (int i = 0; i < n_elem_per_thread; i++) {
             const int idx = col + i * step_size;
             if (idx < p.ncols) {
-                dst[idx] = local_vals[i] / tmp_expf;
+                dst[idx] = local_vals[i] * inv_expf;
             }
         }
         col += step_size * n_elem_per_thread;

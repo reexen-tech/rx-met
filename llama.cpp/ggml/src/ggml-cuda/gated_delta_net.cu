@@ -1,5 +1,12 @@
 #include "gated_delta_net.cuh"
 
+#ifdef GGML_USE_REEX
+#include "reex/reex_lut.cuh"
+#define GDN_EXPF(x) ggml_cuda_exp_lut_mixed_fp16_reex(x)
+#else
+#define GDN_EXPF(x) expf(x)
+#endif
+
 template <int S_v, bool KDA>
 __global__ void __launch_bounds__((ggml_cuda_get_physical_warp_size() < S_v ? ggml_cuda_get_physical_warp_size() : S_v) * 4, 2)
 gated_delta_net_cuda(const float * q,
@@ -76,7 +83,7 @@ gated_delta_net_cuda(const float * q,
         }
 
         if constexpr (!KDA) {
-            const float g_val = expf(*g_t);
+            const float g_val = GDN_EXPF(*g_t);
 
             // kv[col] = (S^T @ k)[col] = sum_i S[i][col] * k[i]
             float kv_shard = 0.0f;
@@ -109,7 +116,7 @@ gated_delta_net_cuda(const float * q,
 #pragma unroll
             for (int r = 0; r < rows_per_lane; r++) {
                 const int i = r * warp_size + lane;
-                kv_shard += expf(g_t[i]) * s_shard[r] * k_reg[r];
+                kv_shard += GDN_EXPF(g_t[i]) * s_shard[r] * k_reg[r];
             }
 
             float kv_col = warp_reduce_sum<warp_size>(kv_shard);
@@ -123,7 +130,7 @@ gated_delta_net_cuda(const float * q,
 #pragma unroll
             for (int r = 0; r < rows_per_lane; r++) {
                 const int i = r * warp_size + lane;
-                s_shard[r]  = expf(g_t[i]) * s_shard[r] + k_reg[r] * delta_col;
+                s_shard[r]  = GDN_EXPF(g_t[i]) * s_shard[r] + k_reg[r] * delta_col;
                 attn_partial += s_shard[r] * q_reg[r];
             }
 

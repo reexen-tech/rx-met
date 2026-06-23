@@ -51,7 +51,11 @@ __device__ void softmax_warp_inplace(float (&vals)[experts_per_thread], const in
 
     sum = warp_reduce_sum(sum);
 
+#ifdef GGML_USE_REEX
+    const float inv_sum = ggml_cuda_reciprocal_lut_mixed_fp16_reex(sum);
+#else
     const float inv_sum = 1.0f / sum;
+#endif
 
 #pragma unroll
     for (int i = 0; i < experts_per_thread; i++) {
@@ -243,7 +247,11 @@ __launch_bounds__(4 * WARP_SIZE, 1) __global__ void topk_moe_cuda(const float * 
     if (config.with_norm) {
         wt_sum              = warp_reduce_sum(wt_sum);
         wt_sum              = max(wt_sum, clamp_val);
+#ifdef GGML_USE_REEX
+        const float inv_sum = ggml_cuda_reciprocal_lut_mixed_fp16_reex(wt_sum);
+#else
         const float inv_sum = 1.0f / wt_sum;
+#endif
 
         for (int i = 0; i < experts_per_thread; i++) {
             output_weights[i] *= inv_sum;

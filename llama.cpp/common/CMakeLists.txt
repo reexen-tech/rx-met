@@ -131,6 +131,10 @@ if (GGML_USE_REEX)
     target_compile_definitions(${TARGET} PRIVATE GGML_USE_REEX)
 endif()
 
+if (GGML_USE_REEX_Q64)
+    target_compile_definitions(${TARGET} PRIVATE GGML_USE_REEX_Q64)
+endif()
+
 if (BUILD_SHARED_LIBS)
     set_target_properties(${TARGET} PROPERTIES POSITION_INDEPENDENT_CODE ON)
 

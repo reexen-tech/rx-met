@@ -3,8 +3,8 @@
  *
  * Usage:
  *   REEX_DUMP_DIR=<dir> REEX_DUMP_LAYER=0 \
- *       ./eval_single_token -m <model.gguf> [-t <threads>] [-p "prompt text"] \
- *       [-ctk f16|q8_0|q4_0] [-ctv f16|q8_0|q4_0]
+ *       ./eval_single_token -m <model.gguf> [-t <threads>] [-p "prompt text"] [-f prompt.txt] \
+ *       [-c ctx] [-b batch] [--n-tokens N] [-ctk f16|q8_0|q4_0] [-ctv f16|q8_0|q4_0] [-ngl N] [-fa]
  *
  * Loads model, tokenizes prompt, evaluates first batch, dumps target layer tensors
  * and final logits (final_logits.bin) for end-to-end comparison.
@@ -39,13 +39,30 @@
 #include "ggml.h"
 #include "debug.h"
 
-#include <algorithm>
+#ifdef GGML_USE_REEX_Q64
+#include "reex/ggml-reex-q64-hw-dump.h"
+#endif
+
+#include <sys/stat.h>
+#include <sys/types.h>
+#include <cerrno>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <fstream>
 #include <string>
 #include <utility>
 #include <vector>
+
+static bool make_dir(const char * path) {
+    if (!path || !path[0]) {
+        return false;
+    }
+    if (mkdir(path, 0777) == 0) {
+        return true;
+    }
+    return errno == EEXIST;
+}
 
 static ggml_type parse_kv_type(const char * s) {
     if (strcmp(s, "f32")  == 0) return GGML_TYPE_F32;
@@ -75,11 +92,37 @@ static const char * kv_type_name(ggml_type t) {
 }
 
 static void usage(const char * prog) {
-    fprintf(stderr, "Usage: %s -m <model.gguf> [-t threads] [-p \"prompt\"] [-ctk type] [-ctv type] [-ngl N] [-fa]\n", prog);
+    fprintf(stderr, "Usage: %s -m <model.gguf> [-t threads] [-p \"prompt\"] [-f prompt.txt]\n", prog);
+    fprintf(stderr, "       [-c ctx] [-b batch] [--n-tokens N] [-ctk type] [-ctv type] [-ngl N] [-fa]\n");
+    fprintf(stderr, "  -f: read prompt text from file (overrides -p)\n");
+    fprintf(stderr, "  -c: context size (default 512)\n");
+    fprintf(stderr, "  -b: max batch / ubatch for chunked prefill (default min(512, ctx))\n");
+    fprintf(stderr, "  --n-tokens: cycle tokenized prompt to exactly N tokens (Prefill length)\n");
     fprintf(stderr, "  -ctk / -ctv: KV cache type (f16, q8_0, q4_0, ...). Default: f16\n");
     fprintf(stderr, "  -ngl N: number of layers to offload to GPU (default: 999 = all)\n");
     fprintf(stderr, "  -fa: force enable Flash Attention (required for quantized V cache)\n");
     fprintf(stderr, "  env: REEX_DUMP_DIR, REEX_DUMP_LAYER, REEX_TARGET_LAYER, REEX_PRINT_CUDA_TRACE\n");
+}
+
+static std::string read_file(const char * path) {
+    std::ifstream in(path, std::ios::binary);
+    if (!in) {
+        fprintf(stderr, "ERROR: cannot read prompt file: %s\n", path);
+        exit(1);
+    }
+    return std::string((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+}
+
+static void cycle_tokens(std::vector<llama_token> & tokens, int n_target) {
+    if (n_target <= 0 || tokens.empty()) {
+        return;
+    }
+    const llama_token seed0 = tokens[0];
+    std::vector<llama_token> seed = tokens;
+    tokens.resize((size_t) n_target);
+    for (int i = 0; i < n_target; i++) {
+        tokens[i] = seed.empty() ? seed0 : seed[i % (int) seed.size()];
+    }
 }
 
 #ifdef GGML_USE_CUDA
@@ -139,8 +182,12 @@ int main(int argc, char ** argv) {
     const char * model_path = nullptr;
     int n_threads = 4;
     int n_gpu_layers = 999;
+    int n_ctx = 512;
+    int n_batch = 0;
+    int n_tokens_target = 0;
     bool force_fa = false;
     std::string prompt = "Hello";
+    const char * prompt_file = nullptr;
     ggml_type type_k = GGML_TYPE_F16;
     ggml_type type_v = GGML_TYPE_F16;
 
@@ -148,17 +195,29 @@ int main(int argc, char ** argv) {
         if (strcmp(argv[i], "-m") == 0 && i + 1 < argc) { model_path = argv[++i]; }
         else if (strcmp(argv[i], "-t") == 0 && i + 1 < argc) { n_threads = atoi(argv[++i]); }
         else if (strcmp(argv[i], "-ngl") == 0 && i + 1 < argc) { n_gpu_layers = atoi(argv[++i]); }
+        else if (strcmp(argv[i], "-c") == 0 && i + 1 < argc) { n_ctx = atoi(argv[++i]); }
+        else if (strcmp(argv[i], "-b") == 0 && i + 1 < argc) { n_batch = atoi(argv[++i]); }
+        else if (strcmp(argv[i], "--n-tokens") == 0 && i + 1 < argc) { n_tokens_target = atoi(argv[++i]); }
         else if (strcmp(argv[i], "-fa") == 0) { force_fa = true; }
+        else if (strcmp(argv[i], "-f") == 0 && i + 1 < argc) { prompt_file = argv[++i]; }
         else if (strcmp(argv[i], "-p") == 0 && i + 1 < argc) { prompt = argv[++i]; }
         else if (strcmp(argv[i], "-ctk") == 0 && i + 1 < argc) { type_k = parse_kv_type(argv[++i]); }
         else if (strcmp(argv[i], "-ctv") == 0 && i + 1 < argc) { type_v = parse_kv_type(argv[++i]); }
         else { usage(argv[0]); return 1; }
     }
     if (!model_path) { usage(argv[0]); return 1; }
+    if (prompt_file) {
+        prompt = read_file(prompt_file);
+    }
+    if (n_ctx < 1) { n_ctx = 512; }
+    if (n_batch <= 0) { n_batch = std::min(n_ctx, 512); }
+    if (n_batch > n_ctx) { n_batch = n_ctx; }
 
     const char * dump_dir = getenv("REEX_DUMP_DIR");
     if (!dump_dir || !dump_dir[0]) {
         fprintf(stderr, "WARNING: REEX_DUMP_DIR not set, no tensors will be dumped\n");
+    } else {
+        make_dir(dump_dir);
     }
 
     // Load model
@@ -172,8 +231,9 @@ int main(int argc, char ** argv) {
 
     // Create context with cb_eval for tensor dumping
     llama_context_params cparams = llama_context_default_params();
-    cparams.n_ctx    = 512;
-    cparams.n_batch  = 512;
+    cparams.n_ctx    = (uint32_t) n_ctx;
+    cparams.n_batch  = (uint32_t) n_batch;
+    cparams.n_ubatch = (uint32_t) n_batch;
     cparams.n_threads = n_threads;
     cparams.n_threads_batch = n_threads;
     cparams.type_k = type_k;
@@ -206,31 +266,50 @@ int main(int argc, char ** argv) {
                                   tokens.data(), (int)tokens.size(), true, false);
     }
     tokens.resize(n_tokens);
+    if (n_tokens_target > 0) {
+        cycle_tokens(tokens, n_tokens_target);
+        n_tokens = n_tokens_target;
+    }
+    if (n_tokens > n_ctx) {
+        fprintf(stderr, "ERROR: prompt has %d tokens but context is %d; increase -c\n", n_tokens, n_ctx);
+        llama_free(ctx);
+        llama_model_free(model);
+        return 1;
+    }
 
     fprintf(stderr, "Model: %s\n", model_path);
     fprintf(stderr, "GPU layers: %d\n", n_gpu_layers);
+    fprintf(stderr, "Context: n_ctx=%d n_batch=%d\n", n_ctx, n_batch);
     fprintf(stderr, "KV cache: K=%s  V=%s\n", kv_type_name(type_k), kv_type_name(type_v));
-    fprintf(stderr, "Prompt: \"%s\" (%d tokens)\n", prompt.c_str(), n_tokens);
+    if (prompt.size() <= 120) {
+        fprintf(stderr, "Prompt: \"%s\" (%d tokens)\n", prompt.c_str(), n_tokens);
+    } else {
+        fprintf(stderr, "Prompt: \"%.*s...\" (%d tokens)\n", 80, prompt.c_str(), n_tokens);
+    }
     if (dump_dir) {
         fprintf(stderr, "Dump dir: %s\n", dump_dir);
     }
-
-    // Evaluate using simple batch API
-    llama_batch batch = llama_batch_get_one(tokens.data(), n_tokens);
 
     fprintf(stderr, "Evaluating %d tokens...\n", n_tokens);
 #ifdef GGML_USE_CUDA
     reex_reset_cuda_trace_if_requested();
 #endif
-    int rc = llama_decode(ctx, batch);
-    if (rc != 0) {
-        fprintf(stderr, "ERROR: llama_decode failed: %d\n", rc);
-    } else {
+    int rc = 0;
+    int last_chunk = 0;
+    for (int pos = 0; pos < n_tokens && rc == 0; pos += n_batch) {
+        last_chunk = std::min(n_batch, n_tokens - pos);
+        llama_batch batch = llama_batch_get_one(tokens.data() + pos, last_chunk);
+        rc = llama_decode(ctx, batch);
+        if (rc != 0) {
+            fprintf(stderr, "ERROR: llama_decode failed at pos=%d: %d\n", pos, rc);
+        }
+    }
+    if (rc == 0) {
         fprintf(stderr, "Decode OK. Tensor dumps saved to %s\n", dump_dir ? dump_dir : "(none)");
 
         // Dump final logits (last token) — the most important end-to-end metric
         if (dump_dir && dump_dir[0]) {
-            const float * logits = llama_get_logits(ctx);
+            const float * logits = llama_get_logits_ith(ctx, last_chunk - 1);
             const int32_t n_vocab = llama_vocab_n_tokens(vocab);
             if (logits && n_vocab > 0) {
                 std::string path = std::string(dump_dir) + "/final_logits.bin";
@@ -265,5 +344,8 @@ int main(int argc, char ** argv) {
     }
     llama_free(ctx);
     llama_model_free(model);
+#ifdef GGML_USE_REEX_Q64
+    reex_q64_hw_dump_flush();
+#endif
     return rc;
 }

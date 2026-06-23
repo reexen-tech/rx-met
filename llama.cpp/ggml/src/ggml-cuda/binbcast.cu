@@ -2,6 +2,10 @@
 #include <cstdint>
 #include <utility>
 
+#ifdef GGML_USE_REEX
+#include "reex/reex_lut.cuh"
+#endif
+
 static __device__ __forceinline__ float op_repeat(const float a, const float b) {
     return b;
     GGML_UNUSED(a);
@@ -20,7 +24,11 @@ static __device__ __forceinline__ float op_mul(const float a, const float b) {
 }
 
 static __device__ __forceinline__ float op_div(const float a, const float b) {
+#ifdef GGML_USE_REEX
+    return a * ggml_cuda_reciprocal_lut_mixed_fp16_reex(b);
+#else
     return a / b;
+#endif
 }
 
 template <float (*bin_op)(const float, const float),

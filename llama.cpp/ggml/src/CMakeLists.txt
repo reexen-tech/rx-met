@@ -244,7 +244,7 @@ endif()
 # table in ggml.c. The common POD layout header is always available; only the
 # kernels compile behind GGML_USE_REEX_Q64.
 if (GGML_USE_REEX_Q64)
-    target_sources(ggml-base PRIVATE ggml-reex-q64.c)
+    target_sources(ggml-base PRIVATE ggml-reex-q64.c ggml-reex-q64-hw-dump.c)
     target_compile_definitions(ggml-base PRIVATE GGML_USE_REEX_Q64)
 endif()
 # === REEX_Q64 END ===

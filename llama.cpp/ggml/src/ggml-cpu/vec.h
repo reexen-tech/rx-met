@@ -1037,7 +1037,12 @@ inline static void ggml_vec_gelu_erf_f32(const int n, float * y, const float * x
 }
 
 inline static float ggml_gelu_quick_f32(float x) {
+#ifdef GGML_USE_REEX
+    // gelu_quick(x) = x * sigmoid(1.702*x); 1/(1+exp(COEF*x)) == sigmoid(-COEF*x)
+    return x*ggml_sigmoid_lut_mixed_fp16_f32_REEX(-GELU_QUICK_COEF*x);
+#else
     return x*(1.0f/(1.0f+expf(GELU_QUICK_COEF*x)));
+#endif
 }
 
 //inline static void ggml_vec_gelu_quick_f16(const int n, ggml_fp16_t * y, const ggml_fp16_t * x) {
@@ -1049,12 +1054,19 @@ inline static float ggml_gelu_quick_f32(float x) {
 
 #ifdef GGML_GELU_QUICK_FP16
 inline static void ggml_vec_gelu_quick_f32(const int n, float * y, const float * x) {
+#ifdef GGML_USE_REEX
+    // Prefer the REEX sigmoid LUT over the precomputed fp16 gelu-quick table.
+    for (int i = 0; i < n; ++i) {
+        y[i] = ggml_gelu_quick_f32(x[i]);
+    }
+#else
     uint16_t t;
     for (int i = 0; i < n; ++i) {
         ggml_fp16_t fp16 = GGML_CPU_FP32_TO_FP16(x[i]);
         memcpy(&t, &fp16, sizeof(uint16_t));
         y[i] = GGML_CPU_FP16_TO_FP32(ggml_table_gelu_quick_f16[t]);
     }
+#endif
 }
 #else
 inline static void ggml_vec_gelu_quick_f32(const int n, float * y, const float * x) {
@@ -1067,7 +1079,11 @@ inline static void ggml_vec_gelu_quick_f32(const int n, float * y, const float *
 inline static void ggml_vec_gelu_quick_f16(const int n, ggml_fp16_t * y, const ggml_fp16_t * x) {
     for (int i = 0; i < n; ++i) {
         float v = GGML_CPU_FP16_TO_FP32(x[i]);
+#ifdef GGML_USE_REEX
+        y[i] = GGML_CPU_FP32_TO_FP16(v*ggml_sigmoid_lut_mixed_fp16_f32_REEX(-GELU_QUICK_COEF*v));
+#else
         y[i] = GGML_CPU_FP32_TO_FP16(v*(1.0f/(1.0f+expf(GELU_QUICK_COEF*v))));
+#endif
     }
 }
 
@@ -1496,7 +1512,7 @@ inline static void ggml_vec_swiglu_f16(const int n, ggml_fp16_t * y, const ggml_
     for (int i = 0; i < n; ++i) {
         float xi = GGML_CPU_FP16_TO_FP32(x[i]);
         float gi = GGML_CPU_FP16_TO_FP32(g[i]);
-        y[i] = GGML_CPU_FP32_TO_FP16((xi/(1.0f + expf(-xi))) * gi);
+        y[i] = GGML_CPU_FP32_TO_FP16(ggml_silu_f32(xi) * gi);
     }
 }
 
@@ -1517,12 +1533,19 @@ inline static void ggml_vec_geglu_erf_f16(const int n, ggml_fp16_t * y, const gg
 
 #ifdef GGML_GELU_QUICK_FP16
 inline static void ggml_vec_geglu_quick_f32(const int n, float * y, const float * x, const float * g) {
+#ifdef GGML_USE_REEX
+    // Prefer the REEX sigmoid LUT over the precomputed fp16 gelu-quick table.
+    for (int i = 0; i < n; ++i) {
+        y[i] = ggml_gelu_quick_f32(x[i]) * g[i];
+    }
+#else
     uint16_t t;
     for (int i = 0; i < n; ++i) {
         ggml_fp16_t fp16 = GGML_CPU_FP32_TO_FP16(x[i]);
         memcpy(&t, &fp16, sizeof(uint16_t));
         y[i] = GGML_CPU_FP16_TO_FP32(ggml_table_gelu_quick_f16[t]) * g[i];
     }
+#endif
 }
 #else
 inline static void ggml_vec_geglu_quick_f32(const int n, float * y, const float * x, const float * g) {
@@ -1533,10 +1556,16 @@ inline static void ggml_vec_geglu_quick_f32(const int n, float * y, const float 
 #endif
 
 inline static void ggml_vec_geglu_quick_f16(const int n, ggml_fp16_t * y, const ggml_fp16_t * x, const ggml_fp16_t * g) {
+#ifndef GGML_USE_REEX
     const uint16_t * i16 = (const uint16_t *) x;
+#endif
     for (int i = 0; i < n; ++i) {
         float v = GGML_CPU_FP16_TO_FP32(g[i]);
+#ifdef GGML_USE_REEX
+        y[i] = GGML_CPU_FP32_TO_FP16(ggml_gelu_quick_f32(GGML_CPU_FP16_TO_FP32(x[i])) * v);
+#else
         y[i] = GGML_CPU_FP32_TO_FP16(GGML_CPU_FP16_TO_FP32(ggml_table_gelu_quick_f16[i16[i]]) * v);
+#endif
     }
 }
 

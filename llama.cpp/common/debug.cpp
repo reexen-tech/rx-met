@@ -3,6 +3,10 @@
 #include "log.h"
 #include "ggml.h"
 
+#ifdef GGML_USE_REEX_Q64
+#include "reex/ggml-reex-q64-hw-dump.h"
+#endif
+
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -242,6 +246,19 @@ template <bool abort_on_nan> bool common_debug_cb_eval(struct ggml_tensor * t, b
     const struct ggml_tensor * src1 = t->src[1];
 
     if (ask) {
+#ifdef GGML_USE_REEX_Q64
+        {
+            const reex_q64_hw_dump_cfg * hw = reex_q64_hw_dump_get_cfg();
+            if (hw->active && t->name[0] &&
+                (t->op == GGML_OP_MUL_MAT || t->op == GGML_OP_MUL_MAT_ID)) {
+                const char * dash = strrchr(t->name, '-');
+                const int layer = (dash && dash[1]) ? atoi(dash + 1) : -1;
+                if (reex_q64_hw_dump_should_record(t->name, layer, hw->token)) {
+                    reex_q64_hw_dump_matmul_begin(t->name, layer);
+                }
+            }
+        }
+#endif
         return true;  // Always retrieve data
     }
 
@@ -274,6 +291,47 @@ template <bool abort_on_nan> bool common_debug_cb_eval(struct ggml_tensor * t, b
         cb_data->data.resize(n_bytes);
         ggml_backend_tensor_get(t, cb_data->data.data(), 0, n_bytes);
     }
+
+#ifdef GGML_USE_REEX_Q64
+    {
+        const reex_q64_hw_dump_cfg * hw = reex_q64_hw_dump_get_cfg();
+        if (hw->active && t->name[0] &&
+            (t->op == GGML_OP_MUL_MAT || t->op == GGML_OP_MUL_MAT_ID)) {
+            const char * dash = strrchr(t->name, '-');
+            const int layer = (dash && dash[1]) ? atoi(dash + 1) : -1;
+            if (reex_q64_hw_dump_should_record(t->name, layer, hw->token)) {
+                std::vector<uint8_t> w_buf;
+                std::vector<uint8_t> a_buf;
+                std::vector<float>   o_buf;
+                const void * wp = nullptr;
+                const void * ap = nullptr;
+                const float * op = nullptr;
+                int64_t wbytes = 0;
+                int64_t abytes = 0;
+                int64_t on = ggml_nelements(t);
+                if (src0) {
+                    wbytes = (int64_t) ggml_nbytes(src0);
+                    w_buf.resize((size_t) wbytes);
+                    ggml_backend_tensor_get(src0, w_buf.data(), 0, (size_t) wbytes);
+                    wp = w_buf.data();
+                }
+                if (src1) {
+                    abytes = (int64_t) ggml_nbytes(src1);
+                    a_buf.resize((size_t) abytes);
+                    ggml_backend_tensor_get(src1, a_buf.data(), 0, (size_t) abytes);
+                    ap = a_buf.data();
+                }
+                if (t->type == GGML_TYPE_F32 && on > 0) {
+                    o_buf.resize((size_t) on);
+                    const uint8_t * dptr = is_host ? (const uint8_t *) t->data : cb_data->data.data();
+                    memcpy(o_buf.data(), dptr, (size_t) on * sizeof(float));
+                    op = o_buf.data();
+                }
+                reex_q64_hw_dump_matmul_end(t->name, layer, wp, wbytes, ap, abytes, op, on);
+            }
+        }
+    }
+#endif
 
     // --- MoE golden-reference dump (unconditional compile, runtime-gated) ---
     // Active either via common_debug_moe_dump_set() (preferred) or via env vars

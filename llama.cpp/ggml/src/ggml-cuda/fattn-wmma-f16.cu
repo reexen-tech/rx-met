@@ -474,7 +474,11 @@ static __global__ void flash_attn_ext_f16(
             }
             float dst_val = VKQ[j_VKQ*D_padded + i];
             if (gridDim.y == 1) {
+#ifdef GGML_USE_REEX
+                dst_val *= ggml_cuda_reciprocal_lut_mixed_fp16_reex(KQ_rowsum_j);
+#else
                 dst_val /= KQ_rowsum_j;
+#endif
             }
             dst[j_dst_unrolled*D + i] = dst_val;
         }

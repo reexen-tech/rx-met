@@ -26,6 +26,8 @@ extern "C" {
 // reex_q64_psum_trunc_b() from ggml-reex-q64-common.h.
 int reex_q64_psum_bits(void);
 
+#include "reex/ggml-reex-q64-hw-dump.h"
+
 // row reference (de)quantizers
 void quantize_row_q4_0_64_ref(const float * GGML_RESTRICT x, block_q4_0_64 * GGML_RESTRICT y, int64_t k);
 void dequantize_row_q4_0_64(const block_q4_0_64 * GGML_RESTRICT x, float * GGML_RESTRICT y, int64_t k);
