@@ -180,6 +180,7 @@ if (CUDAToolkit_FOUND)
         # block-64 legacy quant: CUDA dequant->cuBLAS path. Header-only kernels
         # in reex/reex_q64_dequant.cuh, guarded by GGML_USE_REEX_Q64.
         target_compile_definitions(ggml-cuda PRIVATE GGML_USE_REEX_Q64)
+        list(APPEND GGML_SOURCES_CUDA reex/reex_q64_hw_dump.cu)
     endif()
 
     if (GGML_USE_REEX)

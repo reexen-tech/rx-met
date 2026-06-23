@@ -20,6 +20,7 @@
 
 #include "../common.cuh"
 #include "reex/ggml-reex-q64-common.h"
+#include "reex_q64_hw_dump.cuh"
 
 // One thread owns the whole 64-element block: vdr = qi.
 #define QI4_0_64 8
@@ -76,7 +77,9 @@ static __device__ __forceinline__ float vec_dot_q4_0_64_q8_1(
     const int    sumi = reex_q64_psum_trunc_b(sumi0 + sumi1, reex_q64_psum_bits_dev);
     const float  d    = reex_q64_h2f(bq->d);
     const float2 ds0  = __half22float2(b0->ds); // ds0.x == ds1.x (per-64 scale)
-    return d * ds0.x * sumi;
+    const float  out  = d * ds0.x * sumi;
+    reex_q64_hw_dump_try_record(sumi0 + sumi1, sumi, out);
+    return out;
 }
 
 // === Q4_1_64 : asymmetric 4-bit, w = d*q + m ===============================
