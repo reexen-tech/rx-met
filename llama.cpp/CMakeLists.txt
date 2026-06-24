@@ -132,6 +132,9 @@ if (REEX_TURBOQUANT)
     message(STATUS "REEX_TURBOQUANT is ON — local TurboQuant integration will be built")
 endif()
 
+# Standalone GPU GEMM quant-sweep datagen tool (tools/reex-gemm-datagen/).
+option(REEX_GEMM_DATAGEN "llama: build the REEX GEMM datagen tool (needs GGML_CUDA + GGML_USE_REEX_Q64)" OFF)
+
 
 # Required for relocatable CMake package
 include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/build-info.cmake)
