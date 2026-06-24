@@ -26,6 +26,7 @@
 #include "ggml-cuda/getrows.cuh"
 #include "ggml-cuda/im2col.cuh"
 #include "ggml-cuda/mmf.cuh"
+#include "ggml-cuda/mmid.cuh"
 #include "ggml-cuda/mmq.cuh"
 #include "ggml-cuda/mmvf.cuh"
 #include "ggml-cuda/mmvq.cuh"
@@ -2642,6 +2643,62 @@ static void ggml_cuda_mul_mat_id(ggml_backend_cuda_context & ctx, ggml_tensor * 
         // tensor metadata). Never route block-64 through MMQ / dequant->cuBLAS.
         if (ggml_reex_is_q64_type(src0->type)) {
             ggml_reex_cuda_note_q8_mul_mat_id_dispatch(src0);
+
+            // Golden-reference capture for RTL "专家重排" verification, gated by
+            // REEX_DUMP_MMID_DIR. During the SAME real prefill we dump, straight
+            // from the live tensors:
+            //   <name>.router.bin         the routing table `ids`  [n_tokens, n_expert_used]
+            //   <name>.ids_dst.bin        mm_ids_helper expert-major row -> token*K+slot
+            //   <name>.expert_bounds.bin  per-expert segment offsets [n_experts+1]
+            // ids_dst/expert_bounds are produced by ggml's REAL mm_ids_helper
+            // (the exact routine the MMQ path uses), so this is a genuine capture
+            // of llama.cpp's reorder, internally consistent with the router we
+            // dump alongside it. The MMVQ compute below is unaffected.
+            {
+                const char * mmid_dir = getenv("REEX_DUMP_MMID_DIR");
+                if (mmid_dir && mmid_dir[0] && ids && dst->name[0]) {
+                    cudaStream_t mmid_stream = ctx.stream();
+                    const int64_t n_expert_used = ids->ne[0];
+                    const int64_t ne_get_rows   = ne12 * n_expert_used;
+                    ggml_cuda_pool_alloc<int32_t> mmid_src1(ctx.pool(), ne_get_rows);
+                    ggml_cuda_pool_alloc<int32_t> mmid_dst (ctx.pool(), ne_get_rows);
+                    ggml_cuda_pool_alloc<int32_t> mmid_bounds(ctx.pool(), ne02 + 1);
+                    const int si1  = ids->nb[1] / ggml_element_size(ids);
+                    const int sis1 = nb12 / nb11;
+                    ggml_cuda_launch_mm_ids_helper((const int32_t *) ids->data,
+                        mmid_src1.get(), mmid_dst.get(), mmid_bounds.get(),
+                        (int) ne02, (int) ne12, (int) n_expert_used, (int) ne11, si1, sis1, mmid_stream);
+                    CUDA_CHECK(cudaGetLastError());
+
+                    std::vector<int32_t> h_router((size_t) ne12 * n_expert_used);
+                    std::vector<int32_t> h_dst(ne_get_rows), h_bounds(ne02 + 1);
+                    // router: strided device copy -> contiguous [n_tokens, n_expert_used]
+                    CUDA_CHECK(cudaMemcpy2DAsync(
+                        h_router.data(), n_expert_used * sizeof(int32_t),
+                        ids->data, ids->nb[1],
+                        n_expert_used * sizeof(int32_t), ne12,
+                        cudaMemcpyDeviceToHost, mmid_stream));
+                    CUDA_CHECK(cudaMemcpyAsync(h_dst.data(),    mmid_dst.get(),    ne_get_rows*sizeof(int32_t), cudaMemcpyDeviceToHost, mmid_stream));
+                    CUDA_CHECK(cudaMemcpyAsync(h_bounds.data(), mmid_bounds.get(), (ne02+1)*sizeof(int32_t),    cudaMemcpyDeviceToHost, mmid_stream));
+                    CUDA_CHECK(cudaStreamSynchronize(mmid_stream));
+
+                    char path[1280];
+                    auto wr = [&](const char * suffix, const void * p, size_t bytes) {
+                        snprintf(path, sizeof(path), "%s/%s.%s.bin", mmid_dir, dst->name, suffix);
+                        if (FILE * f = fopen(path, "wb")) { if (bytes) fwrite(p, 1, bytes, f); fclose(f); }
+                    };
+                    wr("router",        h_router.data(), h_router.size()*sizeof(int32_t));
+                    wr("ids_dst",       h_dst.data(),    ne_get_rows*sizeof(int32_t));
+                    wr("expert_bounds", h_bounds.data(), (ne02+1)*sizeof(int32_t));
+                    snprintf(path, sizeof(path), "%s/%s.mmid.json", mmid_dir, dst->name);
+                    if (FILE * jf = fopen(path, "w")) {
+                        fprintf(jf, "{\"name\":\"%s\",\"n_experts\":%lld,\"n_tokens\":%lld,\"n_expert_used\":%lld,\"si1\":%d}\n",
+                            dst->name, (long long) ne02, (long long) ne12, (long long) n_expert_used, si1);
+                        fclose(jf);
+                    }
+                }
+            }
+
             const int64_t n_tokens = dst->ne[2];
             ggml_tensor src1_chunk = *src1;
             ggml_tensor ids_chunk  = *ids;
