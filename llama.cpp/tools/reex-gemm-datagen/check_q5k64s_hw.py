@@ -60,7 +60,7 @@ for m in range(ROWS):
 
 # ---- validate FP16 source tiling: de-tile src, compare to dequant blocks ----
 #      (wrong tiling formula -> O(1) random error; correct -> only quant error)
-asrc = np.fromfile(f"{D}/act_src_f16.bin", dtype=np.float16).astype(np.float32)
+asrc = np.fromfile(f"{D}/act_src_F16.bin", dtype=np.float16).astype(np.float32)
 Asrc = np.zeros((ROWS, K), np.float32)
 for m in range(ROWS):
     for kg in range(K // AG):

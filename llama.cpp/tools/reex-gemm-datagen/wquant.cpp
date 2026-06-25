@@ -19,6 +19,18 @@ static void q8_0_64_encode(const float * W, void * blocks, int64_t N, int64_t K)
     quantize_row_q8_0_64_ref(W, (block_q8_0_64 *) blocks, N * K);
 }
 
+// q4_0_64 — symmetric W4: w = d*(q-8), q in [0,15], nibble-interleaved
+//   (elem e<32 -> qs[e]&0xF, e>=32 -> qs[e-32]>>4). d = max/-8.
+static void q4_0_64_encode(const float * W, void * blocks, int64_t N, int64_t K) {
+    quantize_row_q4_0_64_ref(W, (block_q4_0_64 *) blocks, N * K);
+}
+
+// q8_1_64s — symmetric W8 carrying a running sum s = d*sum(qs) (HW format field;
+//   not used by the symmetric dot). qs sequential int8, w = d*q.
+static void q8_1_64s_encode(const float * W, void * blocks, int64_t N, int64_t K) {
+    quantize_row_q8_1_64_ref(W, (block_q8_1_64 *) blocks, N * K);
+}
+
 // Q5_K_64S — symmetric K-quant W5. block_q5_K_64S = { d; scales[4]; qh[32]; qs[128] }.
 //   sc = unpack4x6(scales,j) - 32,  w = d * sc * (q5 - 16),  q5 in [0,31].
 static void q5k64s_encode(const float * W, void * blocks, int64_t N, int64_t K) {
@@ -30,6 +42,11 @@ static const WQuantType g_registry[] = {
     { "Q6_K_64",  Family::Kquant, 6, false, sizeof(block_q6_K_64),  QK_K_64, 8, q6k64_encode },
     { "Q5_K_64S", Family::Kquant, 5, false, sizeof(block_q5_K_64S), QK_K_64, 6, q5k64s_encode },
     { "q8_0_64",  Family::Legacy, 8, false, sizeof(block_q8_0_64),  64,      0, q8_0_64_encode },
+    { "q8_1_64s", Family::Legacy, 8, false, sizeof(block_q8_1_64),  64,      0, q8_1_64s_encode },
+    { "q4_0_64",  Family::Legacy, 4, false, sizeof(block_q4_0_64),  64,      0, q4_0_64_encode },
+    // IntBlock — pure integer GEMM, NO scale. block = [16x16]=256 raw int8.
+    // (handled by the dedicated int path in intgemm.cu; encode unused)
+    { "W8_16",    Family::IntBlock, 8, false, 256,                  16,      0, nullptr },
 };
 static const int g_registry_n = (int) (sizeof(g_registry) / sizeof(g_registry[0]));
 

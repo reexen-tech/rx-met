@@ -1,4 +1,5 @@
 #include "dumper.h"
+#include "fp8.h"
 
 #include "ggml.h"
 
@@ -31,17 +32,6 @@ static void write_bin(const std::string & path, const void * data, size_t bytes)
     fclose(f);
 }
 
-// element size of the output dtype (bytes)
-static size_t out_elem_size(OutDType d) {
-    switch (d) {
-        case OutDType::F16:  return 2;
-        case OutDType::BF16: return 2;
-        case OutDType::I16:  return 2;
-        case OutDType::I8:   return 1;
-    }
-    return 4;
-}
-
 std::string dump_case(
     const std::string & out_root, const GemmCase & c,
     const TilingSpec & ts, const WQuantType & wt,
@@ -50,7 +40,7 @@ std::string dump_case(
     const std::vector<uint8_t> & a_blocks,
     const std::vector<float> & A_src,
     const std::vector<float> & W_src,
-    const std::vector<float> & C_gpu_tiled,
+    const std::vector<uint8_t> * out_bufs,
     const std::vector<float> & C_ref_tiled,
     const CaseError & err) {
 
@@ -71,21 +61,31 @@ std::string dump_case(
     write_bin(dir + "/weight_blocks.bin", w_blocks, w_blocks_bytes);
     write_bin(dir + "/act_blocks.bin", a_blocks.data(), a_blocks.size());
 
-    // ---- FP16 source inputs (pre-quant), §4.1 tile order (same tiling as the
-    //      quantized blocks): each quant block expands to its Kt fp16 elements.
+    // ---- source inputs (pre-quant), §4.1 tile order (same tiling as the quantized
+    //      blocks). Activation is stored in its NATIVE act_in dtype; weight as fp16.
     //        act:    slot = act_group_slot(m, k/Kt)*Kt + k%Kt     tile [Mt x Kt]
     //        weight: slot = weight_block_slot(n, k/Kt)*Kt + k%Kt  tile [Nt x Kt]
+    const int    asrc_esz = act_src_elem_bytes(c.act_in);
+    const char * asrc_nm  = actdtype_name(c.act_in);
     {
         const int agroup = ts.agroup;            // act quant group == Kt
         const int wK     = wt.elems_per_block;   // weight quant block K-size == Kt
 
-        std::vector<ggml_fp16_t> a16((size_t) (M * K));
+        std::vector<uint8_t> asrc((size_t) (M * K) * asrc_esz);
         for (int64_t m = 0; m < M; ++m)
             for (int64_t k = 0; k < K; ++k) {
                 const int64_t slot = act_group_slot(m, k / agroup, M, K, ts) * agroup + (k % agroup);
-                a16[(size_t) slot] = ggml_fp32_to_fp16(A_src[(size_t) (m * K + k)]);
+                const float   v    = A_src[(size_t) (m * K + k)];
+                uint8_t * dst = asrc.data() + (size_t) slot * asrc_esz;
+                switch (c.act_in) {
+                    case ActDType::F32:  { std::memcpy(dst, &v, 4); } break;
+                    case ActDType::F16:  { ggml_fp16_t h = ggml_fp32_to_fp16(v); std::memcpy(dst, &h, 2); } break;
+                    case ActDType::BF16: { ggml_bf16_t h = ggml_fp32_to_bf16(v); std::memcpy(dst, &h, 2); } break;
+                    case ActDType::E5M2: { dst[0] = fp8_encode(v, fp8_e5m2()); } break;
+                    case ActDType::E4M3: { dst[0] = fp8_encode(v, fp8_e4m3()); } break;
+                }
             }
-        write_bin(dir + "/act_src_f16.bin", a16.data(), a16.size() * sizeof(ggml_fp16_t));
+        write_bin(dir + "/act_src_" + asrc_nm + ".bin", asrc.data(), asrc.size());
 
         std::vector<ggml_fp16_t> w16((size_t) (N * K));
         for (int64_t n = 0; n < N; ++n)
@@ -96,49 +96,15 @@ std::string dump_case(
         write_bin(dir + "/weight_src_f16.bin", w16.data(), w16.size() * sizeof(ggml_fp16_t));
     }
 
-    // ---- output_<dtype>.bin: cast C_gpu in place (already result tile order) ----
-    const size_t esz = out_elem_size(c.out);
-    std::vector<uint8_t> obuf((size_t) (M * N) * esz);
-    std::vector<float>   out_scale; // only for I16/I8 (per-row)
-
-    auto put = [&](int64_t idx, const void * src) {
-        std::memcpy(obuf.data() + (size_t) idx * esz, src, esz);
-    };
-
-    if (c.out == OutDType::F16 || c.out == OutDType::BF16) {
-        for (int64_t i = 0; i < M * N; ++i) {
-            const float v = C_gpu_tiled[i];
-            if (c.out == OutDType::F16) { ggml_fp16_t h = ggml_fp32_to_fp16(v); put(i, &h); }
-            else                        { ggml_bf16_t h = ggml_fp32_to_bf16(v); put(i, &h); }
-        }
-    } else { // I16 / I8 per-row symmetric (gather row m from result tile order)
-        const int qmax = (c.out == OutDType::I16) ? 32767 : 127;
-        out_scale.resize((size_t) M);
-        for (int64_t m = 0; m < M; ++m) {
-            float amax = 0.0f;
-            for (int64_t n = 0; n < N; ++n)
-                amax = std::fmax(amax, std::fabs(C_gpu_tiled[result_tiled_index(m, n, M, ts)]));
-            const float scale = amax > 0.0f ? amax / (float) qmax : 1.0f;
-            const float inv   = amax > 0.0f ? (float) qmax / amax : 0.0f;
-            out_scale[m] = scale;
-            for (int64_t n = 0; n < N; ++n) {
-                const int64_t idx = result_tiled_index(m, n, M, ts);
-                int q = (int) std::lrintf(C_gpu_tiled[idx] * inv);
-                if (q >  qmax) q =  qmax;
-                if (q < -qmax) q = -qmax;
-                if (c.out == OutDType::I16) { int16_t v16 = (int16_t) q; put(idx, &v16); }
-                else                        { int8_t  v8  = (int8_t)  q; put(idx, &v8); }
-            }
-        }
+    // ---- outputs: produced IN-CHIP by the GEMM kernel's OutConv (all 6 dtypes,
+    //      result tile order, NO scale). Dumper just writes the buffers verbatim.
+    {
+        int nsp; const OutSpec * sp = out_specs(nsp);
+        for (int s = 0; s < nsp; ++s)
+            write_bin(dir + "/output_" + sp[s].name + ".bin", out_bufs[s].data(), out_bufs[s].size());
     }
 
-    char outname[64];
-    snprintf(outname, sizeof(outname), "/output_%s.bin", outdtype_name(c.out));
-    write_bin(dir + outname, obuf.data(), obuf.size());
-    if (!out_scale.empty())
-        write_bin(dir + "/out_scale_f32.bin", out_scale.data(), out_scale.size() * sizeof(float));
-
-    // ---- golden (§4.1 result tile order, same as output) ----
+    // ---- golden (§4.1 result tile order, real-valued reference) ----
     write_bin(dir + "/golden_f32.bin", C_ref_tiled.data(), C_ref_tiled.size() * sizeof(float));
 
     // ---- meta.json (self-describing: every entry carries a one-line _doc,
@@ -147,15 +113,14 @@ std::string dump_case(
         const int64_t Mtiles = M / ts.Mt, Ntiles = N / ts.Nt, Ktiles = K / ts.Kt;
         const int64_t n_wblk = N * K / wt.elems_per_block;
         const int     agroup = ts.agroup;
-        const size_t  act_stride = (size_t) act_block_bytes(ts);     // 2 + agroup
+        const size_t  act_stride = (size_t) act_block_bytes(ts, c.A_bits); // 2 + agroup*elem
         const int64_t n_ablk = M * K / agroup;
         const size_t  w_bb   = n_wblk ? (size_t) (w_blocks_bytes / n_wblk) : 0;
-        const size_t  out_bytes  = (size_t) (M * N) * esz;
         const size_t  gold_bytes = (size_t) (M * N) * sizeof(float);
         const size_t  act_bytes  = a_blocks.size();
-        const size_t  asrc_bytes = (size_t) (M * K) * sizeof(ggml_fp16_t);
+        const size_t  asrc_bytes = (size_t) (M * K) * asrc_esz;
         const size_t  wsrc_bytes = (size_t) (N * K) * sizeof(ggml_fp16_t);
-        const char *  out_nm     = outdtype_name(c.out);
+        const char *  aqs_ct = c.A_bits > 8 ? "i16" : "i8";       // act qs container
         FILE * j = fopen((dir + "/meta.json").c_str(), "w");
         if (j) {
             fprintf(j,
@@ -168,7 +133,7 @@ std::string dump_case(
                 "  },\n"
                 "  \"quant\": {\n"
                 "    \"weight_type\": \"%s\", \"weight_family\": \"%s\", \"weight_bits\": %d, \"weight_has_min\": %s,\n"
-                "    \"act_input_dtype\": \"%s\", \"act_compute_bits\": %d, \"output_dtype\": \"%s\",\n"
+                "    \"act_input_dtype\": \"%s\", \"act_compute_bits\": %d, \"output_dtypes\": \"F16,BF16,I16,I8,I6,I4\",\n"
                 "    \"psum_trunc_bits\": %d, \"_psum_doc\": \"0 = no integer-Psum truncation\", \"seed\": %llu\n"
                 "  },\n"
                 "  \"tiling\": {\n"
@@ -178,9 +143,9 @@ std::string dump_case(
                 "    \"Mtiles\": %lld, \"Ntiles\": %lld, \"Ktiles\": %lld\n"
                 "  },\n"
                 "  \"files\": {\n"
-                "    \"act_src_f16.bin\": {\n"
-                "      \"_doc\": \"FP16 source activation A[M,K] BEFORE int8 quant, §4.1 tile order [Mt x Kt] (same tiling as act_blocks)\",\n"
-                "      \"dtype\": \"f16\", \"total_bytes\": %zu, \"shape\": [%lld, %lld], \"tile\": [%d, %d],\n"
+                "    \"act_src_%s.bin\": {\n"
+                "      \"_doc\": \"native-dtype source activation A[M,K] BEFORE int quant, §4.1 tile order [Mt x Kt] (same tiling as act_blocks)\",\n"
+                "      \"dtype\": \"%s\", \"elem_bytes\": %d, \"total_bytes\": %zu, \"shape\": [%lld, %lld], \"tile\": [%d, %d],\n"
                 "      \"elem_index\": \"idx(m,k) = ((m/Mt*Ktiles + k/Kt)*Mt + m%%Mt)*Kt + k%%Kt\"\n"
                 "    },\n"
                 "    \"weight_src_f16.bin\": {\n"
@@ -196,21 +161,22 @@ std::string dump_case(
                 "      \"block_index\": \"slot(n,sb) = (sb*Ntiles + n/Nt)*Nt + n%%Nt   for sb in [0,Ktiles), n in [0,N)\"\n"
                 "    },\n"
                 "    \"act_blocks.bin\": {\n"
-                "      \"_doc\": \"int8 activations A[M,K], one contiguous quant group per block (1 scale + agroup int8)\",\n"
-                "      \"struct\": \"{ f16 d; i8 qs[agroup] }\", \"total_bytes\": %zu, \"block_bytes\": %zu, \"num_blocks\": %lld,\n"
+                "      \"_doc\": \"int activations A[M,K], one contiguous quant group per block (1 fp16 scale + agroup intX, X=A_bits container)\",\n"
+                "      \"struct\": \"{ f16 d; %s qs[agroup] }\", \"act_bits\": %d, \"total_bytes\": %zu, \"block_bytes\": %zu, \"num_blocks\": %lld,\n"
                 "      \"block_covers\": \"m=1 act-row x %d K-elems (one quant group)\",\n"
-                "      \"byte_layout\": \"d:f16; qs:i8[%d]\",\n"
+                "      \"byte_layout\": \"d:f16; qs:%s[%d]\",\n"
                 "      \"block_index\": \"slot(m,kg) = (m/Mt*Ktiles + kg)*Mt + m%%Mt   for kg in [0,K/%d), agroup==Kt\"\n"
                 "    },\n"
-                "    \"output_%s.bin\": {\n"
-                "      \"_doc\": \"GPU result C[M,N], element tile order (de-tile with elem_index)\",\n"
-                "      \"dtype\": \"%s\", \"total_bytes\": %zu, \"shape\": [%lld, %lld],\n"
+                "    \"output_<DT>.bin\": {\n"
+                "      \"_doc\": \"GPU result C[M,N] converted to each DT in [F16,BF16,I16,I8,I6,I4]; element tile order. NO scale. float=fp cast (round-to-nearest); int=hardware FP->INT round-half-to-even then saturate. I6/I4 in int8 container\",\n"
+                "      \"dtypes\": [\"F16\",\"BF16\",\"I16\",\"I8\",\"I6\",\"I4\"], \"int_saturate\": {\"I16\":[-32768,32767],\"I8\":[-128,127],\"I6\":[-32,31],\"I4\":[-8,7]},\n"
+                "      \"shape\": [%lld, %lld],\n"
                 "      \"elem_index\": \"idx(m,n) = (n/Nt*Mtiles + m/Mt)*(Mt*Nt) + (m%%Mt)*Nt + n%%Nt\"\n"
                 "    },\n"
                 "    \"golden_f32.bin\": {\n"
-                "      \"_doc\": \"CPU integer-MAC reference C[M,N], same order as output\",\n"
+                "      \"_doc\": \"CPU reference C[M,N] (real-valued), same order as output\",\n"
                 "      \"dtype\": \"f32\", \"total_bytes\": %zu, \"shape\": [%lld, %lld],\n"
-                "      \"elem_index\": \"same as output_%s.bin\"\n"
+                "      \"elem_index\": \"same as output_<DT>.bin\"\n"
                 "    }\n"
                 "  },\n"
                 "  \"verify\": {\n"
@@ -221,22 +187,22 @@ std::string dump_case(
                 c.name.c_str(),
                 (long long) M, (long long) N, (long long) K,
                 wt.name, family_name(wt.family), wt.W_bits, wt.has_min ? "true" : "false",
-                actdtype_name(c.act_in), c.A_bits, out_nm,
+                actdtype_name(c.act_in), c.A_bits,
                 c.psum_bits, (unsigned long long) c.seed,
                 ts.Mt, ts.Nt, ts.Kt, ts.agroup, ts.wgroup,
                 (long long) Mtiles, (long long) Ntiles, (long long) Ktiles,
-                // act_src_f16.bin / weight_src_f16.bin
-                asrc_bytes, (long long) M, (long long) K, ts.Mt, ts.Kt,
+                // act_src_<dt>.bin / weight_src_f16.bin
+                asrc_nm, asrc_nm, asrc_esz, asrc_bytes, (long long) M, (long long) K, ts.Mt, ts.Kt,
                 wsrc_bytes, (long long) N, (long long) K, ts.Nt, ts.Kt,
                 // weight_blocks.bin
                 wt.name, (size_t) w_blocks_bytes, w_bb, (long long) n_wblk,
                 wt.elems_per_block, w_layout_desc,
                 // act_blocks.bin
-                act_bytes, act_stride, (long long) n_ablk,
-                agroup, agroup, agroup,
-                // output / golden
-                out_nm, out_nm, out_bytes, (long long) M, (long long) N,
-                gold_bytes, (long long) M, (long long) N, out_nm,
+                aqs_ct, c.A_bits, act_bytes, act_stride, (long long) n_ablk,
+                agroup, aqs_ct, agroup, agroup,
+                // output_<DT> / golden
+                (long long) M, (long long) N,
+                gold_bytes, (long long) M, (long long) N,
                 err.max_abs, err.max_rel, err.mse);
             fclose(j);
         }
