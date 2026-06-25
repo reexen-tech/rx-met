@@ -58,6 +58,42 @@ void golden_cpu_symmetric(int wtype_id,
                 }
                 C_ref_tiled[result_tiled_index(m, n, M, ts)] = (float) acc;
             }
+    } else if (wt.family == Family::Kquant && std::strcmp(wt.name, "Q4_K_64S") == 0) {
+        const block_q4_K_64S * wb = (const block_q4_K_64S *) w_blocks;
+        const int64_t sb_per_row = K / QK_K_64;
+        for (int64_t m = 0; m < M; ++m)
+            for (int64_t n = 0; n < N; ++n) {
+                double acc = 0.0;
+                for (int64_t sb = 0; sb < sb_per_row; ++sb) {
+                    const block_q4_K_64S & w = wb[weight_block_slot(n, sb, N, ts)];
+                    acc += (double) rgd_q4k64s_dot_superblock(w, a_blocks.data(), m, sb, M, K, ts, A_bits, psum_bits);
+                }
+                C_ref_tiled[result_tiled_index(m, n, M, ts)] = (float) acc;
+            }
+    } else if (wt.family == Family::Kquant && std::strcmp(wt.name, "Q3_K_64") == 0) {
+        const block_q3_K_64 * wb = (const block_q3_K_64 *) w_blocks;
+        const int64_t sb_per_row = K / QK_K_64;
+        for (int64_t m = 0; m < M; ++m)
+            for (int64_t n = 0; n < N; ++n) {
+                double acc = 0.0;
+                for (int64_t sb = 0; sb < sb_per_row; ++sb) {
+                    const block_q3_K_64 & w = wb[weight_block_slot(n, sb, N, ts)];
+                    acc += (double) rgd_q3k64_dot_superblock(w, a_blocks.data(), m, sb, M, K, ts, A_bits, psum_bits);
+                }
+                C_ref_tiled[result_tiled_index(m, n, M, ts)] = (float) acc;
+            }
+    } else if (wt.family == Family::Kquant && std::strcmp(wt.name, "Q2_K_64S") == 0) {
+        const block_q2_K_64S * wb = (const block_q2_K_64S *) w_blocks;
+        const int64_t sb_per_row = K / QK_K_64;
+        for (int64_t m = 0; m < M; ++m)
+            for (int64_t n = 0; n < N; ++n) {
+                double acc = 0.0;
+                for (int64_t sb = 0; sb < sb_per_row; ++sb) {
+                    const block_q2_K_64S & w = wb[weight_block_slot(n, sb, N, ts)];
+                    acc += (double) rgd_q2k64s_dot_superblock(w, a_blocks.data(), m, sb, M, K, ts, A_bits, psum_bits);
+                }
+                C_ref_tiled[result_tiled_index(m, n, M, ts)] = (float) acc;
+            }
     } else if (wt.family == Family::Legacy && std::strcmp(wt.name, "q4_0_64") == 0) {
         const block_q4_0_64 * wb = (const block_q4_0_64 *) w_blocks;
         const int64_t kb_per_row = K / 64;
@@ -119,6 +155,33 @@ static void dequant_weight_full(int wtype_id, const void * w_blocks,
         for (int64_t n = 0; n < N; ++n)
             for (int64_t sb = 0; sb < sb_per_row; ++sb) {
                 dequantize_row_q5_K_64S(&wb[weight_block_slot(n, sb, N, ts)], tmp.data(), QK_K_64);
+                std::copy(tmp.begin(), tmp.end(), Wf.begin() + (size_t) (n * K + sb * QK_K_64));
+            }
+    } else if (wt.family == Family::Kquant && std::strcmp(wt.name, "Q4_K_64S") == 0) {
+        const block_q4_K_64S * wb = (const block_q4_K_64S *) w_blocks;
+        const int64_t sb_per_row = K / QK_K_64;
+        std::vector<float> tmp(QK_K_64);
+        for (int64_t n = 0; n < N; ++n)
+            for (int64_t sb = 0; sb < sb_per_row; ++sb) {
+                dequantize_row_q4_K_64S(&wb[weight_block_slot(n, sb, N, ts)], tmp.data(), QK_K_64);
+                std::copy(tmp.begin(), tmp.end(), Wf.begin() + (size_t) (n * K + sb * QK_K_64));
+            }
+    } else if (wt.family == Family::Kquant && std::strcmp(wt.name, "Q3_K_64") == 0) {
+        const block_q3_K_64 * wb = (const block_q3_K_64 *) w_blocks;
+        const int64_t sb_per_row = K / QK_K_64;
+        std::vector<float> tmp(QK_K_64);
+        for (int64_t n = 0; n < N; ++n)
+            for (int64_t sb = 0; sb < sb_per_row; ++sb) {
+                dequantize_row_q3_K_64(&wb[weight_block_slot(n, sb, N, ts)], tmp.data(), QK_K_64);
+                std::copy(tmp.begin(), tmp.end(), Wf.begin() + (size_t) (n * K + sb * QK_K_64));
+            }
+    } else if (wt.family == Family::Kquant && std::strcmp(wt.name, "Q2_K_64S") == 0) {
+        const block_q2_K_64S * wb = (const block_q2_K_64S *) w_blocks;
+        const int64_t sb_per_row = K / QK_K_64;
+        std::vector<float> tmp(QK_K_64);
+        for (int64_t n = 0; n < N; ++n)
+            for (int64_t sb = 0; sb < sb_per_row; ++sb) {
+                dequantize_row_q2_K_64S(&wb[weight_block_slot(n, sb, N, ts)], tmp.data(), QK_K_64);
                 std::copy(tmp.begin(), tmp.end(), Wf.begin() + (size_t) (n * K + sb * QK_K_64));
             }
     } else if (wt.family == Family::Legacy && std::strcmp(wt.name, "q4_0_64") == 0) {

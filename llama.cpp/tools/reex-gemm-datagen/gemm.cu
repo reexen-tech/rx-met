@@ -62,6 +62,75 @@ __global__ void kernel_gemm_q5k64s(
     rgd_write_all_f32(outs, oidx, acc);
 }
 
+// K-quant Q2_K_64S (symmetric W2): one block_q2_K_64S per super-block (256).
+__global__ void kernel_gemm_q2k64s(
+    const block_q2_K_64S * __restrict__ w_blocks,
+    const uint8_t * __restrict__ a_blocks,
+    float * __restrict__ C, OutBufs outs,
+    int64_t M, int64_t N, int64_t K,
+    TilingSpec ts, int A_bits, int psum_bits) {
+
+    const int64_t n = (int64_t) blockIdx.x * blockDim.x + threadIdx.x;
+    const int64_t m = (int64_t) blockIdx.y * blockDim.y + threadIdx.y;
+    if (m >= M || n >= N) return;
+
+    const int64_t sb_per_row = K / QK_K_64;
+    float acc = 0.0f;
+    for (int64_t sb = 0; sb < sb_per_row; ++sb) {
+        const block_q2_K_64S & w = w_blocks[weight_block_slot(n, sb, N, ts)];
+        acc += rgd_q2k64s_dot_superblock(w, a_blocks, m, sb, M, K, ts, A_bits, psum_bits);
+    }
+    const int64_t oidx = result_tiled_index(m, n, M, ts);
+    C[oidx] = acc;
+    rgd_write_all_f32(outs, oidx, acc);
+}
+
+// K-quant Q3_K_64 (signed W3): one block_q3_K_64 per super-block (256).
+__global__ void kernel_gemm_q3k64(
+    const block_q3_K_64 * __restrict__ w_blocks,
+    const uint8_t * __restrict__ a_blocks,
+    float * __restrict__ C, OutBufs outs,
+    int64_t M, int64_t N, int64_t K,
+    TilingSpec ts, int A_bits, int psum_bits) {
+
+    const int64_t n = (int64_t) blockIdx.x * blockDim.x + threadIdx.x;
+    const int64_t m = (int64_t) blockIdx.y * blockDim.y + threadIdx.y;
+    if (m >= M || n >= N) return;
+
+    const int64_t sb_per_row = K / QK_K_64;
+    float acc = 0.0f;
+    for (int64_t sb = 0; sb < sb_per_row; ++sb) {
+        const block_q3_K_64 & w = w_blocks[weight_block_slot(n, sb, N, ts)];
+        acc += rgd_q3k64_dot_superblock(w, a_blocks, m, sb, M, K, ts, A_bits, psum_bits);
+    }
+    const int64_t oidx = result_tiled_index(m, n, M, ts);
+    C[oidx] = acc;
+    rgd_write_all_f32(outs, oidx, acc);
+}
+
+// K-quant Q4_K_64S (symmetric W4): one block_q4_K_64S per super-block (256).
+__global__ void kernel_gemm_q4k64s(
+    const block_q4_K_64S * __restrict__ w_blocks,
+    const uint8_t * __restrict__ a_blocks,
+    float * __restrict__ C, OutBufs outs,
+    int64_t M, int64_t N, int64_t K,
+    TilingSpec ts, int A_bits, int psum_bits) {
+
+    const int64_t n = (int64_t) blockIdx.x * blockDim.x + threadIdx.x;
+    const int64_t m = (int64_t) blockIdx.y * blockDim.y + threadIdx.y;
+    if (m >= M || n >= N) return;
+
+    const int64_t sb_per_row = K / QK_K_64;
+    float acc = 0.0f;
+    for (int64_t sb = 0; sb < sb_per_row; ++sb) {
+        const block_q4_K_64S & w = w_blocks[weight_block_slot(n, sb, N, ts)];
+        acc += rgd_q4k64s_dot_superblock(w, a_blocks, m, sb, M, K, ts, A_bits, psum_bits);
+    }
+    const int64_t oidx = result_tiled_index(m, n, M, ts);
+    C[oidx] = acc;
+    rgd_write_all_f32(outs, oidx, acc);
+}
+
 // Legacy q8_0_64 (symmetric W8): one block_q8_0_64 per K-block (64 elements).
 __global__ void kernel_gemm_q8_0_64(
     const block_q8_0_64 * __restrict__ w_blocks,
@@ -171,6 +240,15 @@ void gemm_run_host(
     } else if (wt.family == Family::Kquant && strcmp(wt.name, "Q5_K_64S") == 0) {
         kernel_gemm_q5k64s<<<grid, block>>>(
             (const block_q5_K_64S *) d_w, d_a, d_C, outs, M, N, K, ts, A_bits, psum_bits);
+    } else if (wt.family == Family::Kquant && strcmp(wt.name, "Q2_K_64S") == 0) {
+        kernel_gemm_q2k64s<<<grid, block>>>(
+            (const block_q2_K_64S *) d_w, d_a, d_C, outs, M, N, K, ts, A_bits, psum_bits);
+    } else if (wt.family == Family::Kquant && strcmp(wt.name, "Q3_K_64") == 0) {
+        kernel_gemm_q3k64<<<grid, block>>>(
+            (const block_q3_K_64 *) d_w, d_a, d_C, outs, M, N, K, ts, A_bits, psum_bits);
+    } else if (wt.family == Family::Kquant && strcmp(wt.name, "Q4_K_64S") == 0) {
+        kernel_gemm_q4k64s<<<grid, block>>>(
+            (const block_q4_K_64S *) d_w, d_a, d_C, outs, M, N, K, ts, A_bits, psum_bits);
     } else if (wt.family == Family::Legacy && strcmp(wt.name, "q4_0_64") == 0) {
         kernel_gemm_q4_0_64<<<grid, block>>>(
             (const block_q4_0_64 *) d_w, d_a, d_C, outs, M, N, K, ts, A_bits, psum_bits);

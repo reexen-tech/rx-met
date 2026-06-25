@@ -19,8 +19,8 @@ static void q8_0_64_encode(const float * W, void * blocks, int64_t N, int64_t K)
     quantize_row_q8_0_64_ref(W, (block_q8_0_64 *) blocks, N * K);
 }
 
-// q4_0_64 — symmetric W4: w = d*(q-8), q in [0,15], nibble-interleaved
-//   (elem e<32 -> qs[e]&0xF, e>=32 -> qs[e-32]>>4). d = max/-8.
+// q4_0_64 — symmetric W4: w = d*q, q signed 4-bit [-8,7] two's complement,
+//   nibble-interleaved (elem e<32 -> qs[e]&0xF, e>=32 -> qs[e-32]>>4). d = -max/8.
 static void q4_0_64_encode(const float * W, void * blocks, int64_t N, int64_t K) {
     quantize_row_q4_0_64_ref(W, (block_q4_0_64 *) blocks, N * K);
 }
@@ -32,15 +32,37 @@ static void q8_1_64s_encode(const float * W, void * blocks, int64_t N, int64_t K
 }
 
 // Q5_K_64S — symmetric K-quant W5. block_q5_K_64S = { d; scales[4]; qh[32]; qs[128] }.
-//   sc = unpack4x6(scales,j) - 32,  w = d * sc * (q5 - 16),  q5 in [0,31].
+//   sc = unpack4x6_s(scales,j),  w = d * sc * q5,  q5/sc signed two's complement.
 static void q5k64s_encode(const float * W, void * blocks, int64_t N, int64_t K) {
     quantize_row_q5_K_64S_ref(W, (block_q5_K_64S *) blocks, N * K);
+}
+
+// Q2_K_64S — symmetric K-quant W2. block_q2_K_64S = { d; scales[2]; qs[64] }.
+//   sc = unpack4x4_s(scales,j),  w = d * sc * q2,  q2 signed 2-bit / sc signed 4-bit.
+static void q2k64s_encode(const float * W, void * blocks, int64_t N, int64_t K) {
+    quantize_row_q2_K_64S_ref(W, (block_q2_K_64S *) blocks, N * K);
+}
+
+// Q3_K_64 — signed K-quant W3. block_q3_K_64 = { d; hmask[32]; qs[64]; scales[4] }.
+//   sc = unpack4x6_s(scales,j),  w = d * sc * q3,  q3 signed 3-bit (low2 in qs,
+//   sign bit in hmask) / sc signed 6-bit, all two's complement.
+static void q3k64_encode(const float * W, void * blocks, int64_t N, int64_t K) {
+    quantize_row_q3_K_64_ref(W, (block_q3_K_64 *) blocks, N * K);
+}
+
+// Q4_K_64S — symmetric K-quant W4. block_q4_K_64S = { d; scales[4]; qs[128] }.
+//   sc = unpack4x6_s(scales,j),  w = d * sc * q4,  q4 signed 4-bit / sc signed 6-bit.
+static void q4k64s_encode(const float * W, void * blocks, int64_t N, int64_t K) {
+    quantize_row_q4_K_64S_ref(W, (block_q4_K_64S *) blocks, N * K);
 }
 
 static const WQuantType g_registry[] = {
     //  name        family          W_bits has_min block_bytes              Kt       scale_bits encode
     { "Q6_K_64",  Family::Kquant, 6, false, sizeof(block_q6_K_64),  QK_K_64, 8, q6k64_encode },
     { "Q5_K_64S", Family::Kquant, 5, false, sizeof(block_q5_K_64S), QK_K_64, 6, q5k64s_encode },
+    { "Q4_K_64S", Family::Kquant, 4, false, sizeof(block_q4_K_64S), QK_K_64, 6, q4k64s_encode },
+    { "Q3_K_64",  Family::Kquant, 3, false, sizeof(block_q3_K_64),  QK_K_64, 6, q3k64_encode },
+    { "Q2_K_64S", Family::Kquant, 2, false, sizeof(block_q2_K_64S), QK_K_64, 4, q2k64s_encode },
     { "q8_0_64",  Family::Legacy, 8, false, sizeof(block_q8_0_64),  64,      0, q8_0_64_encode },
     { "q8_1_64s", Family::Legacy, 8, false, sizeof(block_q8_1_64),  64,      0, q8_1_64s_encode },
     { "q4_0_64",  Family::Legacy, 4, false, sizeof(block_q4_0_64),  64,      0, q4_0_64_encode },
@@ -73,8 +95,9 @@ size_t wquant_hw_block_bytes(int id) {
     return (size_t) ((bits + 7) / 8);
 }
 
-// Extract one reex super-block into raw unsigned codes[256] + signed sub_scale[4]
-// + glb scale d. Bit layouts copied from the reex vec_dots.
+// Extract one reex super-block into raw codes[256] (signed two's-complement bit
+// patterns, W_bits wide) + signed sub_scale[4] + glb scale d. The raw code bits are
+// passed straight through to the HW bitstream; bit layouts mirror the reex vec_dots.
 static void kq_extract_block(const WQuantType & t, const void * blk,
                              uint8_t codes[256], int8_t subsc[4], ggml_fp16_t & d) {
     if (std::strcmp(t.name, "Q6_K_64") == 0) {
@@ -87,24 +110,55 @@ static void kq_extract_block(const WQuantType & t, const void * blk,
             for (int e = 0; e < 64; ++e) {
                 const int low4 = (ql[e >> 1] >> (4 * (e & 1))) & 0xF;
                 const int hi2  = (qh[e >> 2] >> (2 * (e & 3))) & 3;
-                codes[s * 64 + e] = (uint8_t) (low4 | (hi2 << 4));   // 0..63
+                codes[s * 64 + e] = (uint8_t) (low4 | (hi2 << 4));   // signed 6-bit (two's complement)
             }
         }
     } else if (std::strcmp(t.name, "Q5_K_64S") == 0) {
         const block_q5_K_64S * b = (const block_q5_K_64S *) blk;
         d = b->d;
         for (int s = 0; s < 4; ++s) {
-            const uint32_t u = (uint32_t) b->scales[0] | ((uint32_t) b->scales[1] << 8) |
-                               ((uint32_t) b->scales[2] << 16);
-            subsc[s] = (int8_t) (((int) ((u >> (6 * s)) & 0x3F)) - 32);
+            subsc[s] = (int8_t) q64_unpack4x6_s(s, b->scales); // signed 6-bit two's complement
             const uint8_t * q  = b->qs + s * 32;
             const uint8_t * qh = b->qh + s * 8;
             for (int l = 0; l < 32; ++l) {
                 const int hb0 = (qh[l >> 3] >> (l & 7)) & 1;
-                codes[s * 64 + l]      = (uint8_t) ((q[l] & 0xF) | (hb0 << 4));  // 0..31
+                codes[s * 64 + l]      = (uint8_t) ((q[l] & 0xF) | (hb0 << 4));  // signed 5-bit (two's complement)
                 const int e   = l + 32;
                 const int hb1 = (qh[e >> 3] >> (e & 7)) & 1;
                 codes[s * 64 + e]      = (uint8_t) ((q[l] >> 4) | (hb1 << 4));
+            }
+        }
+    } else if (std::strcmp(t.name, "Q4_K_64S") == 0) {
+        const block_q4_K_64S * b = (const block_q4_K_64S *) blk;
+        d = b->d;
+        for (int s = 0; s < 4; ++s) {
+            subsc[s] = (int8_t) q64_unpack4x6_s(s, b->scales); // signed 6-bit two's complement
+            const uint8_t * q = b->qs + s * 32;
+            for (int l = 0; l < 32; ++l) {
+                codes[s * 64 + l]      = (uint8_t) (q[l] & 0xF);  // signed 4-bit (two's complement)
+                codes[s * 64 + l + 32] = (uint8_t) (q[l] >> 4);
+            }
+        }
+    } else if (std::strcmp(t.name, "Q3_K_64") == 0) {
+        const block_q3_K_64 * b = (const block_q3_K_64 *) blk;
+        d = b->d;
+        for (int s = 0; s < 4; ++s) {
+            subsc[s] = (int8_t) q64_unpack4x6_s(s, b->scales); // signed 6-bit two's complement
+            for (int ii = 0; ii < 64; ++ii) {
+                const int e    = s * 64 + ii;
+                const int low2 = (b->qs[e >> 2] >> (2 * (e & 3))) & 3;
+                const int hbit = (b->hmask[e >> 3] >> (e & 7)) & 1;
+                codes[e] = (uint8_t) (low2 | (hbit << 2));  // signed 3-bit (two's complement)
+            }
+        }
+    } else if (std::strcmp(t.name, "Q2_K_64S") == 0) {
+        const block_q2_K_64S * b = (const block_q2_K_64S *) blk;
+        d = b->d;
+        for (int s = 0; s < 4; ++s) {
+            subsc[s] = (int8_t) q64_unpack4x4_s(s, b->scales); // signed 4-bit two's complement
+            for (int ii = 0; ii < 64; ++ii) {
+                const int e = s * 64 + ii;
+                codes[e] = (uint8_t) ((b->qs[e >> 2] >> (2 * (e & 3))) & 3);  // signed 2-bit (two's complement)
             }
         }
     }
