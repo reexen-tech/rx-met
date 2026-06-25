@@ -3,8 +3,8 @@
 // Strategy (same trick Q5_0/Q1_0 already use): dequantize the block-64 weights
 // into the q8_0 MMQ shared-memory tile (signed int8 quants + one fp32 scale per
 // 32-element subblock), then reuse the q8_0 MMA/dp4a vec_dot (D4 activation
-// layout, no activation-sum needed because the -8/-16 offsets are folded into
-// the stored int8 values). The asymmetric types (Q4_1_64/Q5_1_64) instead store
+// layout, no activation-sum needed because the signed quants sign-extend directly
+// into int8, no zero-point). The asymmetric types (Q4_1_64/Q5_1_64) instead store
 // RAW nibbles + a half2 (d,m) scale into the q8_1 tile and reuse the
 // vec_dot_q8_1_q8_1_{mma,dp4a} kernels (the activation-sum term carries the min).
 //
@@ -137,8 +137,9 @@ template <int mmq_y, bool need_check> static __device__ __forceinline__ void loa
         }
         const block_q4_0_64 * bxi = (const block_q4_0_64 *) x + kbx0 + i*stride + kbx;
         const int vqs = get_int_b2(bxi->qs, kqsx);
-        const int qlo = __vsubss4((vqs >> 0) & 0x0F0F0F0F, 0x08080808);
-        const int qhi = __vsubss4((vqs >> 4) & 0x0F0F0F0F, 0x08080808);
+        // signed 4-bit two's complement -> sign-extend per byte: (n^8)-8
+        const int qlo = __vsubss4(((vqs >> 0) & 0x0F0F0F0F) ^ 0x08080808, 0x08080808);
+        const int qhi = __vsubss4(((vqs >> 4) & 0x0F0F0F0F) ^ 0x08080808, 0x08080808);
         REEX_Q64_QS(i, 2*kbx + 0, kqsx) = qlo;
         REEX_Q64_QS(i, 2*kbx + 1, kqsx) = qhi;
     }
@@ -179,8 +180,9 @@ template <int mmq_y, bool need_check> static __device__ __forceinline__ void loa
         const int vqs = get_int_b2(bxi->qs, kqsx);
         int qlo = reex_q64_mmq_add5((vqs >> 0) & 0x0F0F0F0F, qhl >> (4*kqsx));
         int qhi = reex_q64_mmq_add5((vqs >> 4) & 0x0F0F0F0F, qhh >> (4*kqsx));
-        qlo = __vsubss4(qlo, 0x10101010); // subtract 16
-        qhi = __vsubss4(qhi, 0x10101010);
+        // signed 5-bit two's complement -> sign-extend per byte: (n^0x10)-0x10
+        qlo = __vsubss4(qlo ^ 0x10101010, 0x10101010);
+        qhi = __vsubss4(qhi ^ 0x10101010, 0x10101010);
         REEX_Q64_QS(i, 2*kbx + 0, kqsx) = qlo;
         REEX_Q64_QS(i, 2*kbx + 1, kqsx) = qhi;
     }

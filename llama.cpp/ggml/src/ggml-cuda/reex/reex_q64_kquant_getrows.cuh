@@ -58,12 +58,13 @@ static __device__ __forceinline__ float q64k_deq_elem_q2_K_64(const block_q2_K_6
 
 static __device__ __forceinline__ float q64k_deq_elem_q3_K_64(const block_q3_K_64 * b, int j) {
     const int sb = j / 64, l = j % 64;
-    const int sc = q64k_unpack4x6(sb, b->scales) - 32;
+    const int sc = q64_unpack4x6_s(sb, b->scales);
     const uint8_t * qs = b->qs    + sb*16;
     const uint8_t * hm = b->hmask + sb*8;
     const int low2 = (qs[l >> 2] >> (2*(l & 3))) & 3;
     const int hbit = (hm[l >> 3] >> (l & 7)) & 1;
-    return q64_h2f(b->d)*sc*((low2 | (hbit << 2)) - 4);
+    const int u3 = low2 | (hbit << 2);
+    return q64_h2f(b->d)*sc*((u3 ^ 0x4) - 0x4); // sign-extend signed 3-bit
 }
 
 static __device__ __forceinline__ float q64k_deq_elem_q5_K_64(const block_q5_K_64 * b, int j) {
@@ -84,34 +85,35 @@ static __device__ __forceinline__ float q64k_deq_elem_q6_K_64(const block_q6_K_6
     const uint8_t * qh = b->qh + sb*16;
     const int low4 = (ql[l >> 1] >> (4*(l & 1))) & 0xF;
     const int hi2  = (qh[l >> 2] >> (2*(l & 3))) & 3;
-    return q64_h2f(b->d)*sc*((low4 | (hi2 << 4)) - 32);
+    const int u6 = low4 | (hi2 << 4);
+    return q64_h2f(b->d)*sc*((u6 ^ 0x20) - 0x20); // sign-extend signed 6-bit
 }
 
 static __device__ __forceinline__ float q64k_deq_elem_q5_K_64S(const block_q5_K_64S * b, int j) {
     const int sb = j / 64, l = j % 64;
-    const int sc = q64k_unpack4x6(sb, b->scales) - 32;
+    const int sc = q64_unpack4x6_s(sb, b->scales);
     const uint8_t * q  = b->qs + sb*32;
     const uint8_t * qh = b->qh + sb*8;
     const int hb  = (qh[l >> 3] >> (l & 7)) & 1;
     const int nib = (l < 32) ? (q[l] & 0xF) : (q[l - 32] >> 4);
-    const int qv  = nib | (hb << 4);
-    return q64_h2f(b->d)*sc*(qv - 16);
+    const int u5  = nib | (hb << 4);
+    return q64_h2f(b->d)*sc*((u5 ^ 0x10) - 0x10); // sign-extend signed 5-bit
 }
 
 static __device__ __forceinline__ float q64k_deq_elem_q4_K_64S(const block_q4_K_64S * b, int j) {
     const int sb = j / 64, l = j % 64;
-    const int sc = q64k_unpack4x6(sb, b->scales) - 32;
+    const int sc = q64_unpack4x6_s(sb, b->scales);
     const uint8_t * q = b->qs + sb*32;
     const int qv = (l < 32) ? (q[l] & 0xF) : (q[l - 32] >> 4);
-    return q64_h2f(b->d)*sc*(qv - 8);
+    return q64_h2f(b->d)*sc*((qv ^ 0x8) - 0x8); // sign-extend signed 4-bit
 }
 
 static __device__ __forceinline__ float q64k_deq_elem_q2_K_64S(const block_q2_K_64S * b, int j) {
     const int sb = j / 64, l = j % 64;
-    const int sc = q64k_unpack4x4(sb, b->scales) - 8;
+    const int sc = q64_unpack4x4_s(sb, b->scales);
     const uint8_t * qs = b->qs + sb*16;
-    const int qv = (qs[l >> 2] >> (2*(l & 3))) & 3;
-    return q64_h2f(b->d)*sc*(qv - 2);
+    const int u2 = (qs[l >> 2] >> (2*(l & 3))) & 3;
+    return q64_h2f(b->d)*sc*((u2 ^ 0x2) - 0x2); // sign-extend signed 2-bit
 }
 
 // === per-type kernel + launcher (one element per thread) ===================

@@ -60,7 +60,7 @@ static __device__ __forceinline__ uint64_t reex_q64_load_qh64(const uint8_t * qh
     return v;
 }
 
-// === Q4_0_64 : symmetric 4-bit, w = d*(q-8) ================================
+// === Q4_0_64 : symmetric 4-bit, w = d*q, q signed [-8,7] ===================
 static __device__ __forceinline__ float vec_dot_q4_0_64_q8_1(
     const void * __restrict__ vbq, const block_q8_1 * __restrict__ bq8_1, const int & kbx, const int & iqs) {
     GGML_UNUSED(iqs);
@@ -71,8 +71,8 @@ static __device__ __forceinline__ float vec_dot_q4_0_64_q8_1(
     int sumi0 = 0, sumi1 = 0;
 #pragma unroll
     for (int j = 0; j < 32; ++j) {
-        sumi0 += ((bq->qs[j] & 0x0F) - 8) * b0->qs[j];
-        sumi1 += ((bq->qs[j] >>   4) - 8) * b1->qs[j];
+        sumi0 += (((bq->qs[j] & 0x0F) ^ 0x08) - 0x08) * b0->qs[j]; // sign-extend signed 4-bit
+        sumi1 += (((bq->qs[j] >>   4) ^ 0x08) - 0x08) * b1->qs[j];
     }
     const int    sumi = reex_q64_psum_trunc_b(sumi0 + sumi1, reex_q64_psum_bits_dev);
     const float  d    = reex_q64_h2f(bq->d);
@@ -104,7 +104,7 @@ static __device__ __forceinline__ float vec_dot_q4_1_64_q8_1(
     return d * ds0.x * sumi + m * (ds0.y + ds1.y);
 }
 
-// === Q5_0_64 : symmetric 5-bit, w = d*(q-16) ===============================
+// === Q5_0_64 : symmetric 5-bit, w = d*q, q signed [-16,15] =================
 static __device__ __forceinline__ float vec_dot_q5_0_64_q8_1(
     const void * __restrict__ vbq, const block_q8_1 * __restrict__ bq8_1, const int & kbx, const int & iqs) {
     GGML_UNUSED(iqs);
@@ -118,8 +118,10 @@ static __device__ __forceinline__ float vec_dot_q5_0_64_q8_1(
     for (int j = 0; j < 32; ++j) {
         const uint8_t xh_0 = ((qh >> (j +  0)) << 4) & 0x10;
         const uint8_t xh_1 = ((qh >> (j + 28))     ) & 0x10; // j + qk/2 - 4 = j + 28
-        const int x0 = (int) (int8_t) (((bq->qs[j] & 0x0F) | xh_0) - 16);
-        const int x1 = (int) (int8_t) (((bq->qs[j] >>   4) | xh_1) - 16);
+        const int u0 = (bq->qs[j] & 0x0F) | xh_0;
+        const int u1 = (bq->qs[j] >>   4) | xh_1;
+        const int x0 = (u0 ^ 0x10) - 0x10; // sign-extend signed 5-bit
+        const int x1 = (u1 ^ 0x10) - 0x10;
         sumi0 += x0 * b0->qs[j];
         sumi1 += x1 * b1->qs[j];
     }

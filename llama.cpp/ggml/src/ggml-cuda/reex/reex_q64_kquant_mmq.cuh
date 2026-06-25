@@ -8,8 +8,8 @@
 //       store the RAW quant (0..2^b-1) as int8 into the q8_1 tile, plus a
 //       half2 (D, M) = (d*sc, -dmin*mn) per sub-block. vec_dot_q8_1_q8_1 then
 //       computes  D*d_a*Σ(qw·qa) + M*s_a  (the activation-sum carries the min).
-//   symmetric types (Q3/Q6_K_64, w = d*sc*(q-off)):
-//       fold the offset into a signed int8 (q-off) in the q8_0 tile, scale
+//   symmetric types (Q3/Q6_K_64, w = d*sc*q, q signed two's complement):
+//       sign-extend the packed quant into a signed int8 in the q8_0 tile, scale
 //       = d*sc. vec_dot_q8_0_q8_1 (D4 layout) needs no activation-sum.
 //
 // Tile geometry: MMQ iterates K in MMQ_ITER_K(=256) chunks. With qk=256 that is
@@ -115,8 +115,8 @@ static __device__ __forceinline__ void reex_q64k_load_dm_q2(
     }
 }
 
-// symmetric, fp32 scale d*sc into the q8_0 tile. SC_BIAS: Q3 = -32 (6-bit
-// signed-biased via q64k_unpack4x6), Q6 = 0 (int8 scales[]).
+// symmetric, fp32 scale d*sc into the q8_0 tile. Q3: 6-bit two's-complement
+// scale via q64_unpack4x6_s; Q6: int8 scales[].
 template <int mmq_y, bool need_check, typename block_t, bool q3>
 static __device__ __forceinline__ void reex_q64k_load_df_sym(
         const char * __restrict__ x, float * __restrict__ x_df,
@@ -134,7 +134,7 @@ static __device__ __forceinline__ void reex_q64k_load_df_sym(
         if (need_check) { i = min(i, i_max); }
         const block_t * bxi = (const block_t *) x + kbx0 + i*stride;
         int sc;
-        if (q3) { sc = q64k_unpack4x6(sb, (const uint8_t *) bxi->scales) - 32; }
+        if (q3) { sc = q64_unpack4x6_s(sb, (const uint8_t *) bxi->scales); }
         else    { sc = bxi->scales[sb]; }
         const float d  = __half2float(__ushort_as_half((unsigned short) bxi->d));
         const float df = d * sc;
@@ -250,7 +250,7 @@ template <int mmq_y, bool need_check> static __device__ __forceinline__ void loa
     reex_q64k_load_dm_q2<mmq_y, need_check>(x, x_dm, kbx0, i_max, stride);
 }
 
-// === Q3_K_64 (symmetric 3-bit, q-4) -> q8_0 tile ===========================
+// === Q3_K_64 (symmetric 3-bit, signed q) -> q8_0 tile ======================
 template <int mmq_y, bool need_check> static __device__ __forceinline__ void load_tiles_q3_K_64(
     const char * __restrict__ x, int * __restrict__ x_tile, const int kbx0, const int i_max, const int stride) {
     constexpr int nwarps    = mmq_get_nwarps_device();
@@ -286,8 +286,8 @@ template <int mmq_y, bool need_check> static __device__ __forceinline__ void loa
         for (int k = 0; k < 4; ++k) {
             const int q3a = ((lb0 >> (2*k)) & 3) | (((hb0 >> (hsh + k)) & 1) << 2);
             const int q3b = ((lb1 >> (2*k)) & 3) | (((hb1 >> (hsh + k)) & 1) << 2);
-            v0 |= ((q3a - 4) & 0xFF) << (8*k);
-            v1 |= ((q3b - 4) & 0xFF) << (8*k);
+            v0 |= (((q3a ^ 0x4) - 0x4) & 0xFF) << (8*k); // sign-extend signed 3-bit
+            v1 |= (((q3b ^ 0x4) - 0x4) & 0xFF) << (8*k);
         }
         REEX_Q64K_QS(i, 2*sb + 0, kqsx) = v0;
         REEX_Q64K_QS(i, 2*sb + 1, kqsx) = v1;
@@ -295,7 +295,7 @@ template <int mmq_y, bool need_check> static __device__ __forceinline__ void loa
     reex_q64k_load_df_sym<mmq_y, need_check, block_q3_K_64, true>(x, x_df, kbx0, i_max, stride);
 }
 
-// === Q6_K_64 (symmetric 6-bit, q-32) -> q8_0 tile ==========================
+// === Q6_K_64 (symmetric 6-bit, signed q) -> q8_0 tile ======================
 template <int mmq_y, bool need_check> static __device__ __forceinline__ void load_tiles_q6_K_64(
     const char * __restrict__ x, int * __restrict__ x_tile, const int kbx0, const int i_max, const int stride) {
     constexpr int nwarps    = mmq_get_nwarps_device();
@@ -330,8 +330,8 @@ template <int mmq_y, bool need_check> static __device__ __forceinline__ void loa
             const uint8_t qlb = bxi->ql[sb*32 + 16 + kqsx*2 + (k >> 1)];
             const int q6a = ((qla >> (4*(k & 1))) & 0xF) | (((qhb0 >> (2*k)) & 3) << 4);
             const int q6b = ((qlb >> (4*(k & 1))) & 0xF) | (((qhb1 >> (2*k)) & 3) << 4);
-            v0 |= ((q6a - 32) & 0xFF) << (8*k);
-            v1 |= ((q6b - 32) & 0xFF) << (8*k);
+            v0 |= (((q6a ^ 0x20) - 0x20) & 0xFF) << (8*k); // sign-extend signed 6-bit
+            v1 |= (((q6b ^ 0x20) - 0x20) & 0xFF) << (8*k);
         }
         REEX_Q64K_QS(i, 2*sb + 0, kqsx) = v0;
         REEX_Q64K_QS(i, 2*sb + 1, kqsx) = v1;

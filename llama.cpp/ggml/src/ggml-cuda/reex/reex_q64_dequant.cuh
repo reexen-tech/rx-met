@@ -28,8 +28,8 @@ static __device__ __forceinline__ void dequantize_q4_0_64(const void * vx, const
     const block_q4_0_64 * x = (const block_q4_0_64 *) vx;
     const float d = q64_h2f(x[ib].d);
     const int vui = x[ib].qs[iqs];
-    v.x = ((vui & 0xF) - 8.0f) * d;
-    v.y = ((vui >>  4) - 8.0f) * d;
+    v.x = (float)(((vui & 0xF) ^ 0x8) - 0x8) * d; // sign-extend signed 4-bit
+    v.y = (float)(((vui >>  4) ^ 0x8) - 0x8) * d;
 }
 
 static __device__ __forceinline__ void dequantize_q8_0_64(const void * vx, const int64_t ib, const int iqs, float2 & v) {
@@ -55,8 +55,10 @@ static __device__ __forceinline__ void dequantize_q5_0_64(const void * vx, const
     memcpy(&qh, x[ib].qh, sizeof(qh));
     const int xh_0 = ((qh >> (iqs +  0)) << 4) & 0x10;
     const int xh_1 = ((qh >> (iqs + 28))     ) & 0x10; // iqs + qk/2 - 4, qk/2 = 32
-    v.x = (((x[ib].qs[iqs] & 0xf) | xh_0) - 16.0f) * d;
-    v.y = (((x[ib].qs[iqs] >>  4) | xh_1) - 16.0f) * d;
+    const int u0 = (x[ib].qs[iqs] & 0xf) | xh_0;
+    const int u1 = (x[ib].qs[iqs] >>  4) | xh_1;
+    v.x = (float)((u0 ^ 0x10) - 0x10) * d; // sign-extend signed 5-bit
+    v.y = (float)((u1 ^ 0x10) - 0x10) * d;
 }
 
 static __device__ __forceinline__ void dequantize_q5_1_64(const void * vx, const int64_t ib, const int iqs, float2 & v) {
@@ -93,8 +95,8 @@ static __global__ void dequantize_block_q4_0_64(const void * __restrict__ vx, ds
     dst_t * y = yy + i*QK4_0_64;
     const int j = threadIdx.x; // 0..31
     const int vui = x->qs[j];
-    y[j]              = ggml_cuda_cast<dst_t>(((vui & 0xF) - 8.0f) * d);
-    y[j + QK4_0_64/2] = ggml_cuda_cast<dst_t>(((vui >>  4) - 8.0f) * d);
+    y[j]              = ggml_cuda_cast<dst_t>((float)(((vui & 0xF) ^ 0x8) - 0x8) * d); // sign-extend signed 4-bit
+    y[j + QK4_0_64/2] = ggml_cuda_cast<dst_t>((float)(((vui >>  4) ^ 0x8) - 0x8) * d);
 }
 
 template<typename dst_t>
@@ -135,8 +137,10 @@ static __global__ void dequantize_block_q5_0_64(const void * __restrict__ vx, ds
     const int j = threadIdx.x;
     const int xh_0 = ((qh >> (j +  0)) << 4) & 0x10;
     const int xh_1 = ((qh >> (j + 28))     ) & 0x10;
-    y[j]              = ggml_cuda_cast<dst_t>((((x->qs[j] & 0xf) | xh_0) - 16.0f) * d);
-    y[j + QK5_0_64/2] = ggml_cuda_cast<dst_t>((((x->qs[j] >>  4) | xh_1) - 16.0f) * d);
+    const int u0 = (x->qs[j] & 0xf) | xh_0;
+    const int u1 = (x->qs[j] >>  4) | xh_1;
+    y[j]              = ggml_cuda_cast<dst_t>((float)((u0 ^ 0x10) - 0x10) * d); // sign-extend signed 5-bit
+    y[j + QK5_0_64/2] = ggml_cuda_cast<dst_t>((float)((u1 ^ 0x10) - 0x10) * d);
 }
 
 template<typename dst_t>

@@ -97,8 +97,8 @@ void ggml_vec_dot_q4_0_64_q8_0_64(int n, float * GGML_RESTRICT s, size_t bs,
         int sumi1 = 0;
 
         for (int j = 0; j < qk/2; ++j) {
-            const int v0 = (x[ib].qs[j] & 0x0F) - 8;
-            const int v1 = (x[ib].qs[j] >>   4) - 8;
+            const int v0 = ((x[ib].qs[j] & 0x0F) ^ 0x08) - 0x08; // sign-extend signed 4-bit
+            const int v1 = ((x[ib].qs[j] >>   4) ^ 0x08) - 0x08;
 
             sumi0 += (v0 * y[ib].qs[j]);
             sumi1 += (v1 * y[ib].qs[j + qk/2]);
@@ -203,8 +203,10 @@ void ggml_vec_dot_q5_0_64_q8_0_64(int n, float * GGML_RESTRICT s, size_t bs,
             const uint8_t xh_0 = ((qh >> (j + 0))         << 4) & 0x10;
             const uint8_t xh_1 = ((qh >> (j + qk/2 - 4))      ) & 0x10;
 
-            const int32_t x0 = (int8_t)(((x[ib].qs[j] & 0x0F) | xh_0) - 16);
-            const int32_t x1 = (int8_t)(((x[ib].qs[j] >>   4) | xh_1) - 16);
+            const int u0 = (x[ib].qs[j] & 0x0F) | xh_0;
+            const int u1 = (x[ib].qs[j] >>   4) | xh_1;
+            const int32_t x0 = (u0 ^ 0x10) - 0x10; // sign-extend signed 5-bit
+            const int32_t x1 = (u1 ^ 0x10) - 0x10;
 
             sumi0 += x0 * y[ib].qs[j];
             sumi1 += x1 * y[ib].qs[j + qk/2];
@@ -382,7 +384,7 @@ void ggml_vec_dot_q2_K_64_q8_K(int n, float * GGML_RESTRICT s, size_t bs,
     *s = sumf;
 }
 
-/* W(Q3_K_64) x A(Q8_K), scalar. x = d*scale*(q-4), signed scale, no min. */
+/* W(Q3_K_64) x A(Q8_K), scalar. x = d*scale*q, signed q [-4,3] + signed scale, no min. */
 void ggml_vec_dot_q3_K_64_q8_K(int n, float * GGML_RESTRICT s, size_t bs,
     const void * GGML_RESTRICT vx, size_t bx, const void * GGML_RESTRICT vy, size_t by, int nrc)
 {
@@ -403,14 +405,14 @@ void ggml_vec_dot_q3_K_64_q8_K(int n, float * GGML_RESTRICT s, size_t bs,
 
         int32_t sumi = 0;
         for (int j = 0; j < QK_K_64/64; ++j) {
-            const int sc = (int) q64_unpack4x6(j, x[i].scales) - 32;
+            const int sc = q64_unpack4x6_s(j, x[i].scales);
             int32_t acc = 0;
             for (int ii = 0; ii < 64; ++ii) {
                 const int e = 64*j + ii;
                 const int low2 = (x[i].qs[e >> 2] >> (2*(e & 3))) & 3;
                 const int hbit = (x[i].hmask[e >> 3] >> (e & 7)) & 1;
-                const int q3 = low2 | (hbit << 2);
-                acc += (q3 - 4) * q8[e];
+                const int u3 = low2 | (hbit << 2);
+                acc += ((u3 ^ 0x4) - 0x4) * q8[e]; // sign-extend signed 3-bit
             }
             acc = reex_q64_psum_trunc_b(acc, pb);
             sumi += sc * acc;
@@ -478,7 +480,7 @@ void ggml_vec_dot_q5_K_64_q8_K(int n, float * GGML_RESTRICT s, size_t bs,
     *s = sumf;
 }
 
-/* W(Q6_K_64) x A(Q8_K), scalar. x = d*scale*(q-32), int8 scale, no min. */
+/* W(Q6_K_64) x A(Q8_K), scalar. x = d*scale*q, signed q [-32,31], int8 scale, no min. */
 void ggml_vec_dot_q6_K_64_q8_K(int n, float * GGML_RESTRICT s, size_t bs,
     const void * GGML_RESTRICT vx, size_t bx, const void * GGML_RESTRICT vy, size_t by, int nrc)
 {
@@ -505,8 +507,8 @@ void ggml_vec_dot_q6_K_64_q8_K(int n, float * GGML_RESTRICT s, size_t bs,
                 const int e = 64*j + ii;
                 const int low4 = (x[i].ql[e >> 1] >> (4*(e & 1))) & 0xF;
                 const int hi2  = (x[i].qh[e >> 2] >> (2*(e & 3))) & 3;
-                const int q6 = low4 | (hi2 << 4);
-                acc += (q6 - 32) * q8[e];
+                const int u6 = low4 | (hi2 << 4);
+                acc += ((u6 ^ 0x20) - 0x20) * q8[e]; // sign-extend signed 6-bit
             }
             acc = reex_q64_psum_trunc_b(acc, pb);
             sumi += sc * acc;
@@ -517,7 +519,7 @@ void ggml_vec_dot_q6_K_64_q8_K(int n, float * GGML_RESTRICT s, size_t bs,
     *s = sumf;
 }
 
-/* W(Q5_K_64S) x A(Q8_K), scalar. x = d*scale*(q-16), int6 signed scale, no min. */
+/* W(Q5_K_64S) x A(Q8_K), scalar. x = d*scale*q, signed q [-16,15], int6 signed scale, no min. */
 void ggml_vec_dot_q5_K_64S_q8_K(int n, float * GGML_RESTRICT s, size_t bs,
     const void * GGML_RESTRICT vx, size_t bx, const void * GGML_RESTRICT vy, size_t by, int nrc)
 {
@@ -540,18 +542,18 @@ void ggml_vec_dot_q5_K_64S_q8_K(int n, float * GGML_RESTRICT s, size_t bs,
 
         int32_t sumi = 0;
         for (int j = 0; j < QK_K_64/64; ++j) {
-            const int sc = (int) q64_unpack4x6(j, x[i].scales) - 32;
+            const int sc = q64_unpack4x6_s(j, x[i].scales);
             int32_t acc = 0;
             for (int l = 0; l < 32; ++l) {
                 const int hbit = (qh[l >> 3] >> (l & 7)) & 1;
-                const int q5 = (ql[l] & 0xF) | (hbit << 4);
-                acc += (q5 - 16) * q8[l];
+                const int u5 = (ql[l] & 0xF) | (hbit << 4);
+                acc += ((u5 ^ 0x10) - 0x10) * q8[l]; // sign-extend signed 5-bit
             }
             for (int l = 0; l < 32; ++l) {
                 const int e = l + 32;
                 const int hbit = (qh[e >> 3] >> (e & 7)) & 1;
-                const int q5 = (ql[l] >> 4) | (hbit << 4);
-                acc += (q5 - 16) * q8[e];
+                const int u5 = (ql[l] >> 4) | (hbit << 4);
+                acc += ((u5 ^ 0x10) - 0x10) * q8[e];
             }
             acc = reex_q64_psum_trunc_b(acc, pb);
             sumi += sc * acc;
@@ -565,7 +567,7 @@ void ggml_vec_dot_q5_K_64S_q8_K(int n, float * GGML_RESTRICT s, size_t bs,
     *s = sumf;
 }
 
-/* W(Q4_K_64S) x A(Q8_K), scalar. x = d*scale*(q-8), int6 signed scale, no min. */
+/* W(Q4_K_64S) x A(Q8_K), scalar. x = d*scale*q, signed q [-8,7], int6 signed scale, no min. */
 void ggml_vec_dot_q4_K_64S_q8_K(int n, float * GGML_RESTRICT s, size_t bs,
     const void * GGML_RESTRICT vx, size_t bx, const void * GGML_RESTRICT vy, size_t by, int nrc)
 {
@@ -587,11 +589,11 @@ void ggml_vec_dot_q4_K_64S_q8_K(int n, float * GGML_RESTRICT s, size_t bs,
 
         int32_t sumi = 0;
         for (int j = 0; j < QK_K_64/64; ++j) {
-            const int sc = (int) q64_unpack4x6(j, x[i].scales) - 32;
+            const int sc = q64_unpack4x6_s(j, x[i].scales);
             int32_t acc = 0;
             for (int l = 0; l < 32; ++l) {
-                acc += ((ql[l] & 0xF) - 8) * q8[l];
-                acc += ((ql[l] >>  4) - 8) * q8[l + 32];
+                acc += (((ql[l] & 0xF) ^ 0x8) - 0x8) * q8[l]; // sign-extend signed 4-bit
+                acc += (((ql[l] >>  4) ^ 0x8) - 0x8) * q8[l + 32];
             }
             acc = reex_q64_psum_trunc_b(acc, pb);
             sumi += sc * acc;
@@ -604,7 +606,7 @@ void ggml_vec_dot_q4_K_64S_q8_K(int n, float * GGML_RESTRICT s, size_t bs,
     *s = sumf;
 }
 
-/* W(Q2_K_64S) x A(Q8_K), scalar. x = d*scale*(q-2), int4 signed scale, no min. */
+/* W(Q2_K_64S) x A(Q8_K), scalar. x = d*scale*q, signed q [-2,1], int4 signed scale, no min. */
 void ggml_vec_dot_q2_K_64S_q8_K(int n, float * GGML_RESTRICT s, size_t bs,
     const void * GGML_RESTRICT vx, size_t bx, const void * GGML_RESTRICT vy, size_t by, int nrc)
 {
@@ -625,12 +627,12 @@ void ggml_vec_dot_q2_K_64S_q8_K(int n, float * GGML_RESTRICT s, size_t bs,
 
         int32_t sumi = 0;
         for (int j = 0; j < QK_K_64/64; ++j) {
-            const int sc = (int) q64_unpack4x4(j, x[i].scales) - 8;
+            const int sc = q64_unpack4x4_s(j, x[i].scales);
             int32_t acc = 0;
             for (int ii = 0; ii < 64; ++ii) {
                 const int e = 64*j + ii;
-                const int q = (x[i].qs[e >> 2] >> (2*(e & 3))) & 3;
-                acc += (q - 2) * q8[e];
+                const int u2 = (x[i].qs[e >> 2] >> (2*(e & 3))) & 3;
+                acc += ((u2 ^ 0x2) - 0x2) * q8[e]; // sign-extend signed 2-bit
             }
             acc = reex_q64_psum_trunc_b(acc, pb);
             sumi += sc * acc;
