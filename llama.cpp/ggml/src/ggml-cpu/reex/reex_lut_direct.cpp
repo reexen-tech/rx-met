@@ -77,15 +77,13 @@ static inline float lut_eval_mixed_fp16_direct_exp(float x_clamped) {
 }
 
 float ggml_sigmoid_lut_fp16_f32_REEX(float x) {
-    if (x < SIGMOID_MIN) return 0.0f;
-    if (x > SIGMOID_MAX) return 1.0f;
-    return lut_eval_fp16_direct(x, ggml_lut_sigmoid_fp16_reex, GGML_LUT_NUM_SEGMENTS_REEX);
+    float xc = fmaxf(SIGMOID_MIN, fminf(SIGMOID_MAX, x));
+    return lut_eval_fp16_direct(xc, ggml_lut_sigmoid_fp16_reex, GGML_LUT_NUM_SEGMENTS_REEX);
 }
 
 float ggml_sigmoid_lut_bf16_f32_REEX(float x) {
-    if (x < SIGMOID_MIN) return 0.0f;
-    if (x > SIGMOID_MAX) return 1.0f;
-    return lut_eval_bf16_direct(x, ggml_lut_sigmoid_bf16_reex, GGML_LUT_NUM_SEGMENTS_REEX);
+    float xc = fmaxf(SIGMOID_MIN, fminf(SIGMOID_MAX, x));
+    return lut_eval_bf16_direct(xc, ggml_lut_sigmoid_bf16_reex, GGML_LUT_NUM_SEGMENTS_REEX);
 }
 
 float ggml_exp_lut_fp16_f32_REEX(float x) {
@@ -115,9 +113,8 @@ float ggml_silu_lut_bf16_f32_REEX(float x) {
 }
 
 float ggml_sigmoid_lut_mixed_fp16_f32_REEX(float x) {
-    if (x < SIGMOID_MIN) return 0.0f;
-    if (x > SIGMOID_MAX) return 1.0f;
-    return lut_eval_mixed_fp16_direct_sigmoid(x);
+    float xc = fmaxf(SIGMOID_MIN, fminf(SIGMOID_MAX, x));
+    return lut_eval_mixed_fp16_direct_sigmoid(xc);
 }
 
 float ggml_exp_lut_mixed_fp16_f32_REEX(float x) {
