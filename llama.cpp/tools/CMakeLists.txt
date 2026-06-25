@@ -38,6 +38,10 @@ else()
         add_subdirectory(export-lora)
     endif()
     add_subdirectory(fit-params)
+    if (REEX_GEMM_DATAGEN)
+        # Standalone GPU GEMM quant-sweep datagen tool.
+        add_subdirectory(reex-gemm-datagen)
+    endif()
     if (REEX_TURBOQUANT)
         # === REEX_TURBOQUANT BEGIN ===
         # Local TurboQuant offline tools (see tools/reex/CMakeLists.txt).

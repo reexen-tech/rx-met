@@ -127,11 +127,10 @@ static __device__ __forceinline__ float ggml_cuda_cos_lut_fp16_reex(float x) {
 
 /* Direct LUT: sigmoid, exp (Mixed-FP16) */
 static __device__ __forceinline__ float ggml_cuda_sigmoid_lut_mixed_fp16_reex(float x) {
-    if (x < GGML_CUDA_SIGMOID_MIN) return 0.0f;
-    if (x > GGML_CUDA_SIGMOID_MAX) return 1.0f;
+    float xc = fmaxf(GGML_CUDA_SIGMOID_MIN, fminf(GGML_CUDA_SIGMOID_MAX, x));
     for (int i = 0; i < GGML_CUDA_LUT_NUM_SEGMENTS; ++i) {
-        if (x <= ggml_cuda_sigmoid_fp32_threshold[i] || i == GGML_CUDA_LUT_NUM_SEGMENTS - 1) {
-            float y = ggml_cuda_sigmoid_fp32_b[i] * x + ggml_cuda_sigmoid_fp32_c[i];
+        if (xc <= ggml_cuda_sigmoid_fp32_threshold[i] || i == GGML_CUDA_LUT_NUM_SEGMENTS - 1) {
+            float y = ggml_cuda_sigmoid_fp32_b[i] * xc + ggml_cuda_sigmoid_fp32_c[i];
             return __half2float(__float2half(y));
         }
     }
