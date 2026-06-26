@@ -20,7 +20,7 @@ void golden_cpu_symmetric(int wtype_id,
                           const void * w_blocks,
                           const std::vector<uint8_t> & a_blocks,
                           int64_t M, int64_t N, int64_t K,
-                          const TilingSpec & ts, int psum_bits,
+                          const TilingSpec & ts, int A_bits, int psum_bits,
                           std::vector<float> & C_ref);
 
 // Independent float golden via reex dequantize_row_* + float matmul (psum=0 only).
@@ -31,6 +31,6 @@ DequantCheck golden_dequant_check(int wtype_id,
                                   const std::vector<uint8_t> & a_blocks,
                                   const float * C_gpu_tiled,
                                   int64_t M, int64_t N, int64_t K,
-                                  const TilingSpec & ts, int64_t rows);
+                                  const TilingSpec & ts, int A_bits, int64_t rows);
 
 } // namespace rgd

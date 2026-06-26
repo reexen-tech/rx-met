@@ -19,8 +19,8 @@ namespace rgd {
 // Orthogonal config axes.
 // -------------------------------------------------------------------------
 enum class Family  { Kquant, Legacy, IntBlock };
-enum class ActDType { F32, F16, BF16 };
-enum class OutDType { F16, BF16, I16, I8 };
+enum class ActDType { F32, F16, BF16, E5M2, E4M3 };
+enum class OutDType { F16, BF16, I16, I8, I6, I4 };
 
 inline const char * family_name(Family f) {
     switch (f) {
@@ -35,8 +35,21 @@ inline const char * actdtype_name(ActDType d) {
         case ActDType::F32:  return "F32";
         case ActDType::F16:  return "F16";
         case ActDType::BF16: return "BF16";
+        case ActDType::E5M2: return "E5M2";
+        case ActDType::E4M3: return "E4M3";
     }
     return "?";
+}
+// Native byte size of one element stored in the act-source dtype.
+inline int act_src_elem_bytes(ActDType d) {
+    switch (d) {
+        case ActDType::F32:  return 4;
+        case ActDType::F16:  return 2;
+        case ActDType::BF16: return 2;
+        case ActDType::E5M2: return 1;
+        case ActDType::E4M3: return 1;
+    }
+    return 4;
 }
 inline const char * outdtype_name(OutDType d) {
     switch (d) {
@@ -44,8 +57,30 @@ inline const char * outdtype_name(OutDType d) {
         case OutDType::BF16: return "BF16";
         case OutDType::I16:  return "I16";
         case OutDType::I8:   return "I8";
+        case OutDType::I6:   return "I6";
+        case OutDType::I4:   return "I4";
     }
     return "?";
+}
+
+// -------------------------------------------------------------------------
+// Output dtype table: container bytes + (for int outputs) symmetric qmax.
+// I6/I4 are carried in a signed int8 container (sign-extended). F16/BF16 are
+// is_float. The full set is emitted per case (compute once, convert to all).
+// -------------------------------------------------------------------------
+struct OutSpec { OutDType dt; const char * name; bool is_float; int bytes; int qmax; };
+
+inline const OutSpec * out_specs(int & n) {
+    static const OutSpec s[] = {
+        { OutDType::F16,  "F16",  true,  2, 0 },
+        { OutDType::BF16, "BF16", true,  2, 0 },
+        { OutDType::I16,  "I16",  false, 2, 32767 },
+        { OutDType::I8,   "I8",   false, 1, 127 },
+        { OutDType::I6,   "I6",   false, 1, 31 },
+        { OutDType::I4,   "I4",   false, 1, 7 },
+    };
+    n = (int) (sizeof(s) / sizeof(s[0]));
+    return s;
 }
 
 // -------------------------------------------------------------------------
@@ -109,9 +144,12 @@ RGD_HD inline int64_t weight_block_slot(int64_t n, int64_t sb, int64_t N,
     return t * ts.Nt + c;                           // intra-tile column-major
 }
 
-// Bytes of one activation block = { fp16 scale ; int8 qs[agroup] }.
-RGD_HD inline int act_block_bytes(const TilingSpec & ts) {
-    return 2 + ts.agroup;
+// Activation quant container element bytes: int16 when A_bits>8 (A16), else int8.
+RGD_HD inline int act_elem_bytes(int A_bits) { return A_bits > 8 ? 2 : 1; }
+
+// Bytes of one activation block = { fp16 scale ; intX qs[agroup] }, X per A_bits.
+RGD_HD inline int act_block_bytes(const TilingSpec & ts, int A_bits) {
+    return 2 + ts.agroup * act_elem_bytes(A_bits);
 }
 
 // Activation group blocks: matrix A[M,K] -> blocks[(m, kg)] where kg = quant
@@ -127,6 +165,25 @@ RGD_HD inline int64_t act_group_slot(int64_t m, int64_t kg, int64_t M, int64_t K
     const int64_t t  = mt * Ktiles + kt;            // inter-tile row-major
     const int64_t o  = r * gpt + kc;                // intra-tile row-major
     return t * ((int64_t) ts.Mt * gpt) + o;
+}
+
+// IntBlock element-granularity tile slots (raw INT values, no scale). Both store
+// a 2D [16x16] block: act = [Mt M-rows x Kt K-cols], weight = [Nt N-rows x Kt
+// K-cols], block row-major; inter-block (act) (mt,kt) row-major / (weight)
+// (kt,nt) row-major. (Identical layout to the FP16-source de-tile formulas.)
+RGD_HD inline int64_t act_elem_slot(int64_t m, int64_t k, int64_t K,
+                                    const TilingSpec & ts) {
+    const int64_t Ktiles = K / ts.Kt;
+    const int64_t mt = m / ts.Mt, r = m % ts.Mt;
+    const int64_t kt = k / ts.Kt, c = k % ts.Kt;
+    return ((mt * Ktiles + kt) * ts.Mt + r) * ts.Kt + c;
+}
+RGD_HD inline int64_t weight_elem_slot(int64_t n, int64_t k, int64_t N,
+                                       const TilingSpec & ts) {
+    const int64_t Ntiles = N / ts.Nt;
+    const int64_t nt = n / ts.Nt, r = n % ts.Nt;
+    const int64_t kt = k / ts.Kt, c = k % ts.Kt;
+    return ((kt * Ntiles + nt) * ts.Nt + r) * ts.Kt + c;
 }
 
 // Result C[M,N], tile [Mt,Nt] (element granularity):

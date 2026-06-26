@@ -16,7 +16,9 @@ add_executable(${TARGET}
     wquant.cpp
     reference.cpp
     dumper.cpp
+    actquant.cu
     gemm.cu
+    intgemm.cu
 )
 
 set_target_properties(${TARGET} PROPERTIES

@@ -4,10 +4,10 @@
 
 - Legacy(block=64):`Q4_0_64`、`Q4_1_64`、`Q5_0_64`、`Q5_1_64`、`Q8_0_64`、`Q8_1_64`
 - K-quant(superblock=256,subblock=64):`Q4_K_64`、`Q2_K_64`、`Q3_K_64`、`Q5_K_64`、`Q6_K_64`
-- K-quant 对称版(superblock=256,subblock=64,有符号子块 scale、无 min,`w = d·scale·(q−mid)`):
-  - `Q2_K_64S`(2-bit,子块 scale **int4** 有符号,mid=2)
-  - `Q4_K_64S`(4-bit,子块 scale **int6** 有符号,mid=8)
-  - `Q5_K_64S`(5-bit,子块 scale **int6** 有符号,mid=16)
+- K-quant 对称版(superblock=256,subblock=64,有符号子块 scale、无 min,`w = d·scale·q`,权重与子块 scale 均为二进制补码有符号整数):
+  - `Q2_K_64S`(2-bit,权重 int2 补码 [−2,1],子块 scale **int4** 补码)
+  - `Q4_K_64S`(4-bit,权重 int4 补码 [−8,7],子块 scale **int6** 补码)
+  - `Q5_K_64S`(5-bit,权重 int5 补码 [−16,15],子块 scale **int6** 补码)
   - 子块 scale 位宽与各自非对称版一致(Q2_K:4 / Q4_K、Q5_K:6);超块 scale 为 fp16 `d`
 
 ---
@@ -73,7 +73,28 @@
 >
 > **MoE(`MUL_MAT_ID`)CUDA 支持**:`supports_op` 现对 block-64 放开 `MUL_MAT_ID`(F32 激活/输出),`ggml_cuda_mul_mat_id` 把专家张量按 token 维度切成 `≤MMVQ_MAX_BATCH_SIZE(8)` 的子张量,逐块复用 CPU 对齐的 `ggml_cuda_mul_mat_vec_q`(MoE 多 token kernel,每 warp 一个 token),decode 与 prefill 都走该路径,绝不回退 MMQ / dequant→cuBLAS。融合门控 `ggml_cuda_should_fuse_mul_mat_vec_q` 对全部 14 种 block-64 关闭,确保走已验证的非融合路径。在此之前 MoE 专家因 `supports_op` 返回 false 而整块回退 CPU(权重留在 host),补齐后专家完整上 GPU。已在 Qwen3.5-35B-A3B(MoE)验证 GPU≡CPU:Q4_K_64 默认 6.41/6.43、`REEX_Q64_PSUM_BITS=8` 截断 6.473/6.477(截断后差异 <0.1%);Q8_0_64/Q6_K_64/Q4_K_64S ≈ f16;2-bit Q2_K_64 GPU 559 ≈ CPU 579(均为 2-bit 量化质量崩坏,非内核问题,数值仍对齐)。
 >
-> 对称 K-quant(`Q2_K_64S`/`Q4_K_64S`/`Q5_K_64S`)功能与 5 个非对称 K-quant 一致(CPU/反量化/MMVQ decode+prefill/get_rows/工具链/GGUF),复用 q8_K 激活、走对称分支(无 min 修正项),并因 prefill 统一走 MMVQ 而无需 MMQ 实例。子块有符号 scale 用 signed-biased 打包(int6→value+32 复用 `q64_pack4x6`;int4→value+8 新增 `q64_pack4x4`),反量化 `w = d·scale·(q−mid)`。已验证 GPU≡CPU(默认 PPL 仅小数点后第 3–4 位差异;`REEX_Q64_PSUM_BITS` 截断下同样对齐)。
+> 对称 K-quant(`Q2_K_64S`/`Q4_K_64S`/`Q5_K_64S`)功能与 5 个非对称 K-quant 一致(CPU/反量化/MMVQ decode+prefill/get_rows/工具链/GGUF),复用 q8_K 激活、走对称分支(无 min 修正项),并因 prefill 统一走 MMVQ 而无需 MMQ 实例。子块 scale 与权重均以二进制补码有符号整数存储(子块 scale 仍用 `q64_pack4x6`/`q64_pack4x4` 打包,但写入的是补码位段而非 value+bias),反量化 `w = d·scale·q`。已验证 GPU≡CPU(默认 PPL 仅小数点后第 3–4 位差异;`REEX_Q64_PSUM_BITS` 截断下同样对齐)。
+
+---
+
+## 有符号补码存储改造(消除反量化零点偏移)
+
+为对齐硬件数据通路(直接按补码整数解释,`x = d·q`,不做运行期 `q − offset` 修正),把**除 Legacy 非对称(`Q4_1_64`/`Q5_1_64`)和 K-quant 非对称(`Q2_K_64`/`Q4_K_64`/`Q5_K_64`)之外的所有对称量化**,权重(及对称 K-quant 子块 scale)由「无符号 + 反量化时减中点」改为「二进制补码有符号整数」存储。
+
+- 涉及类型:`Q4_0_64`、`Q5_0_64`、`Q3_K_64`、`Q6_K_64`、`Q2_K_64S`、`Q4_K_64S`、`Q5_K_64S`(`Q8_0_64`/`Q8_1_64`/`Q6_K_64` 的 scale 早已是 `int8`,无需改)。
+- 量化端:`q = clamp(round(x/d), lo, hi)` 后按补码位段打包(`q & mask`),不再 `+bias`。
+- 反量化 / vec_dot / MMQ tile:子字节字段读出后按位符号扩展 `(n^M)−M`(M 为符号位权重,如 4-bit→0x8、6-bit→0x20),硬件免费;**不再有 `q − mid` 算术偏移**,点积内层退化为纯有符号乘累加 `Σ(q_w·q_a)`。
+- BPW 不变(位宽与打包格式不变,仅改数值语义)。
+- 子块 scale 改用新增 `q64_unpack4x6_s` / `q64_unpack4x4_s`(host+device,符号扩展)读取。
+- **GGUF 兼容性:存储语义改变,旧的对称量化 GGUF 数值不兼容,需重新量化。**
+
+| 文件 | 改动 |
+|---|---|
+| `ggml/include/reex/ggml-reex-q64-common.h` | 新增 `q64_unpack4x6_s` / `q64_unpack4x4_s` 符号扩展解包;更新 block 注释 |
+| `ggml/src/ggml-reex-q64.c` | 7 个对称类型 `quantize_*_ref` 存补码、`dequantize_*` 改符号扩展 |
+| `ggml/src/ggml-cpu/reex/reex_q64_quants.c` | 7 个对称 `vec_dot` 去零点偏移、改符号扩展 |
+| `ggml/src/ggml-cuda/reex/reex_q64_vecdotq.cuh` / `reex_q64_dequant.cuh` / `reex_q64_mmq.cuh` | CUDA legacy(`Q4_0_64`/`Q5_0_64`)MMVQ/反量化/MMQ tile 符号扩展 |
+| `ggml/src/ggml-cuda/reex/reex_q64_kquant_vecdotq.cuh` / `reex_q64_kquant_dequant.cuh` / `reex_q64_kquant_getrows.cuh` / `reex_q64_kquant_mmq.cuh` | CUDA K-quant(`Q3_K_64`/`Q6_K_64`/`*_64S`)MMVQ/反量化/get_rows/MMQ tile 符号扩展,scale 改用 `q64_unpack4x6_s`/`q64_unpack4x4_s` |
 
 未做(性能/质量项,不影响功能):imatrix、CPU SIMD、MMVQ fusion、其他后端(Metal/Vulkan/SYCL)。
 

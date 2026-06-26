@@ -34,8 +34,8 @@ extern "C" {
 
 #define QK4_0_64 64
 typedef struct {
-    ggml_fp16_t d;             // delta
-    uint8_t qs[QK4_0_64 / 2];  // nibbles / quants (32 bytes)
+    ggml_fp16_t d;             // delta; w = d*q, q signed 4-bit [-8,7] (two's complement)
+    uint8_t qs[QK4_0_64 / 2];  // signed nibbles / quants (32 bytes)
 } block_q4_0_64;
 GGML_Q64_STATIC_ASSERT(sizeof(block_q4_0_64) == sizeof(ggml_fp16_t) + QK4_0_64 / 2,
                "wrong q4_0_64 block size/padding");
@@ -58,12 +58,13 @@ typedef struct {
 GGML_Q64_STATIC_ASSERT(sizeof(block_q4_1_64) == 2 * sizeof(ggml_fp16_t) + QK4_1_64 / 2,
                "wrong q4_1_64 block size/padding");
 
-// 5-bit symmetric, block=64 (qh holds the 5th bit of all 64 quants -> 64 bits)
+// 5-bit symmetric, block=64. w = d*q, q signed 5-bit [-16,15] (two's complement);
+// qh holds the 5th (sign) bit of all 64 quants -> 64 bits.
 #define QK5_0_64 64
 typedef struct {
     ggml_fp16_t d;             // delta
-    uint8_t qh[8];             // 5-th bit of quants (64 bits)
-    uint8_t qs[QK5_0_64 / 2];  // nibbles (32 bytes)
+    uint8_t qh[8];             // 5-th (sign) bit of quants (64 bits)
+    uint8_t qs[QK5_0_64 / 2];  // low 4 bits of signed quants (32 bytes)
 } block_q5_0_64;
 GGML_Q64_STATIC_ASSERT(sizeof(block_q5_0_64) == sizeof(ggml_fp16_t) + 8 + QK5_0_64 / 2,
                "wrong q5_0_64 block size/padding");
@@ -156,6 +157,25 @@ static inline uint8_t q64_unpack4x4(int j, const uint8_t * GGML_RESTRICT s) {
     return (uint8_t)((s[j >> 1] >> (4*(j & 1))) & 0xF);
 }
 
+// Signed-int unpack: interpret the packed 6-bit / 4-bit field as a two's-complement
+// signed value (sign-extend), used by the SYMMETRIC K-quant sub-block scales which
+// now store a real signed integer (no +bias offset). host + device.
+#if defined(__CUDACC__)
+__host__ __device__
+#endif
+static inline int q64_unpack4x6_s(int j, const uint8_t * s) {
+    const uint32_t u = (uint32_t)s[0] | ((uint32_t)s[1] << 8) | ((uint32_t)s[2] << 16);
+    const int v = (int)((u >> (6*j)) & 0x3F);
+    return (v ^ 0x20) - 0x20;  // sign-extend 6-bit -> [-32,31]
+}
+#if defined(__CUDACC__)
+__host__ __device__
+#endif
+static inline int q64_unpack4x4_s(int j, const uint8_t * s) {
+    const int v = (int)((s[j >> 1] >> (4*(j & 1))) & 0xF);
+    return (v ^ 0x08) - 0x08;  // sign-extend 4-bit -> [-8,7]
+}
+
 // ---------------------------------------------------------------------------
 // Q2_K_64: 2-bit, super=256 / sub=64 (4 sub-blocks). x = d*scale*q - dmin*min.
 // scales[j]: low nibble = 4-bit scale, high nibble = 4-bit min (mirrors q2_K).
@@ -171,9 +191,10 @@ GGML_Q64_STATIC_ASSERT(sizeof(block_q2_K_64) == 2 * sizeof(ggml_fp16_t) + 4 + QK
                "wrong q2_K_64 block size/padding");
 
 // ---------------------------------------------------------------------------
-// Q3_K_64: 3-bit, super=256 / sub=64 (4 sub-blocks). x = d*scale*(q-4), scale signed.
-// qs: low 2 bits sequential; hmask: 3rd bit sequential (elem e -> hmask[e>>3] bit e&7).
-// scales[0..2]: 4x 6-bit signed-biased scale (value+32); scales[3] reserved (=0).
+// Q3_K_64: 3-bit, super=256 / sub=64 (4 sub-blocks). x = d*scale*q, both q and
+// scale stored as two's-complement SIGNED integers (no zero-point offset).
+// q signed 3-bit [-4,3]: low 2 bits sequential in qs; 3rd (sign) bit in hmask.
+// scales[0..2]: 4x 6-bit signed scale [-32,31] (two's complement); scales[3] reserved (=0).
 // ---------------------------------------------------------------------------
 typedef struct {
     ggml_fp16_t d;             // super-block scale
@@ -200,8 +221,9 @@ GGML_Q64_STATIC_ASSERT(sizeof(block_q5_K_64) == 2 * sizeof(ggml_fp16_t) + 6 + QK
                "wrong q5_K_64 block size/padding");
 
 // ---------------------------------------------------------------------------
-// Q6_K_64: 6-bit, super=256 / sub=64 (4 sub-blocks). x = d*scale*(q-32), scale int8.
-// ql: low 4 bits sequential; qh: high 2 bits sequential (elem e -> qh[e>>2] >> (2*(e&3))).
+// Q6_K_64: 6-bit, super=256 / sub=64 (4 sub-blocks). x = d*scale*q, q signed 6-bit
+// [-32,31] (two's complement, no zero-point offset), scale int8.
+// ql: low 4 bits sequential; qh: high 2 bits (incl. sign) sequential (elem e -> qh[e>>2] >> (2*(e&3))).
 // ---------------------------------------------------------------------------
 typedef struct {
     uint8_t ql[QK_K_64/2];     // low 4 bits of quants (128 bytes)
@@ -214,14 +236,15 @@ GGML_Q64_STATIC_ASSERT(sizeof(block_q6_K_64) == sizeof(ggml_fp16_t) + 4 + QK_K_6
 
 // ---------------------------------------------------------------------------
 // SYMMETRIC K-quant block-64 variants (signed sub-block scale, NO min):
-//   x = d * scale * (q - mid), scale stored as signed-biased N-bit value.
-//   - Q2_K_64S: 2-bit, scale int4 signed (value+8),  mid=2, q in [0,3]
-//   - Q4_K_64S: 4-bit, scale int6 signed (value+32), mid=8, q in [0,15]
-//   - Q5_K_64S: 5-bit, scale int6 signed (value+32), mid=16, q in [0,31]
+//   x = d * scale * q, with BOTH q and scale stored as two's-complement SIGNED
+//   integers (no zero-point / mid offset — hardware-friendly).
+//   - Q2_K_64S: 2-bit, q signed [-2,1],  scale int4 signed [-8,7]
+//   - Q4_K_64S: 4-bit, q signed [-8,7],  scale int6 signed [-32,31]
+//   - Q5_K_64S: 5-bit, q signed [-16,15], scale int6 signed [-32,31]
 // Sub-block scale bit-widths match the asymmetric counterparts (Q2_K:4, Q4/Q5_K:6).
 // ---------------------------------------------------------------------------
 
-// Q2_K_64S: 2-bit symmetric. scales[2] = 4x 4-bit signed-biased scale (value+8).
+// Q2_K_64S: 2-bit symmetric. scales[2] = 4x 4-bit signed scale (q64_pack4x4, two's complement).
 typedef struct {
     ggml_fp16_t d;             // super-block scale
     uint8_t scales[2];         // 4x 4-bit signed-biased scale (q64_pack4x4)
@@ -230,22 +253,22 @@ typedef struct {
 GGML_Q64_STATIC_ASSERT(sizeof(block_q2_K_64S) == sizeof(ggml_fp16_t) + 2 + QK_K_64/4,
                "wrong q2_K_64S block size/padding");
 
-// Q4_K_64S: 4-bit symmetric. scales[4] = 4x 6-bit signed-biased scale (3 used, 1 reserved).
+// Q4_K_64S: 4-bit symmetric. scales[4] = 4x 6-bit signed scale (two's complement, 3 used, 1 reserved).
 typedef struct {
     ggml_fp16_t d;             // super-block scale
-    uint8_t scales[4];         // 4x 6-bit signed-biased scale (q64_pack4x6, 3 used + 1 pad)
-    uint8_t qs[QK_K_64/2];     // 4-bit quants (128 bytes)
+    uint8_t scales[4];         // 4x 6-bit signed scale (q64_pack4x6, two's complement, 3 used + 1 pad)
+    uint8_t qs[QK_K_64/2];     // 4-bit signed quants (128 bytes)
 } block_q4_K_64S;
 GGML_Q64_STATIC_ASSERT(sizeof(block_q4_K_64S) == sizeof(ggml_fp16_t) + 4 + QK_K_64/2,
                "wrong q4_K_64S block size/padding");
 
-// Q5_K_64S: 5-bit symmetric. scales[4] = 4x 6-bit signed-biased scale (3 used, 1 reserved).
+// Q5_K_64S: 5-bit symmetric. scales[4] = 4x 6-bit signed scale (two's complement, 3 used, 1 reserved).
 // qs: low 4 bits sequential (elem e -> qs[e>>1] >> (4*(e&1)));
-// qh: 5th bit sequential (within each 64-sub-block: bit l of qh[l>>3]).
+// qh: 5th (sign) bit sequential (within each 64-sub-block: bit l of qh[l>>3]).
 typedef struct {
     ggml_fp16_t d;             // super-block scale
-    uint8_t scales[4];         // 4x 6-bit signed-biased scale (q64_pack4x6, 3 used + 1 pad)
-    uint8_t qh[QK_K_64/8];     // 5th bit of quants (32 bytes)
+    uint8_t scales[4];         // 4x 6-bit signed scale (q64_pack4x6, two's complement, 3 used + 1 pad)
+    uint8_t qh[QK_K_64/8];     // 5th (sign) bit of quants (32 bytes)
     uint8_t qs[QK_K_64/2];     // low 4 bits of quants (128 bytes)
 } block_q5_K_64S;
 GGML_Q64_STATIC_ASSERT(sizeof(block_q5_K_64S) == sizeof(ggml_fp16_t) + 4 + QK_K_64/8 + QK_K_64/2,

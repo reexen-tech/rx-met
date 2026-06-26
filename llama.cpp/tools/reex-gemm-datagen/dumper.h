@@ -22,10 +22,10 @@ std::string dump_case(
     const void * w_blocks, size_t w_blocks_bytes,        // dump buffer, §4.1 order
     const char * w_layout_desc,                          // weight block byte layout
     const std::vector<uint8_t> & a_blocks,               // §4.1 act group blocks (raw)
-    const std::vector<float> & A_src,                    // [M*K] fp16-source activation
+    const std::vector<float> & A_src,                    // [M*K] native-dtype source act
     const std::vector<float> & W_src,                    // [N*K] fp16-source weight
-    const std::vector<float> & C_gpu_tiled,              // [M*N] result tile order
-    const std::vector<float> & C_ref_tiled,              // [M*N] result tile order
+    const std::vector<uint8_t> * out_bufs,               // 6 chip dtype outputs (out_specs order)
+    const std::vector<float> & C_ref_tiled,              // [M*N] golden, result tile order
     const CaseError & err);
 
 } // namespace rgd
