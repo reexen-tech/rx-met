@@ -57,6 +57,9 @@ int main(int argc, char ** argv) {
             if (!parse_actdtype(argv[++i], c.act_in)) { fprintf(stderr, "bad --actin (F32/F16/BF16/E5M2/E4M3)\n"); return 1; }
         }
         else if (!strcmp(argv[i], "--psum")  && i + 1 < argc) c.psum_bits = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--wbits") && i + 1 < argc) c.w_bits = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--asign") && i + 1 < argc) c.a_unsigned = (argv[++i][0] == 'u' || argv[i][0] == 'U');
+        else if (!strcmp(argv[i], "--wsign") && i + 1 < argc) c.w_unsigned = (argv[++i][0] == 'u' || argv[i][0] == 'U');
         else if (!strcmp(argv[i], "--seed")  && i + 1 < argc) c.seed = strtoull(argv[++i], nullptr, 10);
         else if (!strcmp(argv[i], "--M")     && i + 1 < argc) c.M = atoll(argv[++i]);
         else if (!strcmp(argv[i], "--N")     && i + 1 < argc) c.N = atoll(argv[++i]);
@@ -64,7 +67,8 @@ int main(int argc, char ** argv) {
         else if (!strcmp(argv[i], "--check-rows") && i + 1 < argc) check_rows = atoll(argv[++i]);
         else if (!strcmp(argv[i], "-h") || !strcmp(argv[i], "--help")) {
             printf("Usage: %s [--out DIR] [--wtype NAME] [--abits 16|8|4] [--actin F32|F16|BF16|E5M2|E4M3]\n"
-                   "          [--psum B] [--seed S] [--M m --N n --K k] [--check-rows R]\n", argv[0]);
+                   "          [--psum B] [--seed S] [--M m --N n --K k] [--check-rows R]\n"
+                   "          [--wbits 8|6|5|4|3|2] [--asign s|u] [--wsign s|u]   (INT path only)\n", argv[0]);
             return 0;
         } else {
             fprintf(stderr, "Unknown arg: %s\n", argv[i]);
@@ -89,8 +93,9 @@ int main(int argc, char ** argv) {
     // IntBlock: pure-integer GEMM (no scale) takes a dedicated path.
     if (wt.family == Family::IntBlock) {
         char nbuf[192];
-        snprintf(nbuf, sizeof(nbuf), "%s-A%dW%d-psum%d",
-                 wt.name, c.A_bits, wt.W_bits, c.psum_bits);
+        snprintf(nbuf, sizeof(nbuf), "int-A%c%d-W%c%d-psum%d",
+                 c.a_unsigned ? 'U' : 'S', c.A_bits,
+                 c.w_unsigned ? 'U' : 'S', c.w_bits, c.psum_bits);
         c.name = nbuf;
         fprintf(stderr, "[rgd] case %s  M=%lld N=%lld K=%lld (pure int)\n",
                 c.name.c_str(), (long long) c.M, (long long) c.N, (long long) c.K);

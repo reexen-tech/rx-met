@@ -123,6 +123,11 @@ struct GemmCase {
     bool     dump_intermediate = false;
     int64_t  dump_m = 64, dump_n = 64;
     std::string name;               // auto-generated
+
+    // IntBlock pure-integer path only (ignored by Kquant/Legacy):
+    int      w_bits     = 8;        // weight bit-width (8/6/5/4/3/2)
+    bool     a_unsigned = false;    // activations are UINT (else signed two's-comp)
+    bool     w_unsigned = false;    // weights are UINT
 };
 
 // -------------------------------------------------------------------------
@@ -178,12 +183,16 @@ RGD_HD inline int64_t act_elem_slot(int64_t m, int64_t k, int64_t K,
     const int64_t kt = k / ts.Kt, c = k % ts.Kt;
     return ((mt * Ktiles + kt) * ts.Mt + r) * ts.Kt + c;
 }
+// Weight intra-block ordering is COLUMN-major (contiguous along N): block viewed
+// as [16 N-rows x 16 K-cols], element (n_local,k_local) stored at k_local*Nt +
+// n_local. inter-block (kt,nt) row-major. (Activation stays row-major; this
+// mirrors the FP groups, whose weight blocks are also N-contiguous within a tile.)
 RGD_HD inline int64_t weight_elem_slot(int64_t n, int64_t k, int64_t N,
                                        const TilingSpec & ts) {
     const int64_t Ntiles = N / ts.Nt;
-    const int64_t nt = n / ts.Nt, r = n % ts.Nt;
-    const int64_t kt = k / ts.Kt, c = k % ts.Kt;
-    return ((kt * Ntiles + nt) * ts.Nt + r) * ts.Kt + c;
+    const int64_t nt = n / ts.Nt, r = n % ts.Nt;   // r = N-row within block
+    const int64_t kt = k / ts.Kt, c = k % ts.Kt;   // c = K-col within block
+    return ((kt * Ntiles + nt) * ts.Kt + c) * ts.Nt + r;  // intra-block column(=N)-major
 }
 
 // Result C[M,N], tile [Mt,Nt] (element granularity):
