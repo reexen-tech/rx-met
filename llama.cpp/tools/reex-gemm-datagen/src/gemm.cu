@@ -205,7 +205,7 @@ void gemm_run_host(
     const void * w_blocks,
     const uint8_t * a_blocks, size_t a_bytes,
     float * C_out,
-    uint8_t * const out_bufs[6],
+    uint8_t * const out_bufs[],
     int64_t M, int64_t N, int64_t K,
     TilingSpec ts, int A_bits, int psum_bits) {
 
@@ -222,9 +222,9 @@ void gemm_run_host(
     CUDA_CHECK(cudaMemcpy(d_w, w_blocks, w_bytes, cudaMemcpyHostToDevice));
     CUDA_CHECK(cudaMemcpy(d_a, a_blocks, a_bytes, cudaMemcpyHostToDevice));
 
-    // device output buffers for the 6 dtypes (in-chip OutConv writes here).
+    // device output buffers for all dtypes (in-chip OutConv writes here).
     int nsp; const OutSpec * sp = out_specs(nsp);
-    OutBufs outs; size_t obytes[6] = {0};
+    OutBufs outs; size_t obytes[RGD_MAX_OUT] = {0};
     for (int s = 0; s < nsp; ++s) {
         obytes[s] = (size_t) (M * N) * sp[s].bytes;
         CUDA_CHECK(cudaMalloc((void **) &outs.p[s], obytes[s]));

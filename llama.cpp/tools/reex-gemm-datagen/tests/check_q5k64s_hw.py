@@ -45,7 +45,8 @@ for n in range(N):
             if sc >= (1 << (SCALE_BITS - 1)): sc -= (1 << SCALE_BITS)   # sign-extend
             idx = pos + np.arange(64)[:, None] * W_BITS + np.arange(W_BITS)[None, :]
             codes = bits[idx].dot(pw).astype(np.int32); pos += 64 * W_BITS
-            W[n, sb * Kt + s * 64 : sb * Kt + s * 64 + 64] = d * float(sc) * (codes - 16)
+            codes -= (codes >= (1 << (W_BITS - 1))) * (1 << W_BITS)   # signed two's complement (f95e0c8)
+            W[n, sb * Kt + s * 64 : sb * Kt + s * 64 + 64] = d * float(sc) * codes
 
 # ---- decode activations (contiguous group: d f16, qs[AG] i8) for ROWS rows ----
 astride = 2 + AG

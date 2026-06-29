@@ -133,7 +133,7 @@ int main(int argc, char ** argv) {
     std::vector<float> C_gpu((size_t) (c.M * c.N));
     int nsp; const OutSpec * osp = out_specs(nsp);
     std::vector<std::vector<uint8_t>> obufs(nsp);
-    uint8_t * out_ptrs[6] = {nullptr};
+    uint8_t * out_ptrs[RGD_MAX_OUT] = {nullptr};
     for (int s = 0; s < nsp; ++s) {
         obufs[s].assign((size_t) (c.M * c.N) * osp[s].bytes, 0);
         out_ptrs[s] = obufs[s].data();

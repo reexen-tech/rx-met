@@ -24,7 +24,7 @@ std::string dump_case(
     const std::vector<uint8_t> & a_blocks,               // §4.1 act group blocks (raw)
     const std::vector<float> & A_src,                    // [M*K] native-dtype source act
     const std::vector<float> & W_src,                    // [N*K] fp16-source weight
-    const std::vector<uint8_t> * out_bufs,               // 6 chip dtype outputs (out_specs order)
+    const std::vector<uint8_t> * out_bufs,               // chip dtype outputs (out_specs order, nsp entries)
     const std::vector<float> & C_ref_tiled,              // [M*N] golden, result tile order
     const CaseError & err);
 

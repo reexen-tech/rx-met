@@ -171,7 +171,7 @@ std::string run_intblock_case(const std::string & out_root, const GemmCase & c,
             std::vector<uint8_t> obuf((size_t) (M * N) * o.bytes);
             for (int64_t i = 0; i < M * N; ++i) {
                 rgd_out_write_i32(obuf.data() + (size_t) i * o.bytes,
-                                  o.dt, o.is_float, o.bytes, o.qmax, C_gpu[(size_t) i]);
+                                  o.kind, o.bytes, o.qmax, C_gpu[(size_t) i]);
             }
             iwrite_bin(dir + "/output_" + o.name + ".bin", obuf.data(), obuf.size());
         }
@@ -206,7 +206,7 @@ std::string run_intblock_case(const std::string & out_root, const GemmCase & c,
                 "    \"family\": \"IntBlock\", \"scale\": \"none\",\n"
                 "    \"act_dtype\": \"%s %d-bit\",  \"act_range\": [%d, %d],\n"
                 "    \"weight_dtype\": \"%s %d-bit\", \"weight_range\": [%d, %d],\n"
-                "    \"output_dtypes\": \"i32(saturated, canonical) + F16,BF16,I16,I8,I6,I4 (cast/clamp from the saturated i32, no scale)\",\n"
+                "    \"output_dtypes\": \"i32(saturated, canonical) + F16,BF16,E4M3,I16,I8,I6,I4,U16,U8,U6,U4 (cast/clamp from the saturated i32, no scale)\",\n"
                 "    \"psum_trunc_bits\": %d, \"_psum_doc\": \"0 = int32 accumulator only (step-wise saturated)\", \"seed\": %llu\n"
                 "  },\n"
                 "  \"tiling\": {\n"
@@ -236,8 +236,9 @@ std::string run_intblock_case(const std::string & out_root, const GemmCase & c,
                 "      \"elem_index\": \"idx(m,n) = (n/Nt*Mtiles + m/Mt)*(Mt*Nt) + (m%%Mt)*Nt + n%%Nt\"\n"
                 "    },\n"
                 "    \"output_<DT>.bin\": {\n"
-                "      \"_doc\": \"saturated i32 cast/clamped to each DT in [F16,BF16,I16,I8,I6,I4] (NO scale); F16/BF16 saturate beyond range, int clamps. I6/I4 in int8 container\",\n"
-                "      \"dtypes\": [\"F16\",\"BF16\",\"I16\",\"I8\",\"I6\",\"I4\"], \"int_saturate\": {\"I16\":[-32768,32767],\"I8\":[-128,127],\"I6\":[-32,31],\"I4\":[-8,7]},\n"
+                "      \"_doc\": \"saturated i32 cast/clamped to each DT (NO scale); F16/BF16 cast (FP16 overflow->Inf), E4M3 RNE+saturate +/-448 (no Inf), int clamps. I6/I4 in int8 container, U6/U4 in uint8 container, negatives->0 for UINT\",\n"
+                "      \"dtypes\": [\"F16\",\"BF16\",\"E4M3\",\"I16\",\"I8\",\"I6\",\"I4\",\"U16\",\"U8\",\"U6\",\"U4\"],\n"
+                "      \"fp8_e4m3\": {\"max\":448,\"inf\":false}, \"int_saturate\": {\"I16\":[-32768,32767],\"I8\":[-128,127],\"I6\":[-32,31],\"I4\":[-8,7]}, \"uint_saturate\": {\"U16\":[0,65535],\"U8\":[0,255],\"U6\":[0,63],\"U4\":[0,15]},\n"
                 "      \"shape\": [%lld, %lld], \"elem_index\": \"same as output_i32.bin\"\n"
                 "    },\n"
                 "    \"golden_f32.bin\": {\n"
