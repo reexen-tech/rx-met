@@ -66,8 +66,9 @@ static const WQuantType g_registry[] = {
     { "q8_0_64",  Family::Legacy, 8, false, sizeof(block_q8_0_64),  64,      0, q8_0_64_encode },
     { "q8_1_64s", Family::Legacy, 8, false, sizeof(block_q8_1_64),  64,      0, q8_1_64s_encode },
     { "q4_0_64",  Family::Legacy, 4, false, sizeof(block_q4_0_64),  64,      0, q4_0_64_encode },
-    // IntBlock — pure integer GEMM, NO scale. block = [16x16]=256 raw int8.
-    // (handled by the dedicated int path in intgemm.cu; encode unused)
+    // IntBlock — pure integer GEMM, NO scale; bit-width & signedness come from CLI
+    // (--wbits/--asign/--wsign), bit-packed [16x16] blocks. Handled by intgemm.cu.
+    { "INT",      Family::IntBlock, 8, false, 0,                    16,      0, nullptr },
     { "W8_16",    Family::IntBlock, 8, false, 256,                  16,      0, nullptr },
 };
 static const int g_registry_n = (int) (sizeof(g_registry) / sizeof(g_registry[0]));

@@ -20,7 +20,17 @@ namespace rgd {
 // -------------------------------------------------------------------------
 enum class Family  { Kquant, Legacy, IntBlock };
 enum class ActDType { F32, F16, BF16, E5M2, E4M3 };
-enum class OutDType { F16, BF16, I16, I8, I6, I4 };
+enum class OutDType { F16, BF16, E4M3, I16, I8, I6, I4, U16, U8, U6, U4 };
+
+// Output conversion kind (how the accumulator is mapped into the container):
+//   F16/BF16    : wide float, plain cast (FP16 overflows to ±Inf).
+//   FP8E4M3     : 1-4-3 fp8, RNE + saturate to ±448 (no Inf encoding).
+//   SInt        : signed int, clamp to [-(qmax+1), qmax]   (two's complement).
+//   UInt        : unsigned int, clamp to [0, qmax]         (negatives -> 0).
+enum class OutKind { F16, BF16, FP8E4M3, SInt, UInt };
+
+// Upper bound on the number of output dtypes emitted per case (for fixed arrays).
+enum { RGD_MAX_OUT = 16 };
 
 inline const char * family_name(Family f) {
     switch (f) {
@@ -55,29 +65,43 @@ inline const char * outdtype_name(OutDType d) {
     switch (d) {
         case OutDType::F16:  return "F16";
         case OutDType::BF16: return "BF16";
+        case OutDType::E4M3: return "E4M3";
         case OutDType::I16:  return "I16";
         case OutDType::I8:   return "I8";
         case OutDType::I6:   return "I6";
         case OutDType::I4:   return "I4";
+        case OutDType::U16:  return "U16";
+        case OutDType::U8:   return "U8";
+        case OutDType::U6:   return "U6";
+        case OutDType::U4:   return "U4";
     }
     return "?";
 }
 
 // -------------------------------------------------------------------------
-// Output dtype table: container bytes + (for int outputs) symmetric qmax.
-// I6/I4 are carried in a signed int8 container (sign-extended). F16/BF16 are
-// is_float. The full set is emitted per case (compute once, convert to all).
+// Output dtype table: conversion kind + container bytes + qmax.
+//   - kind picks the OutConv branch (see OutKind).
+//   - qmax: signed -> max positive (clamp [-(qmax+1), qmax]); unsigned -> max
+//     value (clamp [0, qmax]); unused for float kinds.
+//   - I6/I4 in a signed int8 container (sign-extended); U6/U4 in a uint8
+//     container (zero-extended); E4M3 in a 1-byte fp8 container.
+// The full set is emitted per case (compute once, convert to all). NO scale.
 // -------------------------------------------------------------------------
-struct OutSpec { OutDType dt; const char * name; bool is_float; int bytes; int qmax; };
+struct OutSpec { OutDType dt; const char * name; OutKind kind; int bytes; int qmax; };
 
 inline const OutSpec * out_specs(int & n) {
     static const OutSpec s[] = {
-        { OutDType::F16,  "F16",  true,  2, 0 },
-        { OutDType::BF16, "BF16", true,  2, 0 },
-        { OutDType::I16,  "I16",  false, 2, 32767 },
-        { OutDType::I8,   "I8",   false, 1, 127 },
-        { OutDType::I6,   "I6",   false, 1, 31 },
-        { OutDType::I4,   "I4",   false, 1, 7 },
+        { OutDType::F16,  "F16",  OutKind::F16,     2, 0 },
+        { OutDType::BF16, "BF16", OutKind::BF16,    2, 0 },
+        { OutDType::E4M3, "E4M3", OutKind::FP8E4M3, 1, 0 },
+        { OutDType::I16,  "I16",  OutKind::SInt,    2, 32767 },
+        { OutDType::I8,   "I8",   OutKind::SInt,    1, 127 },
+        { OutDType::I6,   "I6",   OutKind::SInt,    1, 31 },
+        { OutDType::I4,   "I4",   OutKind::SInt,    1, 7 },
+        { OutDType::U16,  "U16",  OutKind::UInt,    2, 65535 },
+        { OutDType::U8,   "U8",   OutKind::UInt,    1, 255 },
+        { OutDType::U6,   "U6",   OutKind::UInt,    1, 63 },
+        { OutDType::U4,   "U4",   OutKind::UInt,    1, 15 },
     };
     n = (int) (sizeof(s) / sizeof(s[0]));
     return s;
@@ -123,6 +147,11 @@ struct GemmCase {
     bool     dump_intermediate = false;
     int64_t  dump_m = 64, dump_n = 64;
     std::string name;               // auto-generated
+
+    // IntBlock pure-integer path only (ignored by Kquant/Legacy):
+    int      w_bits     = 8;        // weight bit-width (8/6/5/4/3/2)
+    bool     a_unsigned = false;    // activations are UINT (else signed two's-comp)
+    bool     w_unsigned = false;    // weights are UINT
 };
 
 // -------------------------------------------------------------------------
@@ -178,12 +207,16 @@ RGD_HD inline int64_t act_elem_slot(int64_t m, int64_t k, int64_t K,
     const int64_t kt = k / ts.Kt, c = k % ts.Kt;
     return ((mt * Ktiles + kt) * ts.Mt + r) * ts.Kt + c;
 }
+// Weight intra-block ordering is COLUMN-major (contiguous along N): block viewed
+// as [16 N-rows x 16 K-cols], element (n_local,k_local) stored at k_local*Nt +
+// n_local. inter-block (kt,nt) row-major. (Activation stays row-major; this
+// mirrors the FP groups, whose weight blocks are also N-contiguous within a tile.)
 RGD_HD inline int64_t weight_elem_slot(int64_t n, int64_t k, int64_t N,
                                        const TilingSpec & ts) {
     const int64_t Ntiles = N / ts.Nt;
-    const int64_t nt = n / ts.Nt, r = n % ts.Nt;
-    const int64_t kt = k / ts.Kt, c = k % ts.Kt;
-    return ((kt * Ntiles + nt) * ts.Nt + r) * ts.Kt + c;
+    const int64_t nt = n / ts.Nt, r = n % ts.Nt;   // r = N-row within block
+    const int64_t kt = k / ts.Kt, c = k % ts.Kt;   // c = K-col within block
+    return ((kt * Ntiles + nt) * ts.Kt + c) * ts.Nt + r;  // intra-block column(=N)-major
 }
 
 // Result C[M,N], tile [Mt,Nt] (element granularity):

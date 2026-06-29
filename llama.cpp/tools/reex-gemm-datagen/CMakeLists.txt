@@ -10,15 +10,16 @@ enable_language(CUDA)
 
 set(TARGET reex-gemm-datagen)
 
+# Sources live under src/ (headers stay alongside as an internal tool — no public include/).
 add_executable(${TARGET}
-    main.cpp
-    datagen.cpp
-    wquant.cpp
-    reference.cpp
-    dumper.cpp
-    actquant.cu
-    gemm.cu
-    intgemm.cu
+    src/main.cpp
+    src/datagen.cpp
+    src/wquant.cpp
+    src/reference.cpp
+    src/dumper.cpp
+    src/actquant.cu
+    src/gemm.cu
+    src/intgemm.cu
 )
 
 set_target_properties(${TARGET} PROPERTIES
