@@ -5,6 +5,11 @@
 #   BUILD_DIR  cmake build dir under llama.cpp root      (default build_cuda_q64)
 #   OUT        output root for generated products         (default <tool>/output)
 #   M / N / K  GEMM shape override (else binary defaults: 8192 / 2048 / 2048)
+#   SEED       fix the RNG seed for reproduction.         (default: fresh random per case)
+#              By default every case uses a new random seed so each run produces
+#              different data; the seed actually used is recorded in each meta.json
+#              (and the raw act_src/weight_src are dumped) for later re-verification.
+#              To reproduce a recorded case:  SEED=<meta.seed> ./gen_<group>.sh
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -33,13 +38,23 @@ require_bin() {
 GROUP="${GROUP:-}"
 group_out() { printf '%s' "$OUT_DIR${GROUP:+/$GROUP}"; }
 
+# gen_seed: a fresh unsigned random seed (32-bit), or the fixed $SEED if exported.
+gen_seed() {
+    if [[ -n "${SEED:-}" ]]; then printf '%s' "$SEED"; return; fi
+    if [[ -r /dev/urandom ]]; then
+        od -An -N4 -tu4 /dev/urandom | tr -d ' '
+    else
+        printf '%s' "$(( (RANDOM << 15 | RANDOM) & 0x7fffffff ))"
+    fi
+}
+
 # run_case <datagen-args...>
 run_case() {
     require_bin
-    local dest; dest="$(group_out)"
+    local dest seed; dest="$(group_out)"; seed="$(gen_seed)"
     mkdir -p "$dest"
-    echo "==> reex-gemm-datagen --out $dest $* ${SHAPE_ARGS[*]:-}"
-    "$BIN" --out "$dest" "$@" ${SHAPE_ARGS[@]+"${SHAPE_ARGS[@]}"}
+    echo "==> reex-gemm-datagen --out $dest --seed $seed $* ${SHAPE_ARGS[*]:-}"
+    "$BIN" --out "$dest" --seed "$seed" "$@" ${SHAPE_ARGS[@]+"${SHAPE_ARGS[@]}"}
 }
 
 # run_quant_sweep <wtype> <wbits>
