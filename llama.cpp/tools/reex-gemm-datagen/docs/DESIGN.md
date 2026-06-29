@@ -212,9 +212,12 @@ C[m,n]      = Σ_subblock acc → round 到 fp16
 ```
 tools/reex-gemm-datagen/
 ├── CMakeLists.txt        # 构建定义(源文件路径均以 src/ 为前缀)
+├── .gitignore            # 排除 output/ 产物
 ├── docs/                 # DESIGN.md(单一设计文档)
+├── scripts/              # 一键脚本:build.sh / gen_{legacy,kquant,int,all}.sh(_common.sh 为共享库)
 ├── src/                  # 全部 C++/CUDA 源码与头文件(.cpp/.cu/.h/.cuh)
-└── tests/                # check_q5k64s_hw.py 等独立校验脚本(不参与 C++ 构建)
+├── tests/                # check_q5k64s_hw.py 等独立校验脚本(不参与 C++ 构建)
+└── output/               # 生成产物(每 case 一个时间戳目录,git 忽略)
 ```
 
 > `src/` 内的 `#include "..."` 均为相对引用,编译器按源文件所在目录解析即可命中(无需额外
