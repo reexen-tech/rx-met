@@ -281,6 +281,23 @@ def verify_percentile_calibration(sim_model, verbose: bool = True) -> Dict[str, 
 # Power-of-2 量化相关函数
 # ============================================================================
 
+def _enable_quant_gru_pot2(sim_model, verbose: bool = True) -> int:
+    """递归开启模型中 QuantGRU 的 POT2 scale 模式（use_pot2_scale=True）。"""
+    try:
+        from quant_gru import QuantGRU
+    except ImportError:
+        return 0
+
+    count = 0
+    for name, module in sim_model.named_modules():
+        if isinstance(module, QuantGRU) and bool(getattr(module, 'use_quantization', False)):
+            module.use_pot2_scale = True
+            count += 1
+            if verbose:
+                print(f"  [QuantGRU] {name}: use_pot2_scale=True")
+    return count
+
+
 def apply_power_of_2_workflow(sim_model, method: str = "round", tolerance: float = 0.02, 
                               align_bias_scale: bool = False, verbose: bool = True) -> Dict[str, Any]:
     """
@@ -396,7 +413,11 @@ def apply_power_of_2_workflow(sim_model, method: str = "round", tolerance: float
         
         bias_alignment_stats = _align_conv_bias_scale(sim_model, verbose=verbose)
         results['bias_alignment'] = bias_alignment_stats
-    
+
+    quant_gru_count = _enable_quant_gru_pot2(sim_model, verbose=verbose)
+    if quant_gru_count:
+        results['quant_gru_pot2_count'] = quant_gru_count
+
     return results
 
 
