@@ -53,6 +53,8 @@ include = [
     "aimet_onnx.*",
     "aimet_torch",
     "aimet_torch.*",
+    "aimet_llama",
+    "aimet_llama.*",
     "export_onnx_and_encodings",
     "export_onnx_and_encodings.*",
 ]
@@ -61,4 +63,5 @@ include = [
 aimet_common = ["*.json", "*.so", "*.pyd", "*.dll", "bin/*"]
 aimet_onnx = ["*.json", "*.so", "*.pyd", "*.dll"]
 aimet_torch = ["*.json", "*.so", "*.pyd", "*.dll"]
+aimet_llama = ["*.md"]
 export_onnx_and_encodings = ["*.json", "*.pt", "data/*"]
