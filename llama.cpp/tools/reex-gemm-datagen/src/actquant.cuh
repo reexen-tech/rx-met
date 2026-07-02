@@ -5,7 +5,7 @@
 //              -> clamp(±qmax). Container int16 (A16) / int8 (A8/A4).
 #pragma once
 
-#include "case.h"
+#include "reex_layout.h"
 
 #include <cstdint>
 #include <vector>

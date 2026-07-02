@@ -10,7 +10,7 @@
 //   Output is pure saturation, NO scale.
 #pragma once
 
-#include "case.h"      // OutDType, OutSpec, OutKind, out_specs(), RGD_HD
+#include "reex_layout.h"      // OutDType, OutSpec, OutKind, out_specs(), RGD_HD
 #include "fp8.h"       // fp8_encode (E4M3), host+device
 #include "ggml.h"      // host fp16/bf16 conversion
 

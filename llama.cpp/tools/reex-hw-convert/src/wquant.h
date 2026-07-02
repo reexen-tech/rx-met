@@ -2,7 +2,7 @@
 // strategies plug in by adding a row (encoder + block metadata).
 #pragma once
 
-#include "case.h"
+#include "reex_layout.h"
 
 #include <cstddef>
 #include <cstdint>

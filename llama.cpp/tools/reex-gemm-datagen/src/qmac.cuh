@@ -3,7 +3,7 @@
 // kernels (gemm.cu) and the CPU integer golden (reference.cpp).
 #pragma once
 
-#include "case.h"
+#include "reex_layout.h"
 
 #include "ggml.h"
 #include "reex/ggml-reex-q64-common.h"   // block_q6_K_64 / q8_0_64 / q5_K_64S, reex_q64_psum_trunc_b

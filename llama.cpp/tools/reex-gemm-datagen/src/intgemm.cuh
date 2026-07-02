@@ -3,7 +3,7 @@
 // quantized path; self-contained (datagen + pack + GPU gemm + golden + dump).
 #pragma once
 
-#include "case.h"
+#include "reex_layout.h"
 #include "wquant.h"
 
 #include <string>

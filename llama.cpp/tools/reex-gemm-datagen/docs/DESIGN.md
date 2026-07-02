@@ -43,7 +43,7 @@ datagen_fill            生成 A[M,K]、W[N,K] 随机数(A 已 round 到 act_in 
 
 ## 2. 配置轴(正交)
 
-`case.h` 定义三条正交配置轴 + 一个 case 结构:
+`reex_layout.h`(共享库 `reex-hw-layout`,原 `case.h`)定义三条正交配置轴 + 一个 case 结构:
 
 | 轴 | 取值 |
 |---|---|
@@ -98,7 +98,7 @@ tile = `[Mt 行 × Nt 列(N) × Kt 列(K)]`。权重/激活在 **量化块粒度
 | Legacy   | `4,64,64`   | `[4,64]`   | `[64,64]`  | 64  | 64 |
 | IntBlock | `16,16,16`  | `[16,16]`  | `[16,16]`  | 16  | 16 |
 
-**槽位公式**(`case.h`,均返回扁平 slot;`Xtiles = X / Xt`):
+**槽位公式**(`reex_layout.h`,均返回扁平 slot;`Xtiles = X / Xt`):
 
 - 权重块(块间 `(kt,nt)` 行主序,块内 N 列主序):
   `weight_block_slot(n,sb) = (sb*Ntiles + n/Nt)*Nt + n%Nt`,`sb = k/Kt`
@@ -223,16 +223,24 @@ tools/reex-gemm-datagen/
 > `src/` 内的 `#include "..."` 均为相对引用,编译器按源文件所在目录解析即可命中(无需额外
 > `target_include_directories`);外部头(`ggml.h`、`reex/...`)由 `ggml` target 的 include 目录提供。
 
-下表文件均位于 `src/`:
+> **共享库**:类型注册表 / §4.1 tiling+槽位公式 / reorder / K-quant HW 重打包
+> 已抽到独立库 **`reex-hw-layout`**(`tools/reex-hw-convert/`),datagen 链接复用之
+> (单一实现,无漂移)。对应文件 `reex_layout.h`(原 `case.h`)与 `wquant.{h,cpp}`
+> 现位于 `tools/reex-hw-convert/src/`,datagen 通过该库的 `PUBLIC` include 目录引用。
+> CPU-only 权重转换器 CLI `reex-hw-convert`(native/fp32/random → HW `weight_blocks.bin`
+> + `meta.json`,`-DREEX_HW_CONVERT=ON`,不依赖 CUDA)与其字节级校验
+> `tests/check_wconvert.py` 同在 `tools/reex-hw-convert/`。
+
+下表文件位于 `src/`(除标注属共享库者):
 
 | 文件 | 职责 |
 |---|---|
-| `case.h`            | 配置轴、`TilingSpec`/`tiling_for`、§4.1 槽位公式、激活块访问 |
+| `reex_layout.h` *(共享库)* | 配置轴、`TilingSpec`/`tiling_for`、§4.1 槽位公式、激活块访问(原 `case.h`) |
 | `datagen.{h,cpp}`   | 输入生成(A→act_in 源,W→fp16);`quantize_act` 为 host 备用(主路径用 device) |
 | `fp8.h`             | E5M2/E4M3 round/encode/decode(`RGD_HD`,host+device;encode 供 E4M3 输出与激活源量化共用) |
 | `convert.cuh`       | **OutConv 黑盒**(`RGD_HD`):fp32/int32 acc → 11 种 dtype 字节;按 `OutKind` 分派(float cast / E4M3 饱和 / 有符号补码饱和 / 无符号饱和);GEMM/IntBlock/dumper 共用 |
 | `actquant.{cuh,cu}` | **stage-1 在片量化** device kernel(A → act_blocks) |
-| `wquant.{h,cpp}`    | 权重量化类型注册表、encode、reorder、K-quant HW 重打包(BitWriter) |
+| `wquant.{h,cpp}` *(共享库)* | 权重量化类型注册表、encode、reorder、K-quant HW 重打包(BitWriter) |
 | `qmac.cuh`          | host+device 共享整数 MAC / dot 黑盒(镜像 reex `vec_dot_*`)+ Psum 截断 |
 | `gemm.{cuh,cu}`     | 通用 GEMM kernel(按 qtype/A_bits dispatch)+ 在片 OutConv 产 6 输出 + host 包装 |
 | `reference.{h,cpp}` | CPU 整数 golden + dequant golden + 比对 |

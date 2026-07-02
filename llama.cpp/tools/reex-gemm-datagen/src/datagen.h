@@ -1,7 +1,7 @@
 // Input generation + activation quantization (-> block_q8_1 in §4.1 order).
 #pragma once
 
-#include "case.h"
+#include "reex_layout.h"
 
 #include <cstdint>
 #include <vector>

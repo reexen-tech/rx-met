@@ -38,8 +38,13 @@ else()
         add_subdirectory(export-lora)
     endif()
     add_subdirectory(fit-params)
+    if (REEX_HW_CONVERT OR REEX_GEMM_DATAGEN)
+        # CPU-only HW weight converter + shared reex-hw-layout library.
+        # Added first so the reex-hw-layout target exists for reex-gemm-datagen.
+        add_subdirectory(reex-hw-convert)
+    endif()
     if (REEX_GEMM_DATAGEN)
-        # Standalone GPU GEMM quant-sweep datagen tool.
+        # Standalone GPU GEMM quant-sweep datagen tool (reuses reex-hw-layout).
         add_subdirectory(reex-gemm-datagen)
     endif()
     if (REEX_TURBOQUANT)

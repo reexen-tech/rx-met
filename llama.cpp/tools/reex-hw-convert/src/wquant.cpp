@@ -31,6 +31,21 @@ static void q8_1_64s_encode(const float * W, void * blocks, int64_t N, int64_t K
     quantize_row_q8_1_64_ref(W, (block_q8_1_64 *) blocks, N * K);
 }
 
+// q4_1_64 — asymmetric W4 (delta + min): w = d*q + m, q unsigned 4-bit nibble.
+static void q4_1_64_encode(const float * W, void * blocks, int64_t N, int64_t K) {
+    quantize_row_q4_1_64_ref(W, (block_q4_1_64 *) blocks, N * K);
+}
+
+// q5_0_64 — symmetric W5: w = d*q, q signed 5-bit [-16,15]; low4 in qs, 5th bit in qh.
+static void q5_0_64_encode(const float * W, void * blocks, int64_t N, int64_t K) {
+    quantize_row_q5_0_64_ref(W, (block_q5_0_64 *) blocks, N * K);
+}
+
+// q5_1_64 — asymmetric W5 (delta + min): w = d*q + m, q unsigned 5-bit (low4 + qh).
+static void q5_1_64_encode(const float * W, void * blocks, int64_t N, int64_t K) {
+    quantize_row_q5_1_64_ref(W, (block_q5_1_64 *) blocks, N * K);
+}
+
 // Q5_K_64S — symmetric K-quant W5. block_q5_K_64S = { d; scales[4]; qh[32]; qs[128] }.
 //   sc = unpack4x6_s(scales,j),  w = d * sc * q5,  q5/sc signed two's complement.
 static void q5k64s_encode(const float * W, void * blocks, int64_t N, int64_t K) {
@@ -66,6 +81,9 @@ static const WQuantType g_registry[] = {
     { "q8_0_64",  Family::Legacy, 8, false, sizeof(block_q8_0_64),  64,      0, q8_0_64_encode },
     { "q8_1_64s", Family::Legacy, 8, false, sizeof(block_q8_1_64),  64,      0, q8_1_64s_encode },
     { "q4_0_64",  Family::Legacy, 4, false, sizeof(block_q4_0_64),  64,      0, q4_0_64_encode },
+    { "q4_1_64",  Family::Legacy, 4, true,  sizeof(block_q4_1_64),  64,      0, q4_1_64_encode },
+    { "q5_0_64",  Family::Legacy, 5, false, sizeof(block_q5_0_64),  64,      0, q5_0_64_encode },
+    { "q5_1_64",  Family::Legacy, 5, true,  sizeof(block_q5_1_64),  64,      0, q5_1_64_encode },
     // IntBlock — pure integer GEMM, NO scale; bit-width & signedness come from CLI
     // (--wbits/--asign/--wsign), bit-packed [16x16] blocks. Handled by intgemm.cu.
     { "INT",      Family::IntBlock, 8, false, 0,                    16,      0, nullptr },

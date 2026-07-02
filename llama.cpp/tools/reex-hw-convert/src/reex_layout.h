@@ -1,4 +1,5 @@
-// REEX GEMM datagen — core types, tiling spec and §4.1 tile-address helpers.
+// REEX HW layout — core types, tiling spec and §4.1 tile-address helpers.
+// Shared by reex-hw-convert (weight converter) and reex-gemm-datagen.
 #pragma once
 
 #include "ggml.h"

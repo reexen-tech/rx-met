@@ -1,7 +1,7 @@
 // GPU GEMM host wrapper — dispatches to the right kernel by weight qtype.
 #pragma once
 
-#include "case.h"
+#include "reex_layout.h"
 
 #include <cstddef>
 #include <cstdint>

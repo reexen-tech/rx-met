@@ -2,7 +2,7 @@
 // meta.json into out_root/<case_name>/.
 #pragma once
 
-#include "case.h"
+#include "reex_layout.h"
 #include "reference.h"   // CaseError
 #include "wquant.h"      // WQuantType
 
