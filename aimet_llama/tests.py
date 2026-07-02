@@ -34,9 +34,15 @@ from aimet_llama.schema import (
     _deep_merge,
 )
 from aimet_llama.cli import (
+    build_hw_export_cmd,
     build_imatrix_cmd,
     build_perplexity_cmd,
     build_quantize_cmd,
+)
+from aimet_llama.schema import (
+    hw_export_input,
+    hw_export_output_gguf,
+    quantized_path,
 )
 
 
@@ -281,6 +287,74 @@ def test_reex_psum_bits_invalid_rejected():
         expect("reex_psum_bits" in str(exc), "error mentions the bad field")
         return
     raise AssertionError("non-integer reex_psum_bits should have been rejected")
+
+
+def test_hw_export_disabled_by_default():
+    model = _tmp_file()
+    ppl = _tmp_file(".txt")
+    cfg = _base_config(model, ppl)
+    resolved = resolve_config(cfg)
+    expect(resolved["hw_export"]["enabled"] is False, "hw_export off by default")
+    expect(build_hw_export_cmd(resolved) is None, "no hw_export cmd when disabled")
+    # disabled stage must not appear in the plan
+    expect("hw_export" not in LLMQuantPipeline(copy.deepcopy(cfg)).plan(),
+           "hw_export absent from plan when disabled")
+
+
+def test_hw_export_cmd_shape():
+    model = _tmp_file()
+    ppl = _tmp_file(".txt")
+    cfg = _base_config(model, ppl)
+    cfg["hw_export"] = {
+        "enabled": True,
+        "patterns": ["(^|\\.)attn_(q|k|v)\\.weight$"],
+    }
+    resolved = resolve_config(cfg)
+    argv = build_hw_export_cmd(resolved)
+    expect(argv[0].endswith("reex-hw-convert"), "hw_export binary first")
+    expect("--in-gguf" in argv, "--in-gguf forwarded")
+    # defaults to the quantized GGUF this run produces
+    expect(str(quantized_path(resolved)) in argv, "input defaults to quantized gguf")
+    expect("--out" in argv, "--out forwarded")
+    # default output is the quantized GGUF with a -hw suffix
+    out = hw_export_output_gguf(resolved)
+    expect(out.name.endswith("-hw.gguf"), "output GGUF gets -hw suffix")
+    expect(str(out) in argv, "output GGUF path forwarded")
+    joined = " ".join(argv)
+    expect("--pattern (^|\\.)attn_(q|k|v)\\.weight$" in joined, "pattern forwarded")
+    # it appears in the plan too
+    expect("hw_export" in LLMQuantPipeline(copy.deepcopy(cfg)).plan(),
+           "hw_export present in plan when enabled")
+
+
+def test_hw_export_input_override_and_only_tensor():
+    model = _tmp_file()
+    ppl = _tmp_file(".txt")
+    src = _tmp_file()
+    cfg = _base_config(model, ppl)
+    cfg["hw_export"] = {
+        "enabled": True,
+        "input_gguf": str(src),
+        "only_tensor": "blk.0.attn_q.weight",
+    }
+    resolved = resolve_config(cfg)
+    expect(hw_export_input(resolved) == src.resolve(), "input_gguf override honored")
+    argv = build_hw_export_cmd(resolved)
+    expect(str(src.resolve()) in argv, "explicit input forwarded")
+    expect("--tensor" in argv and "blk.0.attn_q.weight" in argv, "only_tensor forwarded")
+
+
+def test_hw_export_bad_pattern_rejected():
+    model = _tmp_file()
+    ppl = _tmp_file(".txt")
+    cfg = _base_config(model, ppl)
+    cfg["hw_export"] = {"enabled": True, "patterns": ["(unclosed"]}
+    try:
+        resolve_config(cfg)
+    except ConfigError as exc:
+        expect("regex" in str(exc).lower(), "error mentions regex")
+        return
+    raise AssertionError("bad hw_export pattern should have been rejected")
 
 
 def main():

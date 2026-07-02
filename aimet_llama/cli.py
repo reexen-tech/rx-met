@@ -13,7 +13,12 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from .schema import imatrix_path, quantized_path
+from .schema import (
+    imatrix_path,
+    quantized_path,
+    hw_export_input,
+    hw_export_output_gguf,
+)
 
 
 def _str(value: Any) -> str:
@@ -136,6 +141,27 @@ def build_perplexity_cmd(cfg: Dict[str, Any]) -> Optional[List[str]]:
     if ppl.get("cache_type_v"):
         argv += ["-ctv", _str(ppl["cache_type_v"]).lower()]
     argv += [_str(x) for x in ppl.get("extra_args", []) or []]
+    return argv
+
+
+def build_hw_export_cmd(cfg: Dict[str, Any]) -> Optional[List[str]]:
+    """Build the ``reex-hw-convert --in-gguf ... --out ...`` invocation that
+    produces the HW-tiled GGUF, or ``None`` if the hw_export stage is disabled."""
+    he = cfg.get("hw_export", {})
+    if not he.get("enabled"):
+        return None
+
+    argv: List[str] = [
+        he["binary"],
+        "--in-gguf", _str(hw_export_input(cfg)),
+        "--out", _str(hw_export_output_gguf(cfg)),
+    ]
+    for pat in he.get("patterns", []) or []:
+        argv += ["--pattern", _str(pat)]
+    if he.get("only_tensor"):
+        argv += ["--tensor", _str(he["only_tensor"])]
+    if he.get("dump_dir"):
+        argv += ["--dump-dir", _str(he["dump_dir"])]
     return argv
 
 

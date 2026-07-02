@@ -35,7 +35,8 @@ aimet_rx/
     └── config/
         ├── qwen3_30b_q4_0_minimal.json
         ├── qwen3_30b_mixed_precision.json
-        └── qwen3_reex_q4_k_64.json      # REEX block-64 + Psum truncation demo
+        ├── qwen3_reex_q4_k_64.json      # REEX block-64 + Psum truncation demo
+        └── qwen3_30b_legacy_hw_export.json  # Legacy block-64 + hardware weight_blocks export
 ```
 
 We wrap the upstream binaries plus the in-tree REEX-enabled `llama.cpp`
@@ -78,6 +79,9 @@ runs/<experiment_name>/
 ├── perplexity.log          # stdout/stderr of the perplexity stage
 ├── imatrix.gguf            # (if calibration enabled)
 ├── <model>.quantized.gguf  # the quantized output
+├── hw_export.log           # stdout/stderr of the hw_export stage (if enabled)
+├── <model>.quantized-hw.gguf          # (if hw_export enabled) hardware-tiled GGUF
+├── <model>.quantized-hw.gguf.hw_index.json  #   per-tensor summary (type/shape/status)
 └── experiment_report.md    # human-readable report with all of the above
 ```
 
@@ -180,6 +184,11 @@ See `examples/*.json` for runnable copies. Every field has a default in
 | `calibration.n_gpu_layers` | `-ngl` |
 | `calibration.process_output` | `--process-output` |
 | `evaluation.perplexity.*` | `llama-perplexity` flags |
+| `hw_export.input_gguf` / (default) | `reex-hw-convert --in-gguf` |
+| `hw_export.output_gguf` / (default) | `--out` (default `<quantized>-hw.gguf`) |
+| `hw_export.patterns[]` | `--pattern` (repeatable) |
+| `hw_export.only_tensor` | `--tensor` |
+| `hw_export.dump_dir` | `--dump-dir` |
 
 ---
 
@@ -221,6 +230,64 @@ Changing `B` needs **no** re-quantization or re-compilation, so a single
 quantized GGUF can be swept across bit-widths just by editing the JSON. The
 exported env var is recorded in `quantize.log` / `perplexity.log` and the
 manifest for auditability.
+
+---
+
+## 4c. Hardware-tiled GGUF export (`hw_export`, Phase 2)
+
+An **optional** stage that runs after `quantize` and rewrites the quantized
+GGUF into a **new GGUF** (`<quantized>-hw.gguf`) whose GEMM weights carry the
+hardware **tiled** `weight_blocks` layout — the exact byte layout consumed by
+the simulator / hardware and produced by `reex-gemm-datagen`. Same container,
+same KV metadata, same tensor types/shapes; only the data bytes of the matched
+Legacy weights are re-tiled, everything else is copied verbatim. It reuses the
+same validated tiling logic (`tools/reex-hw-convert`, a CPU-only tool) and
+streams the file (no full-model load).
+
+```json
+"hw_export": {
+  "enabled":         true,
+  "binary":          "./llama.cpp/build_cpu_wconvert/bin/reex-hw-convert",
+  "ld_library_path": "./llama.cpp/build_cpu_wconvert/bin",
+  "input_gguf":      null,          // null -> the quantized GGUF this run produced
+  "output_gguf":     null,          // null -> "<quantized_stem>-hw.gguf"
+  "patterns":        [],            // empty -> attn_{q,k,v,output} + ffn_{gate,up,down}(_exps)
+  "only_tensor":     null,          // convert exactly one tensor (overrides patterns)
+  "dump_dir":        null           // optional: also dump per-tensor weight_blocks.bin
+}
+```
+
+The output GGUF is tagged with `reex.hw_layout=true`, `reex.hw_tool` and
+`reex.hw_converted_tensors` (the list of re-tiled tensors). **It must not be fed
+to the stock llama.cpp inference path** — the tiled bytes keep the original
+ggml type id, so a normal loader would misread them.
+
+Behaviour (**Legacy block-64 scope**):
+
+- **Converted**: `Q4_0_64 Q4_1_64 Q5_0_64 Q5_1_64 Q8_0_64 Q8_1_64` weight
+  tensors whose name matches a pattern. MoE 3D expert tensors are converted
+  **per expert**.
+- **Copied verbatim**: everything else (F16 / K-quant, norms, `token_embd`,
+  non-matching names) — the output is still a complete model container.
+- **Hard error**: a matched, convertible tensor whose shape is not divisible by
+  the tiling (`N % 64` / `K % 64`) — the stage fails loudly (exit 2).
+- **Warning (non-fatal)**: if *nothing* convertible is matched (e.g. the model
+  was quantized to a K-quant type), the tool exits 1, **no GGUF is written**,
+  and the stage is marked with a `warning` in the report rather than failing.
+
+A sidecar `<output>-hw.gguf.hw_index.json` summarises every matched tensor
+(name, ggml type, resolved registry type, `N`, `K`, status, byte count); its
+`summary` counts are copied into the manifest / report. Build the CPU tool once
+with:
+
+```bash
+cmake -S llama.cpp -B llama.cpp/build_cpu_wconvert \
+      -DGGML_CUDA=OFF -DREEX_HW_CONVERT=ON -DLLAMA_BUILD_TOOLS=ON
+cmake --build llama.cpp/build_cpu_wconvert -j --target reex-hw-convert
+```
+
+See `tools/reex-hw-convert/README.md` for the standalone (single-tensor) usage
+and the layout / validation details.
 
 ---
 
