@@ -11,6 +11,7 @@
 #include "wconvert.h"
 #include "wquant.h"
 #include "reex_layout.h"
+#include "gguf_batch.h"
 
 #include "ggml.h"
 
@@ -23,7 +24,7 @@
 
 using namespace rgd;
 
-enum class InMode { None, Native, Fp32, Random };
+enum class InMode { None, Native, Fp32, Random, Gguf };
 
 static bool read_file(const std::string & path, std::vector<uint8_t> & buf) {
     FILE * f = fopen(path.c_str(), "rb");
@@ -57,22 +58,43 @@ static bool parse_shape(const char * s, int64_t & N, int64_t & K) {
 }
 
 static void usage(const char * prog) {
-    printf("Usage: %s --wtype NAME --shape N,K\n"
-           "         ( --in FILE | --in-fp32 FILE | --random )\n"
-           "         [--seed S] [--out-dir DIR]\n\n"
-           "  --wtype     Legacy block-64: q8_0_64 q8_1_64s q4_0_64 q4_1_64 q5_0_64 q5_1_64\n"
+    printf("Usage:\n"
+           "  Single tensor:\n"
+           "    %s --wtype NAME --shape N,K\n"
+           "       ( --in FILE | --in-fp32 FILE | --random ) [--seed S] [--out-dir DIR]\n"
+           "  Whole GGUF -> HW GGUF (Legacy only):\n"
+           "    %s --in-gguf MODEL.gguf [--out MODEL-hw.gguf] [--pattern RE]... [--tensor NAME] [--dump-dir DIR]\n\n"
+           "  --wtype     Legacy block-64: q8_0_64 q8_1_64 q4_0_64 q4_1_64 q5_0_64 q5_1_64\n"
            "  --shape     N,K  (N=output rows=ne1, K=input dim=ne0; K contiguous)\n"
            "  --in        native quantized bytes (reex struct, row-major) -> reorder only\n"
            "  --in-fp32   fp32 weights (N*K floats, row-major) -> encode then reorder\n"
            "  --random    generate deterministic fp32 weights -> encode then reorder\n"
            "  --seed      RNG seed for --random (default 1234)\n"
-           "  --out-dir   output directory (default output/wconvert)\n",
-           prog);
+           "  --out-dir   single-tensor output directory (default output/wconvert)\n"
+           "  --in-gguf   read a GGUF and write a HW-tiled GGUF (matched Legacy weights only)\n"
+           "  --out       output GGUF path (default: <input>-hw.gguf)\n"
+           "  --pattern   name regex to match (repeatable; default attn_{q,k,v,output}+ffn_{gate,up,down}(_exps))\n"
+           "  --tensor    convert exactly this tensor name (overrides --pattern)\n"
+           "  --dump-dir  also dump per-tensor weight_blocks.bin + meta.json here (debug/validate)\n",
+           prog, prog);
+}
+
+// "model.gguf" -> "model-hw.gguf"; "model" -> "model-hw.gguf"
+static std::string default_hw_out(const std::string & in) {
+    const std::string suf = ".gguf";
+    if (in.size() >= suf.size() && in.compare(in.size() - suf.size(), suf.size(), suf) == 0)
+        return in.substr(0, in.size() - suf.size()) + "-hw.gguf";
+    return in + "-hw.gguf";
 }
 
 int main(int argc, char ** argv) {
     std::string wtype;
     std::string in_path;
+    std::string gguf_path;
+    std::string out_gguf;
+    std::string dump_dir;
+    std::string only_tensor;
+    std::vector<std::string> patterns;
     std::string out_dir = "output/wconvert";
     int64_t     N = 0, K = 0;
     uint64_t    seed = 1234;
@@ -86,10 +108,30 @@ int main(int argc, char ** argv) {
         else if (!strcmp(argv[i], "--in")      && i + 1 < argc) { in_path = argv[++i]; mode = InMode::Native; }
         else if (!strcmp(argv[i], "--in-fp32") && i + 1 < argc) { in_path = argv[++i]; mode = InMode::Fp32; }
         else if (!strcmp(argv[i], "--random"))                  { mode = InMode::Random; }
+        else if (!strcmp(argv[i], "--in-gguf") && i + 1 < argc) { gguf_path = argv[++i]; mode = InMode::Gguf; }
+        else if (!strcmp(argv[i], "--out")     && i + 1 < argc) out_gguf = argv[++i];
+        else if (!strcmp(argv[i], "--dump-dir")&& i + 1 < argc) dump_dir = argv[++i];
+        else if (!strcmp(argv[i], "--pattern") && i + 1 < argc) patterns.push_back(argv[++i]);
+        else if (!strcmp(argv[i], "--tensor")  && i + 1 < argc) only_tensor = argv[++i];
         else if (!strcmp(argv[i], "--seed")    && i + 1 < argc) seed = strtoull(argv[++i], nullptr, 10);
         else if (!strcmp(argv[i], "--out-dir") && i + 1 < argc) out_dir = argv[++i];
         else if (!strcmp(argv[i], "-h") || !strcmp(argv[i], "--help")) { usage(argv[0]); return 0; }
         else { fprintf(stderr, "Unknown arg: %s\n", argv[i]); usage(argv[0]); return 1; }
+    }
+
+    // ---- whole-GGUF -> HW GGUF mode ----
+    if (mode == InMode::Gguf) {
+        if (out_gguf.empty()) out_gguf = default_hw_out(gguf_path);
+        GgufConvSummary s;
+        const int rc = wconvert_gguf(gguf_path, out_gguf, patterns, only_tensor, dump_dir, s);
+        fprintf(stderr,
+                "[reex-hw-convert] gguf=%s  tensors=%d  ok=%d skip=%d fail=%d\n"
+                "  -> %s\n"
+                "  -> %s.hw_index.json\n",
+                gguf_path.c_str(), s.n_tensors, s.n_ok, s.n_skip, s.n_fail,
+                s.out_gguf.empty() ? "(no GGUF written)" : s.out_gguf.c_str(),
+                out_gguf.c_str());
+        return rc;
     }
 
     if (wtype.empty())        { fprintf(stderr, "missing --wtype\n"); return 1; }
@@ -102,7 +144,7 @@ int main(int argc, char ** argv) {
 
     if (t.family != Family::Legacy) {
         fprintf(stderr, "wtype '%s' (family %s) not supported yet — Legacy block-64 only "
-                        "(q8_0_64/q8_1_64s/q4_0_64/q4_1_64/q5_0_64/q5_1_64)\n",
+                        "(q8_0_64/q8_1_64/q4_0_64/q4_1_64/q5_0_64/q5_1_64)\n",
                 t.name, family_name(t.family));
         return 1;
     }

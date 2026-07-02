@@ -12,6 +12,7 @@
 add_library(reex-hw-layout STATIC
     src/wquant.cpp
     src/wconvert.cpp
+    src/gguf_batch.cpp
 )
 target_compile_definitions(reex-hw-layout PUBLIC GGML_USE_REEX_Q64)
 target_include_directories(reex-hw-layout PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)

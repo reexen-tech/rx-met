@@ -15,7 +15,7 @@
 | `--wtype` | 说明 | native 块字节 | HW 块字节 |
 |---|---|---|---|
 | `q8_0_64`  | 对称 W8，`{d; qs[64]}` | 66 | 66 |
-| `q8_1_64s` | 对称 W8 带行和 `s`，`{d; s; qs[64]}` | 68 | 68 |
+| `q8_1_64`  | 对称 W8 带行和 `s`，`{d; s; qs[64]}` | 68 | 68 |
 | `q4_0_64`  | 对称 W4（nibble），`{d; qs[32]}` | 34 | 34 |
 | `q4_1_64`  | 非对称 W4（d+min） | 36 | 36 |
 | `q5_0_64`  | 对称 W5（low4+qh） | 42 | 42 |
@@ -61,6 +61,8 @@ export LD_LIBRARY_PATH="$PWD/build_cpu_wconvert/bin:$LD_LIBRARY_PATH"
 
 ## 4. 用法与参数
 
+工具有两种模式：**单张量**（`--wtype/--shape` + 输入源）与**整包 GGUF 批量**（`--in-gguf`，见 §4b）。
+
 ```
 reex-hw-convert --wtype NAME --shape N,K
                 ( --in FILE | --in-fp32 FILE | --random )
@@ -93,6 +95,68 @@ reex-hw-convert --wtype q4_0_64 --shape 2048,2048 --in-fp32 w.f32 --out-dir out/
 # 3) 随机
 reex-hw-convert --wtype q5_1_64 --shape 128,256 --random --seed 1234 --out-dir out/demo
 ```
+
+---
+
+## 4b. 整包 GGUF → HW GGUF（Phase 2）
+
+**输入 GGUF、输出也是 GGUF**（默认加 `-hw` 后缀）。读一个量化好的 GGUF，写出一个**新的 GGUF**：容器/KV/张量类型与形状全部保持不变，只把匹配的 **Legacy block-64** GEMM 权重的数据字节替换成 HW 排布，其余张量原样拷贝。全程**流式写出**（不整包载入内存）。
+
+```
+reex-hw-convert --in-gguf MODEL.gguf [--out MODEL-hw.gguf]
+                [--pattern RE]... [--tensor NAME] [--dump-dir DIR]
+```
+
+| 参数 | 说明 | 默认 |
+|---|---|---|
+| `--in-gguf FILE` | 输入 GGUF（用 ggml 的 gguf API 按 tensor 偏移读原始块） | 必填 |
+| `--out FILE`     | 输出 GGUF 路径 | `<输入>-hw.gguf` |
+| `--pattern RE`   | tensor 名匹配正则，可重复 | `attn_{q,k,v,output}` + `ffn_{gate,up,down}(_exps)` |
+| `--tensor NAME`  | 只转这一个 tensor（覆盖 `--pattern`） | — |
+| `--dump-dir DIR` | 额外把每个（专家）张量的 `weight_blocks.bin`+`meta.json` 落盘（调试/校验用） | — |
+
+行为（Legacy 阶段）：
+
+- **转换**：类型为 `q4_0_64/q4_1_64/q5_0_64/q5_1_64/q8_0_64/q8_1_64` 且名字匹配的权重（registry 名与 ggml `type_name` 一一对应）。
+- **MoE 3D**（`ne2`=专家数）：**逐专家切片**，各专家用同一 `weight_block_slot` 分别重排，写回同一个 3D 张量数据区。
+- **原样拷贝**：其它所有张量（F16 / K-quant、norm、`token_embd`、不匹配名）——输出仍是完整模型容器。
+- **硬报错（exit 2）**：匹配且可转的权重形状不整除 tiling（`N%64` / `K%64`）。
+- **退出码**：`0` 成功；`1` 没有任何可转张量（**不写 GGUF**，警告）；`2` 硬错误。
+
+输出 GGUF 会打上标记 KV，供消费方识别（**不可再喂给原版 llama.cpp 推理**，因为块字节是 HW 排布但 ggml type id 不变）：
+
+```
+reex.hw_layout            = true
+reex.hw_tool              = "reex-hw-convert"
+reex.hw_converted_tensors = [ "blk.0.attn_q.weight", "blk.0.ffn_down_exps.weight", ... ]
+```
+
+同时在旁边写一份 `<out>.hw_index.json` 汇总：
+
+```jsonc
+{
+  "source_gguf": "...", "output_gguf": "...-hw.gguf",
+  "summary": { "n_tensors": 723, "n_ok": 420, "n_skip": 3, "n_fail": 0 },
+  "tensors": [
+    { "name": "blk.0.attn_q.weight", "expert": -1, "ggml_type": "q4_0_64",
+      "wtype": "q4_0_64", "N": 2048, "K": 2048, "status": "ok", "bytes": 1114112 },
+    { "name": "blk.0.ffn_down_exps.weight", "expert": 0, "wtype": "q4_0_64", "status": "ok", ... }
+  ]
+}
+```
+
+示例：
+```bash
+export LD_LIBRARY_PATH="$PWD/build_cpu_wconvert/bin:$LD_LIBRARY_PATH"
+# 整包（默认 attn/ffn 权重）：model-q4_0_64.gguf -> model-q4_0_64-hw.gguf
+reex-hw-convert --in-gguf model-q4_0_64.gguf
+# 指定输出名 + 只转某一层
+reex-hw-convert --in-gguf model-q4_0_64.gguf --out out/model-hw.gguf --tensor blk.0.attn_q.weight
+```
+
+这一模式也是 `aimet_llama` 流水线 `hw_export` 阶段的后端（JSON 驱动，见 `aimet_llama/README.md §4c`）。
+
+> 校验：`--dump-dir` 落盘的 `weight_blocks.bin` 与单张量模式对同一 native 块的产出**逐字节一致**（已用回读 `-hw.gguf` + 对比单张量路径验证）。
 
 ---
 
@@ -139,7 +203,8 @@ python3 tools/reex-hw-convert/tests/check_wconvert.py out/demo
 ## 7. 边界与后续
 
 - `N%64 != 0` 或 `K%64 != 0` → 报错（暂不做 padding）。
-- 非 Legacy（K-quant / IntBlock）→ CLI 拒绝（底层机制已通用，格式稳定后放开即可自动接上 HW bitstream repack）。
-- **后续可扩展**：`--in-gguf --tensor <name>` 直接从 GGUF 抽块并推断 `wtype/N/K`；MoE 3D 逐专家；整包 GGUF→HW-GGUF。
+- 非 Legacy（K-quant / IntBlock）→ 单张量模式 CLI 拒绝；批量模式跳过并记录（底层机制已通用，格式稳定后放开即可自动接上 HW bitstream repack）。
+- **已支持**：`--in-gguf` 整包 GGUF → HW GGUF（`-hw` 后缀），自动推断 `wtype/N/K`、逐专家处理 MoE 3D、打标记 KV、流式写出（§4b）。
+- **后续可扩展**：K-quant HW bitstream repack（格式稳定后放开）。
 
 底层原语与 §4.1 tiling 的完整定义见 `../reex-gemm-datagen/docs/DESIGN.md`。
