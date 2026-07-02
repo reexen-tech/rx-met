@@ -63,7 +63,7 @@ static void usage(const char * prog) {
            "    %s --wtype NAME --shape N,K\n"
            "       ( --in FILE | --in-fp32 FILE | --random ) [--seed S] [--out-dir DIR]\n"
            "  Whole GGUF -> HW GGUF (Legacy only):\n"
-           "    %s --in-gguf MODEL.gguf [--out MODEL-hw.gguf] [--pattern RE]... [--tensor NAME] [--dump-dir DIR]\n\n"
+           "    %s --in-gguf MODEL.gguf [--out MODEL-hw.gguf] [--pattern RE]... [--tensor NAME] [--dump-dir DIR] [--dry-run]\n\n"
            "  --wtype     Legacy block-64: q8_0_64 q8_1_64 q4_0_64 q4_1_64 q5_0_64 q5_1_64\n"
            "  --shape     N,K  (N=output rows=ne1, K=input dim=ne0; K contiguous)\n"
            "  --in        native quantized bytes (reex struct, row-major) -> reorder only\n"
@@ -73,9 +73,12 @@ static void usage(const char * prog) {
            "  --out-dir   single-tensor output directory (default output/wconvert)\n"
            "  --in-gguf   read a GGUF and write a HW-tiled GGUF (matched Legacy weights only)\n"
            "  --out       output GGUF path (default: <input>-hw.gguf)\n"
-           "  --pattern   name regex to match (repeatable; default attn_{q,k,v,output}+ffn_{gate,up,down}(_exps))\n"
+           "  --pattern   name regex to match (repeatable; overrides auto selection)\n"
            "  --tensor    convert exactly this tensor name (overrides --pattern)\n"
-           "  --dump-dir  also dump per-tensor weight_blocks.bin + meta.json here (debug/validate)\n",
+           "  --dump-dir  also dump per-tensor weight_blocks.bin + meta.json here (debug/validate)\n"
+           "  --dry-run   classify + report the plan (writes .hw_index.json, no GGUF)\n"
+           "  (default selection: every Legacy block-64 quant weight except token_embd;\n"
+           "   non-tiling-divisible candidates are skipped)\n",
            prog, prog);
 }
 
@@ -95,6 +98,7 @@ int main(int argc, char ** argv) {
     std::string dump_dir;
     std::string only_tensor;
     std::vector<std::string> patterns;
+    bool        dry_run = false;
     std::string out_dir = "output/wconvert";
     int64_t     N = 0, K = 0;
     uint64_t    seed = 1234;
@@ -113,6 +117,7 @@ int main(int argc, char ** argv) {
         else if (!strcmp(argv[i], "--dump-dir")&& i + 1 < argc) dump_dir = argv[++i];
         else if (!strcmp(argv[i], "--pattern") && i + 1 < argc) patterns.push_back(argv[++i]);
         else if (!strcmp(argv[i], "--tensor")  && i + 1 < argc) only_tensor = argv[++i];
+        else if (!strcmp(argv[i], "--dry-run"))                 dry_run = true;
         else if (!strcmp(argv[i], "--seed")    && i + 1 < argc) seed = strtoull(argv[++i], nullptr, 10);
         else if (!strcmp(argv[i], "--out-dir") && i + 1 < argc) out_dir = argv[++i];
         else if (!strcmp(argv[i], "-h") || !strcmp(argv[i], "--help")) { usage(argv[0]); return 0; }
@@ -123,12 +128,13 @@ int main(int argc, char ** argv) {
     if (mode == InMode::Gguf) {
         if (out_gguf.empty()) out_gguf = default_hw_out(gguf_path);
         GgufConvSummary s;
-        const int rc = wconvert_gguf(gguf_path, out_gguf, patterns, only_tensor, dump_dir, s);
+        const int rc = wconvert_gguf(gguf_path, out_gguf, patterns, only_tensor, dump_dir, s, dry_run);
         fprintf(stderr,
-                "[reex-hw-convert] gguf=%s  tensors=%d  ok=%d skip=%d fail=%d\n"
+                "[reex-hw-convert] gguf=%s  tensors=%d  ok=%d skip=%d fail=%d%s\n"
                 "  -> %s\n"
                 "  -> %s.hw_index.json\n",
                 gguf_path.c_str(), s.n_tensors, s.n_ok, s.n_skip, s.n_fail,
+                dry_run ? "  (dry-run)" : "",
                 s.out_gguf.empty() ? "(no GGUF written)" : s.out_gguf.c_str(),
                 out_gguf.c_str());
         return rc;

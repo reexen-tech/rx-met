@@ -104,23 +104,26 @@ reex-hw-convert --wtype q5_1_64 --shape 128,256 --random --seed 1234 --out-dir o
 
 ```
 reex-hw-convert --in-gguf MODEL.gguf [--out MODEL-hw.gguf]
-                [--pattern RE]... [--tensor NAME] [--dump-dir DIR]
+                [--pattern RE]... [--tensor NAME] [--dump-dir DIR] [--dry-run]
 ```
 
 | 参数 | 说明 | 默认 |
 |---|---|---|
 | `--in-gguf FILE` | 输入 GGUF（用 ggml 的 gguf API 按 tensor 偏移读原始块） | 必填 |
 | `--out FILE`     | 输出 GGUF 路径 | `<输入>-hw.gguf` |
-| `--pattern RE`   | tensor 名匹配正则，可重复 | `attn_{q,k,v,output}` + `ffn_{gate,up,down}(_exps)` |
+| `--pattern RE`   | tensor 名匹配正则，可重复；**给了就覆盖自动选择** | 自动（见下） |
 | `--tensor NAME`  | 只转这一个 tensor（覆盖 `--pattern`） | — |
 | `--dump-dir DIR` | 额外把每个（专家）张量的 `weight_blocks.bin`+`meta.json` 落盘（调试/校验用） | — |
+| `--dry-run`      | 只分类打印计划 + 写 `.hw_index.json`，**不产出 GGUF** | 关 |
 
-行为（Legacy 阶段）：
+**选择哪些权重（默认=自动，架构无关）：**
 
-- **转换**：类型为 `q4_0_64/q4_1_64/q5_0_64/q5_1_64/q8_0_64/q8_1_64` 且名字匹配的权重（registry 名与 ggml `type_name` 一一对应）。
+- **自动模式**（未给 `--pattern`/`--tensor`）：凡是 GGUF 类型为 Legacy block-64（`q4_0_64/q4_1_64/q5_0_64/q5_1_64/q8_0_64/q8_1_64`）的张量就转。这等于**隐式复用 llama.cpp 量化时的判定**——norm/conv/router 等非矩阵乘权重根本没被量化成块类型，类型闸门自动排除，所以工具里**不维护第二份名字黑名单**。
+  - **排除 `token_embd`**（`token_embd.weight` / `per_layer_token_embd.weight`：被量化了但走 `get_rows`，非 matmul）→ `skip:embedding`。
+  - **不整除 tiling**（`ne3>1` 或 `N%64` / `K%64`，如 `ssm_alpha/beta` 的 N=32）→ **`skip:shape-not-divisible`**（不报错，原样拷贝）。
+- **显式模式**（`--pattern` 或 `--tensor`）：用户点名即断言必须转，因此不整除 tiling 是**硬报错（exit 2）**；匹配到非可转类型记 `skip:unsupported-type`。
 - **MoE 3D**（`ne2`=专家数）：**逐专家切片**，各专家用同一 `weight_block_slot` 分别重排，写回同一个 3D 张量数据区。
-- **原样拷贝**：其它所有张量（F16 / K-quant、norm、`token_embd`、不匹配名）——输出仍是完整模型容器。
-- **硬报错（exit 2）**：匹配且可转的权重形状不整除 tiling（`N%64` / `K%64`）。
+- **原样拷贝**：其它所有张量（F16 / K-quant、norm、`token_embd`、被跳过的）——输出仍是完整模型容器。
 - **退出码**：`0` 成功；`1` 没有任何可转张量（**不写 GGUF**，警告）；`2` 硬错误。
 
 输出 GGUF 会打上标记 KV，供消费方识别（**不可再喂给原版 llama.cpp 推理**，因为块字节是 HW 排布但 ggml type id 不变）：
@@ -202,9 +205,30 @@ python3 tools/reex-hw-convert/tests/check_wconvert.py out/demo
 
 ## 7. 边界与后续
 
-- `N%64 != 0` 或 `K%64 != 0` → 报错（暂不做 padding）。
+- `N%64 != 0` 或 `K%64 != 0`：**自动模式跳过**（`skip:shape-not-divisible`，原样拷贝）；显式点名（`--pattern`/`--tensor`）则硬报错。暂不做 padding，见 §8 待对齐。
 - 非 Legacy（K-quant / IntBlock）→ 单张量模式 CLI 拒绝；批量模式跳过并记录（底层机制已通用，格式稳定后放开即可自动接上 HW bitstream repack）。
-- **已支持**：`--in-gguf` 整包 GGUF → HW GGUF（`-hw` 后缀），自动推断 `wtype/N/K`、逐专家处理 MoE 3D、打标记 KV、流式写出（§4b）。
-- **后续可扩展**：K-quant HW bitstream repack（格式稳定后放开）。
+- **已支持**：`--in-gguf` 整包 GGUF → HW GGUF（`-hw` 后缀），按量化类型自动选择、逐专家处理 MoE 3D、`token_embd` 排除、打标记 KV、流式写出、`--dry-run`（§4b）。
+- **后续可扩展**：K-quant HW bitstream repack（格式稳定后放开）；sub-64 N 权重的 padding/融合（§8）。
 
 底层原语与 §4.1 tiling 的完整定义见 `../reex-gemm-datagen/docs/DESIGN.md`。
+
+---
+
+## 8. 待对齐问题（OPEN — 后续调整）
+
+**背景：sub-64 N 的瘦投影权重如何上 tiling GEMM 引擎。**
+
+混合架构（如 Qwen3.5-9B / 35B-A3B）的线性注意力层里，`ssm_alpha` / `ssm_beta` 是 `[K=2048, N=32]` 的投影，走 `MUL_MAT`。它们能正常做 block-64 量化（量化沿 K，K 可整除），但 **N=32 不满足硬件 `Nt=64` 的 weight tiling**（半个 tile）。当前处理：自动模式**跳过 tiling、原样拷贝**（量化后的 native 块保持不变，推理数据完整）。
+
+若这类权重确实要在固定 `Nt=64` 的脉动 GEMM 引擎上执行，需要凑满 64，两种方式：
+
+1. **补零 pad**：`N: 32 → 64`，多出的行填 0。精度无损（新增独立零行，不碰原行的逐行 scale）、存储/算力开销可忽略；**代价**是 GEMM 多出 32 个无效输出行，需按"逻辑 N=32"裁剪，要求运行时/硬件按 `original_N` 元数据处理。
+2. **配对融合**（更优，无浪费）：`ssm_alpha`(32) 与 `ssm_beta`(32) 同 K、同输入，沿 N 拼成 `[K, 64]`（即 llama.cpp 已有的融合 `ssm_ba`，`LLM_TENSOR_SSM_BETA_ALPHA`）。64 行全是真数据、满载、无算力浪费、精度无损；**代价**是需定义拆分顺序契约（前 32 / 后 32 谁是 alpha/beta），且只适用于有可配对兄弟的情形；落单的 sub-64 权重仍需补零或走向量单元。
+
+**需与硬件对齐：**
+1. `ssm_alpha/beta` 这类 N<64 的瘦投影，到底是跑在这个 `Nt=64` 的 GEMM 引擎上，还是走向量/标量单元？
+   - 若走向量单元 → 现在"跳过 tiling、原样保留量化权重"即为正确，无需改动。
+   - 若上 GEMM 引擎 → 选补零还是融合 `ssm_ba`？拆分/裁剪由硬件还是运行时按 `original_N` 做？行顺序契约由谁定义？
+2. `output`（lm_head，常为 K-quant）在 K-quant HW 路径落地后应自动纳入——确认其是否上引擎。
+
+**实现预留**：确认后可加可选开关（默认关）：`--pad-n`（自动模式对不整除候选补零到 Nt 并在 sidecar 记 `original_N`），或"配对融合 alpha+beta → ssm_ba 布局 + 记录拆分映射"。

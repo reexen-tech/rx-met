@@ -33,11 +33,11 @@ static const char * ggml_type_to_registry(enum ggml_type t) {
     }
 }
 
-static std::vector<std::string> default_patterns() {
-    return {
-        "(^|\\.)attn_(q|k|v|output)\\.weight$",
-        "(^|\\.)ffn_(gate|up|down)(_exps)?\\.weight$",
-    };
+// Tensors that llama.cpp quantizes to a block type but that are NOT matmul
+// weights (consumed via ggml_get_rows). These must never be HW-tiled even though
+// they carry a convertible quant type. Mirrors llama-quant.cpp's token-embd set.
+static bool is_token_embd(const std::string & name) {
+    return name == "token_embd.weight" || name == "per_layer_token_embd.weight";
 }
 
 static bool name_matches(const std::string & name, const std::vector<std::regex> & res) {
@@ -121,17 +121,25 @@ int wconvert_gguf(const std::string & in_path, const std::string & out_gguf,
                   const std::vector<std::string> & patterns_in,
                   const std::string & only_tensor,
                   const std::string & dump_dir,
-                  GgufConvSummary & summary) {
+                  GgufConvSummary & summary,
+                  bool dry_run) {
     const std::string index_path = out_gguf + ".hw_index.json";
 
-    // compile patterns
-    std::vector<std::string> pats = patterns_in.empty() ? default_patterns() : patterns_in;
+    // Selection mode:
+    //   auto   : no --tensor and no --pattern -> pick by GGUF quant type
+    //   explicit: --tensor NAME, or one/more --pattern RE (user asserts intent)
+    const bool has_only  = !only_tensor.empty();
+    const bool has_pat   = !patterns_in.empty();
+    const bool auto_mode = !has_only && !has_pat;
+
     std::vector<std::regex> res;
-    try {
-        for (const auto & p : pats) res.emplace_back(p);
-    } catch (const std::regex_error & e) {
-        fprintf(stderr, "[wconvert-gguf] bad pattern regex: %s\n", e.what());
-        return 2;
+    if (has_pat) {
+        try {
+            for (const auto & p : patterns_in) res.emplace_back(p);
+        } catch (const std::regex_error & e) {
+            fprintf(stderr, "[wconvert-gguf] bad pattern regex: %s\n", e.what());
+            return 2;
+        }
     }
 
     // open input GGUF (metadata only, no data alloc)
@@ -165,17 +173,31 @@ int wconvert_gguf(const std::string & in_path, const std::string & out_gguf,
         selN[i].nexp = 0;
         const std::string name = gguf_get_tensor_name(gg, i);
         const enum ggml_type gt = gguf_get_tensor_type(gg, i);
-        const bool matched = only_tensor.empty() ? name_matches(name, res)
-                                                 : (name == only_tensor);
-        if (!matched) continue;
-
         const char * reg = ggml_type_to_registry(gt);
+
+        // ---- is this tensor a candidate for conversion? ----
+        bool candidate;
+        if (has_only)      candidate = (name == only_tensor);
+        else if (has_pat)  candidate = name_matches(name, res);
+        else               candidate = (reg[0] != 0);   // auto: any Legacy block-64 weight
+        if (!candidate) continue;
+
+        // Explicit mode may match a non-convertible type; auto mode never does.
         if (!reg[0]) {
             GgufConvItem it; it.name = name; it.ggml_type = ggml_type_name(gt);
             it.status = "skip:unsupported-type";
             summary.items.push_back(it); summary.n_skip++;
             continue;
         }
+
+        // Auto mode: exclude the token embedding (quantized but used via get_rows).
+        if (auto_mode && is_token_embd(name)) {
+            GgufConvItem it; it.name = name; it.ggml_type = ggml_type_name(gt);
+            it.wtype = reg; it.status = "skip:embedding";
+            summary.items.push_back(it); summary.n_skip++;
+            continue;
+        }
+
         const struct ggml_tensor * t = ggml_get_tensor(meta, name.c_str());
         if (!t) {
             fprintf(stderr, "[wconvert-gguf] tensor meta missing: %s\n", name.c_str());
@@ -187,6 +209,14 @@ int wconvert_gguf(const std::string & in_path, const std::string & out_gguf,
         const int64_t N    = t->ne[1];
         const int64_t nexp = t->ne[2] > 0 ? t->ne[2] : 1;
         if (t->ne[3] > 1 || K % tsL.Kt || N % tsL.Nt) {
+            // Auto mode: not tileable -> skip (e.g. ssm_alpha/beta with N=32).
+            // Explicit mode: the user named it, so a bad shape is a hard error.
+            if (auto_mode) {
+                GgufConvItem it; it.name = name; it.ggml_type = ggml_type_name(gt);
+                it.wtype = reg; it.N = N; it.K = K; it.status = "skip:shape-not-divisible";
+                summary.items.push_back(it); summary.n_skip++;
+                continue;
+            }
             fprintf(stderr,
                     "[wconvert-gguf] %s: shape N=%lld K=%lld ne3=%lld not tiling-divisible "
                     "(Nt=%d Kt=%d) — aborting\n",
@@ -201,6 +231,41 @@ int wconvert_gguf(const std::string & in_path, const std::string & out_gguf,
         }
         selN[i] = Sel{ reg, N, K, nexp };
         converted_names.push_back(name);
+    }
+
+    // ---- dry-run: report the plan (per-expert ok counts) and stop ----
+    if (dry_run) {
+        for (int64_t i = 0; i < nt; ++i) {
+            if (selN[i].nexp == 0) continue;
+            const std::string name = gguf_get_tensor_name(gg, i);
+            const enum ggml_type gt = gguf_get_tensor_type(gg, i);
+            const Sel & sel = selN[i];
+            const int wid = wquant_find(sel.wtype.c_str());
+            const size_t per_exp = wid >= 0 ? wquant_blocks_bytes(wid, sel.N, sel.K) : 0;
+            for (int64_t e = 0; e < sel.nexp; ++e) {
+                GgufConvItem it;
+                it.name = name; it.expert = (sel.nexp > 1 ? (int) e : -1);
+                it.wtype = sel.wtype; it.ggml_type = ggml_type_name(gt);
+                it.N = sel.N; it.K = sel.K; it.status = "ok"; it.bytes = per_exp;
+                summary.items.push_back(it); summary.n_ok++;
+            }
+        }
+        {
+            const size_t slash = index_path.find_last_of('/');
+            if (slash != std::string::npos) mkdir_p(index_path.substr(0, slash));
+        }
+        write_index(index_path, summary, in_path);
+        printf("[dry-run] would convert %d tensor-slices, skip %d, fail %d "
+               "(of %d tensors)\n", summary.n_ok, summary.n_skip, summary.n_fail,
+               summary.n_tensors);
+        for (const auto & it : summary.items) {
+            if (it.status == "ok") continue;   // list only the non-obvious decisions
+            printf("  %-26s  %-22s  N=%-7lld K=%-7lld  %s\n",
+                   it.status.c_str(), it.name.c_str(), it.N, it.K,
+                   it.ggml_type.c_str());
+        }
+        gguf_free(gg); if (meta) ggml_free(meta);
+        return converted_names.empty() ? 1 : 0;
     }
 
     if (converted_names.empty()) {
