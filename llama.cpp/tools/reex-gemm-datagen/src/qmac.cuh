@@ -245,7 +245,7 @@ RGD_HD inline float rgd_q8_0_64_dot_block(
 
 // Q8_1_64s: same symmetric W8 dot; block carries an extra running-sum field s that
 // the symmetric dot ignores (kept only for the HW data format).
-RGD_HD inline float rgd_q8_1_64s_dot_block(
+RGD_HD inline float rgd_q8_1_64_dot_block(
         const block_q8_1_64 & w, const uint8_t * a_base,
         int64_t m, int64_t kbw, int64_t M, int64_t K,
         const TilingSpec & ts, int A_bits, int psum_bits) {

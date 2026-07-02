@@ -4,7 +4,7 @@
 // Reuses the datagen-verified wquant primitives (reorder / repack) so there is a
 // single implementation shared with reex-gemm-datagen (no drift).
 //
-// Phase 1 scope: Legacy block-64 quant (q8_0_64 / q8_1_64s / q4_0_64 / q4_1_64 /
+// Phase 1 scope: Legacy block-64 quant (q8_0_64 / q8_1_64 / q4_0_64 / q4_1_64 /
 // q5_0_64 / q5_1_64) — a pure whole-block reorder into §4.1 tile order (block
 // bytes are opaque). The machinery is generic: K-quant would additionally hit the
 // HW bitstream repack automatically (hw_block_bytes != 0), but the CLI gates to

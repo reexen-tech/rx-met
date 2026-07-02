@@ -154,8 +154,8 @@ __global__ void kernel_gemm_q8_0_64(
     rgd_write_all_f32(outs, oidx, acc);
 }
 
-// Legacy q8_1_64s (symmetric W8 + sum field): one block_q8_1_64 per K-block (64).
-__global__ void kernel_gemm_q8_1_64s(
+// Legacy q8_1_64 (symmetric W8 + sum field): one block_q8_1_64 per K-block (64).
+__global__ void kernel_gemm_q8_1_64(
     const block_q8_1_64 * __restrict__ w_blocks,
     const uint8_t * __restrict__ a_blocks,
     float * __restrict__ C, OutBufs outs,
@@ -170,7 +170,7 @@ __global__ void kernel_gemm_q8_1_64s(
     float acc = 0.0f;
     for (int64_t kbw = 0; kbw < kb_per_row; ++kbw) {
         const block_q8_1_64 & w = w_blocks[weight_block_slot(n, kbw, N, ts)];
-        acc += rgd_q8_1_64s_dot_block(w, a_blocks, m, kbw, M, K, ts, A_bits, psum_bits);
+        acc += rgd_q8_1_64_dot_block(w, a_blocks, m, kbw, M, K, ts, A_bits, psum_bits);
     }
     const int64_t oidx = result_tiled_index(m, n, M, ts);
     C[oidx] = acc;
@@ -252,8 +252,8 @@ void gemm_run_host(
     } else if (wt.family == Family::Legacy && strcmp(wt.name, "q4_0_64") == 0) {
         kernel_gemm_q4_0_64<<<grid, block>>>(
             (const block_q4_0_64 *) d_w, d_a, d_C, outs, M, N, K, ts, A_bits, psum_bits);
-    } else if (wt.family == Family::Legacy && strcmp(wt.name, "q8_1_64s") == 0) {
-        kernel_gemm_q8_1_64s<<<grid, block>>>(
+    } else if (wt.family == Family::Legacy && strcmp(wt.name, "q8_1_64") == 0) {
+        kernel_gemm_q8_1_64<<<grid, block>>>(
             (const block_q8_1_64 *) d_w, d_a, d_C, outs, M, N, K, ts, A_bits, psum_bits);
     } else if (wt.family == Family::Legacy) {
         kernel_gemm_q8_0_64<<<grid, block>>>(

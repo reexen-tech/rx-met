@@ -106,7 +106,7 @@ void golden_cpu_symmetric(int wtype_id,
                 }
                 C_ref_tiled[result_tiled_index(m, n, M, ts)] = (float) acc;
             }
-    } else if (wt.family == Family::Legacy && std::strcmp(wt.name, "q8_1_64s") == 0) {
+    } else if (wt.family == Family::Legacy && std::strcmp(wt.name, "q8_1_64") == 0) {
         const block_q8_1_64 * wb = (const block_q8_1_64 *) w_blocks;
         const int64_t kb_per_row = K / 64;
         for (int64_t m = 0; m < M; ++m)
@@ -114,7 +114,7 @@ void golden_cpu_symmetric(int wtype_id,
                 double acc = 0.0;
                 for (int64_t kbw = 0; kbw < kb_per_row; ++kbw) {
                     const block_q8_1_64 & w = wb[weight_block_slot(n, kbw, N, ts)];
-                    acc += (double) rgd_q8_1_64s_dot_block(w, a_blocks.data(), m, kbw, M, K, ts, A_bits, psum_bits);
+                    acc += (double) rgd_q8_1_64_dot_block(w, a_blocks.data(), m, kbw, M, K, ts, A_bits, psum_bits);
                 }
                 C_ref_tiled[result_tiled_index(m, n, M, ts)] = (float) acc;
             }
@@ -193,7 +193,7 @@ static void dequant_weight_full(int wtype_id, const void * w_blocks,
                 dequantize_row_q4_0_64(&wb[weight_block_slot(n, kbw, N, ts)], tmp.data(), 64);
                 std::copy(tmp.begin(), tmp.end(), Wf.begin() + (size_t) (n * K + kbw * 64));
             }
-    } else if (wt.family == Family::Legacy && std::strcmp(wt.name, "q8_1_64s") == 0) {
+    } else if (wt.family == Family::Legacy && std::strcmp(wt.name, "q8_1_64") == 0) {
         const block_q8_1_64 * wb = (const block_q8_1_64 *) w_blocks;
         const int64_t kb_per_row = K / 64;
         std::vector<float> tmp(64);

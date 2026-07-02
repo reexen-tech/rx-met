@@ -25,9 +25,9 @@ static void q4_0_64_encode(const float * W, void * blocks, int64_t N, int64_t K)
     quantize_row_q4_0_64_ref(W, (block_q4_0_64 *) blocks, N * K);
 }
 
-// q8_1_64s — symmetric W8 carrying a running sum s = d*sum(qs) (HW format field;
+// q8_1_64 — symmetric W8 carrying a running sum s = d*sum(qs) (HW format field;
 //   not used by the symmetric dot). qs sequential int8, w = d*q.
-static void q8_1_64s_encode(const float * W, void * blocks, int64_t N, int64_t K) {
+static void q8_1_64_encode(const float * W, void * blocks, int64_t N, int64_t K) {
     quantize_row_q8_1_64_ref(W, (block_q8_1_64 *) blocks, N * K);
 }
 
@@ -79,7 +79,7 @@ static const WQuantType g_registry[] = {
     { "Q3_K_64",  Family::Kquant, 3, false, sizeof(block_q3_K_64),  QK_K_64, 6, q3k64_encode },
     { "Q2_K_64S", Family::Kquant, 2, false, sizeof(block_q2_K_64S), QK_K_64, 4, q2k64s_encode },
     { "q8_0_64",  Family::Legacy, 8, false, sizeof(block_q8_0_64),  64,      0, q8_0_64_encode },
-    { "q8_1_64s", Family::Legacy, 8, false, sizeof(block_q8_1_64),  64,      0, q8_1_64s_encode },
+    { "q8_1_64", Family::Legacy, 8, false, sizeof(block_q8_1_64),  64,      0, q8_1_64_encode },
     { "q4_0_64",  Family::Legacy, 4, false, sizeof(block_q4_0_64),  64,      0, q4_0_64_encode },
     { "q4_1_64",  Family::Legacy, 4, true,  sizeof(block_q4_1_64),  64,      0, q4_1_64_encode },
     { "q5_0_64",  Family::Legacy, 5, false, sizeof(block_q5_0_64),  64,      0, q5_0_64_encode },

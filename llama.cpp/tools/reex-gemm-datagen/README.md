@@ -69,7 +69,7 @@ reex-gemm-datagen --wtype INT --abits 8 --asign i --wbits 4 --wsign u   # 纯整
 
 | 类型 | family | W_bits | 说明 |
 |---|---|---|---|
-| `q8_0_64` / `q8_1_64s` / `q4_0_64` | Legacy | 8/8/4 | block-64，scale-first，直接落盘 |
+| `q8_0_64` / `q8_1_64` / `q4_0_64` | Legacy | 8/8/4 | block-64，scale-first，直接落盘 |
 | `Q6_K_64` / `Q5_K_64S` / `Q4_K_64S` / `Q3_K_64` / `Q2_K_64S` | Kquant | 6/5/4/3/2 | 256 超块 / 64 子块，落盘前重打包成 HW bitstream |
 | `INT` / `W8_16` | IntBlock | CLI 指定 | 纯整数 GEMM（无 scale），独立路径，见 DESIGN §11 |
 
@@ -84,7 +84,7 @@ reex-gemm-datagen --wtype INT --abits 8 --asign i --wbits 4 --wsign u   # 纯整
 | 脚本 | 作用 |
 |---|---|
 | `build.sh`      | 配置并构建 `reex-gemm-datagen` |
-| `gen_legacy.sh` | 生成 Legacy 组（q8_0_64 / q8_1_64s / q4_0_64 的 act_in×A_bits sweep） |
+| `gen_legacy.sh` | 生成 Legacy 组（q8_0_64 / q8_1_64 / q4_0_64 的 act_in×A_bits sweep） |
 | `gen_kquant.sh` | 生成 K-quant 组 |
 | `gen_int.sh`    | 生成纯整数 IntBlock 组 |
 | `gen_all.sh`    | 全部生成 |
