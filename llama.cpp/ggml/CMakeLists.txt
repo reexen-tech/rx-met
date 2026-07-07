@@ -153,7 +153,7 @@ option(GGML_CPU_REPACK       "ggml: use runtime weight conversion of Q4_0 to Q4_
 option(GGML_CPU_KLEIDIAI     "ggml: use KleidiAI optimized kernels if applicable" OFF)
 option(GGML_REEX_GEMM        "ggml: Reex GEMM backend (W4 x Q8/Q16/FLOAT, see GGML_REEX_GEMM_ACTIVATION)" OFF)
 option(GGML_USE_REEX         "ggml: Reex LUT for sin/cos/silu/rsqrt etc. (piecewise linear)" OFF)
-option(GGML_USE_REEX_Q64     "ggml: Reex block=64 legacy quantization types (Q4_0_64/Q8_0_64), hardware-aligned" OFF)
+option(GGML_USE_REEX_Q64     "ggml: Reex block=64 legacy quantization types (Q4_0_64/Q8_0_64), hardware-aligned" ON)
 option(GGML_REEX_FP16_PIPELINE    "ggml: Reex FP16 main data flow pipeline (cast F32 GEMM output to FP16)" OFF)
 option(GGML_REEX_KV_EXPERIMENTAL  "ggml: Reex KV cache experimental features (smooth scaling, per-layer type override)" OFF)
 

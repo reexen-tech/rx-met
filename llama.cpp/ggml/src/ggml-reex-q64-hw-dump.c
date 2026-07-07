@@ -10,10 +10,14 @@
 #include <sys/stat.h>
 #include <errno.h>
 
-/* Implemented in libggml-cuda when CUDA is enabled. */
-extern void ggml_reex_q64_hw_dump_arm(int max_m);
-extern void ggml_reex_q64_hw_dump_disarm(void);
-extern int  ggml_reex_q64_hw_dump_download(reex_q64_hw_psum_record * out, int max_out);
+/* Implemented in libggml-cuda when CUDA is enabled. Declared weak so that
+ * binaries linking libggml-base without the CUDA backend on their link line
+ * still link successfully; at runtime these bind to the CUDA implementations
+ * whenever that backend is loaded. Guarded with NULL checks below in case no
+ * implementation is present. */
+extern void ggml_reex_q64_hw_dump_arm(int max_m) __attribute__((weak));
+extern void ggml_reex_q64_hw_dump_disarm(void) __attribute__((weak));
+extern int  ggml_reex_q64_hw_dump_download(reex_q64_hw_psum_record * out, int max_out) __attribute__((weak));
 
 static reex_q64_hw_dump_cfg g_cfg;
 static int                  g_cfg_init = 0;
@@ -119,7 +123,9 @@ void reex_q64_hw_dump_matmul_begin(const char * name, int layer) {
     }
     snprintf(g_case_name, sizeof(g_case_name), "%s", name);
     (void) layer;
-    ggml_reex_q64_hw_dump_arm(g_cfg.max_m > 0 ? g_cfg.max_m : 64);
+    if (ggml_reex_q64_hw_dump_arm) {
+        ggml_reex_q64_hw_dump_arm(g_cfg.max_m > 0 ? g_cfg.max_m : 64);
+    }
     fprintf(stderr, "[reex-hw-dump] arm matmul %s (max_m=%d)\n", name, g_cfg.max_m);
 }
 
@@ -139,8 +145,10 @@ void reex_q64_hw_dump_matmul_end(
 
     enum { kMaxRec = 65536 };
     static reex_q64_hw_psum_record recs[kMaxRec];
-    const int nrec = ggml_reex_q64_hw_dump_download(recs, kMaxRec);
-    ggml_reex_q64_hw_dump_disarm();
+    const int nrec = ggml_reex_q64_hw_dump_download ? ggml_reex_q64_hw_dump_download(recs, kMaxRec) : 0;
+    if (ggml_reex_q64_hw_dump_disarm) {
+        ggml_reex_q64_hw_dump_disarm();
+    }
     g_total_records += nrec;
 
     char case_dir[640];
