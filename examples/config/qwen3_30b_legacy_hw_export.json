@@ -1,0 +1,45 @@
+{
+  "schema_version": "1.0",
+
+  "experiment": {
+    "name": "qwen3_30b_q4_0_64_hw_export_demo",
+    "description": "Qwen3-30B-A3B: quantize weights to the REEX Legacy block-64 type Q4_0_64, then convert the quantized GGUF into a hardware-tiled GGUF (Qwen3-30B-A3B-q4_0_64-hw.gguf) via reex-hw-convert. Every matched attn/ffn GEMM weight (incl. MoE experts) is HW-tiled; other tensors are copied verbatim.",
+    "output_dir": "./runs/qwen3_30b_q4_0_64_hw_export_demo"
+  },
+
+  "binaries": {
+    "llama_quantize":   "./llama.cpp/build_cuda/bin/llama-quantize",
+    "llama_imatrix":    "./llama.cpp/build_cuda/bin/llama-imatrix",
+    "llama_perplexity": "./llama.cpp/build_cuda/bin/llama-perplexity",
+    "ld_library_path":  "./llama.cpp/build_cuda/bin"
+  },
+
+  "model": {
+    "gguf_fp16_path": "/path/to/Qwen3-30B-A3B-f16.gguf"
+  },
+
+  "calibration": { "enabled": false },
+
+  "quantization": {
+    "default_type":     "Q4_0_64",
+    "output_quantized": "Qwen3-30B-A3B-q4_0_64.gguf",
+    "use_imatrix":      false,
+    "n_threads":        16
+  },
+
+  "hw_export": {
+    "enabled":        true,
+    "binary":         "./llama.cpp/build_cpu_wconvert/bin/reex-hw-convert",
+    "ld_library_path": "./llama.cpp/build_cpu_wconvert/bin",
+    "output_gguf":    null,
+    "patterns":       []
+  },
+
+  "evaluation": { "enabled": false },
+
+  "report": {
+    "write_markdown":       true,
+    "save_resolved_config": true,
+    "save_manifest":        true
+  }
+}

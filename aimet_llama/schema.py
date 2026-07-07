@@ -140,6 +140,24 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         },
     },
 
+    # Optional Phase-2 stage: convert the quantized GGUF into a hardware-tiled
+    # GGUF (weight_blocks layout) via the `reex-hw-convert` tool. Runs after
+    # `quantize` and writes a sibling GGUF (default `<quantized>-hw.gguf`) where
+    # matched Legacy block-64 GEMM weights are HW-tiled and all other tensors are
+    # copied verbatim. The output is marked `reex.hw_layout=true` and must NOT be
+    # fed to the stock llama.cpp inference path. A matched convertible tensor with
+    # a non-tiling-divisible shape is a hard error (the stage fails).
+    "hw_export": {
+        "enabled": False,
+        "binary": "reex-hw-convert",
+        "ld_library_path": None,
+        "input_gguf": None,          # null -> the quantized GGUF from this run
+        "output_gguf": None,         # null -> "<quantized_stem>-hw.gguf"
+        "patterns": [],              # empty -> tool defaults (attn/ffn GEMM weights)
+        "only_tensor": None,
+        "dump_dir": None,            # optional: also dump per-tensor weight_blocks.bin
+    },
+
     "report": {
         "write_markdown": True,
         "markdown_name": "experiment_report.md",
@@ -325,6 +343,38 @@ def validate_config(cfg: Dict[str, Any]) -> None:
             ppl_cfg.get("reex_psum_bits"), "evaluation.perplexity.reex_psum_bits"
         )
 
+    # hw_export (optional Phase-2 stage)
+    he = cfg.get("hw_export", {})
+    if he.get("enabled"):
+        if not isinstance(he.get("binary"), str) or not he["binary"]:
+            raise ConfigError("hw_export.binary must be a non-empty string")
+        pats = he.get("patterns", [])
+        if not isinstance(pats, list):
+            raise ConfigError("hw_export.patterns must be a list")
+        for i, p in enumerate(pats):
+            if not isinstance(p, str):
+                raise ConfigError(f"hw_export.patterns[{i}] must be a string")
+            try:
+                re.compile(p)
+            except re.error as exc:
+                raise ConfigError(
+                    f"hw_export.patterns[{i}] is not a valid regex: {exc}"
+                ) from exc
+        ig = he.get("input_gguf")
+        if ig is not None:
+            # produced by the quantize stage; may not exist yet at validation time
+            if not isinstance(ig, str):
+                raise ConfigError("hw_export.input_gguf must be a string path")
+        og = he.get("output_gguf")
+        if og is not None and not isinstance(og, str):
+            raise ConfigError("hw_export.output_gguf must be a string path")
+        ot = he.get("only_tensor")
+        if ot is not None and not isinstance(ot, str):
+            raise ConfigError("hw_export.only_tensor must be a string")
+        dd = he.get("dump_dir")
+        if dd is not None and not isinstance(dd, str):
+            raise ConfigError("hw_export.dump_dir must be a string path")
+
 
 def imatrix_path(cfg: Dict[str, Any]) -> Optional[Path]:
     """Return absolute path of the imatrix file this run will produce / reuse."""
@@ -341,3 +391,26 @@ def quantized_path(cfg: Dict[str, Any]) -> Path:
     """Return absolute path of the output quantized GGUF file."""
     out_dir = Path(cfg["experiment"]["output_dir"]).resolve()
     return out_dir / cfg["quantization"]["output_quantized"]
+
+
+def hw_export_input(cfg: Dict[str, Any]) -> Path:
+    """Return the GGUF the hw_export stage reads from (defaults to the
+    quantized GGUF produced by this run)."""
+    ig = cfg.get("hw_export", {}).get("input_gguf")
+    return Path(ig).resolve() if ig else quantized_path(cfg)
+
+
+def hw_export_output_gguf(cfg: Dict[str, Any]) -> Path:
+    """Return the HW-tiled GGUF the hw_export stage writes.
+
+    Defaults to a sibling of the quantized GGUF with a ``-hw`` suffix, e.g.
+    ``out.gguf`` -> ``out-hw.gguf``.
+    """
+    og = cfg.get("hw_export", {}).get("output_gguf")
+    if og:
+        p = Path(og)
+        if not p.is_absolute():
+            p = Path(cfg["experiment"]["output_dir"]).resolve() / og
+        return p
+    q = quantized_path(cfg)
+    return q.with_name(q.stem + "-hw" + q.suffix)

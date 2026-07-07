@@ -9,6 +9,12 @@
 
 <!-- 在下次发版前，把新增条目写到这里 -->
 
+### 🔧 改进
+
+- **`apply_power_of_2_workflow()` 支持控制 QuantGRU 的 POT2 模式**
+  - 新增对 QuantGRU POT2 mode 的外部配置能力，调用工作流时可显式控制是否启用 power-of-two 量化约束
+  - 影响范围：使用 `apply_power_of_2_workflow()` 配置 QuantGRU 量化策略的流程
+
 ## [1.3.8] - 2026-06-09
 
 ### ✨ 新增功能

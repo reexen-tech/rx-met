@@ -1,7 +1,7 @@
 // CPU golden references + comparison.
 #pragma once
 
-#include "case.h"
+#include "reex_layout.h"
 
 #include <cstdint>
 #include <vector>

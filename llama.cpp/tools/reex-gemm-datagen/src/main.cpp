@@ -5,7 +5,7 @@
 //           -> act quantize (block_q8_1, per-group scale, §4.1)
 //           -> GPU int GEMM (reads packed blocks) -> CPU golden -> compare
 //           -> dump (packed weight/act blocks + result + meta.json)
-#include "case.h"
+#include "reex_layout.h"
 #include "actquant.cuh"
 #include "datagen.h"
 #include "dumper.h"

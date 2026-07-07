@@ -135,6 +135,9 @@ endif()
 # Standalone GPU GEMM quant-sweep datagen tool (tools/reex-gemm-datagen/).
 option(REEX_GEMM_DATAGEN "llama: build the REEX GEMM datagen tool (needs GGML_CUDA + GGML_USE_REEX_Q64)" OFF)
 
+# CPU-only HW weight converter + shared reex-hw-layout library (tools/reex-hw-convert/).
+option(REEX_HW_CONVERT "llama: build the REEX HW weight converter (CPU-only; needs GGML_USE_REEX_Q64)" OFF)
+
 
 # Required for relocatable CMake package
 include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/build-info.cmake)

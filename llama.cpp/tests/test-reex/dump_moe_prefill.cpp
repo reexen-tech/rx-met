@@ -80,7 +80,9 @@ static void usage(const char * prog) {
         "  --layers   comma-separated MoE layer indices (default: all MoE layers)\n"
         "  --n-tokens prefill length (default 8192)\n"
         "  -ngl       GPU layers to offload (default 999)\n"
-        "  -t         threads (default 8)\n", prog);
+        "  -t         threads (default 8)\n"
+        "  --override-kv KEY=TYPE:VALUE  override model metadata (repeatable),\n"
+        "             e.g. --override-kv qwen35moe.expert_used_count=int:4 for top-4\n", prog);
 }
 
 static bool make_dir(const std::string & path) {
@@ -162,6 +164,7 @@ int main(int argc, char ** argv) {
     int n_gpu_layers = 999;
     int n_threads = 8;
     std::vector<int> layer_filter; // empty = all
+    std::vector<llama_model_kv_override> kv_overrides; // empty = none
 
     for (int i = 1; i < argc; i++) {
         if      (strcmp(argv[i], "-m") == 0 && i + 1 < argc)        { model_path = argv[++i]; }
@@ -171,6 +174,12 @@ int main(int argc, char ** argv) {
         else if (strcmp(argv[i], "--n-tokens") == 0 && i + 1 < argc){ n_tokens = atoi(argv[++i]); }
         else if (strcmp(argv[i], "-ngl") == 0 && i + 1 < argc)      { n_gpu_layers = atoi(argv[++i]); }
         else if (strcmp(argv[i], "-t") == 0 && i + 1 < argc)        { n_threads = atoi(argv[++i]); }
+        else if (strcmp(argv[i], "--override-kv") == 0 && i + 1 < argc) {
+            if (!string_parse_kv_override(argv[++i], kv_overrides)) {
+                fprintf(stderr, "ERROR: invalid --override-kv: %s\n", argv[i]);
+                return 1;
+            }
+        }
         else if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) { usage(argv[0]); return 0; }
         else { fprintf(stderr, "Unknown arg: %s\n", argv[i]); usage(argv[0]); return 1; }
     }
@@ -189,6 +198,15 @@ int main(int argc, char ** argv) {
     // Load model.
     llama_model_params mparams = llama_model_default_params();
     mparams.n_gpu_layers = n_gpu_layers;
+    if (!kv_overrides.empty()) {
+        // kv_overrides must be terminated with an empty-key sentinel.
+        kv_overrides.emplace_back();
+        kv_overrides.back().key[0] = 0;
+        mparams.kv_overrides = kv_overrides.data();
+        for (const auto & o : kv_overrides) {
+            if (o.key[0]) fprintf(stderr, "  override-kv: %s\n", o.key);
+        }
+    }
     llama_model * model = llama_model_load_from_file(model_path, mparams);
     if (!model) {
         fprintf(stderr, "ERROR: failed to load model: %s\n", model_path);
@@ -199,7 +217,17 @@ int main(int argc, char ** argv) {
     const int64_t n_embd   = llama_model_n_embd(model);
     const int64_t n_layer  = llama_model_n_layer(model);
     const int64_t n_expert = meta_int_by_suffix(model, ".expert_count");
-    const int64_t n_topk   = meta_int_by_suffix(model, ".expert_used_count");
+    int64_t       n_topk   = meta_int_by_suffix(model, ".expert_used_count");
+    // The GGUF meta API returns the on-disk value, not a runtime override; reflect
+    // a --override-kv <arch>.expert_used_count here so logs / run_metadata are accurate.
+    for (const auto & o : kv_overrides) {
+        const char * suf = ".expert_used_count";
+        const size_t klen = strlen(o.key), slen = strlen(suf);
+        if (o.tag == LLAMA_KV_OVERRIDE_TYPE_INT && klen >= slen &&
+            strcmp(o.key + klen - slen, suf) == 0) {
+            n_topk = o.val_i64;
+        }
+    }
 
     fprintf(stderr, "Model: %s\n", model_path);
     fprintf(stderr, "  n_embd=%lld n_layer=%lld n_expert=%lld n_expert_used=%lld\n",

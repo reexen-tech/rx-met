@@ -43,7 +43,7 @@ datagen_fill            生成 A[M,K]、W[N,K] 随机数(A 已 round 到 act_in 
 
 ## 2. 配置轴(正交)
 
-`case.h` 定义三条正交配置轴 + 一个 case 结构:
+`reex_layout.h`(共享库 `reex-hw-layout`,原 `case.h`)定义三条正交配置轴 + 一个 case 结构:
 
 | 轴 | 取值 |
 |---|---|
@@ -60,7 +60,7 @@ psum_bits=0(整数 Psum 不截断)  seed=1234
 ```
 
 **支持的计算模式**(A_bits × W_bits,合法组合):
-`A8×W8`、`A16×W8`、`A16×W4`、`A8×W4`、`A4×W4`(量化路径 W8=`q8_0_64`/`q8_1_64s`,
+`A8×W8`、`A16×W8`、`A16×W4`、`A8×W4`、`A4×W4`(量化路径 W8=`q8_0_64`/`q8_1_64`,
 W4=`q4_0_64`;K-quant 另支持 W2/W3/W4/W5/W6,见下表)。纯整数 IntBlock 路径见 §11。
 
 **权重量化类型注册表**(`wquant.cpp`,新增类型只加一行):
@@ -73,12 +73,12 @@ W4=`q4_0_64`;K-quant 另支持 W2/W3/W4/W5/W6,见下表)。纯整数 IntBlock �
 | `Q3_K_64`  | Kquant | 3 | 否 | `block_q3_K_64`  | 256 | 6 | `quantize_row_q3_K_64_ref` |
 | `Q2_K_64S` | Kquant | 2 | 否 | `block_q2_K_64S` | 256 | 4 | `quantize_row_q2_K_64S_ref` |
 | `q8_0_64`  | Legacy | 8 | 否 | `block_q8_0_64`  | 64  | 0 | `quantize_row_q8_0_64_ref` |
-| `q8_1_64s` | Legacy | 8 | 否 | `block_q8_1_64`(带 `s=d·Σq`) | 64 | 0 | `quantize_row_q8_1_64_ref` |
+| `q8_1_64` | Legacy | 8 | 否 | `block_q8_1_64`(带 `s=d·Σq`) | 64 | 0 | `quantize_row_q8_1_64_ref` |
 | `q4_0_64`  | Legacy | 4 | 否 | `block_q4_0_64`(nibble) | 64 | 0 | `quantize_row_q4_0_64_ref` |
 | `INT`      | IntBlock | CLI | 否 | bit-pack `[16×16]`(位宽/符号由 CLI 定) | 16 | 0 | —(纯整数路径,见 §11) |
 | `W8_16`    | IntBlock | 8 | 否 | 裸 int8 `[16×16]`(旧入口) | 16 | 0 | —(同上) |
 
-> `q8_1_64s` 对称量化 W8,额外携带行和 `s`(仅为对齐 HW 数据格式,对称点积不使用)。
+> `q8_1_64` 对称量化 W8,额外携带行和 `s`(仅为对齐 HW 数据格式,对称点积不使用)。
 > **对称 block-64(Legacy `q4_0_64`/`q8_0_64`,K-quant `Q2/Q4/Q5_K_64S`、`Q3_K_64`/`Q6_K_64`)的量化码与
 > sub_scale 均按二进制补码有符号整数存储**(无 `-mid`/`+bias` 零点偏置),反量化即符号扩展。
 
@@ -98,7 +98,7 @@ tile = `[Mt 行 × Nt 列(N) × Kt 列(K)]`。权重/激活在 **量化块粒度
 | Legacy   | `4,64,64`   | `[4,64]`   | `[64,64]`  | 64  | 64 |
 | IntBlock | `16,16,16`  | `[16,16]`  | `[16,16]`  | 16  | 16 |
 
-**槽位公式**(`case.h`,均返回扁平 slot;`Xtiles = X / Xt`):
+**槽位公式**(`reex_layout.h`,均返回扁平 slot;`Xtiles = X / Xt`):
 
 - 权重块(块间 `(kt,nt)` 行主序,块内 N 列主序):
   `weight_block_slot(n,sb) = (sb*Ntiles + n/Nt)*Nt + n%Nt`,`sb = k/Kt`
@@ -117,7 +117,7 @@ tile = `[Mt 行 × Nt 列(N) × Kt 列(K)]`。权重/激活在 **量化块粒度
 ### 4.1 权重量化块 `weight_blocks.bin`
 - **Legacy(对称)**:reex 原生 struct,scale 在前,直接落盘,无需重打包:
   - `q8_0_64 = { f16 d; int8 qs[64] }`(66B),`w = d·q`。
-  - `q8_1_64s = { f16 d; f16 s; int8 qs[64] }`(68B),`w = d·q`,`s=d·Σq`(HW 字段,点积不用)。
+  - `q8_1_64 = { f16 d; f16 s; int8 qs[64] }`(68B),`w = d·q`,`s=d·Σq`(HW 字段,点积不用)。
   - `q4_0_64 = { f16 d; nibble qs[64] }`(34B),`w = d·q`(q 为**有符号 4-bit 补码** [−8,7]),nibble 交错:元素 `e<32`→`qs[e]&0xF`,`e≥32`→`qs[e−32]>>4`,`d=−max/8`。
 - **K-quant**:落盘前重打包成 **HW 连续 LSB-first bitstream**(不字节对齐):
   ```
@@ -223,16 +223,24 @@ tools/reex-gemm-datagen/
 > `src/` 内的 `#include "..."` 均为相对引用,编译器按源文件所在目录解析即可命中(无需额外
 > `target_include_directories`);外部头(`ggml.h`、`reex/...`)由 `ggml` target 的 include 目录提供。
 
-下表文件均位于 `src/`:
+> **共享库**:类型注册表 / §4.1 tiling+槽位公式 / reorder / K-quant HW 重打包
+> 已抽到独立库 **`reex-hw-layout`**(`tools/reex-hw-convert/`),datagen 链接复用之
+> (单一实现,无漂移)。对应文件 `reex_layout.h`(原 `case.h`)与 `wquant.{h,cpp}`
+> 现位于 `tools/reex-hw-convert/src/`,datagen 通过该库的 `PUBLIC` include 目录引用。
+> CPU-only 权重转换器 CLI `reex-hw-convert`(native/fp32/random → HW `weight_blocks.bin`
+> + `meta.json`,`-DREEX_HW_CONVERT=ON`,不依赖 CUDA)与其字节级校验
+> `tests/check_wconvert.py` 同在 `tools/reex-hw-convert/`。
+
+下表文件位于 `src/`(除标注属共享库者):
 
 | 文件 | 职责 |
 |---|---|
-| `case.h`            | 配置轴、`TilingSpec`/`tiling_for`、§4.1 槽位公式、激活块访问 |
+| `reex_layout.h` *(共享库)* | 配置轴、`TilingSpec`/`tiling_for`、§4.1 槽位公式、激活块访问(原 `case.h`) |
 | `datagen.{h,cpp}`   | 输入生成(A→act_in 源,W→fp16);`quantize_act` 为 host 备用(主路径用 device) |
 | `fp8.h`             | E5M2/E4M3 round/encode/decode(`RGD_HD`,host+device;encode 供 E4M3 输出与激活源量化共用) |
 | `convert.cuh`       | **OutConv 黑盒**(`RGD_HD`):fp32/int32 acc → 11 种 dtype 字节;按 `OutKind` 分派(float cast / E4M3 饱和 / 有符号补码饱和 / 无符号饱和);GEMM/IntBlock/dumper 共用 |
 | `actquant.{cuh,cu}` | **stage-1 在片量化** device kernel(A → act_blocks) |
-| `wquant.{h,cpp}`    | 权重量化类型注册表、encode、reorder、K-quant HW 重打包(BitWriter) |
+| `wquant.{h,cpp}` *(共享库)* | 权重量化类型注册表、encode、reorder、K-quant HW 重打包(BitWriter) |
 | `qmac.cuh`          | host+device 共享整数 MAC / dot 黑盒(镜像 reex `vec_dot_*`)+ Psum 截断 |
 | `gemm.{cuh,cu}`     | 通用 GEMM kernel(按 qtype/A_bits dispatch)+ 在片 OutConv 产 6 输出 + host 包装 |
 | `reference.{h,cpp}` | CPU 整数 golden + dequant golden + 比对 |
@@ -265,7 +273,7 @@ cmake --build build_cuda_q64 -j --target reex-gemm-datagen
 ./build_cuda_q64/bin/reex-gemm-datagen --wtype q8_0_64  --out output/datagen
 ./build_cuda_q64/bin/reex-gemm-datagen --wtype Q5_K_64S --out output/datagen
 # Legacy 计算模式示例:
-./build_cuda_q64/bin/reex-gemm-datagen --wtype q8_1_64s --abits 16 --actin E4M3  # A16×W8
+./build_cuda_q64/bin/reex-gemm-datagen --wtype q8_1_64 --abits 16 --actin E4M3  # A16×W8
 ./build_cuda_q64/bin/reex-gemm-datagen --wtype q4_0_64  --abits 16               # A16×W4
 ./build_cuda_q64/bin/reex-gemm-datagen --wtype q4_0_64  --abits 8                # A8×W4
 ./build_cuda_q64/bin/reex-gemm-datagen --wtype q4_0_64  --abits 4                # A4×W4
@@ -360,7 +368,7 @@ I6/I4 用 int8 容器);无符号整数 = `sat(C, [0, 2ⁿ−1])`(负值→0,U6/U
 
 1. **激活在线量化 / 权重离线量化**:激活由芯片第一级在片量化(stage-1 device kernel 吃 `act_src`),
    权重离线参考量化(roundf)。经 llama.cpp `from_float → wdata → vec_dot` 流程佐证:独立量化 kernel → 通用 GEMM kernel。
-2. **激活 block 不带 sum**:全对称量化,点积用不上行和(仅 `q8_1_64s` 为对齐 HW 数据格式额外携带 `s`,计算不使用)。
+2. **激活 block 不带 sum**:全对称量化,点积用不上行和(仅 `q8_1_64` 为对齐 HW 数据格式额外携带 `s`,计算不使用)。
 3. **量化/输出舍入统一为半数向偶数(RNE)**;scale 存 **fp16**;容器宽度 A16=int16、A8/A4=int8。
 4. **输出仅饱和、无 scale**:INT=两补码全范围 `[-(qmax+1),qmax]`;UINT=`[0,2ⁿ-1]`(负值→0);E4M3=RNE+饱和±448;F16/BF16=RNE。
 5. **中间精度**:块内 INT32、块间 FP32;**不要求**与 CPU 逐 bit(故不关 FMA,golden 用 double 仅验正确性,~1e-5)。

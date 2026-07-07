@@ -8,11 +8,12 @@
 # 1) 编译(先做)
 # CPU
 cd /path/to/llama.cpp
-cmake -B build_cpu
+cmake -B build_cpu -DGGML_USE_REEX_Q64=ON
 cmake --build build_cpu --config Release -j
-# GPU
-cd /path/to/llama.cpp
-cmake -B build_cuda -DGGML_CUDA=ON
+# GPU(Q64 + LUT)
+cmake -B build_cuda -DGGML_CUDA=ON \
+  -DGGML_USE_REEX_Q64=ON \
+  -DGGML_USE_REEX=ON
 cmake --build build_cuda --config Release -j
 
 # 2) 检查是否成功

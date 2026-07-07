@@ -33,6 +33,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from .cli import (
+    build_hw_export_cmd,
     build_imatrix_cmd,
     build_perplexity_cmd,
     build_quantize_cmd,
@@ -41,6 +42,7 @@ from .cli import (
 from .schema import (
     ConfigError,
     SCHEMA_VERSION,
+    hw_export_output_gguf,
     imatrix_path,
     load_config,
     quantized_path,
@@ -134,6 +136,7 @@ class LLMQuantPipeline:
 
         self._run_imatrix()
         self._run_quantize()
+        self._run_hw_export()
         self._run_perplexity()
 
         self._total_elapsed = time.time() - t0
@@ -155,6 +158,9 @@ class LLMQuantPipeline:
         if imat is not None:
             plan["imatrix"] = imat
         plan["quantize"] = build_quantize_cmd(self.config)
+        hw = build_hw_export_cmd(self.config)
+        if hw is not None:
+            plan["hw_export"] = hw
         ppl = build_perplexity_cmd(self.config)
         if ppl is not None:
             plan["perplexity"] = ppl
@@ -221,6 +227,11 @@ class LLMQuantPipeline:
             "outputs": {},
             "stages": [],
         }
+        if cfg.get("hw_export", {}).get("enabled"):
+            hb = cfg["hw_export"]["binary"]
+            self.manifest["binaries"]["reex_hw_convert"] = _safe_hash(
+                shutil.which(hb) or hb
+            )
 
     def _finalize_manifest(self) -> None:
         out = {}
@@ -230,6 +241,13 @@ class LLMQuantPipeline:
         qpath = quantized_path(self.config)
         if qpath.exists():
             out["quantized_gguf"] = _safe_hash(str(qpath))
+        if self.config.get("hw_export", {}).get("enabled"):
+            hw_gguf = hw_export_output_gguf(self.config)
+            if hw_gguf.exists():
+                out["hw_gguf"] = _safe_hash(str(hw_gguf))
+            idx = Path(str(hw_gguf) + ".hw_index.json")
+            if idx.exists():
+                out["hw_index"] = _safe_hash(str(idx))
         self.manifest["outputs"] = out
         self.manifest["started_at"] = self._started_at
         self.manifest["finished_at"] = self._finished_at
@@ -264,6 +282,7 @@ class LLMQuantPipeline:
         *,
         skip_reason: str = "",
         env_extra: Optional[Dict[str, str]] = None,
+        allowed_exit_codes: Optional[set] = None,
     ) -> StageResult:
         if cmd is None:
             res = StageResult(name=name, cmd=None, skipped=True, skip_reason=skip_reason)
@@ -311,7 +330,8 @@ class LLMQuantPipeline:
             res.extra["env"] = dict(env_extra)
         self.results.append(res)
 
-        if proc.returncode != 0:
+        allowed = allowed_exit_codes if allowed_exit_codes is not None else {0}
+        if proc.returncode not in allowed:
             raise RuntimeError(
                 f"Stage '{name}' failed with exit code {proc.returncode}; "
                 f"see {log_file}"
@@ -336,6 +356,41 @@ class LLMQuantPipeline:
     def _run_quantize(self) -> None:
         cmd = build_quantize_cmd(self.config)
         self._run_stage("quantize", cmd)
+
+    def _run_hw_export(self) -> None:
+        cmd = build_hw_export_cmd(self.config)
+        if cmd is None:
+            self._run_stage("hw_export", None, skip_reason="hw_export disabled")
+            return
+
+        he = self.config["hw_export"]
+        ld_parts: List[str] = []
+        if he.get("ld_library_path"):
+            ld_parts.append(str(he["ld_library_path"]))
+        base_ld = self.config["binaries"].get("ld_library_path")
+        if base_ld:
+            ld_parts.append(str(base_ld))
+        prev = os.environ.get("LD_LIBRARY_PATH", "")
+        if prev:
+            ld_parts.append(prev)
+        env_extra = {"LD_LIBRARY_PATH": ":".join(ld_parts)} if ld_parts else None
+
+        # exit 0 = ok, 1 = matched nothing convertible (warning, no GGUF written),
+        # 2 = hard error (bad shape / read / parse / write) -> raise.
+        res = self._run_stage(
+            "hw_export", cmd, env_extra=env_extra, allowed_exit_codes={0, 1}
+        )
+        out_gguf = hw_export_output_gguf(self.config)
+        idx = Path(str(out_gguf) + ".hw_index.json")
+        if idx.exists():
+            try:
+                with idx.open("r", encoding="utf-8") as fh:
+                    data = json.load(fh)
+                res.extra["hw_index"] = data.get("summary")
+            except (OSError, ValueError):
+                pass
+        if res.exit_code == 1:
+            res.extra["warning"] = "no convertible (Legacy block-64) weight tensors found"
 
     def _run_perplexity(self) -> None:
         cmd = build_perplexity_cmd(self.config)
@@ -405,6 +460,13 @@ class LLMQuantPipeline:
             f"- imatrix: "
             f"{'used' if cfg['quantization'].get('use_imatrix') else 'not used'}"
         )
+        if cfg.get("hw_export", {}).get("enabled"):
+            he = cfg["hw_export"]
+            pat = ", ".join(f"`{p}`" for p in he.get("patterns", [])) or "(tool defaults)"
+            lines.append(
+                f"- hw_export: **enabled** → `{hw_export_output_gguf(cfg)}` "
+                f"(binary `{he['binary']}`, patterns {pat})"
+            )
 
         lines.append("\n## Inputs (fingerprinted)\n")
         for key, val in self.manifest["inputs"].items():
