@@ -1204,12 +1204,17 @@ def apply_mixed_precision_bitwidth(sim_model, config_file: str, verbose: bool = 
                 for idx, input_quantizer in enumerate(module.input_quantizers):
                     # 若 slot 为 None 但配置了 input_bitwidth，且是第 0 个输入（主输入），则创建新 quantizer
                     # （如 QuantizedVar / QuantizedSnake2d 因无 ONNX 映射，无法由 JSON config 自动创建）
+                    # 仅对 idx==0 补建缺失 quantizer（QuantizedVar 等）；
+                    # Mul/Add/Sub 的第二路 input 由 tutorial.json is_input_quantized 启用
                     if input_quantizer is None and idx == 0 and input_bw is not None:
                         try:
                             from aimet_torch.v2.quantization.affine import QuantizeDequantize
                             import torch.nn as _nn
                             sym = input_sym if input_sym is not None else True
                             new_q = QuantizeDequantize(shape=(), bitwidth=input_bw, symmetric=sym)
+                            q_device = _infer_quant_module_device(module)
+                            if q_device is not None:
+                                new_q = new_q.to(q_device)
                             # nn.ModuleList 不支持直接用索引赋值 None 元素，需重建整个列表
                             slots = list(module.input_quantizers)
                             slots[idx] = new_q
@@ -1372,6 +1377,26 @@ def apply_mixed_precision_bitwidth(sim_model, config_file: str, verbose: bool = 
         print("="*70)
 
     return stats
+
+def _infer_quant_module_device(module) -> "torch.device | None":
+    """从已有 quantizer / 参数 / buffer 推断模块设备。"""
+    import torch
+    for qlist in (
+        getattr(module, "input_quantizers", []),
+        getattr(module, "output_quantizers", []),
+    ):
+        for q in qlist:
+            if q is not None:
+                try:
+                    return next(q.parameters()).device
+                except StopIteration:
+                    pass
+    for p in module.parameters(recurse=False):
+        return p.device
+    for b in module.buffers(recurse=False):
+        return b.device
+    return None
+
 
 def _disable_quantization(module, name: str, verbose: bool):
     """

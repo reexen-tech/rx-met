@@ -9,6 +9,17 @@
 
 <!-- 在下次发版前，把新增条目写到这里 -->
 
+### 🐛 Bug 修复
+
+- **修复量化器与输入 tensor 的 CPU/CUDA 设备不一致问题**
+  （`aimet_torch/utils_rx.py`、`aimet_torch/v2/nn/true_quant.py`）
+  - `apply_mixed_precision_bitwidth` 为 `QuantizedVar` 等模块补建 `input_quantizer` 时，
+    自动将新 quantizer 迁移到模块所在设备，避免 quantizer 留在 CPU 而模块在 GPU
+  - `_quantize_if_applicable` / `_quantize_dequantize_if_applicable` 量化前，
+    将输入 tensor 对齐到 quantizer 所在设备（常量/scalar 输入常在 CPU）
+  - 影响范围：混合精度 bitwidth 配置、QAT 前向中涉及常量/标量输入的量化路径
+    （如 `Div` 第二路输入量化、`QuantizedVar` 等无 ONNX 映射模块）
+
 ### 🔧 改进
 
 - **`apply_power_of_2_workflow()` 支持控制 QuantGRU 的 POT2 模式**

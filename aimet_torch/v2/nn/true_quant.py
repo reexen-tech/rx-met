@@ -75,6 +75,21 @@ from aimet_torch.v2.utils import (
 from .base import BaseQuantizationMixin
 
 
+def _align_tensor_to_quantizer_device(data: Tensor, quantizer) -> Tensor:
+    """将输入 tensor 迁到 quantizer 所在 device（常量/scalar 常在 CPU，quantizer 在 CUDA）。"""
+    q_device = None
+    try:
+        q_device = next(quantizer.parameters()).device
+    except StopIteration:
+        if hasattr(quantizer, "is_initialized") and quantizer.is_initialized():
+            encodings = quantizer.get_encodings()
+            if encodings is not None and hasattr(encodings, "scale"):
+                q_device = encodings.scale.device
+    if q_device is not None and data.device != q_device:
+        return data.to(q_device)
+    return data
+
+
 def _quantize_if_applicable(data: Any, quantizer: Optional[QuantizerBase]):
     """
     Quantize data if it is a quantizable type and quantize is not None
@@ -82,6 +97,7 @@ def _quantize_if_applicable(data: Any, quantizer: Optional[QuantizerBase]):
     if quantizer and isinstance(data, Tensor) and data.is_floating_point():
         if isinstance(data, QuantizedTensorBase):
             data = data.dequantize()
+        data = _align_tensor_to_quantizer_device(data, quantizer)
         return quantizer(data)
 
     if isinstance(data, QuantizedTensorBase):
@@ -98,6 +114,7 @@ def _quantize_dequantize_if_applicable(data, quantizer):
     if quantizer and isinstance(data, Tensor) and data.is_floating_point():
         if isinstance(data, QuantizedTensorBase):
             data = data.dequantize()
+        data = _align_tensor_to_quantizer_device(data, quantizer)
         data = quantizer(data)
 
     if isinstance(data, QuantizedTensorBase):
