@@ -608,6 +608,7 @@ def load_mixed_precision_config(config_file: str) -> Dict[str, Any]:
     - weight_bitwidth: 权重位宽
     - bias_bitwidth: 偏置位宽
     - input_bitwidth: 输入位宽
+    - input_bitwidths: 按输入下标指定输入位宽，例如 [8, 16]
     - output_bitwidth: 输出位宽
     - weight_symmetric: 权重对称量化 (True/False)
     - output_symmetric: 输出对称量化 (True/False)
@@ -977,6 +978,7 @@ def apply_mixed_precision_bitwidth(sim_model, config_file: str, verbose: bool = 
     - weight_bitwidth: 权重位宽
     - bias_bitwidth: 偏置位宽
     - input_bitwidth: 输入位宽
+    - input_bitwidths: 按输入下标指定输入位宽，例如 [8, 16]
     - output_bitwidth: 输出位宽
     - param_bitwidth: 通用参数位宽，作用于所有非 weight/bias 的 param_quantizers 键
                       （如 Snake2d 的 alpha、LayerNorm 的 gamma/beta 等）
@@ -1199,10 +1201,16 @@ def apply_mixed_precision_bitwidth(sim_model, config_file: str, verbose: bool = 
 
             # 设置输入量化参数
             if hasattr(module, 'input_quantizers') and len(module.input_quantizers) > 0:
-                input_bw = layer_config.get('input_bitwidth')
+                input_bws = layer_config.get('input_bitwidths')
+                default_input_bw = layer_config.get('input_bitwidth')
                 input_sym = layer_config.get('input_symmetric')
                 for idx, input_quantizer in enumerate(module.input_quantizers):
-                    # 若 slot 为 None 但配置了 input_bitwidth，且是第 0 个输入（主输入），则创建新 quantizer
+                    if input_bws is not None:
+                        input_bw = input_bws[idx] if idx < len(input_bws) else None
+                    else:
+                        input_bw = default_input_bw
+
+                    # 若 slot 为 None 但配置了当前输入位宽，且是第 0 个输入（主输入），则创建新 quantizer
                     # （如 QuantizedVar / QuantizedSnake2d 因无 ONNX 映射，无法由 JSON config 自动创建）
                     # 仅对 idx==0 补建缺失 quantizer（QuantizedVar 等）；
                     # Mul/Add/Sub 的第二路 input 由 tutorial.json is_input_quantized 启用
