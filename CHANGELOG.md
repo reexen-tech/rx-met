@@ -9,6 +9,20 @@
 
 <!-- 在下次发版前，把新增条目写到这里 -->
 
+## [1.3.9] - 2026-07-09
+
+### ✨ 新增功能
+
+- **`apply_mixed_precision_bitwidth` 支持按输入下标配置混合精度位宽**
+  （`aimet_torch/utils_rx.py`）
+  - 新增 `input_bitwidths` 配置项，可按 input slot 精确设置输入量化器位宽，
+    例如 `input_bitwidths: [8, 16]` 分别作用于 `input_quantizers[0]` 和 `input_quantizers[1]`
+  - 未配置 `input_bitwidths` 时继续使用原有 `input_bitwidth` 行为，保持旧配置兼容
+  - 缺失 `input_quantizer` 的自动补建逻辑保持不变：仍仅对 `idx == 0` 的主输入生效，
+    避免默认量化 scalar、mask、dim 等非主数据输入
+  - 影响范围：需要同一算子多个输入使用不同 bitwidth 的混合精度配置，
+    如 `Div` / `Mul` 等双输入 tensor 算子的 consumer-side 输入量化
+
 ### 🐛 Bug 修复
 
 - **修复量化器与输入 tensor 的 CPU/CUDA 设备不一致问题**
