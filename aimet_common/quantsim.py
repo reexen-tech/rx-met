@@ -37,6 +37,7 @@
 """Common utility for Quantization"""
 
 import os
+import math
 import functools
 from typing import Union, Tuple, Dict
 import numpy as np
@@ -450,21 +451,33 @@ def _get_minimum_scale(num_steps: int) -> float:
     We define the minimum scale as the largest s <= float32.eps such that
     -0.005 <= s * min(x_int) <  s * max(x_int) <= 0.005
 
+    The raw value is then rounded *up* to the nearest power-of-2 so that the
+    floor itself is a power-of-2 scale. This matters for power-of-2 (shift-only)
+    hardware: without it, near-zero INT32 bias channels whose range hits this
+    floor would settle on a non-POT2 scale (int32 raw floor = 2.33e-12 = 2^-38.64)
+    that a later power-of-2 pass cannot fix, because get_scale() clamps every
+    read to this minimum. Rounding up keeps the "-0.005..0.005 representable"
+    guarantee while making the floor POT2. int8/16 are unaffected (fp32_eps = 2^-23
+    is already a power-of-2).
+
     Following this rule, the minimum scale in practice will be:
 
       | dtype | minimum scale |
       |-------|---------------|
-      |  int4 |    1.19e-07   | (note: float32.eps = 1.19e-07)
-      |  int8 |    1.19e-07   |
-      | int16 |    1.19e-07   |
-      | int32 |    2.33e-12   | (note: float64.eps = 2.22e-16)
+      |  int4 |    1.19e-07   | (= 2^-23, note: float32.eps = 1.19e-07)
+      |  int8 |    1.19e-07   | (= 2^-23)
+      | int16 |    1.19e-07   | (= 2^-23)
+      | int32 |    3.64e-12   | (= 2^-38, rounded up from raw 2.33e-12 = 2^-38.64)
 
     """
     fp32_eps = float(np.finfo(np.float32).eps)
 
     _MINIMUM_RANGE_TO_REPRESENT = (-0.005, 0.005)
     _min, _max = _MINIMUM_RANGE_TO_REPRESENT
-    return min(fp32_eps, (_max - _min) / num_steps)
+    raw_scale = min(fp32_eps, (_max - _min) / num_steps)
+
+    # Round up to the nearest power-of-2 so the floor is itself a POT2 scale.
+    return float(2.0 ** math.ceil(math.log2(raw_scale)))
 
 
 def _is_bias_out_of_int32_range(
