@@ -7,6 +7,7 @@ import torch
 import math
 from typing import Dict, List, Tuple
 from aimet_torch.v2.nn import QuantizationMixin
+from aimet_torch.v2.nn.base import BaseQuantizationMixin
 
 
 def print_quantizer_info(model, title="量化器信息"):
@@ -24,8 +25,8 @@ def print_quantizer_info(model, title="量化器信息"):
     quantizer_info = []
     
     for name, module in model.named_modules():
-        # 检查输入量化器（QuantizationMixin 模块）
-        if isinstance(module, QuantizationMixin) and hasattr(module, 'input_quantizers'):
+        # 检查输入量化器（含 fake-quant，如 FakeQuantizedSum）
+        if isinstance(module, BaseQuantizationMixin) and hasattr(module, 'input_quantizers'):
             for idx, quantizer in enumerate(module.input_quantizers):
                 if quantizer is not None and quantizer.is_initialized():
                     info = get_single_quantizer_info(quantizer)
@@ -33,8 +34,8 @@ def print_quantizer_info(model, title="量化器信息"):
                     info['quantizer_type'] = f'input_quantizer[{idx}]'
                     quantizer_info.append(info)
         
-        # 检查输出量化器（QuantizationMixin 模块）
-        if isinstance(module, QuantizationMixin) and hasattr(module, 'output_quantizers'):
+        # 检查输出量化器（含 fake-quant，如 FakeQuantizedSum）
+        if isinstance(module, BaseQuantizationMixin) and hasattr(module, 'output_quantizers'):
             for idx, quantizer in enumerate(module.output_quantizers):
                 if quantizer is not None and quantizer.is_initialized():
                     info = get_single_quantizer_info(quantizer)
@@ -295,16 +296,16 @@ def apply_power_of_2_quantization(model, method: str = "round", tolerance: float
     modified_quantizers = 0
     
     for name, module in model.named_modules():
-        # 处理输入量化器（只在 QuantizationMixin 模块中）
-        if isinstance(module, QuantizationMixin) and hasattr(module, 'input_quantizers'):
+        # 处理输入量化器（含 fake-quant，如 FakeQuantizedSum）
+        if isinstance(module, BaseQuantizationMixin) and hasattr(module, 'input_quantizers'):
             for idx, quantizer in enumerate(module.input_quantizers):
                 if quantizer is not None and quantizer.is_initialized():
                     total_quantizers += 1
                     if modify_quantizer_to_power_of_2(quantizer, f"{name}.input_quantizer[{idx}]", method, tolerance, verbose):
                         modified_quantizers += 1
         
-        # 处理输出量化器（只在 QuantizationMixin 模块中）
-        if isinstance(module, QuantizationMixin) and hasattr(module, 'output_quantizers'):
+        # 处理输出量化器（含 fake-quant，如 FakeQuantizedSum）
+        if isinstance(module, BaseQuantizationMixin) and hasattr(module, 'output_quantizers'):
             for idx, quantizer in enumerate(module.output_quantizers):
                 if quantizer is not None and quantizer.is_initialized():
                     total_quantizers += 1
@@ -663,14 +664,14 @@ def verify_model_power_of_2(model):
     for name, module in model.named_modules():
         quantizers_to_check = []
         
-        # 检查输入量化器（只在 QuantizationMixin 模块中）
-        if isinstance(module, QuantizationMixin) and hasattr(module, 'input_quantizers'):
+        # 检查输入量化器（含 fake-quant，如 FakeQuantizedSum）
+        if isinstance(module, BaseQuantizationMixin) and hasattr(module, 'input_quantizers'):
             for idx, q in enumerate(module.input_quantizers):
                 if q is not None and q.is_initialized():
                     quantizers_to_check.append((q, f"{name}.input_quantizer[{idx}]"))
         
-        # 检查输出量化器（只在 QuantizationMixin 模块中）
-        if isinstance(module, QuantizationMixin) and hasattr(module, 'output_quantizers'):
+        # 检查输出量化器（含 fake-quant，如 FakeQuantizedSum）
+        if isinstance(module, BaseQuantizationMixin) and hasattr(module, 'output_quantizers'):
             for idx, q in enumerate(module.output_quantizers):
                 if q is not None and q.is_initialized():
                     quantizers_to_check.append((q, f"{name}.output_quantizer[{idx}]"))

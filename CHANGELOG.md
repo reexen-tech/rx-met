@@ -18,6 +18,29 @@
     Torch encoding 按全部 PyTorch `input_quantizer` 导出，保证 reload / QAT 契约完整
   - 影响范围：多输入算子、ONNX 输入 tensor 数与 PyTorch input quantizer 数不一致时的 encoding 导出
 
+- **修复 fake-quant 模块（如 `FakeQuantizedSum`）未被 Power-of-2 处理**
+  （`aimet_torch/power_of_2_quantization.py`）
+  - POT2 的 apply / verify / info 三处 `isinstance` 判断仅匹配 `QuantizationMixin`，
+    导致 `FakeQuantizationMixin` 算子（如 `FakeQuantizedSum`）被跳过、scale 保持非 POT2
+  - 将判断放宽到 `BaseQuantizationMixin`，使 fake-quant 的 input/output 量化器
+    也参与 POT2 转换与校验
+  - 影响范围：模型中以 fake-quant 实现的算子（如 `Sum`）的 POT2 导出
+
+- **修复 INT32 最小 scale 地板不是 2 的幂**（`aimet_common/quantsim.py`）
+  - `_get_minimum_scale` 返回 `0.01 / num_steps`，INT32 下为 `2.33e-12 = 2^-38.64`（非 POT2）
+  - 近零 INT32 bias 通道触发该地板后落到非 POT2 scale，且 `get_scale()` 每次读取都会
+    `clamp_min_` 到该地板，导致后续 Power-of-2 步骤无法纠正
+  - 将地板向上取整到最近的 2 的幂（INT32 → `2^-38`），保留“可表示 -0.005..0.005”的语义；
+    INT8/16 不受影响（本就是 `2^-23`）
+  - 影响范围：近零 bias 的 INT32 per-channel 量化、POT2（仅移位）硬件导出
+
+- **修复 Linear 层 bias scale 未对齐到 Sx·Sw**（`aimet_torch/utils_rx.py`）
+  - `_align_conv_bias_scale` 原先仅覆盖卷积类型，`nn.Linear` 的 bias 仍走 AIMET 独立标定，
+    scale 与累加器 `Sx·Sw` 脱节（可能小到 `2^-38`、移位超 32 位），近零通道还会撞上非 POT2 地板
+  - 将 `nn.Linear` 纳入对齐范围，使所有卷积/全连接层 bias 统一采用 `Sb = Sx·Sw`
+    （构造上即为 POT2，移位约 17~26 位）
+  - 影响范围：含 Linear 层的 POT2 量化导出、INT32 bias 的整数域相加与移位预算
+
 ## [1.3.9] - 2026-07-09
 
 ### ✨ 新增功能
