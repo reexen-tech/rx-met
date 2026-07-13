@@ -1715,7 +1715,8 @@ class _QuantizationSimModelBase(_QuantizationSimModelInterface):
         if len(input_tensors) != len(input_encodings):
             logger.warning(
                 "number of input quantizers: %d available for layer: %s "
-                "doesn't match with number of input tensors: %d",
+                "doesn't match with number of input tensors: %d "
+                "(ONNX export uses tensor count; torch encodings export all quantizers)",
                 len(input_encodings),
                 layer_name,
                 len(input_tensors),
@@ -1729,30 +1730,27 @@ class _QuantizationSimModelBase(_QuantizationSimModelInterface):
                 legacy_input_encodings = layer.export_input_encodings(
                     encoding_version="0.6.1"
                 )
+
+        # ONNX sidecar: one encoding per distinct ONNX input tensor (may dedupe mul(x, x)).
         for index, (input_tensor, encoding) in enumerate(
             zip(input_tensors, input_encodings)
         ):
             if encoding is not None:
                 activation_encodings_onnx[input_tensor] = encoding
-                # TODO: Modify this so quantsim does not make assumptions about the length of input_quantizers
                 tensor_to_quantizer_map[input_tensor] = layer.input_quantizers[
                     min(index, len(layer.input_quantizers) - 1)
                 ]
-                if (
-                    not SKIP_TORCH_ENCODINGS_EXPORT
-                    and legacy_input_encodings[index] is not None
-                ):
-                    legacy_encoding = legacy_input_encodings[index]
-                    # Check if layer exists in the pytorch encoding dictionary
-                    if layer_name not in activation_encodings_torch:
-                        activation_encodings_torch[layer_name] = {}
-                    if "input" not in activation_encodings_torch[layer_name]:
-                        activation_encodings_torch[layer_name]["input"] = {}
-                    # Store encodings for a particular index so that they can be used to check if a quantizer was
-                    # enabled or not
-                    activation_encodings_torch[layer_name]["input"][index] = (
-                        legacy_encoding[0]
-                    )
+
+        # Torch module encodings: one entry per PyTorch input_quantizer (reload / QAT contract).
+        if not SKIP_TORCH_ENCODINGS_EXPORT and legacy_input_encodings is not None:
+            for index, encoding in enumerate(legacy_input_encodings):
+                if encoding is None:
+                    continue
+                if layer_name not in activation_encodings_torch:
+                    activation_encodings_torch[layer_name] = {}
+                if "input" not in activation_encodings_torch[layer_name]:
+                    activation_encodings_torch[layer_name]["input"] = {}
+                activation_encodings_torch[layer_name]["input"][index] = encoding[0]
 
     @classmethod
     def _get_layer_input_tensors(

@@ -7,7 +7,16 @@
 
 ## [Unreleased]
 
-<!-- 在下次发版前，把新增条目写到这里 -->
+### 🐛 Bug 修复
+
+- **修复 input encoding 导出时 Torch / ONNX 路径耦合导致的编码缺失**
+  （`aimet_torch/_base/quantsim.py`）
+  - `_update_encoding_dict_for_input_activations` 原先用 `zip(input_tensors, input_encodings)`
+    同时写 ONNX 与 Torch encoding；当 ONNX 对重复输入去重（如 `mul(x, x)`）时，
+    Torch encoding 会漏掉未覆盖到的 `input_quantizer`
+  - 现将两条路径拆开：ONNX sidecar 按 distinct input tensor 导出，
+    Torch encoding 按全部 PyTorch `input_quantizer` 导出，保证 reload / QAT 契约完整
+  - 影响范围：多输入算子、ONNX 输入 tensor 数与 PyTorch input quantizer 数不一致时的 encoding 导出
 
 ## [1.3.9] - 2026-07-09
 
