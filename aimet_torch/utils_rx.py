@@ -408,7 +408,7 @@ def apply_power_of_2_workflow(sim_model, method: str = "round", tolerance: float
             print("\n" + "="*80)
             print("步骤 5: Bias Scale 对齐（Sb = Sx * Sw）")
             print("="*80)
-            print("📝 将卷积层的 bias scale 对齐到输入和权重的 scale 乘积")
+            print("📝 将卷积/全连接层的 bias scale 对齐到输入和权重的 scale 乘积")
             print("📝 目标：使得硬件可以直接计算 Sy*Qy = Sx*Sw*(Qx*Qw + Qb)\n")
         
         bias_alignment_stats = _align_conv_bias_scale(sim_model, verbose=verbose)
@@ -1546,7 +1546,7 @@ def check_bn_params_status(model, verbose: bool = True) -> Dict[str, Any]:
 
 def _align_conv_bias_scale(model, verbose: bool = True) -> Dict[str, Any]:
     """
-    将所有卷积层的 bias scale 对齐到 Sx * Sw
+    将所有卷积层和全连接（Linear）层的 bias scale 对齐到 Sx * Sw
     
     目标量化公式：Sy*Qy = Sx*Sw*(Qx*Qw + Qb)
     通过设置 Sb = Sx*Sw，使得 bias 可以在整数域与乘积结果直接相加
@@ -1578,14 +1578,18 @@ def _align_conv_bias_scale(model, verbose: bool = True) -> Dict[str, Any]:
         'scale_changes': []
     }
     
-    # 支持的卷积层类型
+    # 支持的层类型：卷积 + 全连接
+    # Linear 的 bias 若走 AIMET 独立标定，近零通道会落到 minimum_scale 地板，
+    # 且 scale 与累加器 Sx*Sw 脱节（可能小到 2^-38、移位超 32 位）。
+    # 对齐到 Sb = Sx*Sw 后，scale 跟随累加器（约 2^-17~2^-26），必为 POT2 且移位 <=32。
     conv_types = (
         nn.Conv1d, nn.Conv2d, nn.Conv3d,
-        nn.ConvTranspose1d, nn.ConvTranspose2d, nn.ConvTranspose3d
+        nn.ConvTranspose1d, nn.ConvTranspose2d, nn.ConvTranspose3d,
+        nn.Linear,
     )
     
     for name, module in model.named_modules():
-        # 只处理卷积层
+        # 只处理卷积层和全连接层
         if not isinstance(module, conv_types):
             continue
         
@@ -1923,7 +1927,7 @@ def _align_conv_bias_scale(model, verbose: bool = True) -> Dict[str, Any]:
         print("\n" + "="*80)
         print("Bias Scale 对齐汇总")
         print("="*80)
-        print(f"检查的卷积层总数:   {stats['total_conv']}")
+        print(f"检查的卷积/全连接层总数: {stats['total_conv']}")
         print(f"成功修改的层数:     {stats['modified_conv']}")
         print(f"跳过的层数:         {len(stats['skipped'])}")
         
@@ -1938,7 +1942,7 @@ def _align_conv_bias_scale(model, verbose: bool = True) -> Dict[str, Any]:
             print(f"  ... 还有 {len(stats['skipped']) - 10} 个")
         
         if stats['modified_conv'] > 0:
-            print(f"\n✅ 成功对齐 {stats['modified_conv']} 个卷积层的 bias scale")
+            print(f"\n✅ 成功对齐 {stats['modified_conv']} 个卷积/全连接层的 bias scale")
         else:
             print("\n⚠️  没有成功修改任何层")
         
