@@ -63,25 +63,21 @@ RGD_HD inline float rgd_q6k64_dot_superblock(
         int64_t m, int64_t sb, int64_t M, int64_t K,
         const TilingSpec & ts, int A_bits, int psum_bits) {
 
-    const float d = rgd_h2f(w.d);
+    const uint8_t * qs = w.qs;
+    const float d = rgd_h2f((ggml_fp16_t) q64_get_bits(qs, 0, 16));
     float ad;
     const uint8_t * aq = rgd_act_block(a_base, m, sb, M, K, ts, A_bits, &ad);  // agroup == 256
     float acc = 0.0f;
 
 #pragma unroll
     for (int s = 0; s < 4; ++s) {
-        const int       sc  = w.scales[s];
-        const uint8_t * qlb = w.ql + s * 32;
-        const uint8_t * qhb = w.qh + s * 16;
-        const int       aoff = s * 64;
+        const int sc   = q64_get_sbits(qs, q64_sub_scale_bit(8, 6, s), 8);
+        const int aoff = s * 64;
 
         int sumi = 0;
 #pragma unroll
         for (int e = 0; e < 64; ++e) {
-            const int low4 = (qlb[e >> 1] >> (4 * (e & 1))) & 0xF;
-            const int hi2  = (qhb[e >> 2] >> (2 * (e & 3))) & 3;
-            const int u6   = low4 | (hi2 << 4);
-            sumi += ((u6 ^ 0x20) - 0x20) * rgd_act_at(aq, aoff + e, A_bits); // sign-extend signed 6-bit
+            sumi += q64_get_sbits(qs, q64_code_bit(8, 6, s, e), 6) * rgd_act_at(aq, aoff + e, A_bits);
         }
         sumi = reex_q64_psum_trunc_b(sumi, psum_bits);
         acc += d * sc * ad * (float) sumi;
@@ -97,28 +93,21 @@ RGD_HD inline float rgd_q5k64s_dot_superblock(
         int64_t m, int64_t sb, int64_t M, int64_t K,
         const TilingSpec & ts, int A_bits, int psum_bits) {
 
-    const float d = rgd_h2f(w.d);
+    const uint8_t * qs = w.qs;
+    const float d = rgd_h2f((ggml_fp16_t) q64_get_bits(qs, 0, 16));
     float ad;
     const uint8_t * aq = rgd_act_block(a_base, m, sb, M, K, ts, A_bits, &ad);  // agroup == 256
     float acc = 0.0f;
 
 #pragma unroll
     for (int s = 0; s < 4; ++s) {
-        const int       sc  = q64_unpack4x6_s(s, w.scales);  // signed 6-bit two's complement
-        const uint8_t * q   = w.qs + s * 32;
-        const uint8_t * qh  = w.qh + s * 8;
-        const int       aoff = s * 64;
+        const int sc   = q64_get_sbits(qs, q64_sub_scale_bit(6, 5, s), 6);
+        const int aoff = s * 64;
 
         int sumi = 0;
 #pragma unroll
-        for (int l = 0; l < 32; ++l) {
-            const int hb0 = (qh[l >> 3] >> (l & 7)) & 1;
-            const int u5l = (q[l] & 0xF) | (hb0 << 4);
-            sumi += ((u5l ^ 0x10) - 0x10) * rgd_act_at(aq, aoff + l, A_bits); // sign-extend signed 5-bit
-            const int e   = l + 32;
-            const int hb1 = (qh[e >> 3] >> (e & 7)) & 1;
-            const int u5h = (q[l] >> 4) | (hb1 << 4);
-            sumi += ((u5h ^ 0x10) - 0x10) * rgd_act_at(aq, aoff + e, A_bits);
+        for (int e = 0; e < 64; ++e) {
+            sumi += q64_get_sbits(qs, q64_code_bit(6, 5, s, e), 5) * rgd_act_at(aq, aoff + e, A_bits);
         }
         sumi = reex_q64_psum_trunc_b(sumi, psum_bits);
         acc += d * sc * ad * (float) sumi;
@@ -134,22 +123,21 @@ RGD_HD inline float rgd_q2k64s_dot_superblock(
         int64_t m, int64_t sb, int64_t M, int64_t K,
         const TilingSpec & ts, int A_bits, int psum_bits) {
 
-    const float d = rgd_h2f(w.d);
+    const uint8_t * qs = w.qs;
+    const float d = rgd_h2f((ggml_fp16_t) q64_get_bits(qs, 0, 16));
     float ad;
     const uint8_t * aq = rgd_act_block(a_base, m, sb, M, K, ts, A_bits, &ad);  // agroup == 256
     float acc = 0.0f;
 
 #pragma unroll
     for (int s = 0; s < 4; ++s) {
-        const int sc   = q64_unpack4x4_s(s, w.scales);  // signed 4-bit two's complement
+        const int sc   = q64_get_sbits(qs, q64_sub_scale_bit(4, 2, s), 4);
         const int aoff = s * 64;
 
         int sumi = 0;
 #pragma unroll
-        for (int ii = 0; ii < 64; ++ii) {
-            const int e  = s * 64 + ii;
-            const int u2 = (w.qs[e >> 2] >> (2 * (e & 3))) & 3;
-            sumi += ((u2 ^ 0x2) - 0x2) * rgd_act_at(aq, aoff + ii, A_bits); // sign-extend signed 2-bit
+        for (int e = 0; e < 64; ++e) {
+            sumi += q64_get_sbits(qs, q64_code_bit(4, 2, s, e), 2) * rgd_act_at(aq, aoff + e, A_bits);
         }
         sumi = reex_q64_psum_trunc_b(sumi, psum_bits);
         acc += d * sc * ad * (float) sumi;
@@ -165,24 +153,21 @@ RGD_HD inline float rgd_q3k64_dot_superblock(
         int64_t m, int64_t sb, int64_t M, int64_t K,
         const TilingSpec & ts, int A_bits, int psum_bits) {
 
-    const float d = rgd_h2f(w.d);
+    const uint8_t * qs = w.qs;
+    const float d = rgd_h2f((ggml_fp16_t) q64_get_bits(qs, 0, 16));
     float ad;
     const uint8_t * aq = rgd_act_block(a_base, m, sb, M, K, ts, A_bits, &ad);  // agroup == 256
     float acc = 0.0f;
 
 #pragma unroll
     for (int s = 0; s < 4; ++s) {
-        const int sc   = q64_unpack4x6_s(s, w.scales);  // signed 6-bit two's complement
+        const int sc   = q64_get_sbits(qs, q64_sub_scale_bit(6, 3, s), 6);
         const int aoff = s * 64;
 
         int sumi = 0;
 #pragma unroll
-        for (int ii = 0; ii < 64; ++ii) {
-            const int e    = s * 64 + ii;
-            const int low2 = (w.qs[e >> 2] >> (2 * (e & 3))) & 3;
-            const int hbit = (w.hmask[e >> 3] >> (e & 7)) & 1;
-            const int u3   = low2 | (hbit << 2);
-            sumi += ((u3 ^ 0x4) - 0x4) * rgd_act_at(aq, aoff + ii, A_bits); // sign-extend signed 3-bit
+        for (int e = 0; e < 64; ++e) {
+            sumi += q64_get_sbits(qs, q64_code_bit(6, 3, s, e), 3) * rgd_act_at(aq, aoff + e, A_bits);
         }
         sumi = reex_q64_psum_trunc_b(sumi, psum_bits);
         acc += d * sc * ad * (float) sumi;
@@ -199,24 +184,21 @@ RGD_HD inline float rgd_q4k64s_dot_superblock(
         int64_t m, int64_t sb, int64_t M, int64_t K,
         const TilingSpec & ts, int A_bits, int psum_bits) {
 
-    const float d = rgd_h2f(w.d);
+    const uint8_t * qs = w.qs;
+    const float d = rgd_h2f((ggml_fp16_t) q64_get_bits(qs, 0, 16));
     float ad;
     const uint8_t * aq = rgd_act_block(a_base, m, sb, M, K, ts, A_bits, &ad);  // agroup == 256
     float acc = 0.0f;
 
 #pragma unroll
     for (int s = 0; s < 4; ++s) {
-        const int       sc   = q64_unpack4x6_s(s, w.scales);  // signed 6-bit two's complement
-        const uint8_t * q    = w.qs + s * 32;
-        const int       aoff = s * 64;
+        const int sc   = q64_get_sbits(qs, q64_sub_scale_bit(6, 4, s), 6);
+        const int aoff = s * 64;
 
         int sumi = 0;
 #pragma unroll
-        for (int l = 0; l < 32; ++l) {
-            const int lo = ((q[l] & 0xF) ^ 0x8) - 0x8;  // elem l   (sign-extend signed 4-bit)
-            const int hi = ((q[l] >>   4) ^ 0x8) - 0x8;  // elem l+32
-            sumi += lo * rgd_act_at(aq, aoff + l,      A_bits);
-            sumi += hi * rgd_act_at(aq, aoff + l + 32, A_bits);
+        for (int e = 0; e < 64; ++e) {
+            sumi += q64_get_sbits(qs, q64_code_bit(6, 4, s, e), 4) * rgd_act_at(aq, aoff + e, A_bits);
         }
         sumi = reex_q64_psum_trunc_b(sumi, psum_bits);
         acc += d * sc * ad * (float) sumi;

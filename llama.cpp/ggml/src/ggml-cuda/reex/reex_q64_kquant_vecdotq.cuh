@@ -124,27 +124,23 @@ static __device__ __forceinline__ float vec_dot_q3_K_64_q8_1(
 
     const block_q3_K_64 * bq = (const block_q3_K_64 *) vbq + kbx;
     const int s = iqs;
-    const int sc = q64_unpack4x6_s(s, bq->scales);
-    const uint8_t * qbase = bq->qs    + s*16; // low 2 bits
-    const uint8_t * hbase = bq->hmask + s*8;  // 3rd (sign) bit
+    const uint8_t * qs = bq->qs;
+    const int sc = q64_get_sbits(qs, q64_sub_scale_bit(6, 3, s), 6);
     const block_q8_1 * b0 = bq8_1 + 2*s + 0;
     const block_q8_1 * b1 = bq8_1 + 2*s + 1;
 
+    int64_t bit = q64_code_bit(6, 3, s, 0);
     int sumi0 = 0, sumi1 = 0;
 #pragma unroll
-    for (int e = 0; e < 32; ++e) {
-        const int low2 = (qbase[e >> 2] >> (2*(e & 3))) & 3;
-        const int hbit = (hbase[e >> 3] >> (e & 7)) & 1;
-        sumi0 += (((low2 | (hbit << 2)) ^ 0x4) - 0x4) * b0->qs[e]; // sign-extend signed 3-bit
+    for (int e = 0; e < 32; ++e, bit += 3) {
+        sumi0 += q64_get_sbits(qs, bit, 3) * b0->qs[e];
     }
 #pragma unroll
-    for (int e = 32; e < 64; ++e) {
-        const int low2 = (qbase[e >> 2] >> (2*(e & 3))) & 3;
-        const int hbit = (hbase[e >> 3] >> (e & 7)) & 1;
-        sumi1 += (((low2 | (hbit << 2)) ^ 0x4) - 0x4) * b1->qs[e - 32];
+    for (int e = 32; e < 64; ++e, bit += 3) {
+        sumi1 += q64_get_sbits(qs, bit, 3) * b1->qs[e - 32];
     }
     const int sumi = reex_q64_psum_trunc_b(sumi0 + sumi1, reex_q64_psum_bits_dev);
-    const float  d   = q64_h2f(bq->d);
+    const float  d   = q64_h2f((ggml_fp16_t) q64_get_bits(qs, 0, 16));
     const float2 ds0 = __half22float2(b0->ds);
     const float2 ds1 = __half22float2(b1->ds);
     GGML_UNUSED(ds1);
@@ -187,27 +183,23 @@ static __device__ __forceinline__ float vec_dot_q6_K_64_q8_1(
 
     const block_q6_K_64 * bq = (const block_q6_K_64 *) vbq + kbx;
     const int s = iqs;
-    const int sc = bq->scales[s];
-    const uint8_t * qlb = bq->ql + s*32; // 64 elems * 4 bit / 8 = 32 bytes
-    const uint8_t * qhb = bq->qh + s*16; // 64 elems * 2 bit / 8 = 16 bytes
+    const uint8_t * qs = bq->qs;
+    const int sc = q64_get_sbits(qs, q64_sub_scale_bit(8, 6, s), 8);
     const block_q8_1 * b0 = bq8_1 + 2*s + 0;
     const block_q8_1 * b1 = bq8_1 + 2*s + 1;
 
+    int64_t bit = q64_code_bit(8, 6, s, 0);
     int sumi0 = 0, sumi1 = 0;
 #pragma unroll
-    for (int e = 0; e < 32; ++e) {
-        const int low4 = (qlb[e >> 1] >> (4*(e & 1))) & 0xF;
-        const int hi2  = (qhb[e >> 2] >> (2*(e & 3))) & 3;
-        sumi0 += (((low4 | (hi2 << 4)) ^ 0x20) - 0x20) * b0->qs[e]; // sign-extend signed 6-bit
+    for (int e = 0; e < 32; ++e, bit += 6) {
+        sumi0 += q64_get_sbits(qs, bit, 6) * b0->qs[e];
     }
 #pragma unroll
-    for (int e = 32; e < 64; ++e) {
-        const int low4 = (qlb[e >> 1] >> (4*(e & 1))) & 0xF;
-        const int hi2  = (qhb[e >> 2] >> (2*(e & 3))) & 3;
-        sumi1 += (((low4 | (hi2 << 4)) ^ 0x20) - 0x20) * b1->qs[e - 32];
+    for (int e = 32; e < 64; ++e, bit += 6) {
+        sumi1 += q64_get_sbits(qs, bit, 6) * b1->qs[e - 32];
     }
     const int sumi = reex_q64_psum_trunc_b(sumi0 + sumi1, reex_q64_psum_bits_dev);
-    const float  d   = q64_h2f(bq->d);
+    const float  d   = q64_h2f((ggml_fp16_t) q64_get_bits(qs, 0, 16));
     const float2 ds0 = __half22float2(b0->ds);
     const float2 ds1 = __half22float2(b1->ds);
     GGML_UNUSED(ds1);
@@ -220,23 +212,23 @@ static __device__ __forceinline__ float vec_dot_q5_K_64S_q8_1(
 
     const block_q5_K_64S * bq = (const block_q5_K_64S *) vbq + kbx;
     const int s = iqs;
-    const int sc = q64_unpack4x6_s(s, bq->scales);
-    const uint8_t * q  = bq->qs + s*32;
-    const uint8_t * qh = bq->qh + s*8;
+    const uint8_t * qs = bq->qs;
+    const int sc = q64_get_sbits(qs, q64_sub_scale_bit(6, 5, s), 6);
     const block_q8_1 * b0 = bq8_1 + 2*s + 0;
     const block_q8_1 * b1 = bq8_1 + 2*s + 1;
 
+    int64_t bit = q64_code_bit(6, 5, s, 0);
     int sumi0 = 0, sumi1 = 0;
 #pragma unroll
-    for (int l = 0; l < 32; ++l) {
-        const int hb0 = (qh[l >> 3] >> (l & 7)) & 1;
-        sumi0 += ((((q[l] & 0xF) | (hb0 << 4)) ^ 0x10) - 0x10) * b0->qs[l]; // sign-extend signed 5-bit
-        const int e   = l + 32;
-        const int hb1 = (qh[e >> 3] >> (e & 7)) & 1;
-        sumi1 += ((((q[l] >> 4) | (hb1 << 4)) ^ 0x10) - 0x10) * b1->qs[l];
+    for (int e = 0; e < 32; ++e, bit += 5) {
+        sumi0 += q64_get_sbits(qs, bit, 5) * b0->qs[e];
+    }
+#pragma unroll
+    for (int e = 32; e < 64; ++e, bit += 5) {
+        sumi1 += q64_get_sbits(qs, bit, 5) * b1->qs[e - 32];
     }
     const int sumi = reex_q64_psum_trunc_b(sumi0 + sumi1, reex_q64_psum_bits_dev);
-    const float  d   = q64_h2f(bq->d);
+    const float  d   = q64_h2f((ggml_fp16_t) q64_get_bits(qs, 0, 16));
     const float2 ds0 = __half22float2(b0->ds);
     const float2 ds1 = __half22float2(b1->ds);
     GGML_UNUSED(ds1);
@@ -249,19 +241,23 @@ static __device__ __forceinline__ float vec_dot_q4_K_64S_q8_1(
 
     const block_q4_K_64S * bq = (const block_q4_K_64S *) vbq + kbx;
     const int s = iqs;
-    const int sc = q64_unpack4x6_s(s, bq->scales);
-    const uint8_t * q = bq->qs + s*32;
+    const uint8_t * qs = bq->qs;
+    const int sc = q64_get_sbits(qs, q64_sub_scale_bit(6, 4, s), 6);
     const block_q8_1 * b0 = bq8_1 + 2*s + 0;
     const block_q8_1 * b1 = bq8_1 + 2*s + 1;
 
+    int64_t bit = q64_code_bit(6, 4, s, 0);
     int sumi0 = 0, sumi1 = 0;
 #pragma unroll
-    for (int l = 0; l < 32; ++l) {
-        sumi0 += (((q[l] & 0xF) ^ 0x8) - 0x8) * b0->qs[l]; // sign-extend signed 4-bit
-        sumi1 += (((q[l] >>  4) ^ 0x8) - 0x8) * b1->qs[l];
+    for (int e = 0; e < 32; ++e, bit += 4) {
+        sumi0 += q64_get_sbits(qs, bit, 4) * b0->qs[e];
+    }
+#pragma unroll
+    for (int e = 32; e < 64; ++e, bit += 4) {
+        sumi1 += q64_get_sbits(qs, bit, 4) * b1->qs[e - 32];
     }
     const int sumi = reex_q64_psum_trunc_b(sumi0 + sumi1, reex_q64_psum_bits_dev);
-    const float  d   = q64_h2f(bq->d);
+    const float  d   = q64_h2f((ggml_fp16_t) q64_get_bits(qs, 0, 16));
     const float2 ds0 = __half22float2(b0->ds);
     const float2 ds1 = __half22float2(b1->ds);
     GGML_UNUSED(ds1);
@@ -274,22 +270,23 @@ static __device__ __forceinline__ float vec_dot_q2_K_64S_q8_1(
 
     const block_q2_K_64S * bq = (const block_q2_K_64S *) vbq + kbx;
     const int s = iqs;
-    const int sc = q64_unpack4x4_s(s, bq->scales);
-    const uint8_t * qbase = bq->qs + s*16; // 64 elems * 2 bit / 8 = 16 bytes
+    const uint8_t * qs = bq->qs;
+    const int sc = q64_get_sbits(qs, q64_sub_scale_bit(4, 2, s), 4);
     const block_q8_1 * b0 = bq8_1 + 2*s + 0;
     const block_q8_1 * b1 = bq8_1 + 2*s + 1;
 
+    int64_t bit = q64_code_bit(4, 2, s, 0);
     int sumi0 = 0, sumi1 = 0;
 #pragma unroll
-    for (int e = 0; e < 32; ++e) {
-        sumi0 += ((((qbase[e >> 2] >> (2*(e & 3))) & 3) ^ 0x2) - 0x2) * b0->qs[e]; // sign-extend signed 2-bit
+    for (int e = 0; e < 32; ++e, bit += 2) {
+        sumi0 += q64_get_sbits(qs, bit, 2) * b0->qs[e];
     }
 #pragma unroll
-    for (int e = 32; e < 64; ++e) {
-        sumi1 += ((((qbase[e >> 2] >> (2*(e & 3))) & 3) ^ 0x2) - 0x2) * b1->qs[e - 32];
+    for (int e = 32; e < 64; ++e, bit += 2) {
+        sumi1 += q64_get_sbits(qs, bit, 2) * b1->qs[e - 32];
     }
     const int sumi = reex_q64_psum_trunc_b(sumi0 + sumi1, reex_q64_psum_bits_dev);
-    const float  d   = q64_h2f(bq->d);
+    const float  d   = q64_h2f((ggml_fp16_t) q64_get_bits(qs, 0, 16));
     const float2 ds0 = __half22float2(b0->ds);
     const float2 ds1 = __half22float2(b1->ds);
     GGML_UNUSED(ds1);

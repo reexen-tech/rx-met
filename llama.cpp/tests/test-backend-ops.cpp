@@ -8367,6 +8367,36 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
     }
 #endif
 
+    // REEX block-64 symmetric K-quants: exercise the four CUDA weight->F32 paths
+    // (dequant, mmvq, mmq, get_rows) against the CPU vec_dot reference. k = 256
+    // is one K-quant super-block; n sweeps mmvq (small) and mmq/dequant (large).
+    // MMQ only covers Q6_K_64/Q3_K_64; the S types fall through the dequant path.
+    // Guarded at runtime (not behind GGML_USE_REEX_Q64) so the tests binary needs
+    // no extra compile definition: the enum values always exist in ggml.h and the
+    // cases are only emitted when the linked ggml actually registered these types.
+    for (ggml_type type_a : {GGML_TYPE_Q6_K_64, GGML_TYPE_Q5_K_64S,
+                             GGML_TYPE_Q4_K_64S, GGML_TYPE_Q3_K_64, GGML_TYPE_Q2_K_64S}) {
+        if (ggml_get_type_traits(type_a)->to_float == nullptr) {
+            continue; // ggml built without GGML_USE_REEX_Q64
+        }
+        for (int n : {1, 2, 8, 16, 32, 129, 256}) {
+            test_cases.emplace_back(new test_mul_mat(type_a, GGML_TYPE_F32, 256, n, 256, {1, 1}, {1, 1}));
+        }
+        // batched weights (ne2/ne3) to cover the per-expert offset arithmetic.
+        test_cases.emplace_back(new test_mul_mat(type_a, GGML_TYPE_F32, 256, 8, 256, {3, 2}, {1, 1}));
+        // MUL_MAT_ID (MoE experts): mirror the Q4_0_64/Q4_K_64 coverage above so
+        // the per-64 fixed-point expert path is validated for the sym types too.
+        for (int n_used : {2, 8}) {
+            for (int n : {1, 8, 17, 32, 129, 256}) {
+                test_cases.emplace_back(new test_mul_mat_id(type_a, GGML_TYPE_F32, 8, n_used, false, 512, n, 256));
+            }
+        }
+        // GET_ROWS: dequantize a handful of super-blocks per row.
+        for (int b : {1, 7}) {
+            test_cases.emplace_back(new test_get_rows(type_a, 256, 5, 4, b, 1, false));
+        }
+    }
+
     for (int bs : {1, 4, 512}) {
         for (ggml_type type_a : {GGML_TYPE_F32, GGML_TYPE_F16, GGML_TYPE_Q4_0, GGML_TYPE_Q4_K}) {
             for (ggml_type type_b : {GGML_TYPE_F32}) {

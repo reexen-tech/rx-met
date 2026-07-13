@@ -4238,12 +4238,13 @@ GGML_QUANT_SIZES: dict[GGMLQuantizationType, tuple[int, int]] = {
     GGMLQuantizationType.Q8_1_64: (64, 2 + 2 + 64),
     GGMLQuantizationType.Q4_K_64: (256, 2 + 2 + 6 + 128),
     GGMLQuantizationType.Q2_K_64: (256, 2 + 2 + 4 + 64),
-    GGMLQuantizationType.Q3_K_64: (256, 2 + 32 + 64 + 4),
+    # HW bit-stream super-blocks (no padding): 16b glb_scale + 4*(scale_bits + 64*W_bits) bits.
+    GGMLQuantizationType.Q3_K_64: (256, 101),   # scale=6, W=3 -> 808 bits
     GGMLQuantizationType.Q5_K_64: (256, 2 + 2 + 6 + 32 + 128),
-    GGMLQuantizationType.Q6_K_64: (256, 2 + 4 + 128 + 64),
-    GGMLQuantizationType.Q5_K_64S: (256, 2 + 4 + 32 + 128),
-    GGMLQuantizationType.Q4_K_64S: (256, 2 + 4 + 128),
-    GGMLQuantizationType.Q2_K_64S: (256, 2 + 2 + 64),
+    GGMLQuantizationType.Q6_K_64: (256, 198),   # scale=8, W=6 -> 1584 bits
+    GGMLQuantizationType.Q5_K_64S: (256, 165),  # scale=6, W=5 -> 1320 bits
+    GGMLQuantizationType.Q4_K_64S: (256, 133),  # scale=6, W=4 -> 1064 bits
+    GGMLQuantizationType.Q2_K_64S: (256, 68),   # scale=4, W=2 ->  544 bits
     # === REEX_Q64 END ===
 }
 

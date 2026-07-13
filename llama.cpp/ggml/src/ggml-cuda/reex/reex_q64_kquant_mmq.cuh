@@ -115,9 +115,10 @@ static __device__ __forceinline__ void reex_q64k_load_dm_q2(
     }
 }
 
-// symmetric, fp32 scale d*sc into the q8_0 tile. Q3: 6-bit two's-complement
-// scale via q64_unpack4x6_s; Q6: int8 scales[].
-template <int mmq_y, bool need_check, typename block_t, bool q3>
+// symmetric, fp32 scale d*sc into the q8_0 tile. Reads the sub-block scale and
+// the fp16 glb scale straight from the HW bit-stream (scale_bits/w_bits per type:
+// Q3 = 6/3, Q6 = 8/6).
+template <int mmq_y, bool need_check, typename block_t, int scale_bits, int w_bits>
 static __device__ __forceinline__ void reex_q64k_load_df_sym(
         const char * __restrict__ x, float * __restrict__ x_df,
         const int kbx0, const int i_max, const int stride) {
@@ -133,10 +134,9 @@ static __device__ __forceinline__ void reex_q64k_load_df_sym(
         int i = i0 + threadIdx.y * rows_per_warp + threadIdx.x / blocks_per_tile_x_row;
         if (need_check) { i = min(i, i_max); }
         const block_t * bxi = (const block_t *) x + kbx0 + i*stride;
-        int sc;
-        if (q3) { sc = q64_unpack4x6_s(sb, (const uint8_t *) bxi->scales); }
-        else    { sc = bxi->scales[sb]; }
-        const float d  = __half2float(__ushort_as_half((unsigned short) bxi->d));
+        const uint8_t * qs = bxi->qs;
+        const int   sc = q64_get_sbits(qs, q64_sub_scale_bit(scale_bits, w_bits, sb), scale_bits);
+        const float d  = __half2float(__ushort_as_half((unsigned short) q64_get_bits(qs, 0, 16)));
         const float df = d * sc;
 #if defined(AMD_MFMA_AVAILABLE) || defined(TURING_MMA_AVAILABLE) || defined(AMD_WMMA_AVAILABLE)
         x_df[i*MMQ_MMA_TILE_X_K_Q8_0                 + kbxd] = df;
@@ -270,29 +270,27 @@ template <int mmq_y, bool need_check> static __device__ __forceinline__ void loa
     const int txi  = warp_size > threads_per_row ? threadIdx.x % threads_per_row : threadIdx.x;
     const int sb   = txi / 8;
     const int kqsx = txi % 8;
-    const int hsh  = (kqsx & 1) * 4;
 
 #pragma unroll
     for (int i0 = 0; i0 < mmq_y; i0 += nrows*nwarps) {
         int i = i0 + (nrows == 1 ? threadIdx.y : threadIdx.y*nrows + threadIdx.x/threads_per_row);
         if (need_check) { i = min(i, i_max); }
         const block_q3_K_64 * bxi = (const block_q3_K_64 *) x + kbx0 + i*stride;
-        const uint8_t lb0 = bxi->qs[sb*16 + kqsx];
-        const uint8_t lb1 = bxi->qs[sb*16 + 8 + kqsx];
-        const uint8_t hb0 = bxi->hmask[sb*8 + (kqsx >> 1)];
-        const uint8_t hb1 = bxi->hmask[sb*8 + 4 + (kqsx >> 1)];
+        const uint8_t * qs = bxi->qs;
         int v0 = 0, v1 = 0;
 #pragma unroll
         for (int k = 0; k < 4; ++k) {
-            const int q3a = ((lb0 >> (2*k)) & 3) | (((hb0 >> (hsh + k)) & 1) << 2);
-            const int q3b = ((lb1 >> (2*k)) & 3) | (((hb1 >> (hsh + k)) & 1) << 2);
-            v0 |= (((q3a ^ 0x4) - 0x4) & 0xFF) << (8*k); // sign-extend signed 3-bit
-            v1 |= (((q3b ^ 0x4) - 0x4) & 0xFF) << (8*k);
+            const int e0 =      kqsx*4 + k; // sub-block local elem 0..31
+            const int e1 = 32 + kqsx*4 + k; // sub-block local elem 32..63
+            const int q3a = q64_get_sbits(qs, q64_code_bit(6, 3, sb, e0), 3);
+            const int q3b = q64_get_sbits(qs, q64_code_bit(6, 3, sb, e1), 3);
+            v0 |= (q3a & 0xFF) << (8*k);
+            v1 |= (q3b & 0xFF) << (8*k);
         }
         REEX_Q64K_QS(i, 2*sb + 0, kqsx) = v0;
         REEX_Q64K_QS(i, 2*sb + 1, kqsx) = v1;
     }
-    reex_q64k_load_df_sym<mmq_y, need_check, block_q3_K_64, true>(x, x_df, kbx0, i_max, stride);
+    reex_q64k_load_df_sym<mmq_y, need_check, block_q3_K_64, 6, 3>(x, x_df, kbx0, i_max, stride);
 }
 
 // === Q6_K_64 (symmetric 6-bit, signed q) -> q8_0 tile ======================
@@ -321,22 +319,21 @@ template <int mmq_y, bool need_check> static __device__ __forceinline__ void loa
         int i = i0 + (nrows == 1 ? threadIdx.y : threadIdx.y*nrows + threadIdx.x/threads_per_row);
         if (need_check) { i = min(i, i_max); }
         const block_q6_K_64 * bxi = (const block_q6_K_64 *) x + kbx0 + i*stride;
-        const uint8_t qhb0 = bxi->qh[sb*16 + kqsx];     // hi 2 bits, elems 0..31
-        const uint8_t qhb1 = bxi->qh[sb*16 + 8 + kqsx]; // hi 2 bits, elems 32..63
+        const uint8_t * qs = bxi->qs;
         int v0 = 0, v1 = 0;
 #pragma unroll
         for (int k = 0; k < 4; ++k) {
-            const uint8_t qla = bxi->ql[sb*32      + kqsx*2 + (k >> 1)];
-            const uint8_t qlb = bxi->ql[sb*32 + 16 + kqsx*2 + (k >> 1)];
-            const int q6a = ((qla >> (4*(k & 1))) & 0xF) | (((qhb0 >> (2*k)) & 3) << 4);
-            const int q6b = ((qlb >> (4*(k & 1))) & 0xF) | (((qhb1 >> (2*k)) & 3) << 4);
-            v0 |= (((q6a ^ 0x20) - 0x20) & 0xFF) << (8*k); // sign-extend signed 6-bit
-            v1 |= (((q6b ^ 0x20) - 0x20) & 0xFF) << (8*k);
+            const int e0 =      kqsx*4 + k; // sub-block local elem 0..31
+            const int e1 = 32 + kqsx*4 + k; // sub-block local elem 32..63
+            const int q6a = q64_get_sbits(qs, q64_code_bit(8, 6, sb, e0), 6);
+            const int q6b = q64_get_sbits(qs, q64_code_bit(8, 6, sb, e1), 6);
+            v0 |= (q6a & 0xFF) << (8*k);
+            v1 |= (q6b & 0xFF) << (8*k);
         }
         REEX_Q64K_QS(i, 2*sb + 0, kqsx) = v0;
         REEX_Q64K_QS(i, 2*sb + 1, kqsx) = v1;
     }
-    reex_q64k_load_df_sym<mmq_y, need_check, block_q6_K_64, false>(x, x_df, kbx0, i_max, stride);
+    reex_q64k_load_df_sym<mmq_y, need_check, block_q6_K_64, 8, 6>(x, x_df, kbx0, i_max, stride);
 }
 
 #undef REEX_Q64K_QS

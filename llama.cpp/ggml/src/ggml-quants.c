@@ -5212,6 +5212,18 @@ static bool validate_e_e8m0(uint8_t e, size_t i) {
         } \
     }
 
+// REEX K-quant block-64 HW bit-stream: the fp16 glb scale is the first 16 LSB-first
+// bits of qs[] (byte-aligned), i.e. the first two bytes little-endian.
+#define VALIDATE_ROW_DATA_D_F16_QS_IMPL(type, data, nb) \
+    const type * q = (const type *) (data); \
+    for (size_t i = 0; i < (nb); ++i) { \
+        ggml_fp16_t d_; \
+        memcpy(&d_, q[i].qs, sizeof(d_)); \
+        if (!validate_fp16(d_, i)) { \
+            return false; \
+        } \
+    }
+
 #define VALIDATE_ROW_DATA_DM_F16_IMPL(type, data, nb, d, m) \
     const type * q = (const type *) (data); \
     for (size_t i = 0; i < (nb); ++i) { \
@@ -5516,7 +5528,7 @@ bool ggml_validate_row_data(enum ggml_type type, const void * data, size_t nbyte
             } break;
         case GGML_TYPE_Q3_K_64:
             {
-                VALIDATE_ROW_DATA_D_F16_IMPL(block_q3_K_64, data, nb);
+                VALIDATE_ROW_DATA_D_F16_QS_IMPL(block_q3_K_64, data, nb);
             } break;
         case GGML_TYPE_Q5_K_64:
             {
@@ -5524,19 +5536,19 @@ bool ggml_validate_row_data(enum ggml_type type, const void * data, size_t nbyte
             } break;
         case GGML_TYPE_Q6_K_64:
             {
-                VALIDATE_ROW_DATA_D_F16_IMPL(block_q6_K_64, data, nb);
+                VALIDATE_ROW_DATA_D_F16_QS_IMPL(block_q6_K_64, data, nb);
             } break;
         case GGML_TYPE_Q5_K_64S:
             {
-                VALIDATE_ROW_DATA_D_F16_IMPL(block_q5_K_64S, data, nb);
+                VALIDATE_ROW_DATA_D_F16_QS_IMPL(block_q5_K_64S, data, nb);
             } break;
         case GGML_TYPE_Q4_K_64S:
             {
-                VALIDATE_ROW_DATA_D_F16_IMPL(block_q4_K_64S, data, nb);
+                VALIDATE_ROW_DATA_D_F16_QS_IMPL(block_q4_K_64S, data, nb);
             } break;
         case GGML_TYPE_Q2_K_64S:
             {
-                VALIDATE_ROW_DATA_D_F16_IMPL(block_q2_K_64S, data, nb);
+                VALIDATE_ROW_DATA_D_F16_QS_IMPL(block_q2_K_64S, data, nb);
             } break;
         case GGML_TYPE_Q8_1_64:
             {

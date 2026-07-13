@@ -384,6 +384,27 @@ void ggml_vec_dot_q2_K_64_q8_K(int n, float * GGML_RESTRICT s, size_t bs,
     *s = sumf;
 }
 
+/* Shared integer-domain dot for the SYMMETRIC K-quant block-64 types (no min):
+ * y = d * sum_s sub_scale_s * sum_e code_{s,e} * q8_{s,e}. Weights are read
+ * straight from the HW bit-stream (d, sub_scale, codes) via the q64 bit codec;
+ * q8 is the block_q8_K activation (sequential, 64 elems / sub-block). */
+static inline float reex_q64_sym_dot_q8_K(const uint8_t * GGML_RESTRICT qs,
+    const int8_t * GGML_RESTRICT q8, float y_d, int scale_bits, int w_bits, int pb) {
+    const float d = GGML_CPU_FP16_TO_FP32((ggml_fp16_t) q64_get_bits(qs, 0, 16));
+    int32_t sumi = 0;
+    for (int sblk = 0; sblk < QK_K_64/64; ++sblk) {
+        const int sc = q64_get_sbits(qs, q64_sub_scale_bit(scale_bits, w_bits, sblk), scale_bits);
+        int64_t bit = q64_code_bit(scale_bits, w_bits, sblk, 0);
+        int32_t acc = 0;
+        for (int e = 0; e < 64; ++e, bit += w_bits) {
+            acc += q64_get_sbits(qs, bit, w_bits) * q8[64*sblk + e];
+        }
+        acc = reex_q64_psum_trunc_b(acc, pb);
+        sumi += sc * acc;
+    }
+    return d * y_d * sumi;
+}
+
 /* W(Q3_K_64) x A(Q8_K), scalar. x = d*scale*q, signed q [-4,3] + signed scale, no min. */
 void ggml_vec_dot_q3_K_64_q8_K(int n, float * GGML_RESTRICT s, size_t bs,
     const void * GGML_RESTRICT vx, size_t bx, const void * GGML_RESTRICT vy, size_t by, int nrc)
@@ -396,29 +417,11 @@ void ggml_vec_dot_q3_K_64_q8_K(int n, float * GGML_RESTRICT s, size_t bs,
     const block_q8_K    * GGML_RESTRICT y = (const block_q8_K    *) vy;
 
     const int nb = n / QK_K_64;
-
     const int pb = reex_q64_psum_bits();
 
     float sumf = 0;
     for (int i = 0; i < nb; ++i) {
-        const int8_t * GGML_RESTRICT q8 = y[i].qs;
-
-        int32_t sumi = 0;
-        for (int j = 0; j < QK_K_64/64; ++j) {
-            const int sc = q64_unpack4x6_s(j, x[i].scales);
-            int32_t acc = 0;
-            for (int ii = 0; ii < 64; ++ii) {
-                const int e = 64*j + ii;
-                const int low2 = (x[i].qs[e >> 2] >> (2*(e & 3))) & 3;
-                const int hbit = (x[i].hmask[e >> 3] >> (e & 7)) & 1;
-                const int u3 = low2 | (hbit << 2);
-                acc += ((u3 ^ 0x4) - 0x4) * q8[e]; // sign-extend signed 3-bit
-            }
-            acc = reex_q64_psum_trunc_b(acc, pb);
-            sumi += sc * acc;
-        }
-
-        sumf += GGML_CPU_FP16_TO_FP32(x[i].d) * y[i].d * sumi;
+        sumf += reex_q64_sym_dot_q8_K(x[i].qs, y[i].qs, y[i].d, /*scale_bits*/6, /*w_bits*/3, pb);
     }
     *s = sumf;
 }
@@ -492,29 +495,11 @@ void ggml_vec_dot_q6_K_64_q8_K(int n, float * GGML_RESTRICT s, size_t bs,
     const block_q8_K    * GGML_RESTRICT y = (const block_q8_K    *) vy;
 
     const int nb = n / QK_K_64;
-
     const int pb = reex_q64_psum_bits();
 
     float sumf = 0;
     for (int i = 0; i < nb; ++i) {
-        const int8_t * GGML_RESTRICT q8 = y[i].qs;
-
-        int32_t sumi = 0;
-        for (int j = 0; j < QK_K_64/64; ++j) {
-            const int sc = x[i].scales[j];
-            int32_t acc = 0;
-            for (int ii = 0; ii < 64; ++ii) {
-                const int e = 64*j + ii;
-                const int low4 = (x[i].ql[e >> 1] >> (4*(e & 1))) & 0xF;
-                const int hi2  = (x[i].qh[e >> 2] >> (2*(e & 3))) & 3;
-                const int u6 = low4 | (hi2 << 4);
-                acc += ((u6 ^ 0x20) - 0x20) * q8[e]; // sign-extend signed 6-bit
-            }
-            acc = reex_q64_psum_trunc_b(acc, pb);
-            sumi += sc * acc;
-        }
-
-        sumf += GGML_CPU_FP16_TO_FP32(x[i].d) * y[i].d * sumi;
+        sumf += reex_q64_sym_dot_q8_K(x[i].qs, y[i].qs, y[i].d, /*scale_bits*/8, /*w_bits*/6, pb);
     }
     *s = sumf;
 }
@@ -531,38 +516,11 @@ void ggml_vec_dot_q5_K_64S_q8_K(int n, float * GGML_RESTRICT s, size_t bs,
     const block_q8_K     * GGML_RESTRICT y = (const block_q8_K     *) vy;
 
     const int nb = n / QK_K_64;
-
     const int pb = reex_q64_psum_bits();
 
     float sumf = 0;
     for (int i = 0; i < nb; ++i) {
-        const uint8_t * GGML_RESTRICT ql = x[i].qs;
-        const uint8_t * GGML_RESTRICT qh = x[i].qh;
-        const  int8_t * GGML_RESTRICT q8 = y[i].qs;
-
-        int32_t sumi = 0;
-        for (int j = 0; j < QK_K_64/64; ++j) {
-            const int sc = q64_unpack4x6_s(j, x[i].scales);
-            int32_t acc = 0;
-            for (int l = 0; l < 32; ++l) {
-                const int hbit = (qh[l >> 3] >> (l & 7)) & 1;
-                const int u5 = (ql[l] & 0xF) | (hbit << 4);
-                acc += ((u5 ^ 0x10) - 0x10) * q8[l]; // sign-extend signed 5-bit
-            }
-            for (int l = 0; l < 32; ++l) {
-                const int e = l + 32;
-                const int hbit = (qh[e >> 3] >> (e & 7)) & 1;
-                const int u5 = (ql[l] >> 4) | (hbit << 4);
-                acc += ((u5 ^ 0x10) - 0x10) * q8[e];
-            }
-            acc = reex_q64_psum_trunc_b(acc, pb);
-            sumi += sc * acc;
-            ql += 32;
-            qh += 8;
-            q8 += 64;
-        }
-
-        sumf += GGML_CPU_FP16_TO_FP32(x[i].d) * y[i].d * sumi;
+        sumf += reex_q64_sym_dot_q8_K(x[i].qs, y[i].qs, y[i].d, /*scale_bits*/6, /*w_bits*/5, pb);
     }
     *s = sumf;
 }
@@ -579,29 +537,11 @@ void ggml_vec_dot_q4_K_64S_q8_K(int n, float * GGML_RESTRICT s, size_t bs,
     const block_q8_K     * GGML_RESTRICT y = (const block_q8_K     *) vy;
 
     const int nb = n / QK_K_64;
-
     const int pb = reex_q64_psum_bits();
 
     float sumf = 0;
     for (int i = 0; i < nb; ++i) {
-        const uint8_t * GGML_RESTRICT ql = x[i].qs;
-        const  int8_t * GGML_RESTRICT q8 = y[i].qs;
-
-        int32_t sumi = 0;
-        for (int j = 0; j < QK_K_64/64; ++j) {
-            const int sc = q64_unpack4x6_s(j, x[i].scales);
-            int32_t acc = 0;
-            for (int l = 0; l < 32; ++l) {
-                acc += (((ql[l] & 0xF) ^ 0x8) - 0x8) * q8[l]; // sign-extend signed 4-bit
-                acc += (((ql[l] >>  4) ^ 0x8) - 0x8) * q8[l + 32];
-            }
-            acc = reex_q64_psum_trunc_b(acc, pb);
-            sumi += sc * acc;
-            ql += 32;
-            q8 += 64;
-        }
-
-        sumf += GGML_CPU_FP16_TO_FP32(x[i].d) * y[i].d * sumi;
+        sumf += reex_q64_sym_dot_q8_K(x[i].qs, y[i].qs, y[i].d, /*scale_bits*/6, /*w_bits*/4, pb);
     }
     *s = sumf;
 }
@@ -618,27 +558,11 @@ void ggml_vec_dot_q2_K_64S_q8_K(int n, float * GGML_RESTRICT s, size_t bs,
     const block_q8_K     * GGML_RESTRICT y = (const block_q8_K     *) vy;
 
     const int nb = n / QK_K_64;
-
     const int pb = reex_q64_psum_bits();
 
     float sumf = 0;
     for (int i = 0; i < nb; ++i) {
-        const  int8_t * GGML_RESTRICT q8 = y[i].qs;
-
-        int32_t sumi = 0;
-        for (int j = 0; j < QK_K_64/64; ++j) {
-            const int sc = q64_unpack4x4_s(j, x[i].scales);
-            int32_t acc = 0;
-            for (int ii = 0; ii < 64; ++ii) {
-                const int e = 64*j + ii;
-                const int u2 = (x[i].qs[e >> 2] >> (2*(e & 3))) & 3;
-                acc += ((u2 ^ 0x2) - 0x2) * q8[e]; // sign-extend signed 2-bit
-            }
-            acc = reex_q64_psum_trunc_b(acc, pb);
-            sumi += sc * acc;
-        }
-
-        sumf += GGML_CPU_FP16_TO_FP32(x[i].d) * y[i].d * sumi;
+        sumf += reex_q64_sym_dot_q8_K(x[i].qs, y[i].qs, y[i].d, /*scale_bits*/4, /*w_bits*/2, pb);
     }
     *s = sumf;
 }

@@ -148,9 +148,10 @@ int main(int argc, char ** argv) {
     if (wid < 0) { fprintf(stderr, "wtype '%s' not in registry\n", wtype.c_str()); return 1; }
     const WQuantType & t = wquant_get(wid);
 
-    if (t.family != Family::Legacy) {
-        fprintf(stderr, "wtype '%s' (family %s) not supported yet — Legacy block-64 only "
-                        "(q8_0_64/q8_1_64/q4_0_64/q4_1_64/q5_0_64/q5_1_64)\n",
+    if (t.family != Family::Legacy && t.family != Family::Kquant) {
+        fprintf(stderr, "wtype '%s' (family %s) not supported — Legacy block-64 "
+                        "(q8_0_64/q8_1_64/q4_0_64/q4_1_64/q5_0_64/q5_1_64) or "
+                        "K-quant block-64 (Q6_K_64/Q5_K_64S/Q4_K_64S/Q3_K_64/Q2_K_64S)\n",
                 t.name, family_name(t.family));
         return 1;
     }

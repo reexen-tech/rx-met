@@ -41,29 +41,20 @@ WConvResult wconvert_weight(int id, const void * native, size_t native_bytes,
         return r; // empty -> caller treats as error
     }
 
-    // Step 1: whole-block reorder into §4.1 tile order (block bytes opaque).
-    std::vector<uint8_t> tiled(nbytes);
-    wquant_reorder_to_tiled(id, native, tiled.data(), N, K, ts);
-
-    // Step 2: K-quant only — repack each super-block into the HW bitstream.
-    const size_t hw_bb = wquant_hw_block_bytes(id);
-    if (hw_bb) {
-        const int64_t nblk = N * K / t.elems_per_block;
-        r.bytes.assign((size_t) nblk * hw_bb, 0);
-        wquant_repack_hw(id, tiled.data(), r.bytes.data(), N, K);
-        r.block_bytes = hw_bb;
-        r.n_blocks    = nblk;
-        r.repacked    = true;
-        r.layout_desc = "LSB-first bitstream: glb_scale(fp16,16b) + "
-                        "4*[sub_scale(scale_bits, signed) + 64 codes @W bits]";
-    } else {
-        r.bytes       = std::move(tiled);
-        r.block_bytes = t.block_bytes;
-        r.n_blocks    = N * K / t.elems_per_block;
-        r.repacked    = false;
-        r.layout_desc = "reex native struct {d(fp16); ...; qs} (scale-first), "
-                        "block bytes opaque (whole-block reorder only)";
-    }
+    // Whole-block reorder into §4.1 tile order (block bytes opaque). Both Legacy
+    // and K-quant reex structs already store the final HW byte layout — K-quant
+    // is the LSB-first bit-stream itself — so no per-block repack is needed and
+    // this reorder is the entire conversion.
+    r.bytes.assign(nbytes, 0);
+    wquant_reorder_to_tiled(id, native, r.bytes.data(), N, K, ts);
+    r.block_bytes = t.block_bytes;
+    r.n_blocks    = N * K / t.elems_per_block;
+    r.repacked    = false;
+    r.layout_desc = (t.family == Family::Kquant)
+        ? "LSB-first bitstream: glb_scale(fp16,16b) + 4*[sub_scale(scale_bits, "
+          "signed) + 64 codes @W bits] (whole-block reorder only)"
+        : "reex native struct {d(fp16); ...; qs} (scale-first), block bytes "
+          "opaque (whole-block reorder only)";
     return r;
 }
 

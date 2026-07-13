@@ -104,122 +104,33 @@ size_t wquant_blocks_bytes(int id, int64_t N, int64_t K) {
     return (size_t) (N * K / t.elems_per_block) * t.block_bytes;
 }
 
-// ---- K-quant HW repack: glb_scale + 4*[sub_scale + 64 codes @ W bits] -------
+// ---- K-quant HW block bytes -------------------------------------------------
+//
+// The reex K-quant block-64 struct IS the hardware LSB-first bit-stream now
+// (glb_scale(fp16,16b) + 4*[sub_scale(scale_bits) + 64 codes @W bits], no byte
+// padding), so sizeof(block_*) already equals the packed bit-stream length and
+// no separate repack step is required — see ggml-reex-q64-common.h.
 
 size_t wquant_hw_block_bytes(int id) {
     const WQuantType & t = wquant_get(id);
     if (t.family != Family::Kquant) return 0;            // legacy already scale-first
-    // continuous bitstream: glb(16) + 4*(scale_bits + 64*W_bits), rounded up to bytes
+    // continuous bitstream: glb(16) + 4*(scale_bits + 64*W_bits), rounded up to bytes.
+    // Equals sizeof(block_*) by construction (checked below).
     const int64_t bits = 16 + 4 * (int64_t)(t.scale_bits + 64 * t.W_bits);
-    return (size_t) ((bits + 7) / 8);
+    const size_t  bytes = (size_t) ((bits + 7) / 8);
+    return bytes;
 }
 
-// Extract one reex super-block into raw codes[256] (signed two's-complement bit
-// patterns, W_bits wide) + signed sub_scale[4] + glb scale d. The raw code bits are
-// passed straight through to the HW bitstream; bit layouts mirror the reex vec_dots.
-static void kq_extract_block(const WQuantType & t, const void * blk,
-                             uint8_t codes[256], int8_t subsc[4], ggml_fp16_t & d) {
-    if (std::strcmp(t.name, "Q6_K_64") == 0) {
-        const block_q6_K_64 * b = (const block_q6_K_64 *) blk;
-        d = b->d;
-        for (int s = 0; s < 4; ++s) {
-            subsc[s] = b->scales[s];
-            const uint8_t * ql = b->ql + s * 32;
-            const uint8_t * qh = b->qh + s * 16;
-            for (int e = 0; e < 64; ++e) {
-                const int low4 = (ql[e >> 1] >> (4 * (e & 1))) & 0xF;
-                const int hi2  = (qh[e >> 2] >> (2 * (e & 3))) & 3;
-                codes[s * 64 + e] = (uint8_t) (low4 | (hi2 << 4));   // signed 6-bit (two's complement)
-            }
-        }
-    } else if (std::strcmp(t.name, "Q5_K_64S") == 0) {
-        const block_q5_K_64S * b = (const block_q5_K_64S *) blk;
-        d = b->d;
-        for (int s = 0; s < 4; ++s) {
-            subsc[s] = (int8_t) q64_unpack4x6_s(s, b->scales); // signed 6-bit two's complement
-            const uint8_t * q  = b->qs + s * 32;
-            const uint8_t * qh = b->qh + s * 8;
-            for (int l = 0; l < 32; ++l) {
-                const int hb0 = (qh[l >> 3] >> (l & 7)) & 1;
-                codes[s * 64 + l]      = (uint8_t) ((q[l] & 0xF) | (hb0 << 4));  // signed 5-bit (two's complement)
-                const int e   = l + 32;
-                const int hb1 = (qh[e >> 3] >> (e & 7)) & 1;
-                codes[s * 64 + e]      = (uint8_t) ((q[l] >> 4) | (hb1 << 4));
-            }
-        }
-    } else if (std::strcmp(t.name, "Q4_K_64S") == 0) {
-        const block_q4_K_64S * b = (const block_q4_K_64S *) blk;
-        d = b->d;
-        for (int s = 0; s < 4; ++s) {
-            subsc[s] = (int8_t) q64_unpack4x6_s(s, b->scales); // signed 6-bit two's complement
-            const uint8_t * q = b->qs + s * 32;
-            for (int l = 0; l < 32; ++l) {
-                codes[s * 64 + l]      = (uint8_t) (q[l] & 0xF);  // signed 4-bit (two's complement)
-                codes[s * 64 + l + 32] = (uint8_t) (q[l] >> 4);
-            }
-        }
-    } else if (std::strcmp(t.name, "Q3_K_64") == 0) {
-        const block_q3_K_64 * b = (const block_q3_K_64 *) blk;
-        d = b->d;
-        for (int s = 0; s < 4; ++s) {
-            subsc[s] = (int8_t) q64_unpack4x6_s(s, b->scales); // signed 6-bit two's complement
-            for (int ii = 0; ii < 64; ++ii) {
-                const int e    = s * 64 + ii;
-                const int low2 = (b->qs[e >> 2] >> (2 * (e & 3))) & 3;
-                const int hbit = (b->hmask[e >> 3] >> (e & 7)) & 1;
-                codes[e] = (uint8_t) (low2 | (hbit << 2));  // signed 3-bit (two's complement)
-            }
-        }
-    } else if (std::strcmp(t.name, "Q2_K_64S") == 0) {
-        const block_q2_K_64S * b = (const block_q2_K_64S *) blk;
-        d = b->d;
-        for (int s = 0; s < 4; ++s) {
-            subsc[s] = (int8_t) q64_unpack4x4_s(s, b->scales); // signed 4-bit two's complement
-            for (int ii = 0; ii < 64; ++ii) {
-                const int e = s * 64 + ii;
-                codes[e] = (uint8_t) ((b->qs[e >> 2] >> (2 * (e & 3))) & 3);  // signed 2-bit (two's complement)
-            }
-        }
-    }
-}
-
-// LSB-first continuous bit writer into a pre-zeroed buffer.
-struct BitWriter {
-    uint8_t * buf;
-    int64_t   pos = 0;
-    void put(uint32_t val, int bits) {
-        for (int b = 0; b < bits; ++b, ++pos)
-            if ((val >> b) & 1u) buf[pos >> 3] |= (uint8_t) (1u << (pos & 7));
-    }
-};
-
+// Repack is now the identity: the reex block already stores the HW bit-stream,
+// so this is a straight copy (block_bytes == wquant_hw_block_bytes). Kept as a
+// thin wrapper so callers (datagen / reex-hw-convert) need no changes.
 void wquant_repack_hw(int id, const void * reex_tiled, void * hw_tiled,
                       int64_t N, int64_t K) {
     const WQuantType & t = wquant_get(id);
     const size_t hw_bb = wquant_hw_block_bytes(id);
     if (hw_bb == 0) return;
-    const uint32_t scale_mask = (t.scale_bits >= 32) ? 0xFFFFFFFFu : ((1u << t.scale_bits) - 1u);
-    const uint32_t code_mask  = (1u << t.W_bits) - 1u;
     const int64_t nblk = N * K / t.elems_per_block;
-    const uint8_t * src = (const uint8_t *) reex_tiled;
-    uint8_t       * dst = (uint8_t *)       hw_tiled;
-
-    for (int64_t i = 0; i < nblk; ++i) {
-        uint8_t codes[256]; int8_t subsc[4]; ggml_fp16_t d;
-        kq_extract_block(t, src + i * t.block_bytes, codes, subsc, d);
-
-        uint8_t * o = dst + i * hw_bb;
-        std::memset(o, 0, hw_bb);
-        BitWriter bw{ o, 0 };
-
-        uint16_t draw; std::memcpy(&draw, &d, 2);
-        bw.put(draw, 16);                                       // glb_scale (fp16)
-        for (int s = 0; s < 4; ++s) {
-            bw.put((uint32_t) subsc[s] & scale_mask, t.scale_bits);   // signed sub_scale, two's complement
-            for (int e = 0; e < 64; ++e)
-                bw.put((uint32_t) codes[s * 64 + e] & code_mask, t.W_bits);  // 64 codes @ W bits
-        }
-    }
+    std::memcpy(hw_tiled, reex_tiled, (size_t) nblk * hw_bb);
 }
 
 void wquant_reorder_to_tiled(int id, const void * native, void * tiled,
