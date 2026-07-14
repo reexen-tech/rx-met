@@ -224,9 +224,13 @@ def load_quantizer_encodings(
             inp_enc = enc.get("input")
             if isinstance(inp_enc, list) and len(inp_enc) > 0 and hasattr(module, 'input_quantizers'):
                 for idx, item in enumerate(inp_enc):
-                    if idx >= len(module.input_quantizers) or module.input_quantizers[idx] is None:
+                    if idx >= len(module.input_quantizers):
                         break
                     q = module.input_quantizers[idx]
+                    # 标量输入槽在导出时以 None 占位、量化器亦为 None：跳过而非中断，
+                    # 否则会连带漏加载其后非标量那一路的量化器（按位对应被破坏）。
+                    if q is None or item is None or not isinstance(item, dict):
+                        continue
                     rmin = item.get("real_min")
                     rmax = item.get("real_max")
                     if rmin is not None and rmax is not None and _apply_aimet_encoding_to_quantizer(

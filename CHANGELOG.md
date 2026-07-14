@@ -7,7 +7,39 @@
 
 ## [Unreleased]
 
+### ✨ 新增功能
+
+- **elementwise 二元算子的“标量输入”在构造 sim 阶段即不创建量化器**
+  （`aimet_torch/_base/quantsim.py`）
+  - 需求：对 Add / Multiply / Subtract / Divide 等二元 elementwise 算子，若某一路输入是
+    “标量”（没有 shape：Python 数值，或 0 维 tensor `torch.Size([])`），则该路输入不应有
+    量化器，导出的 encodings 也不应包含对应量化参数。shape 为 `(1,)`/`(1,1,1)` 等（`numel==1`
+    但有 shape）仍算非标量，保留量化。
+  - 实现：在 `QuantizationSimModel` 构造期的前向探测（`record_metadata`）中，对
+    “输入个数 >= 2 且 input_quantizers 与输入一一对应”的算子，按输入 shape 判定标量槽；
+    在量化器 realize 之后统一移除标量槽的 `input_quantizer`（置 `None`），并在模块上打
+    `_scalar_input_slots` 标记。判定只依赖图结构 / 输入 shape，与权重数值无关。
+  - 关键收益：训练 sim 与 reload sim 走**完全相同**的构造路径，得到**完全一致**的量化器
+    集合，避免以往在脚本层事后置 `None` 破坏“按输入位置索引”的对应关系（会导致
+    reload 时连保留的非标量那一路都加载不上、报 “quantization parameters are not initialized”）。
+  - 配套：`apply_mixed_precision_bitwidth`（`aimet_torch/utils_rx.py`）不再对被标记为标量的
+    `idx==0` 输入槽补建量化器，避免把已移除的标量量化器重新建出。
+  - 影响范围：SwitchNorm 展开量化等含大量二元 elementwise 算子的模型（本模型命中约 600 个
+    标量输入槽），其标量输入路不再产生 / 导出量化参数。
+
 ### 🐛 Bug 修复
+
+- **修复 encodings 导出 / 加载在“稀疏输入槽”下的按位错位**
+  （`export_onnx_and_encodings/postprocess_refactor/encodings_ops.py`、
+  `aimet_torch/staged_quantization_utils.py`）
+  - 导出后处理 `flatten_activation_io_index_dict` 把按下标编号的 `{"1": enc}` 转为 list 时，
+    原实现只按存在的键排序输出（`{"1": enc}` → `[enc]`），丢失了槽位下标，使原属 `input[1]`
+    的编码落到 list 下标 0；改为**按位补 `null` 占位**（`{"1": enc}` → `[null, enc]`），
+    保证 list 下标 == 输入槽下标。
+  - 加载器 `load_quantizer_encodings` 遍历 `input` list 时遇到 `None` 槽会直接 `break`，
+    连带漏加载其后非标量那一路的量化器；改为**跳过（`continue`）**该槽，保持后续按位加载。
+  - 影响范围：任何存在“某输入槽无量化器”（如标量输入被移除）的多输入算子的
+    encodings 导出与 reload 加载。
 
 - **修复 input encoding 导出时 Torch / ONNX 路径耦合导致的编码缺失**
   （`aimet_torch/_base/quantsim.py`）

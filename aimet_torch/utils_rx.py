@@ -1214,7 +1214,10 @@ def apply_mixed_precision_bitwidth(sim_model, config_file: str, verbose: bool = 
                     # （如 QuantizedVar / QuantizedSnake2d 因无 ONNX 映射，无法由 JSON config 自动创建）
                     # 仅对 idx==0 补建缺失 quantizer（QuantizedVar 等）；
                     # Mul/Add/Sub 的第二路 input 由 tutorial.json is_input_quantized 启用
-                    if input_quantizer is None and idx == 0 and input_bw is not None:
+                    # 标量输入槽（构造期已判定为“无 shape”并移除量化器）不得重建，否则会破坏
+                    # 训练/reload 的量化器集合一致性，并使导出 encodings 重新包含标量路参数。
+                    _is_scalar_slot = idx in getattr(module, "_scalar_input_slots", set())
+                    if input_quantizer is None and idx == 0 and input_bw is not None and not _is_scalar_slot:
                         try:
                             from aimet_torch.v2.quantization.affine import QuantizeDequantize
                             import torch.nn as _nn
