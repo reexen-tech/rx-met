@@ -7,25 +7,40 @@
 
 ## [Unreleased]
 
-### ✨ 新增功能
+### 🐛 Bug 修复
 
-- **elementwise 二元算子的“标量输入”在构造 sim 阶段即不创建量化器**
+- **修复 reload 时 index dict 格式 encodings 未被加载的问题**
+  （`aimet_torch/staged_quantization_utils.py`）
+  - 1.3.10 起 postprocess 将 activation `input` / `output` 规范为 `{"0": {...}, "1": {...}}`
+  - 加载器原先把 dict 当成旧版扁平格式读 `real_min` / `real_max`，对 index dict 恒为 `None`，
+    静默跳过加载，随后 forward 报 `quantization parameters are not initialized`
+  - 现统一支持 list、index dict、旧版扁平 dict 三种格式；output 侧 `None` 槽也改为跳过而非中断
+  - 影响范围：导出后再 `load_quantizer_encodings` 重载验证 / QAT reload
+
+## [1.3.10] - 2026-07-15
+
+### 🔄 变更
+
+- **`apply_power_of_2_workflow()` 默认策略改为 `cover_range`**
+  （`aimet_torch/utils_rx.py`）
+  - 原先 `method` 默认为 `"round"`（全部四舍五入到最近的 `2^n`）
+  - 现默认改为 `"cover_range"`：当 `real_range` 接近 `2^n`（相对误差 < `tolerance`）时仍四舍五入，
+    否则增大 scale 以覆盖原浮点范围，减少截断风险
+  - 显式传入 `method="round"` 的行为不变；底层 `apply_power_of_2_quantization()` 默认仍为 `"round"`
+  - 影响范围：未显式指定 `method` 的 `apply_power_of_2_workflow()` 调用
+
+- **回退“标量输入不创建量化器”，改为支持双路量化**
   （`aimet_torch/_base/quantsim.py`）
-  - 需求：对 Add / Multiply / Subtract / Divide 等二元 elementwise 算子，若某一路输入是
-    “标量”（没有 shape：Python 数值，或 0 维 tensor `torch.Size([])`），则该路输入不应有
-    量化器，导出的 encodings 也不应包含对应量化参数。shape 为 `(1,)`/`(1,1,1)` 等（`numel==1`
-    但有 shape）仍算非标量，保留量化。
-  - 实现：在 `QuantizationSimModel` 构造期的前向探测（`record_metadata`）中，对
-    “输入个数 >= 2 且 input_quantizers 与输入一一对应”的算子，按输入 shape 判定标量槽；
-    在量化器 realize 之后统一移除标量槽的 `input_quantizer`（置 `None`），并在模块上打
-    `_scalar_input_slots` 标记。判定只依赖图结构 / 输入 shape，与权重数值无关。
-  - 关键收益：训练 sim 与 reload sim 走**完全相同**的构造路径，得到**完全一致**的量化器
-    集合，避免以往在脚本层事后置 `None` 破坏“按输入位置索引”的对应关系（会导致
-    reload 时连保留的非标量那一路都加载不上、报 “quantization parameters are not initialized”）。
-  - 配套：`apply_mixed_precision_bitwidth`（`aimet_torch/utils_rx.py`）不再对被标记为标量的
-    `idx==0` 输入槽补建量化器，避免把已移除的标量量化器重新建出。
-  - 影响范围：SwitchNorm 展开量化等含大量二元 elementwise 算子的模型（本模型命中约 600 个
-    标量输入槽），其标量输入路不再产生 / 导出量化参数。
+  - 背景：编译器现已支持“双路量化”——二元 elementwise 算子（Add / Multiply / Subtract /
+    Divide 等）即使某一路输入是标量（Python 数值，或 0 维 tensor `torch.Size([])`），该路
+    也可以拥有独立的量化参数。
+  - 变更：撤销此前在 `QuantizationSimModel` 构造期“探测并移除标量输入槽量化器”的逻辑
+    （`record_metadata` 中的标量判定、`_remove_scalar_input_quantizers`、`_scalar_input_slots`
+    标记），恢复为所有输入槽（含标量路）均创建量化器、导出完整量化参数。
+  - 保留：以下“稀疏输入槽按位对应”的修复不受影响、继续保留（它们修复的是通用的按位
+    错位老问题，与标量特性无关，双路量化下同样安全）——后处理 `flatten_activation_io_index_dict`
+    保留 index dict 编号、`staged_quantization_utils.py` 的 loader 跳过 `None` 槽；
+    `apply_mixed_precision_bitwidth` 中的标量 guard 因 `_scalar_input_slots` 不再产生而自动失效。
 
 ### 🐛 Bug 修复
 

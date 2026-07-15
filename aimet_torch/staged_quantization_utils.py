@@ -220,12 +220,11 @@ def load_quantizer_encodings(
                 continue
             if not isinstance(enc, dict):
                 continue
-            # input: 对应 input_quantizers[0], [1], ...
-            inp_enc = enc.get("input")
-            if isinstance(inp_enc, list) and len(inp_enc) > 0 and hasattr(module, 'input_quantizers'):
-                for idx, item in enumerate(inp_enc):
+            # input / output: 支持 list、index dict（{"0": {...}}）与旧版扁平 dict
+            if hasattr(module, 'input_quantizers'):
+                for idx, item in _iter_io_encoding_items(enc.get("input")):
                     if idx >= len(module.input_quantizers):
-                        break
+                        continue
                     q = module.input_quantizers[idx]
                     # 标量输入槽在导出时以 None 占位、量化器亦为 None：跳过而非中断，
                     # 否则会连带漏加载其后非标量那一路的量化器（按位对应被破坏）。
@@ -239,37 +238,19 @@ def load_quantizer_encodings(
                         _set_quantizer_allow_overwrite(q, allow_overwrite)
                         loaded_count += 1
                         loaded_types.add(type(module).__name__)
-            elif isinstance(inp_enc, dict):
-                rmin, rmax = inp_enc.get("real_min"), inp_enc.get("real_max")
-                if hasattr(module, 'input_quantizers') and len(module.input_quantizers) > 0 and module.input_quantizers[0] is not None and rmin is not None and rmax is not None:
-                    if _apply_aimet_encoding_to_quantizer(
-                        module.input_quantizers[0], rmin, rmax, device, inp_enc, verbose
-                    ):
-                        _set_quantizer_allow_overwrite(module.input_quantizers[0], allow_overwrite)
-                        loaded_count += 1
-                        loaded_types.add(type(module).__name__)
-            # output: 对应 output_quantizers[0], [1], ...
-            out_enc = enc.get("output")
-            if isinstance(out_enc, list) and len(out_enc) > 0 and hasattr(module, 'output_quantizers'):
-                for idx, item in enumerate(out_enc):
-                    if idx >= len(module.output_quantizers) or module.output_quantizers[idx] is None:
-                        break
+            if hasattr(module, 'output_quantizers'):
+                for idx, item in _iter_io_encoding_items(enc.get("output")):
+                    if idx >= len(module.output_quantizers):
+                        continue
                     q = module.output_quantizers[idx]
+                    if q is None or item is None or not isinstance(item, dict):
+                        continue
                     rmin = item.get("real_min")
                     rmax = item.get("real_max")
                     if rmin is not None and rmax is not None and _apply_aimet_encoding_to_quantizer(
                         q, rmin, rmax, device, item, verbose
                     ):
                         _set_quantizer_allow_overwrite(q, allow_overwrite)
-                        loaded_count += 1
-                        loaded_types.add(type(module).__name__)
-            elif isinstance(out_enc, dict):
-                rmin, rmax = out_enc.get("real_min"), out_enc.get("real_max")
-                if hasattr(module, 'output_quantizers') and len(module.output_quantizers) > 0 and module.output_quantizers[0] is not None and rmin is not None and rmax is not None:
-                    if _apply_aimet_encoding_to_quantizer(
-                        module.output_quantizers[0], rmin, rmax, device, out_enc, verbose
-                    ):
-                        _set_quantizer_allow_overwrite(module.output_quantizers[0], allow_overwrite)
                         loaded_count += 1
                         loaded_types.add(type(module).__name__)
         # 2) 非 GRU 的 param_encodings：通用解析 key 为 "module_name.param_name"（与 param_quantizers 匹配）
@@ -495,6 +476,35 @@ def _collect_gru_module_names_from_activation_encodings(act: dict) -> set:
         if isinstance(enc, dict) and enc.get("is_GRU") is True:
             out.add(mod_name)
     return out
+
+
+def _is_io_index_dict(enc) -> bool:
+    """判断是否为 activation input/output 的 index dict：{"0": {...}, "1": {...}}。"""
+    if not isinstance(enc, dict) or not enc:
+        return False
+    return all(isinstance(k, str) and k.isdigit() for k in enc.keys())
+
+
+def _iter_io_encoding_items(enc):
+    """按槽位迭代 activation 的 input/output encodings。
+
+    兼容三种格式：
+    - list: [{...}, {...}]
+    - index dict（postprocess 现行格式）: {"0": {...}, "1": {...}}
+    - 旧版扁平 dict（单槽）: {"real_min": ..., "real_max": ..., ...}
+    """
+    if isinstance(enc, list):
+        for idx, item in enumerate(enc):
+            yield idx, item
+        return
+    if not isinstance(enc, dict) or not enc:
+        return
+    if _is_io_index_dict(enc):
+        for key in sorted(enc.keys(), key=lambda s: int(s)):
+            yield int(key), enc[key]
+        return
+    # 旧版：整段 dict 即单条 encoding
+    yield 0, enc
 
 
 def _parse_param_encodings_key(key: str, module_map: dict):

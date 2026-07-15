@@ -298,7 +298,7 @@ def _enable_quant_gru_pot2(sim_model, verbose: bool = True) -> int:
     return count
 
 
-def apply_power_of_2_workflow(sim_model, method: str = "round", tolerance: float = 0.02, 
+def apply_power_of_2_workflow(sim_model, method: str = "cover_range", tolerance: float = 0.02, 
                               align_bias_scale: bool = False, verbose: bool = True) -> Dict[str, Any]:
     """
     完整的 Power-of-2 量化工作流
@@ -314,8 +314,8 @@ def apply_power_of_2_workflow(sim_model, method: str = "round", tolerance: float
     Args:
         sim_model: AIMET QuantizationSimModel.model
         method: Power-of-2 选择策略
-            - "round": 全部四舍五入（默认，现有方法）
-            - "cover_range": 智能策略
+            - "round": 全部四舍五入
+            - "cover_range": 智能策略（默认）
                 - 如果 real_max - real_min 接近 2^n（相对误差 < tolerance）：使用四舍五入
                 - 否则：增大 scale 使得覆盖原范围
         tolerance: 判断 real_range 是否接近 2^n 的相对容差（默认 2%）
