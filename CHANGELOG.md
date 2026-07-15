@@ -9,6 +9,47 @@
 
 ### 🐛 Bug 修复
 
+- **修复 reload 时 index dict 格式 encodings 未被加载的问题**
+  （`aimet_torch/staged_quantization_utils.py`）
+  - 1.3.10 起 postprocess 将 activation `input` / `output` 规范为 `{"0": {...}, "1": {...}}`
+  - 加载器原先把 dict 当成旧版扁平格式读 `real_min` / `real_max`，对 index dict 恒为 `None`，
+    静默跳过加载，随后 forward 报 `quantization parameters are not initialized`
+  - 现统一支持 list、index dict、旧版扁平 dict 三种格式；output 侧 `None` 槽也改为跳过而非中断
+  - 影响范围：导出后再 `load_quantizer_encodings` 重载验证 / QAT reload
+
+## [1.3.10] - 2026-07-15
+
+### 🔄 变更
+
+- **`apply_power_of_2_workflow()` 默认策略改为 `cover_range`**
+  （`aimet_torch/utils_rx.py`）
+  - 原先 `method` 默认为 `"round"`（全部四舍五入到最近的 `2^n`）
+  - 现默认改为 `"cover_range"`：当 `real_range` 接近 `2^n`（相对误差 < `tolerance`）时仍四舍五入，
+    否则增大 scale 以覆盖原浮点范围，减少截断风险
+  - 显式传入 `method="round"` 的行为不变；底层 `apply_power_of_2_quantization()` 默认仍为 `"round"`
+  - 影响范围：未显式指定 `method` 的 `apply_power_of_2_workflow()` 调用
+
+- **回退“标量输入不创建量化器”，改为支持双路量化**
+  （`aimet_torch/_base/quantsim.py`）
+  - 背景：编译器现已支持“双路量化”——二元 elementwise 算子（Add / Multiply / Subtract /
+    Divide 等）即使某一路输入是标量（Python 数值，或 0 维 tensor `torch.Size([])`），该路
+    也可以拥有独立的量化参数。
+  - 变更：撤销此前在 `QuantizationSimModel` 构造期“探测并移除标量输入槽量化器”的逻辑
+    （`record_metadata` 中的标量判定、`_remove_scalar_input_quantizers`、`_scalar_input_slots`
+    标记），恢复为所有输入槽（含标量路）均创建量化器、导出完整量化参数。
+  - 保留：以下“稀疏输入槽按位对应”的修复不受影响、继续保留（它们修复的是通用的按位
+    错位老问题，与标量特性无关，双路量化下同样安全）——后处理 `flatten_activation_io_index_dict`
+    保留 index dict 编号、`staged_quantization_utils.py` 的 loader 跳过 `None` 槽；
+    `apply_mixed_precision_bitwidth` 中的标量 guard 因 `_scalar_input_slots` 不再产生而自动失效。
+
+### 🐛 Bug 修复
+
+- **修复 encodings 加载在“稀疏输入槽”下中途中断的问题**
+  （`aimet_torch/staged_quantization_utils.py`）
+  - 加载器 `load_quantizer_encodings` 遍历 `input` list 时遇到 `None` 槽会直接 `break`，
+    连带漏加载其后非标量那一路的量化器；改为**跳过（`continue`）**该槽，保持后续按位加载。
+  - 影响范围：存在“某输入槽无量化器”（如标量输入被移除）的多输入算子 encodings reload。
+
 - **修复 `QuantizationSimModel` 配置中非法 `op_type` 静默失效的问题**
   （`aimet_torch/quantsim_config/quantsim_config.py`）
   - `config_file` 的 `op_type` 字段原先遇到大小写或拼写错误（如 `matmul`、`Linear`）时，

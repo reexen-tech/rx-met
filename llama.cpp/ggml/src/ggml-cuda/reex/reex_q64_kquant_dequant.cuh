@@ -96,25 +96,22 @@ static __global__ void dequantize_block_q2_K_64(const void * __restrict__ vx, ds
     }
 }
 
-// Q3_K_64: 3-bit, x = d*scale*q, signed q [-4,3] + signed 6-bit scale (two's complement).
-// qs low 2 bits sequential; hmask 3rd (sign) bit sequential (element e -> hmask[e>>3] bit e&7).
+// Q3_K_64: 3-bit SYMMETRIC HW bit-stream, scale_bits=6, w_bits=3. x = d*scale*q.
 template<typename dst_t>
 static __global__ void dequantize_block_q3_K_64(const void * __restrict__ vx, dst_t * __restrict__ yy, int64_t nb) {
     const int64_t i = blockIdx.x;
     if (i >= nb) return;
     const block_q3_K_64 * x = (const block_q3_K_64 *) vx + i;
-    const float d_all = q64_h2f(x->d);
+    const uint8_t * qs = x->qs;
+    const float d_all = q64_h2f((ggml_fp16_t) q64_get_bits(qs, 0, 16));
     dst_t * y = yy + i*QK_K_64;
     const int j = threadIdx.x; // 0..63
 #pragma unroll
     for (int sub = 0; sub < 4; ++sub) {
-        const int sc = q64_unpack4x6_s(sub, x->scales);
+        const int   sc = q64_get_sbits(qs, q64_sub_scale_bit(6, 3, sub), 6);
         const float dl = d_all * sc;
-        const int e = sub*64 + j;
-        const int low2 = (x->qs[e >> 2] >> (2*(e & 3))) & 3;
-        const int hbit = (x->hmask[e >> 3] >> (e & 7)) & 1;
-        const int u3 = low2 | (hbit << 2);
-        y[e] = ggml_cuda_cast<dst_t>(dl * ((u3 ^ 0x4) - 0x4)); // sign-extend signed 3-bit
+        const int   q  = q64_get_sbits(qs, q64_code_bit(6, 3, sub, j), 3);
+        y[sub*64 + j] = ggml_cuda_cast<dst_t>(dl * q);
     }
 }
 
@@ -144,86 +141,79 @@ static __global__ void dequantize_block_q5_K_64(const void * __restrict__ vx, ds
     }
 }
 
-// Q6_K_64: 6-bit, x = d*scale*q, signed q [-32,31] (two's complement), int8 scale.
-// ql low 4 bits sequential; qh high 2 bits sequential (element e -> qh[e>>2] >> (2*(e&3))).
+// Q6_K_64: 6-bit SYMMETRIC HW bit-stream, scale_bits=8, w_bits=6. x = d*scale*q.
 template<typename dst_t>
 static __global__ void dequantize_block_q6_K_64(const void * __restrict__ vx, dst_t * __restrict__ yy, int64_t nb) {
     const int64_t i = blockIdx.x;
     if (i >= nb) return;
     const block_q6_K_64 * x = (const block_q6_K_64 *) vx + i;
-    const float d = q64_h2f(x->d);
+    const uint8_t * qs = x->qs;
+    const float d = q64_h2f((ggml_fp16_t) q64_get_bits(qs, 0, 16));
     dst_t * y = yy + i*QK_K_64;
     const int j = threadIdx.x; // 0..63
 #pragma unroll
     for (int sub = 0; sub < 4; ++sub) {
-        const int sc = x->scales[sub];
+        const int   sc = q64_get_sbits(qs, q64_sub_scale_bit(8, 6, sub), 8);
         const float dl = d * sc;
-        const int e = sub*64 + j;
-        const int low4 = (x->ql[e >> 1] >> (4*(e & 1))) & 0xF;
-        const int hi2  = (x->qh[e >> 2] >> (2*(e & 3))) & 3;
-        const int u6 = low4 | (hi2 << 4);
-        y[e] = ggml_cuda_cast<dst_t>(dl * ((u6 ^ 0x20) - 0x20)); // sign-extend signed 6-bit
+        const int   q  = q64_get_sbits(qs, q64_code_bit(8, 6, sub, j), 6);
+        y[sub*64 + j] = ggml_cuda_cast<dst_t>(dl * q);
     }
 }
 
-// Q5_K_64S: 5-bit SYMMETRIC, x = d*scale*q, signed q [-16,15], int6 signed scale, no min.
-// qs low 4 bits per sub-block (q[l] low->elem l, high->elem l+32); qh 5th (sign) bit sequential.
+// Q5_K_64S: 5-bit SYMMETRIC HW bit-stream, scale_bits=6, w_bits=5. x = d*scale*q.
 template<typename dst_t>
 static __global__ void dequantize_block_q5_K_64S(const void * __restrict__ vx, dst_t * __restrict__ yy, int64_t nb) {
     const int64_t i = blockIdx.x;
     if (i >= nb) return;
     const block_q5_K_64S * x = (const block_q5_K_64S *) vx + i;
-    const float d = q64_h2f(x->d);
+    const uint8_t * qs = x->qs;
+    const float d = q64_h2f((ggml_fp16_t) q64_get_bits(qs, 0, 16));
     dst_t * y = yy + i*QK_K_64;
     const int j = threadIdx.x; // 0..63
 #pragma unroll
     for (int sub = 0; sub < 4; ++sub) {
-        const int sc = q64_unpack4x6_s(sub, x->scales);
+        const int   sc = q64_get_sbits(qs, q64_sub_scale_bit(6, 5, sub), 6);
         const float dl = d * sc;
-        const uint8_t * ql = x->qs + sub*32;
-        const uint8_t * qh = x->qh + sub*8;
-        const int low4 = (j < 32) ? (ql[j] & 0xF) : (ql[j-32] >> 4);
-        const int hbit = (qh[j >> 3] >> (j & 7)) & 1;
-        const int u5 = low4 | (hbit << 4);
-        y[sub*64 + j] = ggml_cuda_cast<dst_t>(dl * ((u5 ^ 0x10) - 0x10)); // sign-extend signed 5-bit
+        const int   q  = q64_get_sbits(qs, q64_code_bit(6, 5, sub, j), 5);
+        y[sub*64 + j] = ggml_cuda_cast<dst_t>(dl * q);
     }
 }
 
-// Q4_K_64S: 4-bit SYMMETRIC, x = d*scale*q, signed q [-8,7], int6 signed scale, no min.
+// Q4_K_64S: 4-bit SYMMETRIC HW bit-stream, scale_bits=6, w_bits=4. x = d*scale*q.
 template<typename dst_t>
 static __global__ void dequantize_block_q4_K_64S(const void * __restrict__ vx, dst_t * __restrict__ yy, int64_t nb) {
     const int64_t i = blockIdx.x;
     if (i >= nb) return;
     const block_q4_K_64S * x = (const block_q4_K_64S *) vx + i;
-    const float d = q64_h2f(x->d);
+    const uint8_t * qs = x->qs;
+    const float d = q64_h2f((ggml_fp16_t) q64_get_bits(qs, 0, 16));
     dst_t * y = yy + i*QK_K_64;
     const int j = threadIdx.x; // 0..63
 #pragma unroll
     for (int sub = 0; sub < 4; ++sub) {
-        const int sc = q64_unpack4x6_s(sub, x->scales);
+        const int   sc = q64_get_sbits(qs, q64_sub_scale_bit(6, 4, sub), 6);
         const float dl = d * sc;
-        const uint8_t * q = x->qs + sub*32;
-        const int qv = (j < 32) ? (q[j] & 0xF) : (q[j-32] >> 4);
-        y[sub*64 + j] = ggml_cuda_cast<dst_t>(dl * ((qv ^ 0x8) - 0x8)); // sign-extend signed 4-bit
+        const int   q  = q64_get_sbits(qs, q64_code_bit(6, 4, sub, j), 4);
+        y[sub*64 + j] = ggml_cuda_cast<dst_t>(dl * q);
     }
 }
 
-// Q2_K_64S: 2-bit SYMMETRIC, x = d*scale*q, signed q [-2,1], int4 signed scale, no min.
+// Q2_K_64S: 2-bit SYMMETRIC HW bit-stream, scale_bits=4, w_bits=2. x = d*scale*q.
 template<typename dst_t>
 static __global__ void dequantize_block_q2_K_64S(const void * __restrict__ vx, dst_t * __restrict__ yy, int64_t nb) {
     const int64_t i = blockIdx.x;
     if (i >= nb) return;
     const block_q2_K_64S * x = (const block_q2_K_64S *) vx + i;
-    const float d = q64_h2f(x->d);
+    const uint8_t * qs = x->qs;
+    const float d = q64_h2f((ggml_fp16_t) q64_get_bits(qs, 0, 16));
     dst_t * y = yy + i*QK_K_64;
     const int j = threadIdx.x; // 0..63
 #pragma unroll
     for (int sub = 0; sub < 4; ++sub) {
-        const int sc = q64_unpack4x4_s(sub, x->scales);
+        const int   sc = q64_get_sbits(qs, q64_sub_scale_bit(4, 2, sub), 4);
         const float dl = d * sc;
-        const int e = sub*64 + j;
-        const int u2 = (x->qs[e >> 2] >> (2*(e & 3))) & 3;
-        y[e] = ggml_cuda_cast<dst_t>(dl * ((u2 ^ 0x2) - 0x2)); // sign-extend signed 2-bit
+        const int   q  = q64_get_sbits(qs, q64_code_bit(4, 2, sub, j), 2);
+        y[sub*64 + j] = ggml_cuda_cast<dst_t>(dl * q);
     }
 }
 

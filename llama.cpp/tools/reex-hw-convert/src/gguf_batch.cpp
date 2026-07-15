@@ -20,16 +20,23 @@
 
 namespace rgd {
 
-// ---- ggml GGUF type -> reex registry name (Legacy block-64 only) -----------
+// ---- ggml GGUF type -> reex registry name (Legacy + symmetric K-quant b64) --
 static const char * ggml_type_to_registry(enum ggml_type t) {
     switch (t) {
-        case GGML_TYPE_Q4_0_64: return "q4_0_64";
-        case GGML_TYPE_Q8_0_64: return "q8_0_64";
-        case GGML_TYPE_Q4_1_64: return "q4_1_64";
-        case GGML_TYPE_Q5_0_64: return "q5_0_64";
-        case GGML_TYPE_Q5_1_64: return "q5_1_64";
-        case GGML_TYPE_Q8_1_64: return "q8_1_64";
-        default:                return "";         // unsupported for HW conversion
+        case GGML_TYPE_Q4_0_64:  return "q4_0_64";
+        case GGML_TYPE_Q8_0_64:  return "q8_0_64";
+        case GGML_TYPE_Q4_1_64:  return "q4_1_64";
+        case GGML_TYPE_Q5_0_64:  return "q5_0_64";
+        case GGML_TYPE_Q5_1_64:  return "q5_1_64";
+        case GGML_TYPE_Q8_1_64:  return "q8_1_64";
+        // K-quant block-64: the reex struct already IS the HW bit-stream, so
+        // wconvert_weight is a whole-block reorder (repack is the identity).
+        case GGML_TYPE_Q6_K_64:  return "Q6_K_64";
+        case GGML_TYPE_Q5_K_64S: return "Q5_K_64S";
+        case GGML_TYPE_Q4_K_64S: return "Q4_K_64S";
+        case GGML_TYPE_Q3_K_64:  return "Q3_K_64";
+        case GGML_TYPE_Q2_K_64S: return "Q2_K_64S";
+        default:                 return "";         // unsupported for HW conversion
     }
 }
 
@@ -208,7 +215,11 @@ int wconvert_gguf(const std::string & in_path, const std::string & out_gguf,
         const int64_t K    = t->ne[0];
         const int64_t N    = t->ne[1];
         const int64_t nexp = t->ne[2] > 0 ? t->ne[2] : 1;
-        if (t->ne[3] > 1 || K % tsL.Kt || N % tsL.Nt) {
+        // Divisibility depends on the target family's tile geometry (K-quant
+        // uses Kt=256 vs Legacy Kt=64), so resolve the tiling per selected type.
+        const int        wid_chk = wquant_find(reg);
+        const TilingSpec ts      = wid_chk >= 0 ? tiling_for(wquant_get(wid_chk).family) : tsL;
+        if (t->ne[3] > 1 || K % ts.Kt || N % ts.Nt) {
             // Auto mode: not tileable -> skip (e.g. ssm_alpha/beta with N=32).
             // Explicit mode: the user named it, so a bad shape is a hard error.
             if (auto_mode) {
@@ -221,7 +232,7 @@ int wconvert_gguf(const std::string & in_path, const std::string & out_gguf,
                     "[wconvert-gguf] %s: shape N=%lld K=%lld ne3=%lld not tiling-divisible "
                     "(Nt=%d Kt=%d) — aborting\n",
                     name.c_str(), (long long) N, (long long) K, (long long) t->ne[3],
-                    tsL.Nt, tsL.Kt);
+                    ts.Nt, ts.Kt);
             GgufConvItem it; it.name = name; it.ggml_type = ggml_type_name(gt);
             it.wtype = reg; it.N = N; it.K = K; it.status = "fail:shape-not-divisible";
             summary.items.push_back(it); summary.n_fail++;
@@ -269,8 +280,8 @@ int wconvert_gguf(const std::string & in_path, const std::string & out_gguf,
     }
 
     if (converted_names.empty()) {
-        fprintf(stderr, "[wconvert-gguf] no convertible (Legacy block-64) weight tensors "
-                        "matched; no GGUF written\n");
+        fprintf(stderr, "[wconvert-gguf] no convertible (Legacy / K-quant block-64) weight "
+                        "tensors matched; no GGUF written\n");
         write_index(index_path, summary, in_path);
         gguf_free(gg); if (meta) ggml_free(meta);
         return 1;

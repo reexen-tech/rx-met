@@ -234,6 +234,48 @@ static float reex_make_q3_quants(int n, int nmax, const float * GGML_RESTRICT x,
 }
 
 /* ============================================================
+ *  HW bit-stream (de)serialization for SYMMETRIC K-quant block-64.
+ *
+ *  All 5 symmetric types (Q6_K_64, Q3_K_64, Q5_K_64S, Q4_K_64S, Q2_K_64S)
+ *  store weights as the hardware-native continuous LSB-first bit-stream:
+ *      d(fp16,16b) + 4 x [ sub_scale(scale_bits, s2c) + 64 x code(w_bits, s2c) ]
+ *  These two helpers are the single serialization point; scale/code SEARCH
+ *  logic stays per-type, only the packing/unpacking flows through here.
+ * ============================================================ */
+
+// Pack a super-block: d + 4 sub_scales + 256 codes into the HW bit-stream.
+// sub_scale[0..3] and L[0..255] are signed ints (masked to the field width).
+static inline void q64_encode_block(uint8_t * GGML_RESTRICT qs, size_t nbytes, ggml_fp16_t d,
+                                    const int * GGML_RESTRICT sub_scale, const int8_t * GGML_RESTRICT L,
+                                    int scale_bits, int w_bits) {
+    const uint32_t smask = (1u << scale_bits) - 1u;
+    const uint32_t wmask = (1u << w_bits)     - 1u;
+    memset(qs, 0, nbytes);
+    int64_t bit = 0;
+    q64_put_bits(qs, &bit, (uint32_t) d, 16);
+    for (int s = 0; s < 4; ++s) {
+        q64_put_bits(qs, &bit, (uint32_t) sub_scale[s] & smask, scale_bits);
+        for (int e = 0; e < 64; ++e) {
+            q64_put_bits(qs, &bit, (uint32_t) L[64*s + e] & wmask, w_bits);
+        }
+    }
+}
+
+// Unpack the HW bit-stream super-block into 256 floats: y = d * sub_scale * code.
+static inline void q64_decode_block(const uint8_t * GGML_RESTRICT qs, float * GGML_RESTRICT y,
+                                    int scale_bits, int w_bits) {
+    const float d = GGML_FP16_TO_FP32((ggml_fp16_t) q64_get_bits(qs, 0, 16));
+    for (int s = 0; s < 4; ++s) {
+        const int   sc = q64_get_sbits(qs, q64_sub_scale_bit(scale_bits, w_bits, s), scale_bits);
+        const float dl = d * sc;
+        for (int e = 0; e < 64; ++e) {
+            const int q = q64_get_sbits(qs, q64_code_bit(scale_bits, w_bits, s, e), w_bits);
+            *y++ = dl * q;
+        }
+    }
+}
+
+/* ============================================================
  *  Q4_0_64: symmetric 4-bit, block=64, fp16 scale.
  *  Mirrors native quantize_row_q4_0_ref / dequantize_row_q4_0 with QK=64.
  * ============================================================ */
@@ -847,10 +889,9 @@ void quantize_row_q3_K_64_ref(const float * GGML_RESTRICT x, block_q3_K_64 * GGM
 
     int8_t L[QK_K_64];
     float  scales[QK_K_64/64];
+    int    sub_scale[QK_K_64/64];
 
     for (int i = 0; i < nb; i++) {
-        memset(y[i].scales, 0, 4);
-
         float max_scale = 0;
         float amax = 0;
         for (int j = 0; j < nsub; ++j) {
@@ -859,40 +900,28 @@ void quantize_row_q3_K_64_ref(const float * GGML_RESTRICT x, block_q3_K_64 * GGM
             if (a > amax) { amax = a; max_scale = scales[j]; }
         }
 
-        uint8_t sc6[QK_K_64/64];
+        ggml_fp16_t dh;
         if (max_scale) {
             float iscale = -32.f/max_scale;
             for (int j = 0; j < nsub; ++j) {
                 int l = reex_nearest_int(iscale*scales[j]);
-                l = MAX(-32, MIN(31, l));      // signed [-32,31]
-                sc6[j] = (uint8_t)(l & 0x3F);  // two's-complement 6-bit
+                sub_scale[j] = MAX(-32, MIN(31, l)); // signed [-32,31]
             }
-            y[i].d = GGML_FP32_TO_FP16(1/iscale);
+            dh = GGML_FP32_TO_FP16(1/iscale);
         } else {
-            for (int j = 0; j < nsub; ++j) sc6[j] = 0; // signed zero
-            y[i].d = GGML_FP32_TO_FP16(0.f);
+            for (int j = 0; j < nsub; ++j) sub_scale[j] = 0;
+            dh = GGML_FP32_TO_FP16(0.f);
         }
-        q64_pack4x6(y[i].scales, sc6);
 
         for (int j = 0; j < nsub; ++j) {
-            const int sc = q64_unpack4x6_s(j, y[i].scales);
-            const float d = GGML_FP16_TO_FP32(y[i].d) * sc;
-            if (!d) continue;
+            const float d = GGML_FP16_TO_FP32(dh) * sub_scale[j];
             for (int ii = 0; ii < 64; ++ii) {
-                int l = reex_nearest_int(x[64*j + ii]/d);
-                l = MAX(-4, MIN(3, l));
-                L[64*j + ii] = (int8_t)(l & 0x7); // two's-complement 3-bit
+                int l = d ? reex_nearest_int(x[64*j + ii]/d) : 0;
+                L[64*j + ii] = (int8_t) MAX(-4, MIN(3, l)); // signed 3-bit
             }
         }
 
-        memset(y[i].hmask, 0, QK_K_64/8);
-        memset(y[i].qs,    0, QK_K_64/4);
-        for (int e = 0; e < QK_K_64; ++e) {
-            const uint8_t v = (uint8_t) L[e]; // 3-bit two's complement (low 2 + sign)
-            y[i].qs[e >> 2] |= (uint8_t)((v & 3) << (2*(e & 3)));
-            if (v & 4) y[i].hmask[e >> 3] |= (uint8_t)(1u << (e & 7));
-        }
-
+        q64_encode_block(y[i].qs, sizeof(y[i].qs), dh, sub_scale, L, /*scale_bits*/6, /*w_bits*/3);
         x += QK_K_64;
     }
 }
@@ -902,18 +931,8 @@ void dequantize_row_q3_K_64(const block_q3_K_64 * GGML_RESTRICT x, float * GGML_
     const int nb = k / QK_K_64;
 
     for (int i = 0; i < nb; i++) {
-        const float d_all = GGML_FP16_TO_FP32(x[i].d);
-        for (int j = 0; j < QK_K_64/64; ++j) {
-            const int sc = q64_unpack4x6_s(j, x[i].scales);
-            const float dl = d_all * sc;
-            for (int ii = 0; ii < 64; ++ii) {
-                const int e = 64*j + ii;
-                const int low2 = (x[i].qs[e >> 2] >> (2*(e & 3))) & 3;
-                const int hbit = (x[i].hmask[e >> 3] >> (e & 7)) & 1;
-                const int u3 = low2 | (hbit << 2);
-                *y++ = dl * ((u3 ^ 0x4) - 0x4); // sign-extend signed 3-bit
-            }
-        }
+        q64_decode_block(x[i].qs, y, /*scale_bits*/6, /*w_bits*/3);
+        y += QK_K_64;
     }
 }
 
@@ -1055,6 +1074,7 @@ void quantize_row_q6_K_64_ref(const float * GGML_RESTRICT x, block_q6_K_64 * GGM
 
     int8_t L[QK_K_64];
     float  scales[QK_K_64/64];
+    int    sub_scale[QK_K_64/64];
 
     for (int i = 0; i < nb; i++) {
         float max_scale = 0;
@@ -1066,37 +1086,31 @@ void quantize_row_q6_K_64_ref(const float * GGML_RESTRICT x, block_q6_K_64 * GGM
             if (a > max_abs_scale) { max_abs_scale = a; max_scale = scale; }
         }
 
+        ggml_fp16_t dh;
         if (max_abs_scale < GGML_Q64_GROUP_MAX_EPS) {
-            memset(&y[i], 0, sizeof(block_q6_K_64));
-            y[i].d = GGML_FP32_TO_FP16(0.f);
+            memset(L, 0, sizeof(L));
+            for (int j = 0; j < nsub; ++j) sub_scale[j] = 0;
+            dh = GGML_FP32_TO_FP16(0.f);
+            q64_encode_block(y[i].qs, sizeof(y[i].qs), dh, sub_scale, L, /*scale_bits*/8, /*w_bits*/6);
             x += QK_K_64;
             continue;
         }
 
         float iscale = -128.f/max_scale;
-        y[i].d = GGML_FP32_TO_FP16(1/iscale);
+        dh = GGML_FP32_TO_FP16(1/iscale);
         for (int j = 0; j < nsub; ++j) {
-            y[i].scales[j] = (int8_t) MIN(127, reex_nearest_int(iscale*scales[j]));
+            sub_scale[j] = MAX(-128, MIN(127, reex_nearest_int(iscale*scales[j]))); // int8
         }
 
         for (int j = 0; j < nsub; ++j) {
-            const float d = GGML_FP16_TO_FP32(y[i].d) * y[i].scales[j];
-            if (!d) continue;
+            const float d = GGML_FP16_TO_FP32(dh) * sub_scale[j];
             for (int ii = 0; ii < 64; ++ii) {
-                int l = reex_nearest_int(x[64*j + ii]/d);
-                l = MAX(-32, MIN(31, l));
-                L[64*j + ii] = (int8_t)(l & 0x3F); // two's-complement 6-bit
+                int l = d ? reex_nearest_int(x[64*j + ii]/d) : 0;
+                L[64*j + ii] = (int8_t) MAX(-32, MIN(31, l)); // signed 6-bit
             }
         }
 
-        memset(y[i].ql, 0, QK_K_64/2);
-        memset(y[i].qh, 0, QK_K_64/4);
-        for (int e = 0; e < QK_K_64; ++e) {
-            const uint8_t v = (uint8_t) L[e]; // 6-bit two's complement (low 4 + high 2)
-            y[i].ql[e >> 1] |= (uint8_t)((v & 0xF) << (4*(e & 1)));
-            y[i].qh[e >> 2] |= (uint8_t)(((v >> 4) & 3) << (2*(e & 3)));
-        }
-
+        q64_encode_block(y[i].qs, sizeof(y[i].qs), dh, sub_scale, L, /*scale_bits*/8, /*w_bits*/6);
         x += QK_K_64;
     }
 }
@@ -1106,18 +1120,8 @@ void dequantize_row_q6_K_64(const block_q6_K_64 * GGML_RESTRICT x, float * GGML_
     const int nb = k / QK_K_64;
 
     for (int i = 0; i < nb; i++) {
-        const float d = GGML_FP16_TO_FP32(x[i].d);
-        for (int j = 0; j < QK_K_64/64; ++j) {
-            const int sc = x[i].scales[j];
-            const float dl = d * sc;
-            for (int ii = 0; ii < 64; ++ii) {
-                const int e = 64*j + ii;
-                const int low4 = (x[i].ql[e >> 1] >> (4*(e & 1))) & 0xF;
-                const int hi2  = (x[i].qh[e >> 2] >> (2*(e & 3))) & 3;
-                const int u6 = low4 | (hi2 << 4);
-                *y++ = dl * ((u6 ^ 0x20) - 0x20); // sign-extend signed 6-bit
-            }
-        }
+        q64_decode_block(x[i].qs, y, /*scale_bits*/8, /*w_bits*/6);
+        y += QK_K_64;
     }
 }
 
@@ -1147,10 +1151,9 @@ void quantize_row_q5_K_64S_ref(const float * GGML_RESTRICT x, block_q5_K_64S * G
 
     int8_t L[QK_K_64];
     float  scales[QK_K_64/64];
+    int    sub_scale[QK_K_64/64];
 
     for (int i = 0; i < nb; i++) {
-        memset(y[i].scales, 0, 4);
-
         float max_scale = 0;
         float amax = 0;
         for (int j = 0; j < nsub; ++j) {
@@ -1159,47 +1162,28 @@ void quantize_row_q5_K_64S_ref(const float * GGML_RESTRICT x, block_q5_K_64S * G
             if (a > amax) { amax = a; max_scale = scales[j]; }
         }
 
-        uint8_t sc6[QK_K_64/64];
+        ggml_fp16_t dh;
         if (max_scale) {
             float iscale = -32.f/max_scale;
             for (int j = 0; j < nsub; ++j) {
                 int l = reex_nearest_int(iscale*scales[j]);
-                l = MAX(-32, MIN(31, l));      // signed [-32,31]
-                sc6[j] = (uint8_t)(l & 0x3F);  // two's-complement 6-bit
+                sub_scale[j] = MAX(-32, MIN(31, l)); // signed [-32,31]
             }
-            y[i].d = GGML_FP32_TO_FP16(1/iscale);
+            dh = GGML_FP32_TO_FP16(1/iscale);
         } else {
-            for (int j = 0; j < nsub; ++j) sc6[j] = 0; // signed zero
-            y[i].d = GGML_FP32_TO_FP16(0.f);
+            for (int j = 0; j < nsub; ++j) sub_scale[j] = 0;
+            dh = GGML_FP32_TO_FP16(0.f);
         }
-        q64_pack4x6(y[i].scales, sc6);
 
         for (int j = 0; j < nsub; ++j) {
-            const int sc = q64_unpack4x6_s(j, y[i].scales);
-            const float d = GGML_FP16_TO_FP32(y[i].d) * sc;
-            if (!d) continue;
+            const float d = GGML_FP16_TO_FP32(dh) * sub_scale[j];
             for (int ii = 0; ii < 64; ++ii) {
-                int l = reex_nearest_int(x[64*j + ii]/d);
-                l = MAX(-16, MIN(15, l));
-                L[64*j + ii] = (int8_t)(l & 0x1F); // two's-complement 5-bit
+                int l = d ? reex_nearest_int(x[64*j + ii]/d) : 0;
+                L[64*j + ii] = (int8_t) MAX(-16, MIN(15, l)); // signed 5-bit
             }
         }
 
-        memset(y[i].qs, 0, QK_K_64/2);
-        memset(y[i].qh, 0, QK_K_64/8);
-        uint8_t * GGML_RESTRICT ql = y[i].qs;
-        uint8_t * GGML_RESTRICT qh = y[i].qh;
-        for (int n = 0; n < QK_K_64; n += 64) {
-            for (int l = 0; l < 32; ++l) {
-                ql[l] = (uint8_t)((L[n + l] & 0xF) | ((L[n + l + 32] & 0xF) << 4));
-            }
-            for (int l = 0; l < 64; ++l) {
-                if (L[n + l] & 0x10) qh[l >> 3] |= (uint8_t)(1u << (l & 7));
-            }
-            ql += 32;
-            qh += 8;
-        }
-
+        q64_encode_block(y[i].qs, sizeof(y[i].qs), dh, sub_scale, L, /*scale_bits*/6, /*w_bits*/5);
         x += QK_K_64;
     }
 }
@@ -1209,27 +1193,8 @@ void dequantize_row_q5_K_64S(const block_q5_K_64S * GGML_RESTRICT x, float * GGM
     const int nb = k / QK_K_64;
 
     for (int i = 0; i < nb; i++) {
-        const float d = GGML_FP16_TO_FP32(x[i].d);
-        const uint8_t * GGML_RESTRICT ql = x[i].qs;
-        const uint8_t * GGML_RESTRICT qh = x[i].qh;
-        for (int j = 0; j < QK_K_64/64; ++j) {
-            const int sc = q64_unpack4x6_s(j, x[i].scales);
-            const float dl = d * sc;
-            for (int l = 0; l < 32; ++l) {
-                const int hbit = (qh[l >> 3] >> (l & 7)) & 1;
-                const int u5 = (ql[l] & 0xF) | (hbit << 4);
-                y[l] = dl * ((u5 ^ 0x10) - 0x10); // sign-extend signed 5-bit
-            }
-            for (int l = 0; l < 32; ++l) {
-                const int e = l + 32;
-                const int hbit = (qh[e >> 3] >> (e & 7)) & 1;
-                const int u5 = (ql[l] >> 4) | (hbit << 4);
-                y[e] = dl * ((u5 ^ 0x10) - 0x10);
-            }
-            y  += 64;
-            ql += 32;
-            qh += 8;
-        }
+        q64_decode_block(x[i].qs, y, /*scale_bits*/6, /*w_bits*/5);
+        y += QK_K_64;
     }
 }
 
@@ -1251,10 +1216,9 @@ void quantize_row_q4_K_64S_ref(const float * GGML_RESTRICT x, block_q4_K_64S * G
 
     int8_t L[QK_K_64];
     float  scales[QK_K_64/64];
+    int    sub_scale[QK_K_64/64];
 
     for (int i = 0; i < nb; i++) {
-        memset(y[i].scales, 0, 4);
-
         float max_scale = 0;
         float amax = 0;
         for (int j = 0; j < nsub; ++j) {
@@ -1263,41 +1227,28 @@ void quantize_row_q4_K_64S_ref(const float * GGML_RESTRICT x, block_q4_K_64S * G
             if (a > amax) { amax = a; max_scale = scales[j]; }
         }
 
-        uint8_t sc6[QK_K_64/64];
+        ggml_fp16_t dh;
         if (max_scale) {
             float iscale = -32.f/max_scale;
             for (int j = 0; j < nsub; ++j) {
                 int l = reex_nearest_int(iscale*scales[j]);
-                l = MAX(-32, MIN(31, l));      // signed [-32,31]
-                sc6[j] = (uint8_t)(l & 0x3F);  // two's-complement 6-bit
+                sub_scale[j] = MAX(-32, MIN(31, l)); // signed [-32,31]
             }
-            y[i].d = GGML_FP32_TO_FP16(1/iscale);
+            dh = GGML_FP32_TO_FP16(1/iscale);
         } else {
-            for (int j = 0; j < nsub; ++j) sc6[j] = 0; // signed zero
-            y[i].d = GGML_FP32_TO_FP16(0.f);
+            for (int j = 0; j < nsub; ++j) sub_scale[j] = 0;
+            dh = GGML_FP32_TO_FP16(0.f);
         }
-        q64_pack4x6(y[i].scales, sc6);
 
         for (int j = 0; j < nsub; ++j) {
-            const int sc = q64_unpack4x6_s(j, y[i].scales);
-            const float d = GGML_FP16_TO_FP32(y[i].d) * sc;
-            if (!d) continue;
+            const float d = GGML_FP16_TO_FP32(dh) * sub_scale[j];
             for (int ii = 0; ii < 64; ++ii) {
-                int l = reex_nearest_int(x[64*j + ii]/d);
-                l = MAX(-8, MIN(7, l));
-                L[64*j + ii] = (int8_t)(l & 0xF); // two's-complement 4-bit
+                int l = d ? reex_nearest_int(x[64*j + ii]/d) : 0;
+                L[64*j + ii] = (int8_t) MAX(-8, MIN(7, l)); // signed 4-bit
             }
         }
 
-        memset(y[i].qs, 0, QK_K_64/2);
-        uint8_t * GGML_RESTRICT ql = y[i].qs;
-        for (int n = 0; n < QK_K_64; n += 64) {
-            for (int l = 0; l < 32; ++l) {
-                ql[l] = (uint8_t)((L[n + l] & 0xF) | ((L[n + l + 32] & 0xF) << 4));
-            }
-            ql += 32;
-        }
-
+        q64_encode_block(y[i].qs, sizeof(y[i].qs), dh, sub_scale, L, /*scale_bits*/6, /*w_bits*/4);
         x += QK_K_64;
     }
 }
@@ -1307,18 +1258,8 @@ void dequantize_row_q4_K_64S(const block_q4_K_64S * GGML_RESTRICT x, float * GGM
     const int nb = k / QK_K_64;
 
     for (int i = 0; i < nb; i++) {
-        const float d = GGML_FP16_TO_FP32(x[i].d);
-        const uint8_t * GGML_RESTRICT ql = x[i].qs;
-        for (int j = 0; j < QK_K_64/64; ++j) {
-            const int sc = q64_unpack4x6_s(j, x[i].scales);
-            const float dl = d * sc;
-            for (int l = 0; l < 32; ++l) {
-                y[l]      = dl * (((ql[l] & 0xF) ^ 0x8) - 0x8); // sign-extend signed 4-bit
-                y[l + 32] = dl * (((ql[l] >>  4) ^ 0x8) - 0x8);
-            }
-            y  += 64;
-            ql += 32;
-        }
+        q64_decode_block(x[i].qs, y, /*scale_bits*/6, /*w_bits*/4);
+        y += QK_K_64;
     }
 }
 
@@ -1340,10 +1281,9 @@ void quantize_row_q2_K_64S_ref(const float * GGML_RESTRICT x, block_q2_K_64S * G
 
     int8_t L[QK_K_64];
     float  scales[QK_K_64/64];
+    int    sub_scale[QK_K_64/64];
 
     for (int i = 0; i < nb; i++) {
-        memset(y[i].scales, 0, 2);
-
         float max_scale = 0;
         float amax = 0;
         for (int j = 0; j < nsub; ++j) {
@@ -1352,37 +1292,28 @@ void quantize_row_q2_K_64S_ref(const float * GGML_RESTRICT x, block_q2_K_64S * G
             if (a > amax) { amax = a; max_scale = scales[j]; }
         }
 
-        uint8_t sc4[QK_K_64/64];
+        ggml_fp16_t dh;
         if (max_scale) {
             float iscale = -8.f/max_scale;
             for (int j = 0; j < nsub; ++j) {
                 int l = reex_nearest_int(iscale*scales[j]);
-                l = MAX(-8, MIN(7, l));       // signed [-8,7]
-                sc4[j] = (uint8_t)(l & 0xF);  // two's-complement 4-bit
+                sub_scale[j] = MAX(-8, MIN(7, l)); // signed [-8,7]
             }
-            y[i].d = GGML_FP32_TO_FP16(1/iscale);
+            dh = GGML_FP32_TO_FP16(1/iscale);
         } else {
-            for (int j = 0; j < nsub; ++j) sc4[j] = 0; // signed zero
-            y[i].d = GGML_FP32_TO_FP16(0.f);
+            for (int j = 0; j < nsub; ++j) sub_scale[j] = 0;
+            dh = GGML_FP32_TO_FP16(0.f);
         }
-        q64_pack4x4(y[i].scales, sc4);
 
         for (int j = 0; j < nsub; ++j) {
-            const int sc = q64_unpack4x4_s(j, y[i].scales);
-            const float d = GGML_FP16_TO_FP32(y[i].d) * sc;
-            if (!d) continue;
+            const float d = GGML_FP16_TO_FP32(dh) * sub_scale[j];
             for (int ii = 0; ii < 64; ++ii) {
-                int l = reex_nearest_int(x[64*j + ii]/d);
-                l = MAX(-2, MIN(1, l));
-                L[64*j + ii] = (int8_t)(l & 0x3); // two's-complement 2-bit
+                int l = d ? reex_nearest_int(x[64*j + ii]/d) : 0;
+                L[64*j + ii] = (int8_t) MAX(-2, MIN(1, l)); // signed 2-bit
             }
         }
 
-        memset(y[i].qs, 0, QK_K_64/4);
-        for (int e = 0; e < QK_K_64; ++e) {
-            y[i].qs[e >> 2] |= (uint8_t)((L[e] & 3) << (2*(e & 3)));
-        }
-
+        q64_encode_block(y[i].qs, sizeof(y[i].qs), dh, sub_scale, L, /*scale_bits*/4, /*w_bits*/2);
         x += QK_K_64;
     }
 }
@@ -1392,16 +1323,8 @@ void dequantize_row_q2_K_64S(const block_q2_K_64S * GGML_RESTRICT x, float * GGM
     const int nb = k / QK_K_64;
 
     for (int i = 0; i < nb; i++) {
-        const float d = GGML_FP16_TO_FP32(x[i].d);
-        for (int j = 0; j < QK_K_64/64; ++j) {
-            const int sc = q64_unpack4x4_s(j, x[i].scales);
-            const float dl = d * sc;
-            for (int ii = 0; ii < 64; ++ii) {
-                const int e = 64*j + ii;
-                const int u2 = (x[i].qs[e >> 2] >> (2*(e & 3))) & 3;
-                *y++ = dl * ((u2 ^ 0x2) - 0x2); // sign-extend signed 2-bit
-            }
-        }
+        q64_decode_block(x[i].qs, y, /*scale_bits*/4, /*w_bits*/2);
+        y += QK_K_64;
     }
 }
 

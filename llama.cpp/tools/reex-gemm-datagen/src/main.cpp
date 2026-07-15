@@ -156,21 +156,15 @@ int main(int argc, char ** argv) {
                 (long long) dq.rows, dq.max_abs);
     }
 
-    // 6) dump — K-quant gets re-packed into the HW layout
-    //    glb_scale + 4*[sub_scale + 64*data]; Legacy keeps the reex struct {d; qs}.
+    // 6) dump — the reex block IS the HW layout, so w_blocks is dumped directly:
+    //    K-quant  = LSB-first bitstream glb_scale + 4*[sub_scale + 64*data];
+    //    Legacy   = reex struct {d(fp16); qs} (scale-first).
     const size_t hw_bb = wquant_hw_block_bytes(wid);
-    std::vector<uint8_t> w_hw;
     const void * w_dump      = w_blocks.data();
     size_t       w_dump_size = wbytes;
-    const char * w_desc      = "reex native struct {d(fp16); qs} (scale-first)";
-    if (hw_bb) {
-        const int64_t nblk = c.N * c.K / wt.elems_per_block;
-        w_hw.resize((size_t) nblk * hw_bb);
-        wquant_repack_hw(wid, w_blocks.data(), w_hw.data(), c.N, c.K);
-        w_dump      = w_hw.data();
-        w_dump_size = w_hw.size();
-        w_desc      = "LSB-first bitstream: glb_scale(fp16,16b) + 4*[sub_scale(scale_bits, signed two's-comp) + 64 codes @W bits]";
-    }
+    const char * w_desc      = hw_bb
+        ? "LSB-first bitstream: glb_scale(fp16,16b) + 4*[sub_scale(scale_bits, signed two's-comp) + 64 codes @W bits]"
+        : "reex native struct {d(fp16); qs} (scale-first)";
     const std::string dir = dump_case(out_root, c, ts, wt, w_dump, w_dump_size, w_desc,
                                       a_blocks, A, W, obufs.data(), C_ref, err);
     fprintf(stderr, "[rgd] dumped -> %s\n", dir.c_str());
