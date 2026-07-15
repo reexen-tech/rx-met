@@ -338,19 +338,13 @@ def flatten_activation_io_index_dict(enc: Dict[str, Any], verbose: bool = True) 
             return False
         return all(isinstance(k, str) and k.isdigit() for k in x.keys())
 
-    def _sorted_index_items(d: Dict[str, Any]) -> List[Any]:
-        # 按下标转 list 时必须“按位对应”：缺失的下标（如标量输入槽被移除，没有量化器）
-        # 用 None 占位，保证 list 下标 == 输入槽下标，reload 时才能正确加载非标量那一路。
-        max_idx = max(int(k) for k in d.keys())
-        return [d.get(str(i)) for i in range(max_idx + 1)]
-
-    def _to_list(v: Any) -> Any:
+    def _to_index_dict(v: Any) -> Any:
         if _is_index_dict(v):
-            return _sorted_index_items(v)
+            return {k: v[k] for k in sorted(v.keys(), key=lambda s: int(s))}
         if isinstance(v, dict):
-            return [v]
+            return {"0": v}
         if isinstance(v, list):
-            return v
+            return {str(idx): item for idx, item in enumerate(v)}
         return v
 
     def _normalize_entry_io(entry: Dict[str, Any]) -> bool:
@@ -359,8 +353,8 @@ def flatten_activation_io_index_dict(enc: Dict[str, Any], verbose: bool = True) 
             if io_key not in entry:
                 continue
             before = entry[io_key]
-            after = _to_list(before)
-            if after is not before:
+            after = _to_index_dict(before)
+            if after != before:
                 entry[io_key] = after
                 local_changed = True
 
@@ -383,7 +377,7 @@ def flatten_activation_io_index_dict(enc: Dict[str, Any], verbose: bool = True) 
     if changed:
         enc["activation_encodings"] = act
         if verbose:
-            logger.info("✅ 已规范化 activation_encodings 的 input/output 为 list[dict]（并递归处理 internal_ops，删除 '0'/'1' ...）")
+            logger.info("✅ 已规范化 activation_encodings 的 input/output 为 index dict，保留 '0'/'1' 等输入输出编号")
     return enc, changed
 
 

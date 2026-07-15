@@ -665,6 +665,18 @@ def load_mixed_precision_config(config_file: str) -> Dict[str, Any]:
         print(f"📝 名称配置数量: {len(layer_name_config)} 个具体层")
         print("="*70)
     
+    valid_layer_types = sorted({type(module).__name__ for _, module in sim_model.named_modules()})
+    invalid_layer_types = sorted(layer_type for layer_type in layer_type_config if layer_type not in valid_layer_types)
+    if invalid_layer_types:
+        valid_layer_types_msg = "\n  - " + "\n  - ".join(valid_layer_types)
+        invalid_layer_types_msg = ", ".join(repr(layer_type) for layer_type in invalid_layer_types)
+        raise ValueError(
+            "Unsupported layer_type_config key(s): "
+            f"{invalid_layer_types_msg}.\n"
+            "Layer type names are case-sensitive and must match type(module).__name__ in sim.model.\n"
+            f"Supported layer_type_config keys ({len(valid_layer_types)} total):{valid_layer_types_msg}"
+        )
+
     # 统计信息
     stats = {
         'conv_count': 0,
@@ -1038,6 +1050,18 @@ def apply_mixed_precision_bitwidth(sim_model, config_file: str, verbose: bool = 
         print(f"📝 名称配置数量: {len(layer_name_config)} 个具体层")
         print("="*70)
     
+    valid_layer_types = sorted({type(module).__name__ for _, module in sim_model.named_modules()})
+    invalid_layer_types = sorted(layer_type for layer_type in layer_type_config if layer_type not in valid_layer_types)
+    if invalid_layer_types:
+        valid_layer_types_msg = "\n  - " + "\n  - ".join(valid_layer_types)
+        invalid_layer_types_msg = ", ".join(repr(layer_type) for layer_type in invalid_layer_types)
+        raise ValueError(
+            "Unsupported layer_type_config key(s): "
+            f"{invalid_layer_types_msg}.\n"
+            "Layer type names are case-sensitive and must match type(module).__name__ in sim.model.\n"
+            f"Supported layer_type_config keys ({len(valid_layer_types)} total):{valid_layer_types_msg}"
+        )
+
     # 统计信息
     stats = {
         'conv_count': 0,

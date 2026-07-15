@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import logging
+import copy
+from collections import Counter
 from typing import Any, Dict, List, Tuple
 
 import onnx
@@ -221,6 +223,103 @@ def _rename_param_encoding(enc: Dict[str, Any], old: str, new: str) -> bool:
     return True
 
 
+def _copy_param_encoding(enc: Dict[str, Any], old: str, new: str) -> bool:
+    if "param_encodings" not in enc or not isinstance(enc["param_encodings"], dict):
+        return False
+    pe = enc["param_encodings"]
+    if old not in pe or old == new:
+        return False
+    pe[new] = copy.deepcopy(pe[old])
+    return True
+
+
+def _initializer_by_name(model: onnx.ModelProto, name: str) -> onnx.TensorProto | None:
+    for init in model.graph.initializer:
+        if init.name == name:
+            return init
+    return None
+
+
+def _make_unique_tensor_name(model: onnx.ModelProto, preferred: str) -> str:
+    used = set()
+    for node in model.graph.node:
+        used.update(name for name in node.input if name)
+        used.update(name for name in node.output if name)
+    used.update(init.name for init in model.graph.initializer)
+    used.update(value.name for value in list(model.graph.input) + list(model.graph.output) + list(model.graph.value_info))
+
+    if preferred not in used:
+        return preferred
+
+    idx = 1
+    while f"{preferred}_{idx}" in used:
+        idx += 1
+    return f"{preferred}_{idx}"
+
+
+def _clone_initializer_for_single_node_input(
+    model: onnx.ModelProto,
+    enc: Dict[str, Any],
+    node: onnx.NodeProto,
+    input_idx: int,
+    new_name: str,
+) -> bool:
+    old_name = node.input[input_idx]
+    if old_name == new_name:
+        return False
+
+    old_init = _initializer_by_name(model, old_name)
+    if old_init is None:
+        return False
+
+    cloned = onnx.TensorProto()
+    cloned.CopyFrom(old_init)
+    cloned.name = _make_unique_tensor_name(model, new_name)
+    model.graph.initializer.append(cloned)
+    node.input[input_idx] = cloned.name
+    _copy_param_encoding(enc, old_name, cloned.name)
+    return True
+
+
+def _input_use_counts(model: onnx.ModelProto) -> Counter:
+    return Counter(name for node in model.graph.node for name in node.input if name)
+
+
+def _rename_or_clone_initializer_for_node_input(
+    model: onnx.ModelProto,
+    enc: Dict[str, Any],
+    node: onnx.NodeProto,
+    input_idx: int,
+    new_name: str,
+    use_counts: Counter,
+    verbose: bool = True,
+) -> bool:
+    old_name = node.input[input_idx]
+    if old_name == new_name:
+        return False
+
+    if _initializer_by_name(model, old_name) is None:
+        return False
+
+    if use_counts.get(old_name, 0) > 1:
+        changed = _clone_initializer_for_single_node_input(model, enc, node, input_idx, new_name)
+        if changed:
+            use_counts[old_name] -= 1
+            use_counts[node.input[input_idx]] += 1
+            if verbose:
+                logger.info("复制共享 initializer: %s -> %s，仅用于节点 %s", old_name, node.input[input_idx], node.name)
+        return changed
+
+    if _rename_initializer_and_refs(model, old_name, new_name):
+        _rename_param_encoding(enc, old_name, new_name)
+        use_counts[new_name] = use_counts.pop(old_name, 1)
+        if verbose:
+            logger.info("重命名 initializer: %s -> %s，用于节点 %s", old_name, new_name, node.name)
+        return True
+
+    return False
+
+
 def rename_gru_initializers_and_change_gru_json_format(
     onnx_path: str,
     encodings_path: str,
@@ -248,6 +347,7 @@ def rename_gru_initializers_and_change_gru_json_format(
 
     gru_renamed = False
     param_renamed = False
+    input_counts = _input_use_counts(model)
     for idx, node in enumerate(model.graph.node):
         if node.op_type == "GRU":
             new_name = gru_name_map[idx]
@@ -291,20 +391,14 @@ def rename_gru_initializers_and_change_gru_json_format(
             if len(inputs) >= 2:
                 w_old = inputs[1]
                 w_new = f"{node.name}.weight"
-                if _rename_initializer_and_refs(model, w_old, w_new):
-                    if verbose:
-                        logger.info("重命名 Conv weight: %s -> %s", w_old, w_new)
-                    _rename_param_encoding(enc, w_old, w_new)
-                    inputs[1] = w_new
+                if _rename_or_clone_initializer_for_node_input(model, enc, node, 1, w_new, input_counts, verbose=verbose):
+                    inputs = list(node.input)
                     param_renamed = True
             if len(inputs) >= 3:
                 b_old = inputs[2]
                 b_new = f"{node.name}.bias"
-                if _rename_initializer_and_refs(model, b_old, b_new):
-                    if verbose:
-                        logger.info("重命名 Conv bias: %s -> %s", b_old, b_new)
-                    _rename_param_encoding(enc, b_old, b_new)
-                    inputs[2] = b_new
+                if _rename_or_clone_initializer_for_node_input(model, enc, node, 2, b_new, input_counts, verbose=verbose):
+                    inputs = list(node.input)
                     param_renamed = True
             node.input[:] = inputs
 
