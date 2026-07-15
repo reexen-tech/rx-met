@@ -348,20 +348,6 @@ class _QuantizationSimModelBase(_QuantizationSimModelInterface):
         inout_tensor_shapes = {}
         num_inout_tensors = {}
         inout_tensors_dtypes_for_cast_ops = {}
-        # 记录“标量输入槽”：对于每个输入与量化器一一对应的算子（如 elementwise 二元
-        # 算子 Add/Multiply/Subtract/Divide 等），若某一路输入“没有 shape”（Python 数值
-        # 或 0 维 tensor），则该输入不应有量化器。此判定只依赖图结构/输入 shape，与权重
-        # 数值无关，训练 sim 与 reload sim 走同一构造路径，得到完全一致的量化器集合。
-        scalar_input_slots: Dict[torch.nn.Module, set] = {}
-
-        def _is_scalar_input_shape(shape) -> bool:
-            # “没有 shape 的才算标量”：Python 数值经 tree_map 得到 None；0 维 tensor 的
-            # shape 为 torch.Size([])（长度 0）。shape 为 (1,)/(1,1,1) 等仍算非标量，保留量化。
-            if shape is None:
-                return True
-            if isinstance(shape, torch.Size) and len(shape) == 0:
-                return True
-            return False
 
         def record_metadata(module, inputs, outputs):
             input_shapes = tree_map(
@@ -376,25 +362,6 @@ class _QuantizationSimModelBase(_QuantizationSimModelInterface):
 
             inout_tensor_shapes[module] = (input_shapes, output_shapes)
             num_inout_tensors[module] = (len(input_shapes), len(output_shapes))
-
-            # 仅处理“二元及以上、且输入与量化器一一对应”的 elementwise 算子：
-            #   - input_quantizers 长度须等于输入个数（排除 Concat 等共享单量化器的算子）；
-            #   - 输入个数 >= 2（限定为二元 elementwise，如 Add/Multiply/Subtract/Divide，
-            #     不影响一元算子）。
-            module_input_quantizers = getattr(module, "input_quantizers", None)
-            if (
-                module_input_quantizers is not None
-                and isinstance(input_shapes, tuple)
-                and len(input_shapes) >= 2
-                and len(module_input_quantizers) == len(input_shapes)
-            ):
-                slots = {
-                    idx
-                    for idx, shape in enumerate(input_shapes)
-                    if _is_scalar_input_shape(shape)
-                }
-                if slots:
-                    scalar_input_slots[module] = slots
 
             if isinstance(module, Cast):
                 (inp,) = inputs
@@ -440,33 +407,6 @@ class _QuantizationSimModelBase(_QuantizationSimModelInterface):
 
         # Initialize real wrappers using collected information
         self._realize_quant_wrappers_in_model(self.model)
-
-        # 标量输入（无 shape）不应有量化器：在 sim 构造阶段（实现真实量化器之后）直接移除
-        # elementwise 二元算子中标量输入槽的 input_quantizer，使导出的 encodings 不含该路
-        # 量化参数。判定只依赖图结构/输入 shape，训练与 reload 走同一构造路径，结果一致。
-        self._remove_scalar_input_quantizers(scalar_input_slots)
-
-    def _remove_scalar_input_quantizers(self, scalar_input_slots):
-        """移除“标量输入槽”的 input_quantizer，并在模块上标记，供后续流程避免重建。
-
-        :param scalar_input_slots: {module: set(标量输入槽下标)}，在构造期前向探测得到。
-        """
-        for module, slots in scalar_input_slots.items():
-            input_quantizers = getattr(module, "input_quantizers", None)
-            if input_quantizers is None:
-                continue
-            new_slots = list(input_quantizers)
-            changed = False
-            for idx in slots:
-                if idx < len(new_slots) and new_slots[idx] is not None:
-                    new_slots[idx] = None
-                    changed = True
-            if changed:
-                # nn.ModuleList 需重建以放入 None 元素。
-                module.input_quantizers = torch.nn.ModuleList(new_slots)
-            # 记录标量槽（即使当前已为 None），供 apply_mixed_precision_bitwidth 等避免重建。
-            existing = getattr(module, "_scalar_input_slots", set())
-            module._scalar_input_slots = set(existing) | set(slots)
 
     def get_supported_kernels(self) -> Dict:
         """
