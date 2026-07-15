@@ -1130,30 +1130,38 @@ def _get_tensor_quantizers_to_modify(
 
 
 def _report_unsupported_ops(quantsim_config: ConfigDictType):
-    """Log unsupported op types found in the config"""
+    """Raise on unsupported op types found in the config."""
+
+    known_op_types = set()
+    for op_list in map_torch_types_to_onnx.values():
+        known_op_types.update(op_list)
+    known_op_types.update(pytorch_functional_name_to_onnx_dict.values())
+    known_op_types.update(aimet_op_to_backend_op_name_map.values())
+    known_op_types_list = sorted(known_op_types)
+    known_op_types_msg = "\n  - " + "\n  - ".join(known_op_types_list)
 
     # Look for unsupported ops in op_type section
     op_type_configs = quantsim_config[ConfigDictKeys.OP_TYPE]
     for op in op_type_configs.keys():
-        found_op = False
-        for op_list in map_torch_types_to_onnx.values():
-            if op in op_list:
-                found_op = True
-                break
-        # Need the below for elementwise ops which will use the type_mapper instead of map_torch_types_to_onnx
-        found_op = found_op or (op in pytorch_functional_name_to_onnx_dict.values())
-        if not found_op:
-            logger.info("Unsupported op type %s", op)
+        if op not in known_op_types:
+            error_msg = (
+                f"Unsupported op type {op!r} in quantsim config op_type section.\n"
+                "Op type names are case-sensitive and must match AIMET backend or ONNX op names.\n"
+                f"Supported op_type keys ({len(known_op_types_list)} total):{known_op_types_msg}"
+            )
+            logger.error(error_msg)
+            raise AssertionError(error_msg)
 
     # Look for unsupported ops in supergroups section
     supergroups = quantsim_config[ConfigDictKeys.SUPERGROUPS]
     for supergroup in supergroups:
         for op in supergroup[ConfigDictKeys.OP_LIST]:
-            known_onnx_types = []
-            for val in map_torch_types_to_onnx.values():
-                known_onnx_types.extend(val)
-            if op not in known_onnx_types:
-                error_msg = f"Unsupported op type {op}"
+            if op not in known_op_types:
+                error_msg = (
+                    f"Unsupported op type {op!r} in quantsim config supergroups section.\n"
+                    "Op type names are case-sensitive and must match AIMET backend or ONNX op names.\n"
+                    f"Supported op_type keys ({len(known_op_types_list)} total):{known_op_types_msg}"
+                )
                 logger.error(error_msg)
                 # Raising an error here since an unrecognized op will cause supergroup graph matching to fail
                 raise AssertionError(error_msg)
