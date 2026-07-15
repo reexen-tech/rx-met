@@ -9,6 +9,22 @@
 
 ### 🐛 Bug 修复
 
+- **修复 `QuantizationSimModel` 配置中非法 `op_type` 静默失效的问题**
+  （`aimet_torch/quantsim_config/quantsim_config.py`）
+  - `config_file` 的 `op_type` 字段原先遇到大小写或拼写错误（如 `matmul`、`Linear`）时，
+    只记录 INFO 日志并继续执行，导致对应算子量化配置未生效且用户难以察觉
+  - 现对未知 `op_type` 直接报错，并输出所有合法 key；合法 key 包含 ONNX op name、
+    AIMET backend op name 和 functional 映射名，且大小写敏感
+  - 影响范围：`QuantizationSimModel(..., config_file=...)` 的基础量化配置解析
+
+- **修复混合精度 `layer_type_config` 类型名错误时静默失效的问题**
+  （`aimet_torch/utils_rx.py`）
+  - `apply_mixed_precision_bitwidth` 原先按 `type(module).__name__` 匹配 `layer_type_config`，
+    但配置里写错类型名或大小写时不会报错，只会跳过配置
+  - 现会在应用配置前校验 `layer_type_config` 的 key；若不存在于当前 `sim.model` 的模块类型中，
+    直接报错并输出所有可用的合法类型名
+  - 影响范围：混合精度 bitwidth 配置中按模块类型批量设置输入/输出/参数位宽的流程
+
 - **修复 input encoding 导出时 Torch / ONNX 路径耦合导致的编码缺失**
   （`aimet_torch/_base/quantsim.py`）
   - `_update_encoding_dict_for_input_activations` 原先用 `zip(input_tensors, input_encodings)`
@@ -17,6 +33,23 @@
   - 现将两条路径拆开：ONNX sidecar 按 distinct input tensor 导出，
     Torch encoding 按全部 PyTorch `input_quantizer` 导出，保证 reload / QAT 契约完整
   - 影响范围：多输入算子、ONNX 输入 tensor 数与 PyTorch input quantizer 数不一致时的 encoding 导出
+
+- **修复 postprocess 删除 activation input/output 编号的问题**
+  （`export_onnx_and_encodings/postprocess_refactor/encodings_ops.py`）
+  - `flatten_activation_io_index_dict` 原先会把 `{"0": {...}, "1": {...}}`
+    展平成 list，导致后处理后的 `HA.encodings` 丢失 input slot 编号
+  - 现将 activation `input` / `output` 规范为带编号的 index dict，保留 `"0"` / `"1"` 等编号；
+    若中间流程产生 list，也会按顺序恢复为 `"0"`、`"1"` ...
+  - 影响范围：多输入算子的 activation encodings 后处理、按输入下标区分量化参数的导出结果
+
+- **修复 postprocess 重命名共享 initializer 时误影响其他节点的问题**
+  （`export_onnx_and_encodings/postprocess_refactor/renaming.py`）
+  - Conv 权重 / bias initializer 重命名时，原逻辑默认直接 rename 并更新全图引用；
+    当多个 Conv 共享同一个 initializer 时，会把其他节点输入也一并改名，导致 ONNX 节点参数名与
+    `param_encodings` 对应关系混乱
+  - 现按 initializer 使用次数区分处理：只被一个节点使用时直接 rename；
+    被多个 Conv 共享时 clone 一份给当前 Conv，仅替换当前节点输入，并复制对应 param encoding
+  - 影响范围：ONNX 后处理阶段 Conv 权重 / bias 重命名、共享 initializer 模型的 encodings 对齐
 
 - **修复 fake-quant 模块（如 `FakeQuantizedSum`）未被 Power-of-2 处理**
   （`aimet_torch/power_of_2_quantization.py`）
