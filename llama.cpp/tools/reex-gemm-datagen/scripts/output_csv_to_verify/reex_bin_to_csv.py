@@ -5,7 +5,7 @@
 设计要点（详见 scripts/output_csv_to_verify/README.md）：
   * 读取一个 case 目录 + meta.json，自动识别 family(Legacy/Kquant/IntBlock)。
   * 全部数据 **de-tile** 回原始非 tiling 的二维矩阵后再写 CSV。
-  * 每个元素写成 **原始 bit pattern 的十六进制**，按存储容器字节补零、大写、无前缀、
+  * 每个元素写成 **原始 bit pattern 的十六进制**，按存储容器字节补零、小写、带 `0x` 前缀、
     负数按补码：int8/q4/I6/I4/U6/U4 -> 2 位；fp16/bf16/I16/U16 -> 4 位；e4m3 -> 2 位；
     f32/i32 -> 8 位。
   * 朝向与 zhuanhuan-yanzheng 对齐：weight_int=[K,N]、weight_scale=[K/64,N]、
@@ -30,10 +30,12 @@ from pathlib import Path
 import numpy as np
 
 # ---------------------------------------------------------------------------
-# hex lookup tables
+# hex lookup tables  (小写 + 0x 前缀)
 # ---------------------------------------------------------------------------
-_LUT8 = np.array([f"{i:02X}" for i in range(256)], dtype="<U2")
-_LUT16 = np.array([f"{i:04X}" for i in range(1 << 16)], dtype="<U4")
+_LUT8 = np.array([f"0x{i:02x}" for i in range(256)], dtype="<U4")
+_LUT16 = np.array([f"0x{i:04x}" for i in range(1 << 16)], dtype="<U6")
+# 无前缀数字表，供 u32 拼接后统一加 0x
+_DIG16 = np.array([f"{i:04x}" for i in range(1 << 16)], dtype="<U4")
 
 
 def hex_u8(a: np.ndarray) -> np.ndarray:
@@ -46,9 +48,9 @@ def hex_u16(a: np.ndarray) -> np.ndarray:
 
 def hex_u32(a: np.ndarray) -> np.ndarray:
     a = np.asarray(a, dtype=np.uint32)
-    hi = _LUT16[(a >> 16).astype(np.uint16)]
-    lo = _LUT16[(a & 0xFFFF).astype(np.uint16)]
-    return np.char.add(hi, lo)
+    hi = _DIG16[(a >> 16).astype(np.uint16)]
+    lo = _DIG16[(a & 0xFFFF).astype(np.uint16)]
+    return np.char.add("0x", np.char.add(hi, lo))
 
 
 # native-dtype token -> (itemsize bytes, hex function on raw uint container)
