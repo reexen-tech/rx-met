@@ -36,10 +36,12 @@ bash run_legacy.sh
 | `weight_scale.csv` | Legacy `[K/64, N]`；K-quant 交错 `[(K/256)*(1+n_sub), N]`；INT 无 | scale（hex） |
 | `weight_fp.csv` | `[K, N]` | 量化前源权重（fp16 hex） |
 | `input_fp.csv` | `[M, K]` | **激活输入**（源精度 hex：F16/BF16/E4M3/E5M2/F32）。激活无 scale |
+| `act_int.csv` | Legacy/INT `[M, K]` | 激活量化整数码（hex，容器字节补码） |
+| `act_scale.csv` | Legacy `[M, K/64]` | 每 64 个激活共用的 fp16 scale（原始 bit pattern hex） |
 | `output_<DT>.csv` × 11 | `[M, N]` | 11 种 dtype 的 GPU 结果（hex） |
 
-> 激活**没有对外的 int/scale**：reex 模拟器输入 = `act_src_<DT>` + `weight_blocks`，激活以源精度喂入、片上才量化。
-> `act_blocks`(int+scale) 只是片上中间产物，本工具仅在内部解码它用于对 `golden_f32` 自校验，不导出成 CSV。
+> Legacy 激活从 `act_blocks.bin` 解码，同时导出片上量化后的 `act_int.csv` 和 per-64 `act_scale.csv`。
+> K-quant 的 `act_blocks.bin` 仅保存 per-256 scale，无法从现有 BIN 恢复独立的 per-64 scale，因此暂不导出激活量化 CSV。
 > IntBlock 是纯整数路径，激活即 `act_int.csv`（无 src、无 scale）。
 
 ## 十六进制约定
@@ -52,7 +54,8 @@ bash run_legacy.sh
 ## scale 对应关系
 
 - 权重：`W_dq[k,n] = weight_int[k,n] * weight_scale[k//64, n]`（K-quant 再乘上层 super_scale）。
-- 激活：**无 scale**，直接用 `input_fp.csv` 的源精度值。
+- Legacy 激活：`A_dq[m,k] = act_int[m,k] * fp16(act_scale[m,k//64])`。
+- `input_fp.csv` 仍保留量化前的源精度激活。
 - K-quant `weight_scale.csv` 采用 `scripts/weight_q6_k_scales.csv` 的交错布局：
   每个 super-block 占 `1 + n_sub` 行 —— 第 1 行 fp16 super_scale，其后 `n_sub` 行 int sub_scale，列为 N。
 
