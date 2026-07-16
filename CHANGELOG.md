@@ -9,6 +9,15 @@
 
 ### 🐛 Bug 修复
 
+- **修复 reload 依赖原始混合精度配置才能恢复量化器的问题**
+  （`aimet_torch/staged_quantization_utils.py`）
+  - `load_quantizer_encodings` 现在将 encoding 作为量化配置的权威来源，加载范围前自动恢复
+    `bitwidth`、`is_symmetric` 与对应的 `qmin/qmax`
+  - 修复 INT32 bias encoding 遇到默认 INT8 quantizer 时被静默跳过、造成 QAT 与 Reload
+    推理结果不一致的问题
+  - encoding 应用失败现在会计入 `skipped_count`；`skip_if_not_found=False` 时会直接报错
+  - 新增回归测试，验证仅凭模型结构、权重和 encodings 即可从 INT8 默认配置恢复 INT32 bias
+
 - **修复 reload 时 index dict 格式 encodings 未被加载的问题**
   （`aimet_torch/staged_quantization_utils.py`）
   - 1.3.10 起 postprocess 将 activation `input` / `output` 规范为 `{"0": {...}, "1": {...}}`
