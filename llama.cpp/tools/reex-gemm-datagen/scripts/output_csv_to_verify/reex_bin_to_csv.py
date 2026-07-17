@@ -9,9 +9,9 @@
     负数按补码：int8/q4/I6/I4/U6/U4 -> 2 位；fp16/bf16/I16/U16 -> 4 位；e4m3 -> 2 位；
     f32/i32 -> 8 位。
   * 朝向与 zhuanhuan-yanzheng 对齐：weight_int=[K,N]、weight_scale=[K/64,N]、
-    input_fp(=激活源)=[M,K]、act_int=[M,K]、act_scale=[M,K/64]、output=[M,N]。
+    input_fp(=激活源)=[M,K]、act_int=[M,K]、act_scale=[M,K/agroup]、output=[M,N]。
   * Legacy 从 act_blocks.bin 导出片上量化结果 act_int + per-64 fp16 act_scale；
-    Kquant 的 act_blocks 只有 per-256 scale，暂不导出激活量化 CSV。
+    Kquant 同样导出 act_int + BIN 原生的 per-256 fp16 act_scale。
     IntBlock 是纯整数路径，激活即 act_int（无 src、无 scale）。
   * weight scale 对应关系：weight 用 k//64 索引。
   * K-quant 的 scale 采用 weight_q6_k_scales.csv 的交错格式（每 super-block:
@@ -323,8 +323,16 @@ def decode_kquant(case: Path, meta: dict, out: Path, outputs: list, check_rows: 
     write_hex_csv_rows(out / "weight_scale.csv", rows)
     print(f"  [w] weight_int.csv [{K},{N}]  weight_scale.csv [{n_super*(1+n_sub)},{N}] (interleaved)")
 
-    # ---- act blocks (仅内部解码, 用于对 golden 自校验; 不导出 act_int/act_scale) ----
+    # ---- act blocks: 导出片上量化整数和 BIN 原生的 per-256 fp16 scale ----
     aq_MK, aq_u, ad_u16, ad_f, cont = decode_act_blocks(case, meta, M, K, Mt, Ktiles, agroup)
+    if agroup != 256:
+        raise ValueError(f"Kquant act_group_elems 应为 256，实际为 {agroup}")
+    if cont == 1:
+        write_hex_csv(out / "act_int.csv", hex_u8(aq_u))
+    else:
+        write_hex_csv(out / "act_int.csv", hex_u16(aq_u))
+    write_hex_csv(out / "act_scale.csv", hex_u16(ad_u16))
+    print(f"  [a] act_int.csv [{M},{K}]  act_scale.csv [{M},{K // agroup}] (per-{agroup}, fp16)")
     a_dq_MK = aq_MK.astype(np.float32) * np.repeat(ad_f, agroup, axis=1)
 
     _dump_source_fp(case, meta, out, M, N, K, Mt, Nt, Kt, Ntiles, Ktiles)
