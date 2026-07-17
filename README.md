@@ -10,8 +10,7 @@
 
 ## 更新日志
 
-完整版本历史见 [CHANGELOG.md](./CHANGELOG.md)。最新版本：**v1.3.8 (2026-06-09)** ——
-`export_onnx_json` 支持按 GRU 模块类型自动分发导出逻辑。
+完整版本历史见 [CHANGELOG.md](./CHANGELOG.md)。
 
 ## 安装
 
