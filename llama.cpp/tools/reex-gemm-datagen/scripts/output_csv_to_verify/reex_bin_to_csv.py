@@ -5,13 +5,13 @@
 设计要点（详见 scripts/output_csv_to_verify/README.md）：
   * 读取一个 case 目录 + meta.json，自动识别 family(Legacy/Kquant/IntBlock)。
   * 全部数据 **de-tile** 回原始非 tiling 的二维矩阵后再写 CSV。
-  * 每个元素写成 **原始 bit pattern 的十六进制**，按存储容器字节补零、大写、无前缀、
+  * 每个元素写成 **原始 bit pattern 的十六进制**，按存储容器字节补零、小写、带 `0x` 前缀、
     负数按补码：int8/q4/I6/I4/U6/U4 -> 2 位；fp16/bf16/I16/U16 -> 4 位；e4m3 -> 2 位；
     f32/i32 -> 8 位。
   * 朝向与 zhuanhuan-yanzheng 对齐：weight_int=[K,N]、weight_scale=[K/64,N]、
-    input_fp(=激活源)=[M,K]、output=[M,N]。
-  * 激活**无 scale**：Legacy/Kquant 的模拟器输入是源精度激活 act_src_<DT>（片上才量化），
-    因此激活只导出 input_fp.csv；act_blocks(int+scale) 仅作内部自校验用（golden 用片上量化激活算得）。
+    input_fp(=激活源)=[M,K]、act_int=[M,K]、act_scale=[M,K/agroup]、output=[M,N]。
+  * Legacy 从 act_blocks.bin 导出片上量化结果 act_int + per-64 fp16 act_scale；
+    Kquant 同样导出 act_int + BIN 原生的 per-256 fp16 act_scale。
     IntBlock 是纯整数路径，激活即 act_int（无 src、无 scale）。
   * weight scale 对应关系：weight 用 k//64 索引。
   * K-quant 的 scale 采用 weight_q6_k_scales.csv 的交错格式（每 super-block:
@@ -30,10 +30,12 @@ from pathlib import Path
 import numpy as np
 
 # ---------------------------------------------------------------------------
-# hex lookup tables
+# hex lookup tables  (小写 + 0x 前缀)
 # ---------------------------------------------------------------------------
-_LUT8 = np.array([f"{i:02X}" for i in range(256)], dtype="<U2")
-_LUT16 = np.array([f"{i:04X}" for i in range(1 << 16)], dtype="<U4")
+_LUT8 = np.array([f"0x{i:02x}" for i in range(256)], dtype="<U4")
+_LUT16 = np.array([f"0x{i:04x}" for i in range(1 << 16)], dtype="<U6")
+# 无前缀数字表，供 u32 拼接后统一加 0x
+_DIG16 = np.array([f"{i:04x}" for i in range(1 << 16)], dtype="<U4")
 
 
 def hex_u8(a: np.ndarray) -> np.ndarray:
@@ -46,9 +48,9 @@ def hex_u16(a: np.ndarray) -> np.ndarray:
 
 def hex_u32(a: np.ndarray) -> np.ndarray:
     a = np.asarray(a, dtype=np.uint32)
-    hi = _LUT16[(a >> 16).astype(np.uint16)]
-    lo = _LUT16[(a & 0xFFFF).astype(np.uint16)]
-    return np.char.add(hi, lo)
+    hi = _DIG16[(a >> 16).astype(np.uint16)]
+    lo = _DIG16[(a & 0xFFFF).astype(np.uint16)]
+    return np.char.add("0x", np.char.add(hi, lo))
 
 
 # native-dtype token -> (itemsize bytes, hex function on raw uint container)
@@ -223,8 +225,16 @@ def decode_legacy(case: Path, meta: dict, out: Path, outputs: list, check_rows: 
     write_hex_csv(out / "weight_scale.csv", wscale_hex)
     print(f"  [w] weight_int.csv [{K},{N}]  weight_scale.csv [{Ktiles},{N}]")
 
-    # ---- act blocks (仅内部解码, 用于对 golden 自校验; 不导出 act_int/act_scale) ----
+    # ---- act blocks: 导出片上量化整数和原生 per-64 fp16 scale ----
     aq_MK, aq_u, ad_u16, ad_f, cont = decode_act_blocks(case, meta, M, K, Mt, Ktiles, agroup)
+    if agroup != 64:
+        raise ValueError(f"Legacy act_group_elems 应为 64，实际为 {agroup}")
+    if cont == 1:
+        write_hex_csv(out / "act_int.csv", hex_u8(aq_u))
+    else:
+        write_hex_csv(out / "act_int.csv", hex_u16(aq_u))
+    write_hex_csv(out / "act_scale.csv", hex_u16(ad_u16))
+    print(f"  [a] act_int.csv [{M},{K}]  act_scale.csv [{M},{K // agroup}] (per-{agroup}, fp16)")
     a_dq_MK = aq_MK.astype(np.float32) * np.repeat(ad_f, agroup, axis=1)
 
     # ---- source fp (激活即源精度 input_fp.csv, 无 scale) ----
@@ -313,8 +323,16 @@ def decode_kquant(case: Path, meta: dict, out: Path, outputs: list, check_rows: 
     write_hex_csv_rows(out / "weight_scale.csv", rows)
     print(f"  [w] weight_int.csv [{K},{N}]  weight_scale.csv [{n_super*(1+n_sub)},{N}] (interleaved)")
 
-    # ---- act blocks (仅内部解码, 用于对 golden 自校验; 不导出 act_int/act_scale) ----
+    # ---- act blocks: 导出片上量化整数和 BIN 原生的 per-256 fp16 scale ----
     aq_MK, aq_u, ad_u16, ad_f, cont = decode_act_blocks(case, meta, M, K, Mt, Ktiles, agroup)
+    if agroup != 256:
+        raise ValueError(f"Kquant act_group_elems 应为 256，实际为 {agroup}")
+    if cont == 1:
+        write_hex_csv(out / "act_int.csv", hex_u8(aq_u))
+    else:
+        write_hex_csv(out / "act_int.csv", hex_u16(aq_u))
+    write_hex_csv(out / "act_scale.csv", hex_u16(ad_u16))
+    print(f"  [a] act_int.csv [{M},{K}]  act_scale.csv [{M},{K // agroup}] (per-{agroup}, fp16)")
     a_dq_MK = aq_MK.astype(np.float32) * np.repeat(ad_f, agroup, axis=1)
 
     _dump_source_fp(case, meta, out, M, N, K, Mt, Nt, Kt, Ntiles, Ktiles)

@@ -187,6 +187,10 @@ def load_quantizer_encodings(
                     module_name=target_name,
                     verbose=verbose
                 )
+                if loaded_ok:
+                    # QuantGRU 的加载接口只负责恢复量化参数；执行模式由
+                    # AIMET 适配层显式开启，避免底层库产生隐式状态变化。
+                    module.use_quantization = True
                 if loaded_ok and allow_overwrite is not None:
                     module.set_quant_params_locked(not allow_overwrite)
 
@@ -232,12 +236,15 @@ def load_quantizer_encodings(
                         continue
                     rmin = item.get("real_min")
                     rmax = item.get("real_max")
-                    if rmin is not None and rmax is not None and _apply_aimet_encoding_to_quantizer(
-                        q, rmin, rmax, device, item, verbose
-                    ):
-                        _set_quantizer_allow_overwrite(q, allow_overwrite)
-                        loaded_count += 1
-                        loaded_types.add(type(module).__name__)
+                    if rmin is not None and rmax is not None:
+                        if _apply_aimet_encoding_to_quantizer(q, rmin, rmax, device, item, verbose):
+                            _set_quantizer_allow_overwrite(q, allow_overwrite)
+                            loaded_count += 1
+                            loaded_types.add(type(module).__name__)
+                        else:
+                            skipped_count += 1
+                            if not skip_if_not_found:
+                                raise ValueError(f"输入量化器 encoding 加载失败: {mod_name}[{idx}]")
             if hasattr(module, 'output_quantizers'):
                 for idx, item in _iter_io_encoding_items(enc.get("output")):
                     if idx >= len(module.output_quantizers):
@@ -247,12 +254,15 @@ def load_quantizer_encodings(
                         continue
                     rmin = item.get("real_min")
                     rmax = item.get("real_max")
-                    if rmin is not None and rmax is not None and _apply_aimet_encoding_to_quantizer(
-                        q, rmin, rmax, device, item, verbose
-                    ):
-                        _set_quantizer_allow_overwrite(q, allow_overwrite)
-                        loaded_count += 1
-                        loaded_types.add(type(module).__name__)
+                    if rmin is not None and rmax is not None:
+                        if _apply_aimet_encoding_to_quantizer(q, rmin, rmax, device, item, verbose):
+                            _set_quantizer_allow_overwrite(q, allow_overwrite)
+                            loaded_count += 1
+                            loaded_types.add(type(module).__name__)
+                        else:
+                            skipped_count += 1
+                            if not skip_if_not_found:
+                                raise ValueError(f"输出量化器 encoding 加载失败: {mod_name}[{idx}]")
         # 2) 非 GRU 的 param_encodings：通用解析 key 为 "module_name.param_name"（与 param_quantizers 匹配）
         for key, enc in param_enc.items():
             if not isinstance(enc, dict):
@@ -277,12 +287,14 @@ def load_quantizer_encodings(
             if q is None:
                 skipped_count += 1
                 continue
-            if _apply_aimet_encoding_to_quantizer(
-                q, rmin, rmax, device, enc, verbose
-            ):
+            if _apply_aimet_encoding_to_quantizer(q, rmin, rmax, device, enc, verbose):
                 _set_quantizer_allow_overwrite(q, allow_overwrite)
                 loaded_count += 1
                 loaded_types.add(type(module).__name__)
+            else:
+                skipped_count += 1
+                if not skip_if_not_found:
+                    raise ValueError(f"参数量化器 encoding 加载失败: {key}")
         if verbose:
             print(f"\n✅ AIMET 格式加载完成: 共加载 {loaded_count} 个量化器")
         return {
@@ -527,12 +539,8 @@ def _parse_param_encodings_key(key: str, module_map: dict):
     return None
 
 
-def _encoding_compatible_with_quantizer(enc_entry: dict, quantizer, verbose: bool) -> tuple:
-    """
-    校验 encodings 条目与量化器是否兼容（bitwidth、symmetric）。
-    enc_entry 可为单条 dict（含 bitwidth, is_symmetric）或 list 的首元素。
-    Returns: (ok: bool, msg: str)
-    """
+def _adapt_quantizer_to_encoding(enc_entry: dict, quantizer, verbose: bool) -> tuple:
+    """根据 encoding 元数据调整量化器的位宽、符号网格与对称性。"""
     if not isinstance(enc_entry, dict):
         return True, ""
     entry = enc_entry.get("input", enc_entry) if isinstance(enc_entry.get("input"), list) else enc_entry
@@ -543,22 +551,46 @@ def _encoding_compatible_with_quantizer(enc_entry: dict, quantizer, verbose: boo
     file_bw = entry.get("bitwidth")
     file_sym = entry.get("is_symmetric")
     if file_sym is not None and isinstance(file_sym, str):
-        file_sym = file_sym.lower() == "true"
+        normalized = file_sym.strip().lower()
+        if normalized not in ("true", "false"):
+            return False, f"无效的 is_symmetric: {file_sym!r}"
+        file_sym = normalized == "true"
     if file_bw is None and file_sym is None:
         return True, ""
+
     try:
-        q_bw = None
-        if hasattr(quantizer, 'qmin') and hasattr(quantizer, 'qmax'):
-            num_steps = int(quantizer.qmax) - int(quantizer.qmin) + 1
-            q_bw = int(round((num_steps - 1).bit_length())) if num_steps > 1 else 0
-        q_sym = getattr(quantizer, 'symmetric', getattr(quantizer, '_symmetric', None))
-        if file_bw is not None and q_bw is not None and file_bw != q_bw:
-            return False, f"bitwidth 不一致: file={file_bw}, quantizer≈{q_bw}"
-        if file_sym is not None and q_sym is not None and bool(file_sym) != bool(q_sym):
-            return False, f"symmetric 不一致: file={file_sym}, quantizer={q_sym}"
+        if file_bw is not None:
+            file_bw = int(file_bw)
+            if file_bw < 1:
+                return False, f"无效的 bitwidth: {file_bw}"
+
+        # AIMET affine encoding 的约定：对称量化使用 signed grid，
+        # 非对称量化使用 unsigned grid。encoding 是 reload 时的权威配置。
+        if file_bw is not None and hasattr(quantizer, "bitwidth"):
+            quantizer.bitwidth = file_bw
+
+        if file_sym is not None:
+            if file_bw is None:
+                file_bw = int(getattr(quantizer, "bitwidth"))
+            if hasattr(quantizer, "qmin") and hasattr(quantizer, "qmax"):
+                if bool(file_sym):
+                    quantizer.qmin = -(2 ** (file_bw - 1))
+                    quantizer.qmax = 2 ** (file_bw - 1) - 1
+                else:
+                    quantizer.qmin = 0
+                    quantizer.qmax = 2 ** file_bw - 1
+            if hasattr(quantizer, "symmetric"):
+                quantizer.symmetric = bool(file_sym)
+
+        q_bw = getattr(quantizer, "bitwidth", None)
+        q_sym = getattr(quantizer, "symmetric", getattr(quantizer, "_symmetric", None))
+        if file_bw is not None and q_bw is not None and int(q_bw) != file_bw:
+            return False, f"无法调整 bitwidth: file={file_bw}, quantizer={q_bw}"
+        if file_sym is not None and q_sym is not None and bool(q_sym) != bool(file_sym):
+            return False, f"无法调整 symmetric: file={file_sym}, quantizer={q_sym}"
     except Exception as e:
-        if verbose:
-            print(f"  [校验兼容性时忽略]: {e}")
+        return False, f"调整量化器配置失败: {e}"
+
     return True, ""
 
 
@@ -619,17 +651,17 @@ def _apply_aimet_encoding_to_quantizer(
     """
     将 AIMET 导出格式的 real_min/real_max 应用到量化器（调用 set_range）。
     real_min, real_max 可为标量或列表，会转为 tensor。
-    若 enc_entry 提供且与量化器不兼容（bitwidth/symmetric），则跳过并返回 False。
+    若 enc_entry 提供，则先根据其中的 bitwidth/is_symmetric 调整量化器。
     """
     if not hasattr(quantizer, 'set_range'):
         return False
     if real_min is None or real_max is None:
         return False
     if enc_entry is not None:
-        ok, msg = _encoding_compatible_with_quantizer(enc_entry, quantizer, verbose)
+        ok, msg = _adapt_quantizer_to_encoding(enc_entry, quantizer, verbose)
         if not ok:
             if verbose:
-                print(f"  ⚠️ 跳过（编码不兼容）: {msg}")
+                print(f"  ⚠️ 跳过（无法按 encoding 调整量化器）: {msg}")
             return False
     min_t = torch.tensor(real_min, dtype=torch.float32)
     max_t = torch.tensor(real_max, dtype=torch.float32)
