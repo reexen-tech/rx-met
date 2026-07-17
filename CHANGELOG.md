@@ -7,7 +7,17 @@
 
 ## [Unreleased]
 
+## [1.3.11] - 2026-07-17
+
 ### 🐛 Bug 修复
+
+- **修复 QuantGRU reload 后仍执行浮点 Forward 的问题**
+  （`aimet_torch/staged_quantization_utils.py`）
+  - `load_quantizer_encodings` 此前仅调用 QuantGRU 接口恢复量化参数，未开启
+    `use_quantization`；重载模块虽然 `is_calibrated()=True`，实际仍走浮点 GRU 路径，
+    导致 QAT 导出前与 Reload 推理结果不一致。
+  - 现由 AIMET 适配层在 QuantGRU 量化参数加载成功后显式设置
+    `module.use_quantization=True`。
 
 - **修复 reload 依赖原始混合精度配置才能恢复量化器的问题**
   （`aimet_torch/staged_quantization_utils.py`）
@@ -16,7 +26,6 @@
   - 修复 INT32 bias encoding 遇到默认 INT8 quantizer 时被静默跳过、造成 QAT 与 Reload
     推理结果不一致的问题
   - encoding 应用失败现在会计入 `skipped_count`；`skip_if_not_found=False` 时会直接报错
-  - 新增回归测试，验证仅凭模型结构、权重和 encodings 即可从 INT8 默认配置恢复 INT32 bias
 
 - **修复 reload 时 index dict 格式 encodings 未被加载的问题**
   （`aimet_torch/staged_quantization_utils.py`）

@@ -187,6 +187,10 @@ def load_quantizer_encodings(
                     module_name=target_name,
                     verbose=verbose
                 )
+                if loaded_ok:
+                    # QuantGRU 的加载接口只负责恢复量化参数；执行模式由
+                    # AIMET 适配层显式开启，避免底层库产生隐式状态变化。
+                    module.use_quantization = True
                 if loaded_ok and allow_overwrite is not None:
                     module.set_quant_params_locked(not allow_overwrite)
 

@@ -1227,6 +1227,46 @@ class _QuantizationSimModelBase(_QuantizationSimModelInterface):
         self._remove_quantization_wrappers(self.model, quant_layers_to_exclude)
 
     @staticmethod
+    def _get_ad_hoc_param_encodings(
+        sim_model: torch.nn.Module,
+        encoding_version: str = "0.6.1",
+    ) -> Dict[str, List[Dict]]:
+        """Export parameter quantizers dynamically attached to plain modules.
+
+        Some v2 extensions attach ``param_quantizers`` to modules which do not
+        implement ``_QuantizedModuleProtocol`` (for example, parameters owned by
+        modules expanded by ``model_preparer``).  The regular export loop skips
+        such modules, so their quantizer configuration would otherwise be lost.
+        """
+        param_encodings = {}
+        for module_name, module in sim_model.named_modules():
+            if isinstance(module, _QuantizedModuleProtocol):
+                continue
+
+            quantizers = getattr(module, "param_quantizers", None)
+            if not hasattr(quantizers, "items"):
+                continue
+
+            direct_params = dict(module.named_parameters(recurse=False))
+            for param_name, quantizer in quantizers.items():
+                if param_name not in direct_params or quantizer is None:
+                    continue
+                if not callable(getattr(quantizer, "get_encodings", None)):
+                    continue
+
+                encoding = quantizer.get_encodings()
+                if encoding is None:
+                    continue
+                qnn_encoding = encoding.to_qnn_encoding_dict(encoding_version)
+                if qnn_encoding:
+                    full_name = (
+                        f"{module_name}.{param_name}" if module_name else param_name
+                    )
+                    param_encodings[full_name] = qnn_encoding
+
+        return param_encodings
+
+    @staticmethod
     def _get_torch_encodings_for_missing_layers(
         layer: _QuantizedModuleProtocol,
         layer_name: str,  # pylint: disable=too-many-branches
@@ -1377,6 +1417,16 @@ class _QuantizationSimModelBase(_QuantizationSimModelInterface):
                     tensor_to_quantizer_map,
                 )
 
+        # Local v2 extensions may attach param_quantizers to ordinary modules
+        # without implementing _QuantizedModuleProtocol.  Preserve those
+        # encodings explicitly so a fresh QuantSim can restore their bitwidth
+        # and range without re-running the training-side configuration.
+        ad_hoc_param_encodings = cls._get_ad_hoc_param_encodings(sim_model)
+        missing_param_encodings.update(ad_hoc_param_encodings)
+        for param_name, param_encoding in ad_hoc_param_encodings.items():
+            if param_name in valid_param_set:
+                param_encodings.setdefault(param_name, param_encoding)
+
         if layer_names_not_found:
             logger.warning(
                 "The following layers were not found in the exported onnx model. Encodings for these layers"
@@ -1441,6 +1491,8 @@ class _QuantizationSimModelBase(_QuantizationSimModelInterface):
                         if not encoding:
                             continue
                         param_encodings_torch[f"{module_name}.{param_name}"] = encoding
+                for param_name, encoding in ad_hoc_param_encodings.items():
+                    param_encodings_torch.setdefault(param_name, encoding)
 
             activation_encodings_torch.update(missing_activation_encodings_torch)
             encodings_dict_pytorch = {
