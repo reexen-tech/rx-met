@@ -10,18 +10,15 @@ from aimet_torch.v2.nn import QuantizationMixin
 from aimet_torch.v2.nn.base import BaseQuantizationMixin
 
 
-def print_quantizer_info(model, title="量化器信息"):
+def print_quantizer_info(model, title="量化器信息", verbose=True):
     """
     打印模型中所有量化器的完整信息
     
     Args:
         model: 量化模型
         title: 打印标题
+        verbose: 是否输出量化器信息
     """
-    print("\n" + "="*80)
-    print(f"{title}")
-    print("="*80)
-    
     quantizer_info = []
     
     for name, module in model.named_modules():
@@ -52,55 +49,60 @@ def print_quantizer_info(model, title="量化器信息"):
                     info['quantizer_type'] = f'param_quantizer[{param_name}]'
                     quantizer_info.append(info)
     
-    # 打印信息
-    for i, info in enumerate(quantizer_info, 1):
-        print(f"\n{i}. {info['module_name']} - {info['quantizer_type']}")
-        print(f"   Qmin: {info['qmin']}, Qmax: {info['qmax']}")
-        print(f"   Min: {info['min']:.6f}, Max: {info['max']:.6f}")
-        
-        # 打印 scale 信息
-        if 'scale_tensor' in info:
-            # Per-channel 量化
-            scale_tensor = info['scale_tensor']
-            num_channels = scale_tensor.numel()
-            print(f"   Scale (per-channel): {num_channels} 个通道")
-            
-            if num_channels <= 10:
-                # 通道数少，全部打印
-                print(f"     {'Channel':>10s} {'Scale':>20s} {'Reciprocal':>15s}")
-                for ch_idx in range(num_channels):
-                    scale_val = scale_tensor.flatten()[ch_idx].item()
-                    recip = 1/scale_val if scale_val != 0 else float('inf')
-                    print(f"     {ch_idx:>10d} {scale_val:>20.10f} {recip:>15.2f}")
-            else:
-                # 通道数多，打印统计信息和前后几个
-                print(f"   Scale 范围: [{scale_tensor.min().item():.10f}, {scale_tensor.max().item():.10f}]")
-                print(f"   Scale 平均: {scale_tensor.mean().item():.10f}")
-                print(f"\n   前5个通道:")
-                print(f"     {'Channel':>10s} {'Scale':>20s} {'Reciprocal':>15s}")
-                for ch_idx in range(min(5, num_channels)):
-                    scale_val = scale_tensor.flatten()[ch_idx].item()
-                    recip = 1/scale_val if scale_val != 0 else float('inf')
-                    print(f"     {ch_idx:>10d} {scale_val:>20.10f} {recip:>15.2f}")
-                
-                if num_channels > 10:
-                    print(f"     ... (省略中间 {num_channels-10} 个通道) ...")
-                    print(f"\n   后5个通道:")
-                    for ch_idx in range(num_channels - 5, num_channels):
+    if verbose:
+        print("\n" + "="*80)
+        print(f"{title}")
+        print("="*80)
+
+        # 打印信息
+        for i, info in enumerate(quantizer_info, 1):
+            print(f"\n{i}. {info['module_name']} - {info['quantizer_type']}")
+            print(f"   Qmin: {info['qmin']}, Qmax: {info['qmax']}")
+            print(f"   Min: {info['min']:.6f}, Max: {info['max']:.6f}")
+
+            # 打印 scale 信息
+            if 'scale_tensor' in info:
+                # Per-channel 量化
+                scale_tensor = info['scale_tensor']
+                num_channels = scale_tensor.numel()
+                print(f"   Scale (per-channel): {num_channels} 个通道")
+
+                if num_channels <= 10:
+                    # 通道数少，全部打印
+                    print(f"     {'Channel':>10s} {'Scale':>20s} {'Reciprocal':>15s}")
+                    for ch_idx in range(num_channels):
                         scale_val = scale_tensor.flatten()[ch_idx].item()
                         recip = 1/scale_val if scale_val != 0 else float('inf')
                         print(f"     {ch_idx:>10d} {scale_val:>20.10f} {recip:>15.2f}")
-        else:
-            # 标量 scale
-            print(f"   Scale: {info['scale']:.8f}")
-            print(f"   Scale_reciprocal: {1/info['scale']:.2f}")
-        
-        print(f"   Zero Point (Offset): {info['zero_point']:.2f}")
-        print(f"   Symmetric: {info['symmetric']}")
-        print(f"   Shape: {info['shape']}")
-    
-    print(f"\n总共 {len(quantizer_info)} 个量化器")
-    print("="*80 + "\n")
+                else:
+                    # 通道数多，打印统计信息和前后几个
+                    print(f"   Scale 范围: [{scale_tensor.min().item():.10f}, {scale_tensor.max().item():.10f}]")
+                    print(f"   Scale 平均: {scale_tensor.mean().item():.10f}")
+                    print(f"\n   前5个通道:")
+                    print(f"     {'Channel':>10s} {'Scale':>20s} {'Reciprocal':>15s}")
+                    for ch_idx in range(min(5, num_channels)):
+                        scale_val = scale_tensor.flatten()[ch_idx].item()
+                        recip = 1/scale_val if scale_val != 0 else float('inf')
+                        print(f"     {ch_idx:>10d} {scale_val:>20.10f} {recip:>15.2f}")
+
+                    if num_channels > 10:
+                        print(f"     ... (省略中间 {num_channels-10} 个通道) ...")
+                        print(f"\n   后5个通道:")
+                        for ch_idx in range(num_channels - 5, num_channels):
+                            scale_val = scale_tensor.flatten()[ch_idx].item()
+                            recip = 1/scale_val if scale_val != 0 else float('inf')
+                            print(f"     {ch_idx:>10d} {scale_val:>20.10f} {recip:>15.2f}")
+            else:
+                # 标量 scale
+                print(f"   Scale: {info['scale']:.8f}")
+                print(f"   Scale_reciprocal: {1/info['scale']:.2f}")
+
+            print(f"   Zero Point (Offset): {info['zero_point']:.2f}")
+            print(f"   Symmetric: {info['symmetric']}")
+            print(f"   Shape: {info['shape']}")
+
+        print(f"\n总共 {len(quantizer_info)} 个量化器")
+        print("="*80 + "\n")
     
     return quantizer_info
 
@@ -647,16 +649,18 @@ def verify_power_of_2_scale(scale: float, tolerance: float = 1e-9) -> Tuple[bool
     return False, -1
 
 
-def verify_model_power_of_2(model):
+def verify_model_power_of_2(model, verbose=True):
     """
     验证模型中所有量化器的scale是否都是2的幂次方
     
     Args:
         model: 量化模型
+        verbose: 是否输出验证信息
     """
-    print("\n" + "="*80)
-    print("验证 Power-of-2 量化")
-    print("="*80)
+    if verbose:
+        print("\n" + "="*80)
+        print("验证 Power-of-2 量化")
+        print("="*80)
     
     total_quantizers = 0
     power_of_2_quantizers = 0
@@ -700,19 +704,24 @@ def verify_model_power_of_2(model):
                     
                     if all_power_of_2:
                         power_of_2_quantizers += 1
-                        print(f"✓ {qname}: 所有scale都是2的幂次方")
+                        if verbose:
+                            print(f"✓ {qname}: 所有scale都是2的幂次方")
                     else:
-                        print(f"✗ {qname}: 存在非2的幂次方scale")
+                        if verbose:
+                            print(f"✗ {qname}: 存在非2的幂次方scale")
                 else:
                     is_po2, n = verify_power_of_2_scale(scale.item())
                     if is_po2:
                         power_of_2_quantizers += 1
-                        print(f"✓ {qname}: scale = 1/2^{n}")
+                        if verbose:
+                            print(f"✓ {qname}: scale = 1/2^{n}")
                     else:
-                        print(f"✗ {qname}: scale = {scale.item():.8f} (非2的幂次方)")
-    
-    print(f"\n验证结果: {power_of_2_quantizers}/{total_quantizers} 个量化器使用 Power-of-2 scale")
-    print("="*80 + "\n")
+                        if verbose:
+                            print(f"✗ {qname}: scale = {scale.item():.8f} (非2的幂次方)")
+
+    if verbose:
+        print(f"\n验证结果: {power_of_2_quantizers}/{total_quantizers} 个量化器使用 Power-of-2 scale")
+        print("="*80 + "\n")
     
     return power_of_2_quantizers == total_quantizers
 
