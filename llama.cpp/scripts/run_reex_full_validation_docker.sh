@@ -22,7 +22,7 @@ fi
 if ! docker ps --format '{{.Names}}' | grep -qx "$CONTAINER"; then
   echo "错误: 容器「$CONTAINER」未在运行（docker ps 中不存在）。"
   echo "  请先启动: docker start $CONTAINER"
-  echo "  或新建评测容器见 lm_evaluator/scripts/run_llq_eval_container.sh"
+  echo "  或新建评测容器见 lm_evaluator/scripts/sh/run_llq_eval_container.sh"
   exit 1
 fi
 
