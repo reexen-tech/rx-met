@@ -20,17 +20,30 @@ cmake --build build_cuda --config Release -j
 ./build_cuda/bin/llama-cli --help
 ./build_cuda/bin/llama-quantize --help
 
-# 3) Hugging Face -> FP16 GGUF(再做)
-python convert_hf_to_gguf.py /path/to/hf_model \
+# 3) (可选) AWQ scale → FP16 HF；跳过则直接用原 HF
+#     --w_bit 须与步骤 1 的量化位宽一致(例: w_bit=4 → Q4_*_64)
+#     校准默认: pileval (mit-han-lab/pile-val-backup), n_samples=128, seqlen=512
+python export_awq_hf.py \
+  --model_path /path/to/model \
+  --output_dir /path/to/out-awq-hf \
+  --w_bit 4 --q_group_size 64 \
+  --n_samples 128 --seqlen 512 --calib_data pileval # 使用pileval数据集进行校准， 校准样本128个， 序列长度512.
+
+# 4) HF → FP16 GGUF
+python convert_hf_to_gguf.py /path/to/hf_or_awq_hf \
   --outtype f16 --outfile /path/to/model-f16.gguf
 ```
 
-`llama-quantize` 的输入是 GGUF,所以通常是:HF -> f16.gguf -> Qx_*.gguf。
+流程: `HF (或 AWQ-HF) → f16.gguf → llama-quantize → Qx_*.gguf`。
 
 ## 1. 量化(选类型)
 
 ```bash
+# 默认:主体为 <类型>,output.weight 常抬到 Q6_K_64
 ./build_cuda/bin/llama-quantize 输入-f16.gguf 输出.gguf <类型>
+
+# 全张量同一类型(对照 / 严格 W4 时用)
+./build_cuda/bin/llama-quantize --pure 输入-f16.gguf 输出.gguf <类型>
 ```
 
 可选 `<类型>`(全部 block=64):
