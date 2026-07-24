@@ -1,0 +1,6 @@
+torch>=2.1
+transformers>=4.37
+datasets>=2.14
+accelerate>=0.25
+safetensors
+tqdm
