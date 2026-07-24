@@ -229,7 +229,7 @@ def decode_legacy(case: Path, meta: dict, out: Path, outputs: list, check_rows: 
         codes = np.concatenate([low, high], axis=-1)          # [N,Ktiles,64] in [-8,7]
     elif wtype == "q8_0_64":
         codes = wg[..., 2:2 + Kt].view(np.int8).astype(np.int16)
-    elif wtype == "q8_1_64s":
+    elif wtype in ("q8_1_64s", "q8_1_64"):
         codes = wg[..., 4:4 + Kt].view(np.int8).astype(np.int16)
     else:
         raise ValueError(f"unsupported legacy wtype {wtype}")
