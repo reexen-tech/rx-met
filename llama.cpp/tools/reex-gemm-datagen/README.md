@@ -55,6 +55,13 @@ reex-gemm-datagen [--out DIR] [--wtype NAME] [--abits 16|8|4]
 
 **合法计算模式**（A_bits × W_bits）：`A8×W8`、`A16×W8`、`A16×W4`、`A8×W4`、`A4×W4`（K-quant 另支持 W2/W3/W5/W6）。
 
+**两级串联 MMA（`--chain qkt`）**：MMA1 `[64,64,64]` 造 K（输出级直接吐量化 block，免反量化/重量化）→ 整块转置 → MMA2 `[1,64,64]` 算 QKᵀ。`--kbits 8|4` 定中间 K block 精度；`--wtype` 限 Legacy。形状固定，设计与产物见 [`docs/chain-qkt.md`](docs/chain-qkt.md)，校验用 `tests/check_chain_qkt.py`。
+
+```bash
+reex-gemm-datagen --chain qkt --wtype q8_0_64 --abits 8 --kbits 8 --out output/chain
+python3 tools/reex-gemm-datagen/tests/check_chain_qkt.py output/chain/<case-timestamp>
+```
+
 示例：
 ```bash
 reex-gemm-datagen --wtype q8_0_64  --out output/datagen                 # A8×W8

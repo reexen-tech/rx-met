@@ -33,6 +33,13 @@ void datagen_fill(std::vector<float> & A, std::vector<float> & W, const GemmCase
     for (auto & x : W) x = round_to_act(distw(rngw), ActDType::F16);
 }
 
+void datagen_fill_act(std::vector<float> & A, int64_t count, ActDType act_in, uint64_t seed) {
+    A.resize((size_t) count);
+    std::mt19937_64 rng(seed ^ 0xC2B2AE3D27D4EB4FULL);
+    std::normal_distribution<float> dist(0.0f, 1.0f);
+    for (auto & x : A) x = round_to_act(dist(rng), act_in);
+}
+
 void quantize_act(const std::vector<float> & A, int64_t M, int64_t K,
                   const TilingSpec & ts, int A_bits, ActDType act_in,
                   std::vector<uint8_t> & a_blocks) {
