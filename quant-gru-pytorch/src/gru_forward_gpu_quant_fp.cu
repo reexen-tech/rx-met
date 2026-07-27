@@ -1,0 +1,1232 @@
+// ============================================================================
+// gru_forward_gpu_quant_fp.cu - 浮点存储版量化 GRU 前向传播 CUDA 实现
+// ============================================================================
+//
+// 文件结构:
+//   1. 辅助函数          - div_round 等（本地使用）
+//   2. 门计算函数        - computeUpdateGateFP, computeResetGateFP 等
+//   3. Bias+Rescale Kernel - cuBLAS GEMM 后处理
+//   4. Pointwise Kernel  - GRU 逐点运算
+//   5. ForwardPassQuantFP - 前向传播封装类
+//
+// 通用函数在 quantize_ops_helper.h:
+//   - clamp_f, quantize_f, dequantize_f
+//   - real_sigmoid_f, real_tanh_f
+//
+// 与 gru_forward_gpu_quant.cu 的区别:
+//   - 所有量化值使用 float 存储（值仍是定点整数）
+//   - 使用 cuBLAS SGEMM + 单独的 bias/rescale kernel
+//   - 只使用 real_sigmoid/real_tanh，不用 LUT
+//   - shift 预处理为除数，避免运行时位移
+//
+// ============================================================================
+
+#include <cublas_v2.h>
+#include <cuda_runtime_api.h>
+
+#include <cstdio>
+#include <vector>
+
+#include "blas.h"
+#include "dev_vector.h"
+#include "gru_quant.h"
+#include "parallel_algorithm.h"
+
+// ============================================================================
+// 对称量化宏定义
+// ============================================================================
+// 如果定义了 USE_SYMMETRIC_QUANTIZATION，则所有零点(zp)相关运算将被优化掉
+// 对称量化时，所有零点都为0，可以简化计算
+// 使用方式：在编译时定义 -DUSE_SYMMETRIC_QUANTIZATION
+// #define USE_SYMMETRIC_QUANTIZATION
+
+namespace kernel {
+
+// ============================================================================
+// 1. 辅助函数（本地使用，不通用）
+// ============================================================================
+
+/**
+ * @brief 带四舍五入的除法（替代 rshift_round）
+ *
+ * result = round(x / divisor)
+ * divisor 已预计算为 2^shift
+ */
+__device__ __forceinline__ float div_round(float x, float divisor) {
+    // x = truncf(x);
+    return round_f(x / divisor);
+}
+
+/**
+ * @brief 内联函数：乘法 + 四舍五入（优化版本，使用倒数）
+ *
+ * 使用预计算的倒数，乘法比除法快 3-5 倍
+ *
+ * @param x 被除数
+ * @param inv_divisor 倒数（1.0f / divisor）
+ */
+__device__ __forceinline__ float mul_round(float x, float inv_divisor) {
+    // x = truncf(x);
+    return round_f(x * inv_divisor);
+}
+
+/**
+ * @brief 新的 rescale 函数：先乘4，再乘inv_divisor，然后trunc，再除以4，最后round
+ *
+ * @param x 输入值
+ * @param inv_divisor 倒数除数
+ * @return 处理后的值
+ */
+__device__ __forceinline__ float mul_round_new(float x, float inv_divisor) {
+    x = x * 4.0f;         // 先将输入值乘以4
+    x = x * inv_divisor;  // 然后乘以inv_divisor
+    x = truncf(x);        // 然后调用truncf
+    x = x / 4.0f;         // 然后除以4
+    return round_f(x);    // 然后调用round_f
+}
+
+// 注：clamp_f, real_sigmoid_f, real_tanh_f 已移至 quantize_ops_helper.h
+
+// ============================================================================
+// 2. 门计算函数
+// ============================================================================
+
+/**
+ * @brief 内联函数：对 GEMM 结果进行 Bias + Rescale（融合到 PointwiseOperationsFP）
+ *
+ * 计算流程（两步转换）:
+ *   1. bias从scale_bw转换到GEMM空间: bias_in_gemm = round(bias * inv_div_bw_to_gemm)
+ *   2. GEMM结果和bias相加（都在GEMM空间）: combined = (gemm_result - W_sum_mul_zp) + bias_in_gemm
+ *   3. 一起转换到weight_ih_linear空间: result = round(combined * inv_div_gemm) + zp_out
+ *
+ * 最终公式: result = clamp(round(((gemm_result - W_sum_mul_zp)
+ *                                + round(bias * inv_div_bw_to_gemm))
+ *                                * inv_div_gemm) + zp_out)
+ *
+ * @tparam Training 是否训练模式（决定是否使用 mask）
+ * @param gemm_result GEMM原始结果（在GEMM空间，scale_W*scale_x）
+ * @param bias bias值（在scale_bw空间）
+ * @param W_sum_mul_zp 预计算的sum(W)*zp_x（零点补偿）
+ * @param inv_div_gemm 从GEMM空间到weight_ih_linear空间的倒数
+ * @param inv_div_bias 从bias空间到GEMM空间的倒数（实际是inv_div_bw_to_gemm_x_）
+ * @param zp_out 输出零点
+ * @param output_bw 输出位宽配置
+ * @param keep_gradient 训练模式时保存梯度保持标志，推理模式时可为 nullptr
+ *                      0=被clamp（Backward 时梯度置零），1=未被clamp（Backward 时梯度保持）
+ */
+template <bool Training>
+__device__ __forceinline__ float biasRescaleInline(float gemm_result, float bias,
+                                                   float W_sum_mul_zp,
+                                                   float inv_div_gemm,  // 倒数（1.0f / div_gemm）
+                                                   float inv_div_bias,  // 倒数（1.0f / div_bias）
+                                                   float zp_out, QuantBitWidth output_bw,
+                                                   uint8_t *keep_gradient = nullptr) {
+    // Step 1: GEMM结果减去零点补偿（已在GEMM空间）
+    float val = gemm_result;
+#ifndef USE_SYMMETRIC_QUANTIZATION
+    val -= W_sum_mul_zp;
+#endif
+
+    // Step 2: bias从scale_bw空间转换到GEMM空间（使用倒数，乘法替代除法）
+    const float bias_term = round_f(bias * inv_div_bias);
+
+    // Step 3: GEMM结果和bias相加（都在GEMM空间），然后一起转换到weight_ih_linear空间
+    const float combined = val + bias_term;
+    float result = mul_round(combined, inv_div_gemm);
+#ifndef USE_SYMMETRIC_QUANTIZATION
+    result += zp_out;
+#endif
+
+    // 使用模板版本的 clamp_f，内部根据 Training 决定是否使用 mask
+    return clamp_f<Training>(result, output_bw, keep_gradient);
+}
+
+/**
+ * @brief 计算更新门 update_gate = sigmoid(weight_ih_linear + weight_hh_linear)
+ *
+ * @tparam Training 是否训练模式（决定是否使用 mask）
+ * @param input_keep_gradient 训练模式时保存输入梯度保持标志，推理模式时可为 nullptr
+ *                            0=被clamp（Backward 时梯度置零），1=未被clamp（Backward 时梯度保持）
+ * @param output_keep_gradient 训练模式时保存输出梯度保持标志，推理模式时可为 nullptr
+ *                             0=被clamp（Backward 时梯度置零），1=未被clamp（Backward 时梯度保持）
+ */
+template <bool Training>
+__device__ __forceinline__ float computeUpdateGateFP(float weight_ih_linear, float weight_hh_linear,
+                                                     const GateQuantParamsFP &p,
+                                                     const OperatorQuantConfig &bitwidth_config,
+                                                     uint8_t *input_keep_gradient = nullptr,
+                                                     uint8_t *output_keep_gradient = nullptr) {
+    // 重缩放到 update_gate_input 空间（使用倒数，乘法替代除法）
+    float weight_ih_linear_val = weight_ih_linear;
+    float weight_hh_linear_val = weight_hh_linear;
+#ifndef USE_SYMMETRIC_QUANTIZATION
+    weight_ih_linear_val -= p.zp_weight_ih_linear_;
+    weight_hh_linear_val -= p.zp_weight_hh_linear_;
+#endif
+    const float ih = mul_round(weight_ih_linear_val,
+                               p.inv_div_weight_ih_linear_to_update_gate_input_);
+    const float hh = mul_round(weight_hh_linear_val,
+                               p.inv_div_weight_hh_linear_to_update_gate_input_);
+    float input = ih + hh;
+#ifndef USE_SYMMETRIC_QUANTIZATION
+    input += p.zp_update_gate_input_;
+#endif
+
+    // 对输入进行 clamp（根据 Training 决定是否使用 mask）
+    const float clamped_input = clamp_f<Training>(
+        input, bitwidth_config.update_gate_input_,
+        input_keep_gradient);
+
+    // 调用模板版本的 real_sigmoid_f，内部根据 Training 决定是否使用 mask
+    return real_sigmoid_f<Training>(
+        clamped_input, p.scale_update_gate_input_, p.zp_update_gate_input_,
+        p.scale_update_gate_output_, p.zp_update_gate_output_,
+        bitwidth_config.update_gate_output_,
+        output_keep_gradient);
+}
+
+/**
+ * @brief 计算重置门 reset_gate = sigmoid(weight_ih_linear + weight_hh_linear)
+ *
+ * @tparam Training 是否训练模式（决定是否使用 mask）
+ * @param input_keep_gradient 训练模式时保存输入梯度保持标志，推理模式时可为 nullptr
+ *                            0=被clamp（Backward 时梯度置零），1=未被clamp（Backward 时梯度保持）
+ * @param output_keep_gradient 训练模式时保存输出梯度保持标志，推理模式时可为 nullptr
+ *                             0=被clamp（Backward 时梯度置零），1=未被clamp（Backward 时梯度保持）
+ */
+template <bool Training>
+__device__ __forceinline__ float computeResetGateFP(float weight_ih_linear, float weight_hh_linear,
+                                                    const GateQuantParamsFP &p,
+                                                    const OperatorQuantConfig &bitwidth_config,
+                                                    uint8_t *input_keep_gradient = nullptr,
+                                                    uint8_t *output_keep_gradient = nullptr) {
+    float weight_ih_linear_val = weight_ih_linear;
+    float weight_hh_linear_val = weight_hh_linear;
+#ifndef USE_SYMMETRIC_QUANTIZATION
+    weight_ih_linear_val -= p.zp_weight_ih_linear_;
+    weight_hh_linear_val -= p.zp_weight_hh_linear_;
+#endif
+    float ih = mul_round(weight_ih_linear_val,
+                         p.inv_div_weight_ih_linear_to_reset_gate_input_);
+    float hh = mul_round(weight_hh_linear_val,
+                         p.inv_div_weight_hh_linear_to_reset_gate_input_);
+    float input = ih + hh;
+#ifndef USE_SYMMETRIC_QUANTIZATION
+    input += p.zp_reset_gate_input_;
+#endif
+
+    // 对输入进行 clamp（根据 Training 决定是否使用 mask）
+    const float clamped_input = clamp_f<Training>(
+        input, bitwidth_config.reset_gate_input_,
+        input_keep_gradient);
+
+    // 调用模板版本的 real_sigmoid_f，内部根据 Training 决定是否使用 mask
+    return real_sigmoid_f<Training>(
+        clamped_input, p.scale_reset_gate_input_, p.zp_reset_gate_input_,
+        p.scale_reset_gate_output_, p.zp_reset_gate_output_,
+        bitwidth_config.reset_gate_output_,
+        output_keep_gradient);
+}
+
+/**
+ * @brief 计算候选门 new_gate = tanh(weight_ih_linear + reset_gate * weight_hh_linear)
+ *
+ * @tparam Training 是否训练模式（决定是否使用 mask）
+ * @param input_keep_gradient 训练模式时保存输入梯度保持标志，推理模式时可为 nullptr
+ *                            0=被clamp（Backward 时梯度置零），1=未被clamp（Backward 时梯度保持）
+ * @param output_keep_gradient 训练模式时保存输出梯度保持标志，推理模式时可为 nullptr
+ *                             0=被clamp（Backward 时梯度置零），1=未被clamp（Backward 时梯度保持）
+ * @note weight_hh_linear 参数（即 R*h + br）在反向传播时直接保存到 v，无需额外输出参数
+ */
+template <bool Training>
+__device__ __forceinline__ float computeNewGateFP(float weight_ih_linear, float weight_hh_linear,
+                                                  float reset_gate, const GateQuantParamsFP &p,
+                                                  const OperatorQuantConfig &bitwidth_config,
+                                                  uint8_t *input_keep_gradient = nullptr,
+                                                  uint8_t *output_keep_gradient = nullptr) {
+    // 计算 reset_gate * weight_hh_linear，直接对齐到 new_gate_input
+    // 使用 float 精度（单个乘积最大 4,161,409，在 FP32 精确范围内）
+    float r_diff = reset_gate;
+    float hh_diff = weight_hh_linear;
+#ifndef USE_SYMMETRIC_QUANTIZATION
+    r_diff -= p.zp_reset_gate_output_;
+    hh_diff -= p.zp_weight_hh_linear_;
+#endif
+    const float reset_hidden_mul = r_diff * hh_diff;
+    const float rh = mul_round(reset_hidden_mul, p.inv_div_reset_mul_hh_to_new_gate_input_);
+
+    // weight_ih_linear 重缩放到 new_gate_input 空间（使用倒数，乘法替代除法）
+    float weight_ih_linear_val = weight_ih_linear;
+#ifndef USE_SYMMETRIC_QUANTIZATION
+    weight_ih_linear_val -= p.zp_weight_ih_linear_;
+#endif
+    const float ih = mul_round(weight_ih_linear_val,
+                               p.inv_div_weight_ih_linear_to_new_gate_input_);
+    float input = ih + rh;
+#ifndef USE_SYMMETRIC_QUANTIZATION
+    input += p.zp_new_gate_input_;
+#endif
+
+    // 对输入进行 clamp（根据 Training 决定是否使用 mask）
+    const float clamped_input = clamp_f<Training>(
+        input, bitwidth_config.new_gate_input_,
+        input_keep_gradient);
+
+    // 调用模板版本的 real_tanh_f，内部根据 Training 决定是否使用 mask
+    return real_tanh_f<Training>(
+        clamped_input, p.scale_new_gate_input_, p.zp_new_gate_input_,
+        p.scale_new_gate_output_, p.zp_new_gate_output_,
+        bitwidth_config.new_gate_output_,
+        output_keep_gradient);
+}
+
+/**
+ * @brief 计算隐藏状态 h_new = update_gate * h_old + (1 - update_gate) * new_gate
+ *
+ * 计算流程：
+ * 1. 先将 new_gate 从 new_gate_output scale 对齐到 h scale
+ * 2. 计算 old_contribution = (u - zp_u) * (h_old - zp_h)，scale = scale_u * scale_h
+ * 3. 计算 new_contribution = (1-u - zp_u) * (new_gate_aligned - zp_h)，scale = scale_u * scale_h
+ * 4. 将 old_contribution + new_contribution 从 scale_u * scale_h rescale 到 h scale
+ *
+ * @tparam Training 是否训练模式（决定是否使用 mask）
+ * @param update_gate update gate 输出值（在 update_gate_output scale）
+ * @param new_gate new gate 输出值（在 new_gate_output scale）
+ * @param h_old 上一个时间步的隐藏状态（在 h scale）
+ * @param p 量化参数
+ * @param keep_gradient 训练模式时保存梯度保持标志，推理模式时可为 nullptr
+ *                      0=被clamp（Backward 时梯度置零），1=未被clamp（Backward 时梯度保持）
+ * @param index 用于调试打印的索引
+ * @return 新的隐藏状态（在 h scale）
+ */
+template <bool Training>
+__device__ __forceinline__ float computeHiddenStateFP(float update_gate, float new_gate,
+                                                      float h_old, const GateQuantParamsFP &p,
+                                                      const OperatorQuantConfig &bitwidth_config,
+                                                      uint8_t *keep_gradient = nullptr) {
+    // ========== 步骤1: 将 new_gate 从 new_gate_output scale 对齐到 h scale ==========
+    // 这样后续计算时 old_contribution 和 new_contribution 的 scale 可以统一
+    float n_diff_from_zp = new_gate;
+#ifndef USE_SYMMETRIC_QUANTIZATION
+    n_diff_from_zp -= p.zp_new_gate_output_;
+#endif
+    float new_gate_aligned_to_h = mul_round(n_diff_from_zp, p.inv_div_new_gate_output_to_h_);
+#ifndef USE_SYMMETRIC_QUANTIZATION
+    new_gate_aligned_to_h += p.zp_h_;
+#endif
+
+    // ========== 步骤2: 计算 old_contribution = update_gate * h_old ==========
+    // u_diff 在 update_gate_output scale，h_diff 在 h scale
+    // 乘积 scale = scale_update_gate_output * scale_h
+    // 使用 float 精度（单个乘积最大 4,161,409，在 FP32 精确范围内）
+    float u_diff = update_gate;
+    float h_diff = h_old;
+#ifndef USE_SYMMETRIC_QUANTIZATION
+    u_diff -= p.zp_update_gate_output_;
+    h_diff -= p.zp_h_;
+#endif
+    const float old_contribution_mul = u_diff * h_diff;  // scale = scale_u * scale_h
+
+    // ========== 步骤3: 计算 new_contribution = (1 - update_gate) * new_gate_aligned ==========
+    // quant_one = 2^shift + zp，是常数 1 在 update_gate_output 量化空间的完整表示
+    // one_minus_u = quant_one - update_gate = (2^shift + zp) - update_gate
+    const float one_minus_u = p.quant_one_in_update_gate_scale_ - update_gate;
+    float one_minus_u_diff = one_minus_u;  // 在 update_gate_output scale
+    float n_diff_aligned = new_gate_aligned_to_h;  // 在 h scale
+#ifndef USE_SYMMETRIC_QUANTIZATION
+    one_minus_u_diff -= p.zp_update_gate_output_;
+    n_diff_aligned -= p.zp_h_;
+#endif
+    // one_minus_u_diff 在 update_gate_output scale，n_diff_aligned 在 h scale
+    // 乘积 scale = scale_update_gate_output * scale_h
+    const float new_contribution_mul =
+        one_minus_u_diff * n_diff_aligned;  // scale = scale_u * scale_h
+
+    // ========== 步骤4: 合并两个贡献并 rescale 到 h scale ==========
+    // old_contribution_mul 和 new_contribution_mul 都在 scale_update_gate_output * scale_h
+    // scale，可以直接相加
+    const float old_contribution_add_new_contribution = old_contribution_mul + new_contribution_mul;
+
+    // rescale 到 h scale: 从 scale_update_gate_output * scale_h 到 scale_h
+    // inv_div_update_old_to_h_ = 1.0 / (2^shift_update_gate_output) = 1.0 /
+    // scale_update_gate_output 所以除以 scale_update_gate_output 即可得到 h scale
+    float h_new =
+        mul_round(old_contribution_add_new_contribution, p.inv_div_update_old_to_h_);
+#ifndef USE_SYMMETRIC_QUANTIZATION
+    h_new += p.zp_h_;
+#endif
+
+    // 使用模板版本的 clamp_f，内部根据 Training 决定是否使用 mask
+    return clamp_f<Training>(h_new, bitwidth_config.h_, keep_gradient);
+}
+
+// ============================================================================
+// 4. Bias + Rescale Kernel（cuBLAS GEMM 后处理）
+// ============================================================================
+
+/**
+ * @brief GEMM 结果加 bias 并 rescale
+ *
+ * out[i] = clamp(round((gemm[i] - W_sum_mul_zp[row]) / div_gemm[row])
+ *              + round(bias[row] / div_bias[row]) + zp_out)
+ *
+ * @param gemm_result GEMM 原始输出 [M, N]（列主序）
+ * @param output rescale 后输出 [M, N]
+ * @param bias [M] 偏置
+ * @param W_sum_mul_zp [M] 预计算的 sum(W)*zp_x（用于零点补偿）
+ * @param div_gemm [M] per-row GEMM 除数
+ * @param div_bias [M] per-row bias 除数
+ * @param zp_out 输出零点
+ * @param M 输出通道数（hidden*3）
+ * @param N batch * steps
+ * @param output_bw 输出位宽配置
+ */
+/**
+ * @brief GEMM 结果加 bias 并 rescale
+ * @tparam Training 是否训练模式（决定是否使用 mask）
+ * @param gemm_result 输入：GEMM 结果（非原地版本）或 nullptr（原地版本）
+ * @param output 输出：rescale 后的结果（非原地版本）或 nullptr（原地版本）
+ * @param data 输入/输出：GEMM 结果（原地版本，当 gemm_result 为 nullptr 时使用）
+ * @param mask 训练模式时保存 clamp mask，推理模式时可为 nullptr
+ */
+template <bool Training = false>
+__global__ void biasRescaleKernel(
+    const float *__restrict__ gemm_result,  // 非原地版本输入，或 nullptr（使用 data）
+    float *__restrict__ output,             // 非原地版本输出，或 nullptr（使用 data）
+    float *__restrict__ data,               // 原地版本输入/输出
+    const float *__restrict__ bias, const float *__restrict__ W_sum_mul_zp,
+    const float *__restrict__ div_gemm, const float *__restrict__ div_bias, float zp_out, int M,
+    int N, QuantBitWidth output_bw, uint8_t *__restrict__ mask) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= M * N) return;
+
+    const int row = idx % M;
+
+    // 读取 GEMM 结果，减去零点补偿（W_sum_mul_zp 是 float，权重总是 8bit）
+    float val = (gemm_result != nullptr) ? gemm_result[idx] : data[idx];
+#ifndef USE_SYMMETRIC_QUANTIZATION
+    val -= W_sum_mul_zp[row];
+#endif
+    
+    // bias 先 rescale（bias 是 8bit/16bit 整数，可以用 float 精确表示）
+    const float bias_term = round_f(bias[row] / div_bias[row]);
+    
+    // GEMM + bias 一起 rescale（最终结果在量化范围内）
+    float result = round_f((val + bias_term) / div_gemm[row]);
+#ifndef USE_SYMMETRIC_QUANTIZATION
+    result += zp_out;
+#endif
+
+    // 写回结果（使用模板版本的 clamp_f，内部根据 Training 决定是否使用 mask）
+    uint8_t keep_gradient;
+    float clamped_result = clamp_f<Training>(result, output_bw, Training ? &keep_gradient : nullptr);
+    
+    if (output != nullptr) {
+        output[idx] = clamped_result;
+    } else {
+        data[idx] = clamped_result;
+    }
+    
+    if constexpr (Training) {
+        // 保存梯度保持标志：用于 Backward 时的梯度计算
+        // keep_gradient=0 表示被 clamp（Backward 时梯度置零），keep_gradient=1 表示未被 clamp（Backward 时梯度保持）
+        mask[idx] = keep_gradient;
+    }
+}
+
+/**
+ * @brief 计算权重列和乘以零点（浮点版）
+ *
+ * W_sum_mul_zp[j] = sum_i(W[i,j]) * zp
+ */
+__global__ void computeWeightSumKernel(const float *__restrict__ W,
+                                       float *__restrict__ W_sum_mul_zp, float zp, int M, int K) {
+    const int row = blockIdx.x * blockDim.x + threadIdx.x;
+    if (row >= M) return;
+
+    // 使用 float 累加（权重总是 8bit，K < 1024 且 zp < 100 时 float 足够精确）
+    float sum = 0.0f;  // sum 在循环中累加，不能使用 const
+    // W 是列主序 [M, K]，遍历第 row 行的所有 K 个元素
+    for (int k = 0; k < K; ++k) {
+        sum += W[k * M + row];
+    }
+    W_sum_mul_zp[row] = sum * zp;
+}
+
+// ============================================================================
+// 5. Pointwise Kernel - GRU 逐点运算
+// ============================================================================
+
+/**
+ * @brief 根据粒度配置获取 W 相关的 rescale 倒数
+ * 
+ * @param params LinearRescaleParamsFP 结构体
+ * @param bitwidth_config OperatorQuantConfig 结构体（包含粒度配置）
+ * @param idx 通道索引
+ * @param hidden_size 隐藏层大小（用于计算 gate_idx）
+ * @return float rescale 倒数
+ */
+__device__ __forceinline__ float get_inv_div_gemm_x(
+    const LinearRescaleParamsFP &params,
+    const OperatorQuantConfig &bitwidth_config,
+    int idx, int hidden_size) {
+    // 统一使用 per-channel 参数（无论粒度如何，shift 参数都已统一更新到 per-channel 数组）
+    // 原来的判断逻辑已注释：
+    // if (static_cast<int8_t>(bitwidth_config.W_granularity_) == 0) {  // PER_TENSOR
+    //     return params.inv_div_gemm_x_tensor_;
+    // } else if (static_cast<int8_t>(bitwidth_config.W_granularity_) == 1) {  // PER_GATE
+    //     int gate_idx = idx / hidden_size;
+    //     return params.inv_div_gemm_x_gate_[gate_idx];
+    // } else {  // PER_CHANNEL (2)
+    //     return params.inv_div_gemm_x_to_weight_ih_linear_[idx];
+    // }
+    return params.inv_div_gemm_x_to_weight_ih_linear_[idx];
+}
+
+/**
+ * @brief 根据粒度配置获取 bw 相关的 rescale 倒数
+ * 
+ * @param params LinearRescaleParamsFP 结构体
+ * @param bitwidth_config OperatorQuantConfig 结构体（包含粒度配置）
+ * @param idx 通道索引
+ * @param hidden_size 隐藏层大小（用于计算 gate_idx）
+ * @return float rescale 倒数
+ */
+__device__ __forceinline__ float get_inv_div_bw(
+    const LinearRescaleParamsFP &params,
+    const OperatorQuantConfig &bitwidth_config,
+    int idx, int hidden_size) {
+    // 统一使用 per-channel 参数（无论粒度如何，shift 参数都已统一更新到 per-channel 数组）
+    // 原来的判断逻辑已注释：
+    // if (static_cast<int8_t>(bitwidth_config.bw_granularity_) == 0) {  // PER_TENSOR
+    //     return params.inv_div_bw_tensor_;
+    // } else if (static_cast<int8_t>(bitwidth_config.bw_granularity_) == 1) {  // PER_GATE
+    //     int gate_idx = idx / hidden_size;
+    //     return params.inv_div_bw_gate_[gate_idx];
+    // } else {  // PER_CHANNEL (2)
+    //     return params.inv_div_bw_to_gemm_x_[idx];
+    // }
+    return params.inv_div_bw_to_gemm_x_[idx];
+}
+
+/**
+ * @brief 根据粒度配置获取 R 相关的 rescale 倒数
+ * 
+ * @param params LinearRescaleParamsFP 结构体
+ * @param bitwidth_config OperatorQuantConfig 结构体（包含粒度配置）
+ * @param idx 通道索引
+ * @param hidden_size 隐藏层大小（用于计算 gate_idx）
+ * @return float rescale 倒数
+ */
+__device__ __forceinline__ float get_inv_div_gemm_h(
+    const LinearRescaleParamsFP &params,
+    const OperatorQuantConfig &bitwidth_config,
+    int idx, int hidden_size) {
+    // 统一使用 per-channel 参数（无论粒度如何，shift 参数都已统一更新到 per-channel 数组）
+    // 原来的判断逻辑已注释：
+    // if (static_cast<int8_t>(bitwidth_config.R_granularity_) == 0) {  // PER_TENSOR
+    //     return params.inv_div_gemm_h_tensor_;
+    // } else if (static_cast<int8_t>(bitwidth_config.R_granularity_) == 1) {  // PER_GATE
+    //     int gate_idx = idx / hidden_size;
+    //     return params.inv_div_gemm_h_gate_[gate_idx];
+    // } else {  // PER_CHANNEL (2)
+    //     return params.inv_div_gemm_h_to_weight_hh_linear_[idx];
+    // }
+    return params.inv_div_gemm_h_to_weight_hh_linear_[idx];
+}
+
+/**
+ * @brief 根据粒度配置获取 br 相关的 rescale 倒数
+ * 
+ * @param params LinearRescaleParamsFP 结构体
+ * @param bitwidth_config OperatorQuantConfig 结构体（包含粒度配置）
+ * @param idx 通道索引
+ * @param hidden_size 隐藏层大小（用于计算 gate_idx）
+ * @return float rescale 倒数
+ */
+__device__ __forceinline__ float get_inv_div_br(
+    const LinearRescaleParamsFP &params,
+    const OperatorQuantConfig &bitwidth_config,
+    int idx, int hidden_size) {
+    // 统一使用 per-channel 参数（无论粒度如何，shift 参数都已统一更新到 per-channel 数组）
+    // 原来的判断逻辑已注释：
+    // if (static_cast<int8_t>(bitwidth_config.br_granularity_) == 0) {  // PER_TENSOR
+    //     return params.inv_div_br_tensor_;
+    // } else if (static_cast<int8_t>(bitwidth_config.br_granularity_) == 1) {  // PER_GATE
+    //     int gate_idx = idx / hidden_size;
+    //     return params.inv_div_br_gate_[gate_idx];
+    // } else {  // PER_CHANNEL (2)
+    //     return params.inv_div_br_to_gemm_h_[idx];
+    // }
+    return params.inv_div_br_to_gemm_h_[idx];
+}
+
+/**
+ * @brief GRU 逐点运算 Kernel（浮点版）
+ *
+ * 每个线程处理一个 (batch, hidden) 位置
+ *
+ * @tparam Training 是否训练模式（保存中间值到 v，保存 clamp mask 用于 QAT）
+ * @tparam ApplyZoneout 是否应用 Zoneout
+ */
+template <bool Training, bool ApplyZoneout>
+__global__ void PointwiseOperationsFP(
+    int batch_dim, int hidden_dim,
+    // 未 rescale 的 GEMM 结果（融合 BiasRescale 到本 kernel）
+    const float *__restrict__ gemm_weight_ih_linear,  // [batch*3*hidden] 未 rescale 的 W*x
+    const float *__restrict__ gemm_weight_hh_linear,  // [batch*3*hidden] 未 rescale 的 R*h
+    // BiasRescale 参数（打包到结构体中，减少参数数量）
+    LinearRescaleParamsFP linear_rescale_params,
+    // 偏置（直接从 IterateInternal 参数传入）
+    const float *__restrict__ bw,  // [3*hidden] 输入偏置
+    const float *__restrict__ br,  // [3*hidden] 循环偏置
+    // 其他参数
+    const float *__restrict__ h, float *__restrict__ h_out, float *__restrict__ v,
+    float zoneout_prob, const float *__restrict__ zoneout_mask, GateQuantParamsFP gate_params,
+    // 位宽配置（单独参数，通过参数内存传递）
+    OperatorQuantConfig bitwidth_config,
+    // Mask 输出（Training=true 时使用）
+    uint8_t *__restrict__ weight_ih_linear_mask,  // [batch*3*hidden] weight_ih_linear rescale mask
+    uint8_t *__restrict__ weight_hh_linear_mask,  // [batch*3*hidden] weight_hh_linear rescale mask
+    uint8_t *__restrict__ gate_input_mask,        // [batch*3*hidden] 门输入 clamp mask
+    uint8_t *__restrict__ gate_output_mask,       // [batch*3*hidden] 门输出 clamp mask
+    uint8_t *__restrict__ h_mask                  // [batch*hidden] 隐状态输出 mask
+) {
+    // ========== Shared Memory 缓存 ==========
+    // 缓存 bw 和 br（每个 row 只需要加载一次，16 个 col 线程共享）
+    // 使用 [4] 而不是 [3] 避免 bank conflict（padding）
+    __shared__ float shared_bw[32][4];  // [blockDim.x, 3 gates + 1 padding] = 512 字节
+    __shared__ float shared_br[32][4];  // [blockDim.x, 3 gates + 1 padding] = 512 字节
+
+    const int row = blockDim.x * blockIdx.x + threadIdx.x;
+    const int col = blockDim.y * blockIdx.y + threadIdx.y;
+
+    if (row >= hidden_dim || col >= batch_dim) return;
+
+    // ========== 协作加载 bw 和 br 到 shared memory ==========
+    // 只需要 threadIdx.y == 0 的线程加载（16 个线程中的 1 个）
+    if (threadIdx.y == 0) {
+        // 预计算索引（避免重复计算）
+        const int row_update = row;
+        const int row_reset = row + hidden_dim;
+        const int row_new = row + 2 * hidden_dim;
+
+        shared_bw[threadIdx.x][0] = bw[row_update];
+        shared_bw[threadIdx.x][1] = bw[row_reset];
+        shared_bw[threadIdx.x][2] = bw[row_new];
+        // shared_bw[threadIdx.x][3] 未使用（padding，避免 bank conflict）
+        shared_br[threadIdx.x][0] = br[row_update];
+        shared_br[threadIdx.x][1] = br[row_reset];
+        shared_br[threadIdx.x][2] = br[row_new];
+        // shared_br[threadIdx.x][3] 未使用（padding，避免 bank conflict）
+    }
+    __syncthreads();  // 确保所有数据加载完成
+
+    const int weight_idx = col * (hidden_dim * 3) + row;
+    const int output_idx = col * hidden_dim + row;
+    const int update_idx = weight_idx + 0 * hidden_dim;
+    const int reset_idx = weight_idx + 1 * hidden_dim;
+    const int new_idx = weight_idx + 2 * hidden_dim;
+
+    // ========== 预计算索引 ==========
+    const int row_update = row;
+    const int row_reset = row + hidden_dim;
+    const int row_new = row + 2 * hidden_dim;
+
+    // ========== 从 shared memory 读取 bw 和 br ==========
+    const float bw_update = shared_bw[threadIdx.x][0];
+    const float bw_reset = shared_bw[threadIdx.x][1];
+    const float bw_new = shared_bw[threadIdx.x][2];
+    const float br_update = shared_br[threadIdx.x][0];
+    const float br_reset = shared_br[threadIdx.x][1];
+    const float br_new = shared_br[threadIdx.x][2];
+
+    // 统一声明 mask 变量（函数内部会根据 Training 模板参数决定是否使用）
+    uint8_t ih_update_mask, ih_reset_mask, ih_new_mask;
+    uint8_t hh_update_mask, hh_reset_mask, hh_new_mask;
+
+    // 在 kernel 内部进行 BiasRescale（减少全局内存读取）
+    // 计算后不变的值使用 const
+    const float weight_ih_linear_update = biasRescaleInline<Training>(
+        gemm_weight_ih_linear[update_idx],
+        bw_update,  // 从 shared memory 读取（原：bw[row]）
+        linear_rescale_params.W_sum_mul_x_zp[row_update],
+        get_inv_div_gemm_x(linear_rescale_params, bitwidth_config, row_update, hidden_dim),
+        get_inv_div_bw(linear_rescale_params, bitwidth_config, row_update, hidden_dim),
+        linear_rescale_params.zp_weight_ih_linear_, bitwidth_config.weight_ih_linear_,
+        &ih_update_mask);
+    const float weight_ih_linear_reset = biasRescaleInline<Training>(
+        gemm_weight_ih_linear[reset_idx],
+        bw_reset,  // 从 shared memory 读取（原：bw[row + hidden_dim]）
+        linear_rescale_params.W_sum_mul_x_zp[row_reset],
+        get_inv_div_gemm_x(linear_rescale_params, bitwidth_config, row_reset, hidden_dim),
+        get_inv_div_bw(linear_rescale_params, bitwidth_config, row_reset, hidden_dim),
+        linear_rescale_params.zp_weight_ih_linear_, bitwidth_config.weight_ih_linear_,
+        &ih_reset_mask);
+    const float weight_ih_linear_new = biasRescaleInline<Training>(
+        gemm_weight_ih_linear[new_idx],
+        bw_new,  // 从 shared memory 读取（原：bw[row + 2 * hidden_dim]）
+        linear_rescale_params.W_sum_mul_x_zp[row_new],
+        get_inv_div_gemm_x(linear_rescale_params, bitwidth_config, row_new, hidden_dim),
+        get_inv_div_bw(linear_rescale_params, bitwidth_config, row_new, hidden_dim),
+        linear_rescale_params.zp_weight_ih_linear_, bitwidth_config.weight_ih_linear_,
+        &ih_new_mask);
+
+    // Rescale weight_hh_linear (update, reset, new) - 使用倒数，乘法替代除法
+    // 使用从 shared memory 读取的 br_update, br_reset, br_new
+    const float weight_hh_linear_update = biasRescaleInline<Training>(
+        gemm_weight_hh_linear[update_idx],
+        br_update,  // 从 shared memory 读取（原：br[row]）
+        linear_rescale_params.R_sum_mul_h_zp[row_update],
+        get_inv_div_gemm_h(linear_rescale_params, bitwidth_config, row_update, hidden_dim),
+        get_inv_div_br(linear_rescale_params, bitwidth_config, row_update, hidden_dim),
+        linear_rescale_params.zp_weight_hh_linear_, bitwidth_config.weight_hh_linear_,
+        &hh_update_mask);
+    const float weight_hh_linear_reset = biasRescaleInline<Training>(
+        gemm_weight_hh_linear[reset_idx],
+        br_reset,  // 从 shared memory 读取（原：br[row + hidden_dim]）
+        linear_rescale_params.R_sum_mul_h_zp[row_reset],
+        get_inv_div_gemm_h(linear_rescale_params, bitwidth_config, row_reset, hidden_dim),
+        get_inv_div_br(linear_rescale_params, bitwidth_config, row_reset, hidden_dim),
+        linear_rescale_params.zp_weight_hh_linear_, bitwidth_config.weight_hh_linear_,
+        &hh_reset_mask);
+    const float weight_hh_linear_new = biasRescaleInline<Training>(
+        gemm_weight_hh_linear[new_idx],
+        br_new,  // 从 shared memory 读取（原：br[row + 2 * hidden_dim]）
+        linear_rescale_params.R_sum_mul_h_zp[row_new],
+        get_inv_div_gemm_h(linear_rescale_params, bitwidth_config, row_new, hidden_dim),
+        get_inv_div_br(linear_rescale_params, bitwidth_config, row_new, hidden_dim),
+        linear_rescale_params.zp_weight_hh_linear_, bitwidth_config.weight_hh_linear_,
+        &hh_new_mask);
+
+    // 保存 rescale mask（只在训练模式时执行）
+    // 注意：Training=true 时，weight_ih_linear_mask 和 weight_hh_linear_mask 必须非空（外部负责）
+    if constexpr (Training) {
+        weight_ih_linear_mask[update_idx] = ih_update_mask;
+        weight_ih_linear_mask[reset_idx] = ih_reset_mask;
+        weight_ih_linear_mask[new_idx] = ih_new_mask;
+
+        weight_hh_linear_mask[update_idx] = hh_update_mask;
+        weight_hh_linear_mask[reset_idx] = hh_reset_mask;
+        weight_hh_linear_mask[new_idx] = hh_new_mask;
+    }
+
+    // 统一声明梯度掩码变量（用于 Backward 时的梯度计算）
+    // 梯度保持标志：0=被clamp（Backward 时梯度置零），1=未被clamp（Backward 时梯度保持）
+    uint8_t update_input_keep_gradient, update_output_keep_gradient;
+    uint8_t reset_input_keep_gradient, reset_output_keep_gradient;
+    uint8_t new_input_keep_gradient, new_output_keep_gradient;
+    uint8_t h_keep_gradient;
+
+    // 计算门结果（按依赖顺序，计算后不变的值使用 const）
+    const float update_gate =
+        computeUpdateGateFP<Training>(weight_ih_linear_update, weight_hh_linear_update, gate_params,
+                                      bitwidth_config, &update_input_keep_gradient, &update_output_keep_gradient);
+
+    const float reset_gate =
+        computeResetGateFP<Training>(weight_ih_linear_reset, weight_hh_linear_reset, gate_params,
+                                     bitwidth_config, &reset_input_keep_gradient, &reset_output_keep_gradient);
+
+    const float new_gate =
+        computeNewGateFP<Training>(weight_ih_linear_new, weight_hh_linear_new, reset_gate,
+                                   gate_params, bitwidth_config, &new_input_keep_gradient, &new_output_keep_gradient);
+
+    // cur_h 可能被 Zoneout 修改，不能使用 const
+    float cur_h = computeHiddenStateFP<Training>(update_gate, new_gate, h[output_idx], gate_params,
+                                                 bitwidth_config, &h_keep_gradient);
+
+    // Training: 保存梯度保持标志和中间值
+    // keep_gradient=0 表示被clamp（Backward 时梯度置零），keep_gradient=1 表示未被clamp（Backward 时梯度保持）
+    if constexpr (Training) {
+        // 保存门输入梯度保持标志
+        gate_input_mask[update_idx] = update_input_keep_gradient;
+        gate_input_mask[reset_idx] = reset_input_keep_gradient;
+        gate_input_mask[new_idx] = new_input_keep_gradient;
+
+        // 保存门输出梯度保持标志
+        gate_output_mask[update_idx] = update_output_keep_gradient;
+        gate_output_mask[reset_idx] = reset_output_keep_gradient;
+        gate_output_mask[new_idx] = new_output_keep_gradient;
+
+        // 保存隐状态梯度保持标志
+        h_mask[output_idx] = h_keep_gradient;
+
+        // 保存中间值
+        const int base_v_idx = col * (hidden_dim * 4) + row;
+        v[base_v_idx + 0 * hidden_dim] = update_gate;
+        v[base_v_idx + 1 * hidden_dim] = reset_gate;
+        v[base_v_idx + 2 * hidden_dim] = new_gate;
+        v[base_v_idx + 3 * hidden_dim] = weight_hh_linear_new;  // 直接使用 weight_hh_linear_new
+    }
+
+    // Zoneout（如果启用）
+    if constexpr (ApplyZoneout) {
+        const float mask = zoneout_mask[output_idx];
+        cur_h = mask * h[output_idx] + (1.0f - mask) * cur_h;
+    }
+
+    h_out[output_idx] = cur_h;
+}
+
+}  // namespace kernel
+
+// ============================================================================
+// 6. ForwardPassQuantFP - 前向传播封装类
+// ============================================================================
+
+namespace gru {
+
+struct ForwardPassQuantFP::private_data {
+    bool training;
+    int batch_size;
+    int input_size;
+    int hidden_size;
+    cublasHandle_t blas_handle;
+    cudaStream_t stream[2];
+    cudaEvent_t event;
+    cudaStream_t sync_stream;
+};
+
+ForwardPassQuantFP::ForwardPassQuantFP(bool training, int batch_size, int input_size,
+                                       int hidden_size, const cublasHandle_t &blas_handle,
+                                       const cudaStream_t &stream)
+    : data_(new private_data) {
+    data_->training = training;
+    data_->batch_size = batch_size;
+    data_->input_size = input_size;
+    data_->hidden_size = hidden_size;
+    data_->blas_handle = blas_handle;
+    data_->sync_stream = stream;
+    cudaStreamCreate(&data_->stream[0]);
+    cudaStreamCreate(&data_->stream[1]);
+    cudaEventCreateWithFlags(&data_->event, cudaEventDisableTiming);
+}
+
+ForwardPassQuantFP::~ForwardPassQuantFP() {
+    if (data_->sync_stream) {
+        cudaEventRecord(data_->event, data_->stream[1]);
+        cudaStreamWaitEvent(data_->sync_stream, data_->event, 0);
+        cudaEventRecord(data_->event, data_->stream[0]);
+        cudaStreamWaitEvent(data_->sync_stream, data_->event, 0);
+    } else {
+        cudaStreamSynchronize(data_->stream[1]);
+        cudaStreamSynchronize(data_->stream[0]);
+    }
+    cudaEventDestroy(data_->event);
+    cudaStreamDestroy(data_->stream[1]);
+    cudaStreamDestroy(data_->stream[0]);
+    delete data_;
+}
+
+void ForwardPassQuantFP::setRescaleParam(const GRUQuantParams &src) {
+    const int channel = src.hidden_ * 3;
+    auto inv_rescale_ratio = [](float src_scale, float dst_scale) {
+        return src_scale / dst_scale;
+    };
+
+    // ========== 转换 GateQuantParamsFP ==========
+    auto &g = gate_params_;
+
+    // 零点转换
+    g.zp_weight_ih_linear_ = static_cast<float>(src.weight_ih_linear_.zero_point);
+    g.zp_weight_hh_linear_ = static_cast<float>(src.weight_hh_linear_.zero_point);
+    g.zp_h_ = static_cast<float>(src.h_.zero_point);
+
+    // Update gate
+    g.zp_update_gate_input_ = static_cast<float>(src.update_gate_input_.zero_point);
+    g.zp_update_gate_output_ = static_cast<float>(src.update_gate_output_.zero_point);
+    g.inv_div_weight_ih_linear_to_update_gate_input_ =
+        inv_rescale_ratio(src.weight_ih_linear_.scale, src.update_gate_input_.scale);
+    g.inv_div_weight_hh_linear_to_update_gate_input_ =
+        inv_rescale_ratio(src.weight_hh_linear_.scale, src.update_gate_input_.scale);
+
+    // Reset gate
+    g.zp_reset_gate_input_ = static_cast<float>(src.reset_gate_input_.zero_point);
+    g.zp_reset_gate_output_ = static_cast<float>(src.reset_gate_output_.zero_point);
+    g.inv_div_weight_ih_linear_to_reset_gate_input_ =
+        inv_rescale_ratio(src.weight_ih_linear_.scale, src.reset_gate_input_.scale);
+    g.inv_div_weight_hh_linear_to_reset_gate_input_ =
+        inv_rescale_ratio(src.weight_hh_linear_.scale, src.reset_gate_input_.scale);
+
+    // New gate
+    g.zp_new_gate_input_ = static_cast<float>(src.new_gate_input_.zero_point);
+    g.zp_new_gate_output_ = static_cast<float>(src.new_gate_output_.zero_point);
+    g.inv_div_weight_ih_linear_to_new_gate_input_ =
+        inv_rescale_ratio(src.weight_ih_linear_.scale, src.new_gate_input_.scale);
+    g.inv_div_reset_mul_hh_to_new_gate_input_ =
+        inv_rescale_ratio(
+            src.reset_gate_output_.scale * src.weight_hh_linear_.scale,
+            src.new_gate_input_.scale);
+
+    // ========== Hidden state 更新参数 ==========
+    // quant_one = rshift_round(1, -shift) + zp = (1 << shift) + zp = 2^shift + zp
+    // 注意：rshift_round(1, -n) 当 n>0 时等于 1 << n
+    // 用于计算 (1 - update_gate) = quant_one - update_gate
+    // quant_one 必须是常数 1 在 update_gate_output 量化空间的“取整后”整数表示，
+    // 才能与 real_sigmoid_f 中 round_f 取整后的 update_gate 值匹配。
+    // POT2 模式下 1/scale 恰为整数，affine 模式下为小数，必须显式取整，否则
+    // (1 - u) = quant_one - update_gate 会引入系统性误差。
+    g.quant_one_in_update_gate_scale_ = round_f(1.0f / src.update_gate_output_.scale);
+#ifndef USE_SYMMETRIC_QUANTIZATION
+    g.quant_one_in_update_gate_scale_ += static_cast<float>(src.update_gate_output_.zero_point);
+#endif
+
+    // shift_uh: u * h_old 到 h 的 shift
+    // u 在 update_gate_output scale，h_old 在 h scale
+    // 乘积 scale = scale_update_gate_output * scale_h
+    // 需要转换到 h scale: shift = shift_u (因为 scale_h / scale_h = 1)
+    g.inv_div_update_old_to_h_ =
+        inv_rescale_ratio(
+            src.update_gate_output_.scale * src.h_.scale,
+            src.h_.scale);
+    g.inv_div_new_gate_output_to_h_ =
+        inv_rescale_ratio(src.new_gate_output_.scale, src.h_.scale);
+
+    // 激活函数 scale = 2^(-shift)
+    g.scale_update_gate_input_ = src.update_gate_input_.scale;
+    g.scale_update_gate_output_ = src.update_gate_output_.scale;
+    g.scale_reset_gate_input_ = src.reset_gate_input_.scale;
+    g.scale_reset_gate_output_ = src.reset_gate_output_.scale;
+    g.scale_new_gate_input_ = src.new_gate_input_.scale;
+    g.scale_new_gate_output_ = src.new_gate_output_.scale;
+
+    // 存储位宽配置（单独存储，作为 kernel 参数传递）
+    bitwidth_config_ = src.bitwidth_config_;
+
+    // ========== 设置 LinearRescaleParamsFP（统一管理，直接传递给 kernel）==========
+    auto &l = linear_params_;
+
+    l.zp_x_ = static_cast<float>(src.x_.zero_point);
+    l.zp_h_ = static_cast<float>(src.h_.zero_point);
+    l.zp_weight_ih_linear_ = static_cast<float>(src.weight_ih_linear_.zero_point);
+    l.zp_weight_hh_linear_ = static_cast<float>(src.weight_hh_linear_.zero_point);
+    // 注意：output_bw_ih_ 和 output_bw_hh_ 已移除，直接从 OperatorQuantConfig 中获取
+
+    // 统一初始化 per-channel 参数（无论粒度如何，shift 参数都已统一更新到 per-channel 数组）
+    // 原来的判断逻辑已注释，现在统一使用 per-channel 数组
+    
+    // W 和 bw 的 rescale 参数（统一使用 per-channel）
+    std::vector<float> inv_div_gemm_x(channel), inv_div_bw(channel);
+    for (int i = 0; i < channel; ++i) {
+        const float scale_wx = src.W_.channel(i).scale * src.x_.scale;
+        inv_div_gemm_x[i] = inv_rescale_ratio(scale_wx, src.weight_ih_linear_.scale);
+        inv_div_bw[i] = inv_rescale_ratio(src.bw_.channel(i).scale, scale_wx);
+    }
+    // 存储到类成员的 dev::vector，然后设置指针
+    inv_div_gemm_x_to_weight_ih_linear_ = dev::vector<float>(inv_div_gemm_x);
+    inv_div_bw_to_gemm_x_ = dev::vector<float>(inv_div_bw);
+    l.inv_div_gemm_x_to_weight_ih_linear_ = inv_div_gemm_x_to_weight_ih_linear_.data();
+    l.inv_div_bw_to_gemm_x_ = inv_div_bw_to_gemm_x_.data();
+    
+    // 原来的粒度判断逻辑已注释：
+    // const auto &cfg = src.bitwidth_config_;
+    // if (cfg.W_granularity_ == OperatorQuantConfig::PER_TENSOR) {
+    //     // PER_TENSOR: 只初始化 per-tensor 参数
+    //     int8_t shift_W = src.shift_W_tensor_;
+    //     int8_t shift_gx = (shift_W + src.shift_x_) - src.shift_weight_ih_linear_;
+    //     int8_t shift_bw = src.shift_bw_tensor_ - (shift_W + src.shift_x_);
+    //     float div_gemm_x = exp2_scale(-shift_gx);
+    //     float div_bw = exp2_scale(-shift_bw);
+    //     l.inv_div_gemm_x_tensor_ = 1.0f / div_gemm_x;
+    //     l.inv_div_bw_tensor_ = 1.0f / div_bw;
+    //     l.inv_div_gemm_x_to_weight_ih_linear_ = nullptr;
+    //     l.inv_div_bw_to_gemm_x_ = nullptr;
+    // } else if (cfg.W_granularity_ == OperatorQuantConfig::PER_GATE) {
+    //     // PER_GATE: 只初始化 per-gate 参数
+    //     for (int gate = 0; gate < 3; ++gate) {
+    //         int8_t shift_W = src.shift_W_gate_[gate];
+    //         int8_t shift_bw = src.shift_bw_gate_[gate];
+    //         int8_t shift_gx = (shift_W + src.shift_x_) - src.shift_weight_ih_linear_;
+    //         int8_t shift_bw_to_gemm = shift_bw - (shift_W + src.shift_x_);
+    //         float div_gemm_x = exp2_scale(-shift_gx);
+    //         float div_bw = exp2_scale(-shift_bw_to_gemm);
+    //         l.inv_div_gemm_x_gate_[gate] = 1.0f / div_gemm_x;
+    //         l.inv_div_bw_gate_[gate] = 1.0f / div_bw;
+    //     }
+    //     l.inv_div_gemm_x_to_weight_ih_linear_ = nullptr;
+    //     l.inv_div_bw_to_gemm_x_ = nullptr;
+    // } else {  // PER_CHANNEL
+    //     // PER_CHANNEL: 只初始化 per-channel 参数
+    //     ...
+    // }
+
+    // R 和 br 的 rescale 参数（统一使用 per-channel）
+    std::vector<float> inv_div_gemm_h(channel), inv_div_br(channel);
+    for (int i = 0; i < channel; ++i) {
+        const float scale_rh = src.R_.channel(i).scale * src.h_.scale;
+        inv_div_gemm_h[i] = inv_rescale_ratio(scale_rh, src.weight_hh_linear_.scale);
+        inv_div_br[i] = inv_rescale_ratio(src.br_.channel(i).scale, scale_rh);
+    }
+    // 存储到类成员的 dev::vector，然后设置指针
+    inv_div_gemm_h_to_weight_hh_linear_ = dev::vector<float>(inv_div_gemm_h);
+    inv_div_br_to_gemm_h_ = dev::vector<float>(inv_div_br);
+    l.inv_div_gemm_h_to_weight_hh_linear_ = inv_div_gemm_h_to_weight_hh_linear_.data();
+    l.inv_div_br_to_gemm_h_ = inv_div_br_to_gemm_h_.data();
+    
+    // 原来的粒度判断逻辑已注释：
+    // if (cfg.R_granularity_ == OperatorQuantConfig::PER_TENSOR) {
+    //     // PER_TENSOR: 只初始化 per-tensor 参数
+    //     int8_t shift_R = src.shift_R_tensor_;
+    //     int8_t shift_gh = (shift_R + src.shift_h_) - src.shift_weight_hh_linear_;
+    //     int8_t shift_br = src.shift_br_tensor_ - (shift_R + src.shift_h_);
+    //     float div_gemm_h = exp2_scale(-shift_gh);
+    //     float div_br = exp2_scale(-shift_br);
+    //     l.inv_div_gemm_h_tensor_ = 1.0f / div_gemm_h;
+    //     l.inv_div_br_tensor_ = 1.0f / div_br;
+    //     l.inv_div_gemm_h_to_weight_hh_linear_ = nullptr;
+    //     l.inv_div_br_to_gemm_h_ = nullptr;
+    // } else if (cfg.R_granularity_ == OperatorQuantConfig::PER_GATE) {
+    //     // PER_GATE: 只初始化 per-gate 参数
+    //     for (int gate = 0; gate < 3; ++gate) {
+    //         int8_t shift_R = src.shift_R_gate_[gate];
+    //         int8_t shift_br = src.shift_br_gate_[gate];
+    //         int8_t shift_gh = (shift_R + src.shift_h_) - src.shift_weight_hh_linear_;
+    //         int8_t shift_br_to_gemm = shift_br - (shift_R + src.shift_h_);
+    //         float div_gemm_h = exp2_scale(-shift_gh);
+    //         float div_br = exp2_scale(-shift_br_to_gemm);
+    //         l.inv_div_gemm_h_gate_[gate] = 1.0f / div_gemm_h;
+    //         l.inv_div_br_gate_[gate] = 1.0f / div_br;
+    //     }
+    //     l.inv_div_gemm_h_to_weight_hh_linear_ = nullptr;
+    //     l.inv_div_br_to_gemm_h_ = nullptr;
+    // } else {  // PER_CHANNEL
+    //     // PER_CHANNEL: 只初始化 per-channel 参数
+    //     ...
+    // }
+
+    // 注意：
+    //   - W_sum_mul_x_zp 和 R_sum_mul_h_zp 指针在 EnsureBuffersAllocated 中更新（确保缓冲区已分配）
+    //   - 粒度配置通过 OperatorQuantConfig 单独传递，不在此结构体中
+
+    // 重置权重和计算标志
+    weight_sums_computed_ = false;
+}
+
+void ForwardPassQuantFP::EnsureBuffersAllocated(int steps) {
+    const int batch_size = data_->batch_size;
+    const int hidden_size = data_->hidden_size;
+    const int hidden3 = hidden_size * 3;
+
+    if (steps <= max_steps_) {
+        return;
+    }
+
+    // Linear 变换结果（cuBLAS GEMM 直接写入，然后原地 rescale）
+    tmp_weight_ih_linear_.resize(hidden3 * steps * batch_size);
+    tmp_weight_hh_linear_.resize(hidden3 * batch_size);
+
+    // 权重和常量
+    if (W_sum_mul_x_zp_.size() == 0) {
+        W_sum_mul_x_zp_.resize(hidden3);
+        R_sum_mul_h_zp_.resize(hidden3);
+    }
+
+    // 更新 LinearRescaleParamsFP 中的指针（确保缓冲区已分配）
+    linear_params_.W_sum_mul_x_zp = W_sum_mul_x_zp_.data();
+    linear_params_.R_sum_mul_h_zp = R_sum_mul_h_zp_.data();
+
+    max_steps_ = steps;
+    weight_sums_computed_ = false;
+}
+
+void ForwardPassQuantFP::PrecomputeWeightSums(const float *W, const float *R) {
+    // 如果权重变化，需要重新计算
+    if (cached_W_ != W || cached_R_ != R) {
+        weight_sums_computed_ = false;
+        cached_W_ = W;
+        cached_R_ = R;
+    }
+
+    if (weight_sums_computed_) return;
+
+    const int hidden_size = data_->hidden_size;
+    const int input_size = data_->input_size;
+    const int hidden3 = hidden_size * 3;
+    const cudaStream_t stream = data_->stream[1];
+
+    int threads = 256;
+    int blocks = (hidden3 + threads - 1) / threads;
+
+    // 计算 W_sum * zp_x（如果 zp_x != 0，否则直接清零）
+    if (linear_params_.zp_x_ != 0.0f) {
+        kernel::computeWeightSumKernel<<<blocks, threads, 0, stream>>>(
+            W, W_sum_mul_x_zp_.data(), linear_params_.zp_x_, hidden3, input_size);
+    } else {
+        dev::fill_n(W_sum_mul_x_zp_.data(), hidden3, 0.0f);
+    }
+
+    // 计算 R_sum * zp_h（如果 zp_h != 0，否则直接清零）
+    if (linear_params_.zp_h_ != 0.0f) {
+        kernel::computeWeightSumKernel<<<blocks, threads, 0, stream>>>(
+            R, R_sum_mul_h_zp_.data(), linear_params_.zp_h_, hidden3, hidden_size);
+    } else {
+        dev::fill_n(R_sum_mul_h_zp_.data(), hidden3, 0.0f);
+    }
+
+    cudaStreamSynchronize(stream);
+    weight_sums_computed_ = true;
+}
+
+void ForwardPassQuantFP::ComputeLinearX(const float *W, const float *x, const float *bw,
+                                        int steps) {
+    const int batch_size = data_->batch_size;
+    const int input_size = data_->input_size;
+    const int hidden_size = data_->hidden_size;
+    const cudaStream_t stream = data_->stream[1];
+
+    const int M = hidden_size * 3;
+    const int N = steps * batch_size;
+    const int K = input_size;
+
+    // 使用 cuBLAS SGEMM（BiasRescale 已融合到 PointwiseOperationsFP）
+    cublasSetStream(data_->blas_handle, stream);
+
+    // cuBLAS SGEMM: 直接写入 tmp_weight_ih_linear_（未 rescale 的原始 GEMM 结果）
+    // W: [M, K] 列主序，x: [K, N] 列主序，输出 [M, N]
+    static const float alpha = 1.0f;
+    static const float beta = 0.0f;
+    blas<float>::gemm(data_->blas_handle, CUBLAS_OP_N, CUBLAS_OP_N, M, N, K, &alpha, W, M, x, K,
+                      &beta, tmp_weight_ih_linear_.data(), M);
+
+    // 注意：BiasRescale 已融合到 PointwiseOperationsFP，减少全局内存读取
+}
+
+void ForwardPassQuantFP::ComputeLinearH(const float *R, const float *h, const float *br,
+                                        uint8_t *weight_hh_linear_mask) {
+    const int batch_size = data_->batch_size;
+    const int hidden_size = data_->hidden_size;
+    const cudaStream_t stream = data_->stream[0];
+
+    const int M = hidden_size * 3;
+    const int N = batch_size;
+    const int K = hidden_size;
+
+    // 使用 cuBLAS SGEMM（BiasRescale 已融合到 PointwiseOperationsFP）
+    cublasSetStream(data_->blas_handle, stream);
+
+    // cuBLAS SGEMM: 直接写入 tmp_weight_hh_linear_（未 rescale 的原始 GEMM 结果）
+    static const float alpha = 1.0f;
+    static const float beta = 0.0f;
+    blas<float>::gemm(data_->blas_handle, CUBLAS_OP_N, CUBLAS_OP_N, M, N, K, &alpha, R, M, h, K,
+                      &beta, tmp_weight_hh_linear_.data(), M);
+
+    // 注意：BiasRescale 已融合到 PointwiseOperationsFP，减少全局内存读取
+}
+
+void ForwardPassQuantFP::IterateInternal(const float *R, const float *bw, const float *br,
+                                         const float *h, float *h_out, float *v,
+                                         const float *cur_weight_ih_linear, float zoneout_prob,
+                                         const float *zoneout_mask, uint8_t *weight_ih_linear_mask,
+                                         uint8_t *weight_hh_linear_mask, uint8_t *gate_input_mask,
+                                         uint8_t *gate_output_mask, uint8_t *h_mask) {
+    const bool training = data_->training;
+    const int batch_size = data_->batch_size;
+    const int hidden_size = data_->hidden_size;
+    const cudaStream_t stream1 = data_->stream[0];
+    const cudaEvent_t event = data_->event;
+
+    cublasSetStream(data_->blas_handle, stream1);
+
+    // 计算隐状态 Linear 变换: R*h + br（与 stream2 上的 ComputeLinearX 并行执行）
+    ComputeLinearH(R, h, br, weight_hh_linear_mask);
+
+    // Pointwise kernel 配置
+    const dim3 blockDim(32, 16);
+    const dim3 gridDim((hidden_size + blockDim.x - 1) / blockDim.x,
+                       (batch_size + blockDim.y - 1) / blockDim.y);
+
+    // 等待 ComputeLinearX 完成（pointwise kernel 需要同时使用 weight_ih_linear 和
+    // weight_hh_linear）
+    cudaStreamWaitEvent(stream1, event, 0);
+
+    const bool apply_zoneout = (zoneout_prob > 0.0f && zoneout_mask != nullptr);
+
+    // 启动 GRU pointwise kernel（4 种组合：Training * Zoneout）
+    // BiasRescale 已融合到 PointwiseOperationsFP，减少全局内存读取
+    // Training 模式自动保存 mask（用于 QAT 反向传播）
+    // bw 和 br 直接从 IterateInternal 参数传入，不需要存到 linear_params_ 中
+    if (training) {
+        if (apply_zoneout) {
+            kernel::PointwiseOperationsFP<true, true><<<gridDim, blockDim, 0, stream1>>>(
+                batch_size, hidden_size, cur_weight_ih_linear, tmp_weight_hh_linear_.data(),
+                linear_params_, bw, br, h, h_out, v, zoneout_prob, zoneout_mask,
+                gate_params_, bitwidth_config_, weight_ih_linear_mask, weight_hh_linear_mask, gate_input_mask,
+                gate_output_mask, h_mask);
+        } else {
+            kernel::PointwiseOperationsFP<true, false><<<gridDim, blockDim, 0, stream1>>>(
+                batch_size, hidden_size, cur_weight_ih_linear, tmp_weight_hh_linear_.data(),
+                linear_params_, bw, br, h, h_out, v, zoneout_prob, zoneout_mask,
+                gate_params_, bitwidth_config_, weight_ih_linear_mask, weight_hh_linear_mask, gate_input_mask,
+                gate_output_mask, h_mask);
+        }
+    } else {
+        if (apply_zoneout) {
+            kernel::PointwiseOperationsFP<false, true><<<gridDim, blockDim, 0, stream1>>>(
+                batch_size, hidden_size, cur_weight_ih_linear, tmp_weight_hh_linear_.data(),
+                linear_params_, bw, br, h, h_out, v, zoneout_prob, zoneout_mask,
+                gate_params_, bitwidth_config_, nullptr, nullptr, nullptr, nullptr, nullptr);
+        } else {
+            kernel::PointwiseOperationsFP<false, false><<<gridDim, blockDim, 0, stream1>>>(
+                batch_size, hidden_size, cur_weight_ih_linear, tmp_weight_hh_linear_.data(),
+                linear_params_, bw, br, h, h_out, v, zoneout_prob, zoneout_mask,
+                gate_params_, bitwidth_config_, nullptr, nullptr, nullptr, nullptr, nullptr);
+        }
+    }
+}
+
+void ForwardPassQuantFP::Run(int steps, const float *W, const float *R, const float *bw,
+                             const float *br, const float *x, float *h, float *v,
+                             float zoneout_prob, const float *zoneout_mask,
+                             uint8_t *weight_ih_linear_mask, uint8_t *weight_hh_linear_mask,
+                             uint8_t *gate_input_mask, uint8_t *gate_output_mask, uint8_t *h_mask) {
+    // 量化模式：禁用 TensorCore 以提高精度（与浮点模式保持一致）
+    // TensorCore 使用 TF32 精度，可能导致精度问题
+    const blas<void>::enable_tensor_cores scoped0(data_->blas_handle);  // 注释掉以禁用
+    // TensorCore
+    const blas<void>::set_pointer_mode scoped1(data_->blas_handle);
+
+    const int batch_size = data_->batch_size;
+    const int hidden_size = data_->hidden_size;
+    const cudaStream_t stream2 = data_->stream[1];
+    const cudaEvent_t event = data_->event;
+
+    // 预分配缓冲区
+    EnsureBuffersAllocated(steps);
+
+    // 预计算权重和
+    PrecomputeWeightSums(W, R);
+
+    cudaStream_t save_stream;
+    cublasGetStream(data_->blas_handle, &save_stream);
+
+    cublasSetStream(data_->blas_handle, stream2);
+
+    // 计算输入 Linear 变换（所有时间步一次性计算）
+    // 注意：weight_ih_linear_mask 现在在 PointwiseOperationsFP 中填充
+    ComputeLinearX(W, x, bw, steps);
+
+    // 同步 Linear 计算
+    cudaEventRecord(event, stream2);
+
+    const int NH = batch_size * hidden_size;
+    const int NH3 = batch_size * hidden_size * 3;
+
+    // 时间步循环
+    for (int i = 0; i < steps; ++i) {
+        IterateInternal(R, bw, br,
+                        h + i * NH,                              // 输入 h
+                        h + (i + 1) * NH,                        // 输出 h
+                        v ? v + i * NH * 4 : nullptr,            // 中间激活
+                        tmp_weight_ih_linear_.data() + i * NH3,  // 当前时间步的 W*x（未 rescale）
+                        zoneout_prob, zoneout_mask ? zoneout_mask + i * NH : nullptr,
+                        weight_ih_linear_mask ? weight_ih_linear_mask + i * NH3 : nullptr,
+                        weight_hh_linear_mask ? weight_hh_linear_mask + i * NH3 : nullptr,
+                        gate_input_mask ? gate_input_mask + i * NH3 : nullptr,
+                        gate_output_mask ? gate_output_mask + i * NH3 : nullptr,
+                        h_mask ? h_mask + i * NH : nullptr);
+    }
+
+    cublasSetStream(data_->blas_handle, save_stream);
+}
+
+}  // namespace gru

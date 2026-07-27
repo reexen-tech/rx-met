@@ -1,0 +1,119 @@
+{
+  "description": "GRU 量化位宽配置文件",
+  "comment": "位宽: 1-32; is_symmetric: true(zp=0) / false(zp≠0); is_unsigned: true(UINT) / false(INT)",
+
+  "GRU_config": {
+    "default_config": {
+      "disable_quantization": false,
+      "use_pot2_scale": false
+    },
+    "operator_config": {
+      "input": {
+        "bitwidth": 8,
+        "is_symmetric": true,
+        "is_unsigned": false,
+        "comment": "输入序列 input, 每个时间步的输入特征"
+      },
+      "output": {
+        "bitwidth": 8,
+        "is_symmetric": true,
+        "is_unsigned": false,
+        "comment": "隐藏状态 output, 每个时间步的输出，同时作为下一时间步的输入"
+      },
+      "weight_ih": {
+        "bitwidth": 8,
+        "is_symmetric": true,
+        "is_unsigned": false,
+        "quantization_granularity": "PER_CHANNEL",
+        "comment": "输入权重矩阵 weight_ih, 包含 weight_ih_z/weight_ih_r/weight_ih_n 三个门的权重。quantization_granularity: PER_TENSOR(整个tensor一个scale) / PER_GATE(每个门一个scale) / PER_CHANNEL(每个输出通道一个scale, 默认)"
+      },
+      "weight_hh": {
+        "bitwidth": 8,
+        "is_symmetric": true,
+        "is_unsigned": false,
+        "quantization_granularity": "PER_CHANNEL",
+        "comment": "循环权重矩阵 weight_hh, 包含 weight_hh_z/weight_hh_r/weight_hh_n 三个门的权重。quantization_granularity: PER_TENSOR / PER_GATE / PER_CHANNEL(默认)"
+      },
+      "bias_ih": {
+        "bitwidth": 8,
+        "is_symmetric": true,
+        "is_unsigned": false,
+        "quantization_granularity": "PER_CHANNEL",
+        "comment": "输入偏置 bias_ih, 包含 bias_ih_z/bias_ih_r/bias_ih_n 三个门的偏置。quantization_granularity: PER_TENSOR / PER_GATE / PER_CHANNEL(默认)"
+      },
+      "bias_hh": {
+        "bitwidth": 8,
+        "is_symmetric": true,
+        "is_unsigned": false,
+        "quantization_granularity": "PER_CHANNEL",
+        "comment": "循环偏置 bias_hh, 包含 bias_hh_z/bias_hh_r/bias_hh_n 三个门的偏置。quantization_granularity: PER_TENSOR / PER_GATE / PER_CHANNEL(默认)"
+      },
+      "weight_ih_linear": {
+        "bitwidth": 8,
+        "is_symmetric": true,
+        "is_unsigned": false,
+        "comment": "输入 Linear 变换输出: W*x + bw, GEMM+bias 融合结果，循环外一次性计算所有时间步"
+      },
+      "weight_hh_linear": {
+        "bitwidth": 8,
+        "is_symmetric": true,
+        "is_unsigned": false,
+        "comment": "隐状态 Linear 变换输出: R*h + br, GEMM+bias 融合结果，每个时间步计算一次"
+      },
+      "update_gate_input": {
+        "bitwidth": 8,
+        "is_symmetric": true,
+        "is_unsigned": false,
+        "comment": "更新门(z)激活前: weight_ih_linear_z + weight_hh_linear_z, sigmoid 函数的输入"
+      },
+      "update_gate_output": {
+        "bitwidth": 8,
+        "is_symmetric": true,
+        "is_unsigned": true,
+        "comment": "更新门(z)激活后: sigmoid(update_gate_input), 范围[0,1], 控制保留多少旧状态, 使用 UINT 充分利用量化范围"
+      },
+      "reset_gate_input": {
+        "bitwidth": 8,
+        "is_symmetric": true,
+        "is_unsigned": false,
+        "comment": "重置门(r)激活前: weight_ih_linear_r + weight_hh_linear_r, sigmoid 函数的输入"
+      },
+      "reset_gate_output": {
+        "bitwidth": 8,
+        "is_symmetric": true,
+        "is_unsigned": true,
+        "comment": "重置门(r)激活后: sigmoid(reset_gate_input), 范围[0,1], 控制遗忘多少旧状态, 使用 UINT 充分利用量化范围"
+      },
+      "new_gate_input": {
+        "bitwidth": 8,
+        "is_symmetric": true,
+        "is_unsigned": false,
+        "comment": "候选门(n)激活前: weight_ih_linear_n + mul_reset_hidden, tanh 函数的输入"
+      },
+      "new_gate_output": {
+        "bitwidth": 8,
+        "is_symmetric": true,
+        "is_unsigned": false,
+        "comment": "候选门(n)激活后: tanh(new_gate_input), 范围[-1,1], 候选隐藏状态, 使用 INT 对称量化"
+      },
+      "mul_reset_hidden": {
+        "bitwidth": 8,
+        "is_symmetric": true,
+        "is_unsigned": false,
+        "comment": "重置门与隐状态乘积: reset_gate_output * weight_hh_linear_n, 用于候选门计算"
+      },
+      "mul_old_contribution": {
+        "bitwidth": 8,
+        "is_symmetric": true,
+        "is_unsigned": false,
+        "comment": "旧状态贡献: u * h, 即 update_gate_output * h_old, 隐状态更新公式的第一项"
+      },
+      "mul_new_contribution": {
+        "bitwidth": 8,
+        "is_symmetric": true,
+        "is_unsigned": false,
+        "comment": "新状态贡献: (1-u) * n, 即 (1 - update_gate_output) * new_gate_output, 隐状态更新公式的第二项"
+      }
+    }
+  }
+}
