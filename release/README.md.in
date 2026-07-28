@@ -1,0 +1,92 @@
+# rx-met @VERSION@ 离线使用说明
+
+本发布包包含：
+
+```text
+rx-met-@VERSION@/
+├── README.md
+├── SHA256SUMS
+├── rx-met-@VERSION@-image.tar
+└── examples/
+```
+
+## 1. 环境要求
+
+- Linux x86_64
+- 满足 CUDA 12.8 运行要求的 NVIDIA Driver
+- Docker
+- NVIDIA Container Toolkit
+
+宿主机不需要安装 CUDA Toolkit、Python、PyTorch 或 rx-met。
+
+## 2. 校验并导入镜像
+
+在解压后的 `rx-met-@VERSION@` 目录执行：
+
+```bash
+sha256sum -c SHA256SUMS
+docker load -i rx-met-@VERSION@-image.tar
+docker run --rm --gpus all rx-met:@VERSION@ rx-met --help
+```
+
+## 3. 大模型量化
+
+先编辑 `examples/config/` 下的 JSON，将模型和数据集路径改为容器内的
+`/data/...` 路径。然后挂载示例、数据和输出目录：
+
+```bash
+mkdir -p runs
+
+docker run --rm --gpus all \
+  --user "$(id -u):$(id -g)" \
+  -v "$PWD/examples:/examples:ro" \
+  -v /宿主机/模型和数据目录:/data:ro \
+  -v "$PWD/runs:/output" \
+  -w /output \
+  rx-met:@VERSION@ \
+  rx-met /examples/config/qwen3_reex_q4_k_64.json
+```
+
+只检查配置和将要执行的命令：
+
+```bash
+docker run --rm --gpus all \
+  -v "$PWD/examples:/examples:ro" \
+  -v /宿主机/模型和数据目录:/data:ro \
+  rx-met:@VERSION@ \
+  rx-met --dry-run /examples/config/qwen3_reex_q4_k_64.json
+```
+
+配置字段说明见 `examples/config/README.md`。
+
+## 4. 小模型示例
+
+`quick_start.py` 会在 Example 目录写入模型和结果，因此建议复制一份工作目录：
+
+```bash
+cp -a examples examples-work
+
+docker run --rm --gpus all \
+  --user "$(id -u):$(id -g)" \
+  -v "$PWD/examples-work:/examples" \
+  -v /宿主机/SpeechCommands目录:/data/speech_commands:ro \
+  -w /examples \
+  rx-met:@VERSION@ \
+  python3 quick_start.py
+```
+
+运行前需按实际数据位置调整 `examples-work/quick_start.py` 中的 `DATA_ROOT`。
+
+## 5. 常用检查
+
+```bash
+docker run --rm --gpus all rx-met:@VERSION@ \
+  python3 -c "import torch; print(torch.__version__, torch.cuda.is_available())"
+
+# 输出 True 则正常
+
+docker run --rm rx-met:@VERSION@ \
+  python3 -c "import aimet_torch, quant_gru, rx_met_llm; print('imports OK')"
+```
+
+# 输出 imports OK 则正常

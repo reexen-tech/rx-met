@@ -1,48 +1,7 @@
 {
-  "schema_version": "1.0",
-
-  "experiment": {
-    "name": "qwen3_reex_q4_k_64",
-    "description": "REEX block-64 quantization demo: quantize to Q4_K_64 and evaluate PPL with fixed-point Psum truncated to 8 bits (REEX_Q64_PSUM_BITS=8). Requires the in-tree REEX-enabled llama.cpp build.",
-    "output_dir": "./runs/qwen3_reex_q4_k_64"
-  },
-
-  "binaries": {
-    "llama_quantize":   "./llama.cpp/build_cuda/bin/llama-quantize",
-    "llama_imatrix":    "./llama.cpp/build_cuda/bin/llama-imatrix",
-    "llama_perplexity": "./llama.cpp/build_cuda/bin/llama-perplexity",
-    "ld_library_path":  "./llama.cpp/build_cuda/bin"
-  },
-
-  "model": {
-    "gguf_fp16_path": "/path/to/model-f16.gguf"
-  },
-
-  "calibration": { "enabled": false },
-
-  "quantization": {
-    "default_type":     "Q4_K_64",
-    "output_quantized": "model-Q4_K_64.gguf",
-    "use_imatrix":      false,
-    "n_threads":        16
-  },
-
-  "evaluation": {
-    "enabled": true,
-    "perplexity": {
-      "dataset_file":   "/path/to/wikitext-2-raw/wiki.test.raw",
-      "context_length": 512,
-      "n_gpu_layers":   99,
-      "parallel":       1,
-      "flash_attn":     true,
-      "chunks":         8,
-      "reex_psum_bits": 8
-    }
-  },
-
-  "report": {
-    "write_markdown":       true,
-    "save_resolved_config": true,
-    "save_manifest":        true
+  "model": "/path/to/Qwen3-30B-A3B",
+  "quant": "Q4_K_64",
+  "eval": {
+    "dataset": "/path/to/wikitext-2-raw/wiki.test.raw"
   }
 }

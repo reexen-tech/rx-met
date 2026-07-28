@@ -7,7 +7,7 @@ build-backend = "setuptools.build_meta"
 # ---------------------------------------------------------------------------
 [project]
 name = "aimet-rx"
-version = "1.3.11"
+version = "1.0.0"
 description = "AI Model Efficiency Toolkit - Redistributable Package"
 readme = "README.md"
 license = { text = "BSD-3-Clause" }
@@ -32,8 +32,8 @@ classifiers = [
 # 运行时依赖动态读 requirements.txt，避免与 requirements.txt 双重维护
 dynamic = ["dependencies"]
 
-[project.urls]
-Homepage = "https://github.com/quic/aimet"
+[project.scripts]
+rx-met = "rx_met_llm.pipeline:_cli"
 
 # ---------------------------------------------------------------------------
 # setuptools 后端配置（替代旧 setup.py 中的对应字段）
@@ -53,8 +53,8 @@ include = [
     "aimet_onnx.*",
     "aimet_torch",
     "aimet_torch.*",
-    "aimet_llama",
-    "aimet_llama.*",
+    "rx_met_llm",
+    "rx_met_llm.*",
     "export_onnx_and_encodings",
     "export_onnx_and_encodings.*",
 ]
@@ -63,5 +63,5 @@ include = [
 aimet_common = ["*.json", "*.so", "*.pyd", "*.dll", "bin/*"]
 aimet_onnx = ["*.json", "*.so", "*.pyd", "*.dll"]
 aimet_torch = ["*.json", "*.so", "*.pyd", "*.dll"]
-aimet_llama = ["*.md"]
+rx_met_llm = ["*.md"]
 export_onnx_and_encodings = ["*.json", "*.pt", "data/*"]

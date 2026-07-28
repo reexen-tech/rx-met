@@ -1,46 +1,7 @@
 {
-  "schema_version": "1.0",
-
-  "experiment": {
-    "name": "qwen3_30b_q4_0_minimal",
-    "description": "Minimal Qwen3-30B-A3B Q4_0 quantization. Single JSON replaces a shell pipeline.",
-    "output_dir": "./runs/qwen3_30b_q4_0_minimal"
-  },
-
-  "binaries": {
-    "llama_quantize":   "./llama.cpp/build_cuda/bin/llama-quantize",
-    "llama_imatrix":    "./llama.cpp/build_cuda/bin/llama-imatrix",
-    "llama_perplexity": "./llama.cpp/build_cuda/bin/llama-perplexity",
-    "ld_library_path":  "./llama.cpp/build_cuda/bin"
-  },
-
-  "model": {
-    "gguf_fp16_path": "/path/to/Qwen3-30B-A3B-f16.gguf"
-  },
-
-  "calibration": { "enabled": false },
-
-  "quantization": {
-    "default_type":   "Q4_0",
-    "output_quantized": "Qwen3-30B-A3B-q4_0.gguf",
-    "use_imatrix":    false,
-    "n_threads":      16
-  },
-
-  "evaluation": {
-    "enabled": true,
-    "perplexity": {
-      "dataset_file": "/path/to/wikitext-2-raw/wiki.test.raw",
-      "context_length": 2048,
-      "n_gpu_layers":   99,
-      "parallel":       16,
-      "flash_attn":     true
-    }
-  },
-
-  "report": {
-    "write_markdown": true,
-    "save_resolved_config": true,
-    "save_manifest": true
+  "model": "/path/to/Qwen3-30B-A3B",
+  "quant": "Q4_0",
+  "eval": {
+    "dataset": "/path/to/wikitext-2-raw/wiki.test.raw"
   }
 }

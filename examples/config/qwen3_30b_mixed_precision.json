@@ -1,48 +1,15 @@
 {
-  "schema_version": "1.0",
-
-  "experiment": {
-    "name": "qwen3_30b_q4_0_kvq4_0_demo",
-    "description": "Qwen3-30B-A3B: load FP16 GGUF, quantize weights to Q4_0, run PPL with KV cache = Q4_0. Single JSON drives the whole flow.",
-    "output_dir": "./runs/qwen3_30b_q4_0_kvq4_0_demo"
+  "model": "/path/to/Qwen3-30B-A3B",
+  "quant": "Q4_0",
+  "eval": {
+    "dataset": "/path/to/wikitext-2-raw/wiki.test.raw",
+    "context": 2048,
+    "chunks": 20,
+    "cache_type_k": "q4_0",
+    "cache_type_v": "q4_0"
   },
-
-  "binaries": {
-    "llama_quantize":   "./llama.cpp/build_cuda/bin/llama-quantize",
-    "llama_imatrix":    "./llama.cpp/build_cuda/bin/llama-imatrix",
-    "llama_perplexity": "./llama.cpp/build_cuda/bin/llama-perplexity",
-    "ld_library_path":  "./llama.cpp/build_cuda/bin"
-  },
-
-  "model": {
-    "gguf_fp16_path": "/path/to/Qwen3-30B-A3B-f16.gguf"
-  },
-
-  "calibration": { "enabled": false },
-
-  "quantization": {
-    "default_type":     "Q4_0",
-    "output_quantized": "Qwen3-30B-A3B-q4_0.gguf",
-    "use_imatrix":      false,
-    "n_threads":        16
-  },
-  "evaluation": {
-    "enabled": true,
-    "perplexity": {
-      "dataset_file":   "/path/to/wikitext-2-raw/wiki.test.raw",
-      "context_length": 2048,
-      "n_gpu_layers":   99,
-      "parallel":       16,
-      "flash_attn":     true,
-      "chunks":         20,
-      "cache_type_k":   "q4_0",
-      "cache_type_v":   "q4_0"
-    }
-  },
-
-  "report": {
-    "write_markdown":       true,
-    "save_resolved_config": true,
-    "save_manifest":        false
-  }
+  "mixed_precision": [
+    { "pattern": ".*\\.attn_v\\.weight$", "type": "Q5_K" },
+    { "pattern": ".*\\.ffn_down\\..*", "type": "Q5_K" }
+  ]
 }

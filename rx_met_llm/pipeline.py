@@ -42,6 +42,7 @@ from .cli import (
 from .schema import (
     ConfigError,
     SCHEMA_VERSION,
+    hf_gguf_intermediate_path,
     hw_export_output_gguf,
     imatrix_path,
     load_config,
@@ -134,6 +135,7 @@ class LLMQuantPipeline:
         self._started_at = datetime.datetime.now().isoformat(timespec="seconds")
         t0 = time.time()
 
+        self._run_hf_convert()
         self._run_imatrix()
         self._run_quantize()
         self._run_hw_export()
@@ -154,6 +156,9 @@ class LLMQuantPipeline:
     def plan(self) -> Dict[str, List[str]]:
         """Return the exact CLI commands this run would execute. Side-effect free."""
         plan: Dict[str, List[str]] = {}
+        hf = self._build_hf_convert_cmd()
+        if hf is not None:
+            plan["hf_convert"] = hf
         imat = build_imatrix_cmd(self.config)
         if imat is not None:
             plan["imatrix"] = imat
@@ -184,7 +189,7 @@ class LLMQuantPipeline:
             ):
                 # Non-empty: allow but warn (we never delete files).
                 print(
-                    f"[aimet_llama] WARNING: output_dir is non-empty: {self.output_dir}",
+                    f"[rx-met] WARNING: output_dir is non-empty: {self.output_dir}",
                     file=sys.stderr,
                 )
         self.output_dir.mkdir(parents=True, exist_ok=True)
@@ -208,6 +213,7 @@ class LLMQuantPipeline:
                 "cwd": os.getcwd(),
             },
             "inputs": {
+                "hf_model": _safe_hash(cfg["model"].get("hf_path")),
                 "gguf_fp16": _safe_hash(cfg["model"].get("gguf_fp16_path")),
                 "calibration_dataset": _safe_hash(
                     cfg["calibration"].get("dataset_file")
@@ -298,13 +304,13 @@ class LLMQuantPipeline:
         if env_extra:
             env.update(env_extra)
 
-        print(f"\n[aimet_llama] stage={name} cmd:")
+        print(f"\n[rx-met] stage={name} cmd:")
         print(format_cmd(cmd))
-        print(f"[aimet_llama] log -> {log_file}\n", flush=True)
+        print(f"[rx-met] log -> {log_file}\n", flush=True)
 
         t0 = time.time()
         with log_file.open("w", encoding="utf-8", errors="replace") as fh:
-            fh.write(f"# aimet_llama stage: {name}\n")
+            fh.write(f"# rx-met stage: {name}\n")
             fh.write(f"# cmd: {shlex.join(cmd)}\n")
             if env_extra:
                 env_str = " ".join(f"{k}={v}" for k, v in env_extra.items())
@@ -339,6 +345,34 @@ class LLMQuantPipeline:
         return res
 
     # --- stage runners ------------------------------------------------
+
+    def _build_hf_convert_cmd(self) -> Optional[List[str]]:
+        model = self.config["model"]
+        if model.get("gguf_fp16_path"):
+            return None
+        hf_path = model.get("hf_path")
+        if not hf_path:
+            raise ConfigError("model: expected HuggingFace directory or GGUF file")
+        out_gguf = hf_gguf_intermediate_path(self.config)
+        script = self.config["binaries"]["convert_hf_to_gguf"]
+        return [
+            sys.executable,
+            script,
+            hf_path,
+            "--outtype", "f16",
+            "--outfile", str(out_gguf),
+        ]
+
+    def _run_hf_convert(self) -> None:
+        cmd = self._build_hf_convert_cmd()
+        if cmd is None:
+            self._run_stage("hf_convert", None, skip_reason="gguf input already set")
+            return
+        out_gguf = hf_gguf_intermediate_path(self.config)
+        self._run_stage("hf_convert", cmd)
+        if not out_gguf.is_file():
+            raise RuntimeError(f"HF conversion did not produce: {out_gguf}")
+        self.config["model"]["gguf_fp16_path"] = str(out_gguf.resolve())
 
     def _run_imatrix(self) -> None:
         cmd = build_imatrix_cmd(self.config)
@@ -429,7 +463,7 @@ class LLMQuantPipeline:
         report = self.output_dir / cfg["report"]["markdown_name"]
         lines: List[str] = []
 
-        lines.append(f"# AIMET-llama experiment report: `{exp['name']}`")
+        lines.append(f"# rx-met experiment report: `{exp['name']}`")
         if exp.get("description"):
             lines.append(f"\n> {exp['description']}\n")
         lines.append("")
@@ -511,7 +545,7 @@ class LLMQuantPipeline:
 
         with report.open("w", encoding="utf-8") as fh:
             fh.write("\n".join(lines) + "\n")
-        print(f"\n[aimet_llama] report written -> {report}")
+        print(f"\n[rx-met] report written -> {report}")
 
 
 # ---------------------------------------------------------------------------
@@ -521,8 +555,8 @@ class LLMQuantPipeline:
 
 def _cli() -> None:
     p = argparse.ArgumentParser(
-        prog="python -m aimet_llama.pipeline",
-        description="JSON-driven LLM quantization pipeline (llama.cpp backend)",
+        prog="rx-met",
+        description="JSON-driven LLM quantization pipeline (rx-met)",
     )
     p.add_argument("config", type=Path, help="Path to JSON config")
     p.add_argument(
@@ -537,7 +571,7 @@ def _cli() -> None:
         pipe.print_plan()
         return
     summary = pipe.run()
-    print("\n[aimet_llama] summary:")
+    print("\n[rx-met] summary:")
     print(json.dumps(summary, indent=2, ensure_ascii=False))
 
 
