@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from .schema import (
+    hf_gguf_intermediate_path,
     imatrix_path,
     quantized_path,
     hw_export_input,
@@ -23,6 +24,12 @@ from .schema import (
 
 def _str(value: Any) -> str:
     return str(value)
+
+
+def _input_gguf_path(cfg: Dict[str, Any]) -> Path:
+    """Return an existing GGUF input or the planned HF conversion output."""
+    gguf = cfg["model"].get("gguf_fp16_path")
+    return Path(gguf) if gguf else hf_gguf_intermediate_path(cfg)
 
 
 def build_imatrix_cmd(cfg: Dict[str, Any]) -> Optional[List[str]]:
@@ -37,7 +44,7 @@ def build_imatrix_cmd(cfg: Dict[str, Any]) -> Optional[List[str]]:
 
     argv: List[str] = [
         cfg["binaries"]["llama_imatrix"],
-        "-m", _str(cfg["model"]["gguf_fp16_path"]),
+        "-m", _str(_input_gguf_path(cfg)),
         "-f", _str(cal["dataset_file"]),
         "-o", _str(out_path),
         "--output-format", cal["output_format"],
@@ -108,7 +115,7 @@ def build_quantize_cmd(cfg: Dict[str, Any]) -> List[str]:
 
     # Positional args last: input, output, type, [threads]
     argv += [
-        _str(cfg["model"]["gguf_fp16_path"]),
+        _str(_input_gguf_path(cfg)),
         _str(out_path),
         q["default_type"],
         _str(q.get("n_threads", 8)),

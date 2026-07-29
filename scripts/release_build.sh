@@ -10,7 +10,7 @@ EXPORT_DIR="${RX_MET_EXPORT_DIR:-${ROOT}/.release/export}"
 RELEASE_NAME="rx-met-${VERSION}"
 RELEASE_BUNDLE="${EXPORT_DIR}/${RELEASE_NAME}-release.tar.gz"
 RELEASE_SHA256="${RELEASE_BUNDLE}.sha256"
-README_TEMPLATE="${ROOT}/release/README.md.in"
+README_FILE="${ROOT}/release/README.md"
 STAGING_ROOT="${ROOT}/.release/staging"
 GZIP_LEVEL="${RX_MET_GZIP_LEVEL:-6}"
 CUDA_ARCHITECTURES="${RX_MET_CUDA_ARCHITECTURES:-80;86;89;120}"
@@ -33,8 +33,8 @@ if [[ ! "${GZIP_LEVEL}" =~ ^[1-9]$ ]]; then
     log "ERROR: RX_MET_GZIP_LEVEL must be an integer from 1 to 9"
     exit 1
 fi
-if [[ ! -f "${README_TEMPLATE}" ]]; then
-    log "ERROR: release README template not found: ${README_TEMPLATE}"
+if [[ ! -f "${README_FILE}" ]]; then
+    log "ERROR: release README not found: ${README_FILE}"
     exit 1
 fi
 export RX_MET_VERSION="${VERSION}"
@@ -83,7 +83,8 @@ tar -C "${ROOT}" \
     --exclude='*/__pycache__' \
     --exclude='*.pyc' \
     -cf - examples | tar -C "${RELEASE_DIR}" -xf -
-sed "s/@VERSION@/${VERSION}/g" "${README_TEMPLATE}" > "${RELEASE_DIR}/README.md"
+cp "${README_FILE}" "${RELEASE_DIR}/README.md"
+sed -i "s/@VERSION@/${VERSION}/g" "${RELEASE_DIR}/README.md"
 (
     cd "${RELEASE_DIR}"
     sha256sum "$(basename "${IMAGE_TAR}")" > SHA256SUMS

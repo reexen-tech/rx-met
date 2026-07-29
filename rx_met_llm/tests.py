@@ -133,6 +133,21 @@ def test_quantize_cmd_shape():
     expect(argv[-2] == "Q4_0", "quant type positional")
 
 
+def test_hf_plan_uses_conversion_output():
+    with tempfile.TemporaryDirectory() as model_dir:
+        (Path(model_dir) / "config.json").write_text("{}", encoding="utf-8")
+        ppl = _tmp_file(".txt")
+        plan = LLMQuantPipeline(_base_config(Path(model_dir), ppl)).plan()
+        expected = str(
+            Path.cwd()
+            / "runs"
+            / f"{Path(model_dir).name}-Q4_0"
+            / f"{Path(model_dir).name}-f16.gguf"
+        )
+        expect(plan["quantize"][-4] == expected, "HF quantize input")
+        expect("None" not in plan["quantize"], "HF plan must not contain None")
+
+
 def test_imatrix_from_calib_dataset():
     model = _tmp_file()
     ppl = _tmp_file(".txt")

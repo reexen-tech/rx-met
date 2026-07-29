@@ -2,6 +2,7 @@
 # Smoke-test a built rx-met Docker image (§3.6 in Release_packaging.md).
 set -euo pipefail
 
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 VERSION="${RX_MET_VERSION:-1.0.0}"
 IMAGE="${RX_MET_IMAGE:-rx-met:${VERSION}}"
 
@@ -21,6 +22,7 @@ import torch
 import torchvision
 import aimet_torch
 import onnxscript
+import onnxsim
 import quant_gru
 import rx_met_llm
 import gguf
@@ -29,6 +31,22 @@ print('torch', torch.__version__, 'torchvision', torchvision.__version__, 'cuda'
 print('onnxscript', onnxscript.__version__)
 print('quant_gru', quant_gru.__file__)
 print('rx_met_llm', rx_met_llm.__version__)
+"
+
+log "external quick_start.py imports with host UID"
+docker run --rm \
+    --user "$(id -u):$(id -g)" \
+    -e HOME=/tmp \
+    -e USER="$(id -un)" \
+    -e RX_MET_SPEECH_COMMANDS_ROOT=/data/speech_commands \
+    -v "${ROOT}/examples:/examples:ro" \
+    -w /examples \
+    "${IMAGE}" \
+    python3 -c "
+import runpy
+ns = runpy.run_path('/examples/quick_start.py', run_name='verify_image')
+assert ns['DATA_ROOT'] == '/data/speech_commands'
+print('quick_start import OK')
 "
 
 log "Python dependency consistency"
