@@ -1,7 +1,0 @@
-{
-  "model": "/path/to/Qwen3-30B-A3B",
-  "quant": "Q4_K_64",
-  "eval": {
-    "dataset": "/path/to/wikitext-2-raw/wiki.test.raw"
-  }
-}

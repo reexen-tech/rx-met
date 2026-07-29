@@ -1,0 +1,9 @@
+{
+  "model": "/models/Qwen/Qwen3.5-35B-A3B",
+  "quant": "Q4_0_64",
+  "eval": {
+    "dataset": "/datasets/evaluation.txt"
+  },
+  "hw_export": true,
+  "output": "/workspace/runs/Qwen3.5-35B-A3B-q4-0-64"
+}

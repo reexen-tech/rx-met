@@ -1,5 +1,0 @@
-{
-  "model": "/path/to/Qwen3-30B-A3B",
-  "quant": "Q4_0_64",
-  "hw_export": true
-}
