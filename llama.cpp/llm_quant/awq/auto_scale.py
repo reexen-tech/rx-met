@@ -14,6 +14,19 @@ from .utils.module import get_op_by_name, get_op_name, set_op_by_name
 
 __all__ = ["auto_scale_block", "apply_scale"]
 
+QWEN3_5_MOE_EXPERT_INPUT = "__qwen3_5_moe_expert_input__"
+QWEN3_5_MOE_ROUTER_INPUT = "__qwen3_5_moe_router_input__"
+
+
+def is_qwen3_5_moe_decoder(module):
+    return module.__class__.__name__ == "Qwen3_5MoeDecoderLayer"
+
+
+def is_rms_norm(module):
+    return isinstance(module, (LlamaRMSNorm, Qwen2RMSNorm)) or (
+        module.__class__.__name__ == "Qwen3_5MoeRMSNorm"
+    )
+
 
 @torch.no_grad()
 def get_weight_scale(weight, q_group_size=-1):
@@ -38,7 +51,13 @@ def scale_ln_fcs(ln, fcs, scales):
 
     scales = scales.to(ln.weight.device).to(ln.weight.dtype)
 
-    ln.weight.div_(scales)
+    if ln.__class__.__name__ == "Qwen3_5MoeRMSNorm":
+        # Qwen3.5 applies (1 + weight) after RMS normalization.  To divide
+        # the normalized output by scales while preserving the FP16 function,
+        # solve 1 + new_weight = (1 + old_weight) / scales.
+        ln.weight.data = (1.0 + ln.weight.data) / scales - 1.0
+    else:
+        ln.weight.div_(scales)
     if hasattr(ln, "bias") and ln.bias is not None:
         ln.bias.div_(scales)
 
@@ -256,6 +275,70 @@ def auto_scale_block(module, module_kwargs, w_bit, q_config, input_feat):
             )
         )
 
+    elif is_qwen3_5_moe_decoder(module):
+        if module.block_type == "full_attention":
+            scales_list.append(
+                _auto_get_scale(
+                    prev_op=module.input_layernorm,
+                    layers=[
+                        module.self_attn.q_proj,
+                        module.self_attn.k_proj,
+                        module.self_attn.v_proj,
+                    ],
+                    inp=input_feat["self_attn.q_proj"],
+                    module2inspect=module.self_attn,
+                    kwargs=module_kwargs,
+                )
+            )
+        elif module.block_type == "linear_attention":
+            scales_list.append(
+                _auto_get_scale(
+                    prev_op=module.input_layernorm,
+                    layers=[
+                        module.linear_attn.in_proj_qkv,
+                        module.linear_attn.in_proj_z,
+                        module.linear_attn.in_proj_b,
+                        module.linear_attn.in_proj_a,
+                    ],
+                    inp=input_feat["linear_attn.in_proj_qkv"],
+                    module2inspect=module.linear_attn,
+                    kwargs=module_kwargs,
+                )
+            )
+        else:
+            raise NotImplementedError(
+                f"Unsupported Qwen3.5 MoE block type: {module.block_type}"
+            )
+
+        # The sparse MoE expert projections are 3-D Parameters rather than
+        # nn.Linear modules. Search on the shared expert, then apply the same
+        # input-channel scale to all experts and the router to preserve the
+        # original FP16 function.
+        mlp_input = input_feat["mlp.shared_expert.gate_proj"]
+        # Qwen3.5 flattens token dimensions before entering SparseMoeBlock,
+        # so its Linear hook observes [tokens, hidden] while the block itself
+        # requires [batch, sequence, hidden].
+        if mlp_input.dim() == 2:
+            mlp_input = mlp_input.unsqueeze(0)
+        mlp_scale = _auto_get_scale(
+            prev_op=module.post_attention_layernorm,
+            layers=[
+                module.mlp.shared_expert.gate_proj,
+                module.mlp.shared_expert.up_proj,
+                module.mlp.shared_expert_gate,
+            ],
+            inp=mlp_input,
+            module2inspect=module.mlp,
+        )
+        scales_list.append(
+            (
+                mlp_scale[0],
+                mlp_scale[1]
+                + (QWEN3_5_MOE_EXPERT_INPUT, QWEN3_5_MOE_ROUTER_INPUT),
+                mlp_scale[2],
+            )
+        )
+
     elif isinstance(module, BloomBlock):
         # attention input
         scales_list.append(
@@ -450,7 +533,17 @@ def auto_scale_block(module, module_kwargs, w_bit, q_config, input_feat):
 def apply_scale(module, scales_list, input_feat_dict=None):
     for prev_op_name, layer_names, scales in scales_list:
         prev_op = get_op_by_name(module, prev_op_name)
-        layers = [get_op_by_name(module, name) for name in layer_names]
+        qwen3_5_moe_input_scale = (
+            QWEN3_5_MOE_EXPERT_INPUT in layer_names
+            or QWEN3_5_MOE_ROUTER_INPUT in layer_names
+        )
+        real_layer_names = [
+            name
+            for name in layer_names
+            if name
+            not in (QWEN3_5_MOE_EXPERT_INPUT, QWEN3_5_MOE_ROUTER_INPUT)
+        ]
+        layers = [get_op_by_name(module, name) for name in real_layer_names]
 
         prev_op.cuda()
         for layer in layers:
@@ -460,8 +553,23 @@ def apply_scale(module, scales_list, input_feat_dict=None):
         if isinstance(prev_op, nn.Linear):
             assert len(layers) == 1
             scale_fc_fc(prev_op, layers[0], scales)
-        elif isinstance(prev_op, (nn.LayerNorm, LlamaRMSNorm, Qwen2RMSNorm)):
+        elif isinstance(prev_op, nn.LayerNorm) or is_rms_norm(prev_op):
             scale_ln_fcs(prev_op, layers, scales)
+            if qwen3_5_moe_input_scale:
+                if not is_qwen3_5_moe_decoder(module):
+                    raise TypeError(
+                        "Qwen3.5 MoE scale markers used on a non-Qwen3.5 block"
+                    )
+                mlp = module.mlp
+                if QWEN3_5_MOE_EXPERT_INPUT in layer_names:
+                    expert_scales = scales.to(
+                        mlp.experts.gate_up_proj.device,
+                        mlp.experts.gate_up_proj.dtype,
+                    )
+                    mlp.experts.gate_up_proj.mul_(expert_scales.view(1, 1, -1))
+                if QWEN3_5_MOE_ROUTER_INPUT in layer_names:
+                    router_scales = scales.to(mlp.gate.weight.device, mlp.gate.weight.dtype)
+                    mlp.gate.weight.mul_(router_scales.view(1, -1))
         elif isinstance(prev_op, (nn.GELU, BloomGelu, GELUActivation, nn.SiLU)):
             new_module = ScaledActivation(prev_op, scales)
             set_op_by_name(module, prev_op_name, new_module)
@@ -471,7 +579,7 @@ def apply_scale(module, scales_list, input_feat_dict=None):
 
         # apply the scaling to input feat if given; prepare it for clipping
         if input_feat_dict is not None:
-            for layer_name in layer_names:
+            for layer_name in real_layer_names:
                 inp = input_feat_dict[layer_name]
                 inp.div_(scales.view(1, -1).to(inp.device).to(inp.dtype))
 
