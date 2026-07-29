@@ -1,14 +1,13 @@
 [build-system]
-requires = ["setuptools>=61", "wheel"]
+requires = ["setuptools>=66.1", "wheel"]
 build-backend = "setuptools.build_meta"
 
 # ---------------------------------------------------------------------------
 # PEP 621 项目元数据
 # ---------------------------------------------------------------------------
 [project]
-name = "aimet-rx"
-version = "1.0.0"
-description = "AI Model Efficiency Toolkit - Redistributable Package"
+name = "rx-met"
+description = "Offline model quantization toolkit for AIMET, QuantGRU, and llama.cpp"
 readme = "README.md"
 license = { text = "BSD-3-Clause" }
 requires-python = ">=3.8"
@@ -29,8 +28,8 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
 
-# 运行时依赖动态读 requirements.txt，避免与 requirements.txt 双重维护
-dynamic = ["dependencies"]
+# 产品版本与运行时依赖分别读取 VERSION 和 requirements.txt
+dynamic = ["version", "dependencies"]
 
 [project.scripts]
 rx-met = "rx_met_llm.pipeline:_cli"
@@ -43,6 +42,7 @@ include-package-data = true
 zip-safe = false
 
 [tool.setuptools.dynamic]
+version = { file = ["VERSION"] }
 dependencies = { file = ["requirements.txt"] }
 
 [tool.setuptools.packages.find]

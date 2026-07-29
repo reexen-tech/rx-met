@@ -8,6 +8,12 @@
 
 **交付策略**：单镜像全栈（大模型 `rx-met` + 小模型 PyTorch/aimet），外加可直接查看和修改的 `examples/` 与客户 `README.md`。三者组成一个离线 Release Bundle。**客户 Release 不含 wheel / native**（仅在 CI 构建镜像时使用）。
 
+本文中的 `${VERSION}` 均取自仓库根目录 `VERSION`：
+
+```bash
+VERSION="$(tr -d '[:space:]' < VERSION)"
+```
+
 ---
 
 ## 1. 打包（CI 构建制品）
@@ -15,12 +21,12 @@
 Docker Builder 阶段在隔离的 CUDA 12.8 devel 环境中产出以下 **镜像构建制品**；它们只在多阶段构建中传给 Runtime 阶段，**不随客户 Release 单独下发**。
 
 ```
-ci-artifacts/rx-met-1.0.0/
+ci-artifacts/rx-met-${VERSION}/
 ├── wheels/
-│   ├── aimet_rx-1.0.0-py3-none-any.whl    # 含 rx_met_llm、aimet_torch、rx-met CLI
+│   ├── rx_met-${VERSION}-py3-none-any.whl  # 含 rx_met_llm、aimet_torch、rx-met CLI
 │   └── quant_gru-1.0.11-cp310-cp310-linux_x86_64.whl
 ├── native/
-│   └── rx-met-native-1.0.0-cuda12.8-linux_x86_64.tar.gz
+│   └── rx-met-native-${VERSION}-cuda12.8-linux_x86_64.tar.gz
 └── docker/
     └── Dockerfile
 ```
@@ -30,7 +36,7 @@ ci-artifacts/rx-met-1.0.0/
 | 脚本 | 作用 |
 | ---- | ---- |
 | `scripts/package_native.sh` | Builder 内编译 llama.cpp 并打 native tar |
-| `scripts/build_wheel.sh` | Builder 内构建 `aimet-rx` wheel |
+| `scripts/build_wheel.sh` | Builder 内构建 `rx-met` wheel |
 | `scripts/build_quant_gru_wheel.sh` | Builder 内构建 Python 3.10/CUDA `quant_gru` wheel |
 | `scripts/release_build.sh` | 多阶段 `docker build` → 验收 → `docker save` |
 | `scripts/verify_image.sh` | §3.6 镜像 smoke test |
@@ -41,7 +47,7 @@ ci-artifacts/rx-met-1.0.0/
 
 | 路径                  | 类型            | 用途                                          |
 | --------------------- | --------------- | --------------------------------------------- |
-| `wheels/*.whl`      | Python 包（`aimet-rx`、`quant_gru`） | Dockerfile 中 `pip install` |
+| `wheels/*.whl`      | Python 包（`rx-met`、`quant_gru`） | Dockerfile 中 `pip install` |
 | `native/*.tar.gz`   | 预编译 C++/CUDA | Dockerfile 中解压到`/opt/rx-met`            |
 | `examples/`         | 客户示例        | 不进入镜像；打包到外层 Release Bundle       |
 | `docker/Dockerfile` | 镜像定义        | 构建运行时镜像                                |
@@ -49,7 +55,7 @@ ci-artifacts/rx-met-1.0.0/
 ### 1.2 `native/*.tar.gz` 内部
 
 ```
-rx-met-native-1.0.0-cuda12.8-linux_x86_64.tar.gz
+rx-met-native-${VERSION}-cuda12.8-linux_x86_64.tar.gz
 ├── bin/     # llama-quantize, llama-imatrix, convert_hf_to_gguf.py, ...
 └── lib/     # libggml*.so
 ```
@@ -67,7 +73,7 @@ cmake -S llama.cpp -B build_release \
 cmake --build build_release -j
 cmake --install build_release --prefix /tmp/rx-met-native-stage
 
-tar -C /tmp/rx-met-native-stage -czf rx-met-native-1.0.0-cuda12.8-linux_x86_64.tar.gz bin lib
+tar -C /tmp/rx-met-native-stage -czf rx-met-native-${VERSION}-cuda12.8-linux_x86_64.tar.gz bin lib
 ```
 
 ### 1.3 Dockerfile（运行时镜像）
@@ -90,17 +96,17 @@ build context 为仓库根目录，由 `.dockerignore` 排除已有 build、模�
 客户 Release 是一个外层压缩包（及其校验文件）：
 
 ```
-rx-met-1.0.0-release.tar.gz
-rx-met-1.0.0-release.tar.gz.sha256
+rx-met-${VERSION}-release.tar.gz
+rx-met-${VERSION}-release.tar.gz.sha256
 ```
 
 解压后：
 
 ```text
-rx-met-1.0.0/
+rx-met-${VERSION}/
 ├── README.md
 ├── SHA256SUMS
-├── rx-met-1.0.0-image.tar
+├── rx-met-${VERSION}-image.tar
 └── examples/
 ```
 
@@ -129,7 +135,7 @@ RX_MET_BUILD_PROXY=http://127.0.0.1:7890 ./scripts/release_build.sh
 
 PyTorch CUDA 12.8 wheel 仍使用官方 `download.pytorch.org`；清华/阿里 PyPI 镜像通常不提供该 wheel，不作为替代源。
 
-大于 4 GB 时可分卷：`split -b 3900M rx-met-1.0.0-release.tar.gz rx-met-1.0.0-release.part`
+大于 4 GB 时可分卷：`split -b 3900M rx-met-${VERSION}-release.tar.gz rx-met-${VERSION}-release.part`
 
 ### 2.1 宿主机前提（客户 IT）
 
@@ -147,13 +153,13 @@ PyTorch CUDA 12.8 wheel 仍使用官方 `download.pytorch.org`；清华/阿里 P
 ### 3.1 导入镜像
 
 ```bash
-sha256sum -c rx-met-1.0.0-release.tar.gz.sha256
-tar xzf rx-met-1.0.0-release.tar.gz
-cd rx-met-1.0.0
+sha256sum -c rx-met-${VERSION}-release.tar.gz.sha256
+tar xzf rx-met-${VERSION}-release.tar.gz
+cd rx-met-${VERSION}
 sha256sum -c SHA256SUMS
-docker load -i rx-met-1.0.0-image.tar
+docker load -i rx-met-${VERSION}-image.tar
 # 分卷时先执行：
-# cat rx-met-1.0.0-release.part* > rx-met-1.0.0-release.tar.gz
+# cat rx-met-${VERSION}-release.part* > rx-met-${VERSION}-release.tar.gz
 ```
 
 ### 3.2 环境说明
@@ -178,7 +184,7 @@ docker run --gpus all \
   -v /data:/data:ro \
   -v "$PWD/runs:/output" \
   -w /output \
-  rx-met:1.0.0 \
+  rx-met:${VERSION} \
   rx-met /examples/config/qwen3_reex_q4_k_64.json
 ```
 
@@ -188,7 +194,7 @@ docker run --gpus all \
 docker run --gpus all \
   -v "$PWD/examples:/examples:ro" \
   -v /data:/data:ro \
-  rx-met:1.0.0 \
+  rx-met:${VERSION} \
   rx-met /examples/config/my_config.json
 ```
 
@@ -219,7 +225,7 @@ docker run --gpus all \
   -v "$PWD/examples-work:/examples" \
   -v /data:/data:ro \
   -w /examples \
-  rx-met:1.0.0 \
+  rx-met:${VERSION} \
   python quick_start.py
 ```
 
@@ -236,8 +242,8 @@ docker run --gpus all \
 ### 3.6 验收建议
 
 ```bash
-docker run --rm --gpus all rx-met:1.0.0 rx-met --help
-docker run --rm --gpus all rx-met:1.0.0 python -c "import torch; print(torch.cuda.is_available())"
+docker run --rm --gpus all rx-met:${VERSION} rx-met --help
+docker run --rm --gpus all rx-met:${VERSION} python -c "import torch; print(torch.cuda.is_available())"
 ```
 
 ---
@@ -248,7 +254,7 @@ docker run --rm --gpus all rx-met:1.0.0 python -c "import torch; print(torch.cud
 | -------- | ------------------- | ----------------------------- | ----------------------------------------- |
 | Python   | `wheels/*.whl`    | 已在镜像层内                  | 容器内`rx-met` / `import aimet_torch` |
 | 二进制   | `native/*.tar.gz` | 已在镜像`/opt/rx-met`       | 框架自动找，JSON 不配置                   |
-| 镜像     | `docker build`    | Bundle 内 `rx-met-1.0.0-image.tar` | `docker load` → `docker run`    |
+| 镜像     | `docker build`    | Bundle 内 `rx-met-${VERSION}-image.tar` | `docker load` → `docker run`    |
 | 示例     | 源码树`examples/` | Bundle 内 `examples/`         | 运行时挂载到 `/examples`             |
 | 环境变量 | Dockerfile 写入     | `RX_MET_HOME=/opt/rx-met`   | 一般无需改                                |
 
@@ -256,11 +262,11 @@ docker run --rm --gpus all rx-met:1.0.0 python -c "import torch; print(torch.cud
 
 ## 附录 A：离线部署检查清单
 
-1. 校验并解压 `rx-met-1.0.0-release.tar.gz`
+1. 校验并解压 `rx-met-${VERSION}-release.tar.gz`
 2. 在解压目录执行 `sha256sum -c SHA256SUMS`
-3. `docker load -i rx-met-1.0.0-image.tar`
+3. `docker load -i rx-met-${VERSION}-image.tar`
 4. 确认宿主机 Driver 版本满足 CUDA 12.8 runtime（见 NVIDIA 兼容表）
 5. 确认已安装 `nvidia-container-toolkit`
-6. `docker run --rm --gpus all rx-met:1.0.0 rx-met --help`
+6. `docker run --rm --gpus all rx-met:${VERSION} rx-met --help`
 7. 准备挂载目录：examples、模型、评测集和输出目录
 8. 按 Bundle 内 README 或 §3.3 / §3.4 运行

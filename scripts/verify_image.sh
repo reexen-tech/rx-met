@@ -3,10 +3,16 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-VERSION="${RX_MET_VERSION:-1.0.0}"
+PRODUCT_VERSION="$(tr -d '[:space:]' < "${ROOT}/VERSION")"
+VERSION="${RX_MET_VERSION:-${PRODUCT_VERSION}}"
 IMAGE="${RX_MET_IMAGE:-rx-met:${VERSION}}"
 
 log() { printf '[verify_image] %s\n' "$*"; }
+
+if [[ "${VERSION}" != "${PRODUCT_VERSION}" ]]; then
+    log "ERROR: RX_MET_VERSION=${VERSION} differs from ${ROOT}/VERSION (${PRODUCT_VERSION})"
+    exit 1
+fi
 
 if ! docker image inspect "${IMAGE}" >/dev/null 2>&1; then
     log "ERROR: image not found: ${IMAGE}"
@@ -27,6 +33,7 @@ import quant_gru
 import rx_met_llm
 import gguf
 import transformers
+assert rx_met_llm.__version__ == '${VERSION}', (rx_met_llm.__version__, '${VERSION}')
 print('torch', torch.__version__, 'torchvision', torchvision.__version__, 'cuda', torch.cuda.is_available())
 print('onnxscript', onnxscript.__version__)
 print('quant_gru', quant_gru.__file__)

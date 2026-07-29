@@ -1,6 +1,7 @@
 # Include documentation
 include README.md
 include LICENSE
+include VERSION
 include requirements.txt
 
 # Include all JSON config files

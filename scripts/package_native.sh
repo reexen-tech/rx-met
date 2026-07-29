@@ -5,7 +5,8 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 LLAMA="${ROOT}/llama.cpp"
 
-VERSION="${RX_MET_VERSION:-1.0.0}"
+PRODUCT_VERSION="$(tr -d '[:space:]' < "${ROOT}/VERSION")"
+VERSION="${RX_MET_VERSION:-${PRODUCT_VERSION}}"
 CUDA_TAG="${RX_MET_CUDA_TAG:-cuda12.8}"
 BUILD_DIR="${RX_MET_LLAMA_BUILD_DIR:-${LLAMA}/build_release}"
 OUT_DIR="${RX_MET_NATIVE_OUT:-${ROOT}/.release/native}"
@@ -38,6 +39,11 @@ REQUIRED_BIN=(
 )
 
 log() { printf '[package_native] %s\n' "$*"; }
+
+if [[ "${VERSION}" != "${PRODUCT_VERSION}" ]]; then
+    log "ERROR: RX_MET_VERSION=${VERSION} differs from ${ROOT}/VERSION (${PRODUCT_VERSION})"
+    exit 1
+fi
 
 if [[ "${SKIP_LLAMA_BUILD:-0}" != "1" ]]; then
     log "configure + build -> ${BUILD_DIR}"

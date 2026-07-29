@@ -1,5 +1,6 @@
 """rx_met_llm: JSON-driven LLM quantization for rx-met."""
 
+from aimet_common._version import __version__
 from .schema import (
     DEFAULT_CONFIG,
     load_config,
@@ -25,5 +26,3 @@ __all__ = [
     "build_imatrix_cmd",
     "build_perplexity_cmd",
 ]
-
-__version__ = "1.0.0"

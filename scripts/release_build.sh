@@ -3,8 +3,9 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-PACKAGE_VERSION="$(awk -F'"' '/^version = "/ { print $2; exit }' "${ROOT}/pyproject.toml")"
-VERSION="${RX_MET_VERSION:-${PACKAGE_VERSION}}"
+VERSION_FILE="${ROOT}/VERSION"
+PRODUCT_VERSION="$(tr -d '[:space:]' < "${VERSION_FILE}")"
+VERSION="${RX_MET_VERSION:-${PRODUCT_VERSION}}"
 IMAGE="rx-met:${VERSION}"
 EXPORT_DIR="${RX_MET_EXPORT_DIR:-${ROOT}/.release/export}"
 RELEASE_NAME="rx-met-${VERSION}"
@@ -25,8 +26,12 @@ cleanup() {
 }
 trap cleanup EXIT
 
-if [[ "${VERSION}" != "${PACKAGE_VERSION}" ]]; then
-    log "ERROR: RX_MET_VERSION=${VERSION} differs from pyproject version ${PACKAGE_VERSION}"
+if [[ ! "${PRODUCT_VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]]; then
+    log "ERROR: invalid product version in ${VERSION_FILE}: ${PRODUCT_VERSION}"
+    exit 1
+fi
+if [[ "${VERSION}" != "${PRODUCT_VERSION}" ]]; then
+    log "ERROR: RX_MET_VERSION=${VERSION} differs from ${VERSION_FILE} (${PRODUCT_VERSION})"
     exit 1
 fi
 if [[ ! "${GZIP_LEVEL}" =~ ^[1-9]$ ]]; then

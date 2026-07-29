@@ -1,151 +1,65 @@
-# AIMET RX - AI Model Efficiency Toolkit (Redistributable Package)
+# rx-met
 
-这是一个包含 AIMET (AI Model Efficiency Toolkit) 核心组件的可重分发包。
+rx-met 是面向模型量化与硬件部署的离线工具包，提供统一的 Docker
+运行环境，覆盖大语言模型和 PyTorch 小模型量化流程。
 
-## 包含的模块
+## 核心能力
 
-- **aimet_common**: AIMET 的通用功能模块
-- **aimet_onnx**: ONNX 模型的量化和优化工具
-- **aimet_torch**: PyTorch 模型的量化和优化工具
+- 大语言模型从 Hugging Face 权重转换为 GGUF，并执行多种量化。
+- 支持 REEX block-64、混合精度、PPL 评估和硬件格式导出。
+- 集成 AIMET、PyTorch 和 QuantGRU，支持小模型 PTQ、QAT 与导出。
+- 以 CUDA 12.8 单镜像交付，客户机器无需安装 Python、PyTorch 或 CUDA Toolkit。
+- Release Bundle 包含 Docker 镜像、示例配置和离线使用文档。
 
-## 更新日志
+## 使用入口
 
-完整版本历史见 [CHANGELOG.md](./CHANGELOG.md)。
+- 客户离线使用：[release/README.md](release/README.md)
+- LLM 配置说明：[examples/config/README.md](examples/config/README.md)
+- AIMET 定制说明：[aimet_README.md](aimet_README.md)
+- 版本记录：[CHANGELOG.md](CHANGELOG.md)
 
-## 安装
+## 构建离线 Release
 
-使用 pip 安装生成的 whl 文件：
-
-```bash
-pip install aimet_rx-1.0.0-py3-none-any.whl
-```
-
-## 外部依赖
-
- `QuantGRU` 来自上游的 [**CX9898/quant-gru-pytorch**](https://github.com/CX9898/quant-gru-pytorch) 仓库（包含 CUDA / C++ 扩展，需要从源码编译安装）。本仓库不打包该模块，详细说明（用途、安装与编译步骤）见 [`quant-gru-pytorch/`](./quant-gru-pytorch/)。
-
-## 使用示例
-
-### PyTorch 模型量化
-
-```python
-from aimet_torch.v2 import quantsim
-from aimet_torch.utils_rx import apply_mixed_precision_bitwidth
-
-# 1. 创建量化模拟器
-sim = quantsim.QuantizationSimModel(
-    model,
-    dummy_input=sample_input,
-    quant_scheme='percentile',
-    config_file='quantsim_config.json',
-    default_output_bw=8,
-    default_param_bw=8
-)
-
-# 2. 应用混合精度位宽配置（可选）
-stats = apply_mixed_precision_bitwidth(
-    sim.model,
-    config_file='bitwidth_config.json',
-    verbose=True
-)
-
-# 3. 校准量化参数
-import aimet_torch.v2 as aimet
-with aimet.nn.compute_encodings(sim.model):
-    for inputs, _ in calib_loader:
-        sim.model(inputs)
-```
-
-### 混合精度配置示例 (JSON)
-
-```json
-{
-  "layer_name_config": {
-    "conv1": {
-      "weight_bitwidth": 8,
-      "input_bitwidth": 8,
-      "output_bitwidth": 8,
-      "input_symmetric": true,
-      "output_symmetric": true
-    }
-  },
-  "layer_type_config": {
-    "QuantizedConv2d": {
-      "weight_bitwidth": 4,
-      "input_bitwidth": 4,
-      "output_bitwidth": 4,
-      "input_symmetric": true,
-      "output_symmetric": true
-    }
-  }
-}
-```
-
-### ONNX 模型量化
-
-```python
-from aimet_onnx import QuantizationSimModel
-
-# 创建量化模拟器
-sim = QuantizationSimModel(model, ...)
-```
-
-## 技术说明
-
-### 对称量化 vs 非对称量化
-
-| 特性 | 对称量化 | 非对称量化 |
-|------|---------|-----------|
-| **量化范围** | 8-bit: [-128, 127]<br>2-bit: [-2, 1] | 8-bit: [0, 255]<br>2-bit: [0, 3] |
-| **零点偏移** | 固定为 0 | 需要计算 |
-| **硬件友好性** | ✅ 更简单 | 需要额外支持 |
-| **量化效率** | 可能浪费范围 | 充分利用范围 |
-
-### 配置优先级
-
-混合精度位宽配置的优先级（从高到低）：
-1. `layer_name_config` - 精确匹配层名称
-2. `layer_name_config` - 模式匹配（支持通配符 `*`）
-3. `layer_type_config` - 按层类型匹配
-4. `default_bitwidth` - 默认值
-
-### 工具函数
-
-- `apply_mixed_precision_bitwidth()`: 应用混合精度位宽配置
-- `setup_percentile_calibration()`: 设置 Percentile 校准
-- `apply_power_of_2_workflow()`: 应用 Power-of-2 量化
-- `freeze_quantizer_parameters()`: 冻结量化器参数（QAT 准备）
-
-## 构建和安装
-
-### 构建 Wheel 包
+构建机需要 Docker、NVIDIA Driver 和可用的 NVIDIA GPU。执行：
 
 ```bash
-cd aimet_rx
-python -m build
+./scripts/release_build.sh
 ```
 
-### 安装
+脚本会依次完成多阶段镜像构建、运行时验证、镜像导出和 Release Bundle
+组装。默认制品位于 `.release/export/`：
+
+```text
+rx-met-<version>-release.tar.gz
+rx-met-<version>-release.tar.gz.sha256
+```
+
+## 主要目录
+
+- `aimet_common/`、`aimet_onnx/`、`aimet_torch/`：AIMET 定制组件。
+- `rx_met_llm/`：JSON 驱动的大模型量化流水线和 `rx-met` CLI。
+- `quant-gru-pytorch/`：QuantGRU 源码与 CUDA 扩展。
+- `llama.cpp/`：GGUF 转换、量化和硬件导出工具。
+- `examples/`：客户示例与配置。
+- `docker/`：CUDA 12.8 多阶段镜像定义。
+- `scripts/`：wheel、native、镜像验证和 Release 构建脚本。
+
+## 开发构建
+
+仅构建 AIMET wheel：
 
 ```bash
-pip install dist/aimet_rx-1.3.8-py3-none-any.whl
+./scripts/build_wheel.sh
+```
+
+仅运行镜像验收：
+
+```bash
+RX_MET_IMAGE=rx-met:<version> ./scripts/verify_image.sh
 ```
 
 ## 许可证
 
 BSD-3-Clause
 
-## 版权
-
 Copyright (c) 2024, Qualcomm Innovation Center, Inc. All rights reserved.
-
----
-
-**注意**: 本包基于 AIMET 官方版本进行定制和优化，增加了便捷的工具函数和 bug 修复。
-
-
-
-
-
-
-

@@ -7,7 +7,7 @@
 |------|------|
 | 文档名称 | AIMET RX 用户使用指南（快速上手） |
 | 文档版本 | 2026.06-r1 |
-| 适用软件版本 | aimet-rx 1.3.8 |
+| 适用软件版本 | 以根目录 `VERSION` 为准 |
 | 文档责任人 | （待填写） |
 | 最近更新 | 2026-06 |
 
@@ -59,7 +59,7 @@ AIMET RX 是 Reexen 基于高通 AIMET（AI Model Efficiency Toolkit）定制的
 使用发布的 wheel 包安装：
 
 ```bash
-pip install aimet_rx-1.3.8-py3-none-any.whl
+pip install rx_met-*.whl
 ```
 
 验证安装成功：
@@ -372,10 +372,10 @@ REEX_Q64_PSUM_BITS=8 ./build_cuda/bin/llama-perplexity -m model-Q4_K_64.gguf -ng
 - **卸载 Python 包**：
 
 ```bash
-pip uninstall aimet-rx
+pip uninstall rx-met
 ```
 
-- **回滚到旧版本**：安装对应版本的 wheel 即可，例如 `pip install aimet_rx-<旧版本>-py3-none-any.whl`。
+- **回滚到旧版本**：安装对应版本的 wheel 即可，例如 `pip install rx_met-<旧版本>-py3-none-any.whl`。
 - **清理大模型流程产物**：删除 `aimet_rx/runs/` 下对应实验目录与 `llama.cpp/build_cuda/` 编译目录即可（删除 build 目录后需重新编译）。
 
 ---

@@ -9,9 +9,11 @@ ARG UBUNTU_VERSION=22.04
 FROM nvidia/cuda:${CUDA_VERSION}-devel-ubuntu${UBUNTU_VERSION} AS builder
 
 ARG DEBIAN_FRONTEND=noninteractive
-ARG RX_MET_VERSION=1.0.0
+ARG RX_MET_VERSION
 ARG CUDA_ARCHITECTURES=80;86;89;120
 ARG TORCH_CUDA_ARCH_LIST=8.0;8.6;8.9;12.0
+
+RUN test -n "${RX_MET_VERSION}"
 
 RUN sed -i \
         -e 's|http://archive.ubuntu.com|https://archive.ubuntu.com|g' \
@@ -72,8 +74,10 @@ RUN --mount=type=cache,id=rx-met-pip-cu128,target=/root/.cache/pip,sharing=locke
 FROM nvidia/cuda:${CUDA_VERSION}-runtime-ubuntu${UBUNTU_VERSION} AS runtime
 
 ARG DEBIAN_FRONTEND=noninteractive
-ARG RX_MET_VERSION=1.0.0
+ARG RX_MET_VERSION
 ARG RX_MET_REVISION=unknown
+
+RUN test -n "${RX_MET_VERSION}"
 
 LABEL org.opencontainers.image.title="rx-met" \
       org.opencontainers.image.version="${RX_MET_VERSION}" \
