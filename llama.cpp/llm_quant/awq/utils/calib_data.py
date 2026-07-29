@@ -1,12 +1,31 @@
+import os
+from pathlib import Path
+
 import torch
 from datasets import load_dataset
 
 
 def get_calib_dataset(data="pileval", tokenizer=None, n_samples=512, block_size=512):
     if data == "pileval":
-        dataset = load_dataset("mit-han-lab/pile-val-backup", split="validation")
+        dataset_value = os.environ.get("AWQ_PILEVAL_PATH")
+        if not dataset_value:
+            raise ValueError(
+                "Set AWQ_PILEVAL_PATH to a local PileVal val.jsonl file, or "
+                "pass the local JSONL path through --calib_data."
+            )
     else:
-        raise NotImplementedError
+        dataset_value = data
+
+    dataset_path = Path(dataset_value).expanduser()
+    if not dataset_path.is_file():
+        raise FileNotFoundError(
+            f"Local calibration dataset not found: {dataset_path}."
+        )
+    if dataset_path.suffix != ".jsonl":
+        raise ValueError(
+            f"Expected a .jsonl calibration dataset, got: {dataset_path}"
+        )
+    dataset = load_dataset("json", data_files=str(dataset_path), split="train")
     dataset = dataset.shuffle(seed=42)
     samples = []
     n_run = 0
