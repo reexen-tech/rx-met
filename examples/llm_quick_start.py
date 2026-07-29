@@ -30,7 +30,7 @@ HERE = Path(__file__).resolve().parent
 # aimet_rx/examples/ -> aimet_rx/ (which contains the aimet_llama source package)
 sys.path.insert(0, str(HERE.parent))
 
-from aimet_llama import LLMQuantPipeline  # noqa: E402
+from rx_met_llm import LLMQuantPipeline  # noqa: E402
 
 
 def main() -> None:

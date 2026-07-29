@@ -54,8 +54,14 @@ RGD_HD inline long rgd_rne_lround(float x) {
 }
 
 RGD_HD inline void rgd_store16(uint8_t * dst, uint16_t b) {
+#if defined(__CUDA_ARCH__)
+    // nvcc sm_120: byte stores from fp16/u16 can lower to st.global.u8,b16 and drop
+    // the low byte (observed: 0x260C -> [0x00,0x26]). 16-bit store preserves LE.
+    *reinterpret_cast<uint16_t *>(dst) = b;
+#else
     dst[0] = (uint8_t) (b & 0xff);
     dst[1] = (uint8_t) (b >> 8);
+#endif
 }
 
 // Store an already-rounded integer accumulator into a signed/unsigned int

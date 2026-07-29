@@ -5,9 +5,10 @@
 设计要点（详见 scripts/output_csv_to_verify/README.md）：
   * 读取一个 case 目录 + meta.json，自动识别 family(Legacy/Kquant/IntBlock)。
   * 全部数据 **de-tile** 回原始非 tiling 的二维矩阵后再写 CSV。
-  * 每个元素写成 **原始 bit pattern 的十六进制**，按存储容器字节补零、小写、带 `0x` 前缀、
-    负数按补码：int8/q4/I6/I4/U6/U4 -> 2 位；fp16/bf16/I16/U16 -> 4 位；e4m3 -> 2 位；
-    f32/i32 -> 8 位。
+  * 每个元素写成 **原始 bit pattern 的十六进制**，小写、带 `0x` 前缀。
+    浮点/整型容器仍按字节宽度写 hex；K-quant 权重码与 sub_scale、Legacy q4 码、
+    IntBlock 窄整数则按 **实际量化位宽** 写 hex（不符号扩展到 8 bit）。
+    fp16/bf16/I16/U16 -> 4 位 hex；e4m3/e5m2/int8 容器 -> 2 位；f32/i32 -> 8 位。
   * 朝向与 zhuanhuan-yanzheng 对齐：weight_int=[K,N]、weight_scale=[K/64,N]、
     input_fp(=激活源)=[M,K]、act_int=[M,K]、act_scale=[M,K/agroup]、output=[M,N]。
   * Legacy 从 act_blocks.bin 导出片上量化结果 act_int + per-64 fp16 act_scale；
@@ -51,6 +52,24 @@ def hex_u32(a: np.ndarray) -> np.ndarray:
     hi = _DIG16[(a >> 16).astype(np.uint16)]
     lo = _DIG16[(a & 0xFFFF).astype(np.uint16)]
     return np.char.add("0x", np.char.add(hi, lo))
+
+
+_HEX_BITS_LUT: dict[int, np.ndarray] = {}
+
+
+def hex_signed_bits(values: np.ndarray, width: int) -> np.ndarray:
+    """有符号语义值 -> width-bit 补码原码的 hex（不扩展到更宽容器）。"""
+    if width <= 0 or width > 64:
+        raise ValueError(f"unsupported signed bit width {width}")
+    v = np.asarray(values, dtype=np.int64)
+    mod = 1 << width
+    u = (np.where(v >= 0, v, v + mod) & (mod - 1)).astype(np.int64)
+    lut = _HEX_BITS_LUT.get(width)
+    if lut is None:
+        ndigits = (width + 3) // 4
+        lut = np.array([f"0x{i:0{ndigits}x}" for i in range(mod)], dtype=f"<U{2 + ndigits}")
+        _HEX_BITS_LUT[width] = lut
+    return lut[u]
 
 
 # native-dtype token -> (itemsize bytes, hex function on raw uint container)
@@ -210,7 +229,7 @@ def decode_legacy(case: Path, meta: dict, out: Path, outputs: list, check_rows: 
         codes = np.concatenate([low, high], axis=-1)          # [N,Ktiles,64] in [-8,7]
     elif wtype == "q8_0_64":
         codes = wg[..., 2:2 + Kt].view(np.int8).astype(np.int16)
-    elif wtype == "q8_1_64s":
+    elif wtype in ("q8_1_64s", "q8_1_64"):
         codes = wg[..., 4:4 + Kt].view(np.int8).astype(np.int16)
     else:
         raise ValueError(f"unsupported legacy wtype {wtype}")
@@ -218,8 +237,11 @@ def decode_legacy(case: Path, meta: dict, out: Path, outputs: list, check_rows: 
     codes_NK = codes.reshape(N, K)                            # [N,K] value
     w_dq_NK = codes_NK.astype(np.float32) * np.repeat(d_f, Kt, axis=1)  # [N,K]
 
-    # CSV: weight_int [K,N] hex(int8 container), weight_scale [Ktiles,N] hex(fp16)
-    wint_hex_KN = hex_u8((codes_NK & 0xFF).astype(np.uint8)).T           # [K,N]
+    # CSV: weight_int [K,N]；q4 按 4-bit 原码，q8 按 int8 容器
+    if wtype == "q4_0_64":
+        wint_hex_KN = hex_signed_bits(codes_NK, 4).T
+    else:
+        wint_hex_KN = hex_u8((codes_NK & 0xFF).astype(np.uint8)).T
     wscale_hex = hex_u16(d_u16.T)                                        # [Ktiles,N]
     write_hex_csv(out / "weight_int.csv", wint_hex_KN)
     write_hex_csv(out / "weight_scale.csv", wscale_hex)
@@ -309,17 +331,17 @@ def decode_kquant(case: Path, meta: dict, out: Path, outputs: list, check_rows: 
     a_eff = (glb_fN[:, :, None] * sub_scN.astype(np.float32)).reshape(N, Ktiles * n_sub)  # [N, K/64]
     w_dq_NK = codes_NK.astype(np.float32) * np.repeat(a_eff, sub, axis=1)
 
-    # CSV: weight_int [K,N]
-    write_hex_csv(out / "weight_int.csv", hex_u8((codes_NK & 0xFF).astype(np.uint8)).T)
+    # CSV: weight_int [K,N] 按 wbits；sub_scale 按 sbits（均不补到 8 bit）
+    write_hex_csv(out / "weight_int.csv", hex_signed_bits(codes_NK, wbits).T)
 
     # weight scale: interleaved (weight_q6_k_scales.csv 格式)
-    #   每 super-block: 1 行 super_scale(fp16 hex) + n_sub 行 sub_scale(int hex), 列=N
+    #   每 super-block: 1 行 super_scale(fp16 hex) + n_sub 行 sub_scale(sbits hex), 列=N
     n_super = Ktiles
     rows = []
     for sup in range(n_super):
         rows.append(hex_u16(glb[:, sup]))                                  # [N] fp16
         for s in range(n_sub):
-            rows.append(hex_u8((sub_scN[:, sup, s] & 0xFF).astype(np.uint8)))  # [N] int
+            rows.append(hex_signed_bits(sub_scN[:, sup, s], sbits))       # [N] sbits-bit raw
     write_hex_csv_rows(out / "weight_scale.csv", rows)
     print(f"  [w] weight_int.csv [{K},{N}]  weight_scale.csv [{n_super*(1+n_sub)},{N}] (interleaved)")
 
@@ -369,13 +391,13 @@ def decode_intblock(case: Path, meta: dict, out: Path, outputs: list, check_rows
     aslot = ((m // Mt * Ktiles + k2 // Kt) * Mt + m % Mt) * Kt + k2 % Kt  # [M,K]
     codes_MK = _gather_bits(abits_stream, aslot, abits, signed=True)
 
-    # container hex: value clamped into signed byte/16b container
+    # hex 按实际量化位宽；>8 bit 仍用 16-bit 容器
     if wbits <= 8:
-        write_hex_csv(out / "weight_int.csv", hex_u8((codes_NK & 0xFF).astype(np.uint8)).T)
+        write_hex_csv(out / "weight_int.csv", hex_signed_bits(codes_NK, wbits).T)
     else:
         write_hex_csv(out / "weight_int.csv", hex_u16((codes_NK & 0xFFFF).astype(np.uint16)).T)
     if abits <= 8:
-        write_hex_csv(out / "act_int.csv", hex_u8((codes_MK & 0xFF).astype(np.uint8)))
+        write_hex_csv(out / "act_int.csv", hex_signed_bits(codes_MK, abits))
     else:
         write_hex_csv(out / "act_int.csv", hex_u16((codes_MK & 0xFFFF).astype(np.uint16)))
     print(f"  [w] weight_int.csv [{K},{N}]   [a] act_int.csv [{M},{K}]  (IntBlock 无 scale)")

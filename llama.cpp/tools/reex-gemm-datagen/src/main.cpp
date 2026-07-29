@@ -11,6 +11,7 @@
 #include "dumper.h"
 #include "gemm.cuh"
 #include "intgemm.cuh"
+#include "outquant.cuh"
 #include "reference.h"
 #include "wquant.h"
 
@@ -29,6 +30,124 @@ static void build_name(GemmCase & c, const WQuantType & wt) {
     c.name = buf;
 }
 
+// --chain qkt: two-stage fused MMA (docs/chain-qkt.md).
+//   MMA1 [64,64,64] builds K = X @ Wk^T; its output stage emits Legacy quant
+//   blocks directly (per output row [1,64]: fp16 scale + 64 INTx codes) — no
+//   dequant/requant round-trip. A block-atomic transpose re-lays them, then
+//   MMA2 [1,64,64] computes S = Q @ K^T consuming those blocks verbatim.
+static int run_chain_qkt(const std::string & out_root, GemmCase & c,
+                         const WQuantType & wt1, int kbits, int64_t check_rows) {
+    if (wt1.family != Family::Legacy) {
+        fprintf(stderr, "--chain qkt requires a Legacy block-64 wtype (q8_0_64/q8_1_64/q4_0_64), got %s\n", wt1.name);
+        return 1;
+    }
+    if (kbits != 8 && kbits != 4) { fprintf(stderr, "--kbits must be 8 or 4\n"); return 1; }
+
+    // Fixed shapes (chain-qkt.md §2): MMA1 [64,64,64], MMA2 [1,64,64].
+    c.M = 64; c.N = 64; c.K = 64;
+    const int64_t M1 = c.M, N1 = c.N, K1 = c.K;
+    const int64_t M2 = 1, N2 = M1 /*num_keys*/, K2 = N1 /*head_dim*/;
+    const TilingSpec ts1 = tiling_for(Family::Legacy);          // {4,64,64,64,64}
+    const TilingSpec ts2 = { 1, 64, 64, 64, 64 };               // MMA2: M2=1 -> Mt=1
+
+    const int kwid = wquant_find(kbits == 8 ? "q8_0_64" : "q4_0_64");
+    const WQuantType & wtk = wquant_get(kwid);
+
+    char nbuf[192];
+    snprintf(nbuf, sizeof(nbuf), "qkt-A%dW%d-K%d-%sin-psum%d",
+             c.A_bits, wt1.W_bits, kbits, actdtype_name(c.act_in), c.psum_bits);
+    c.name = nbuf;
+    fprintf(stderr, "[rgd] chain %s  MMA1[%lld,%lld,%lld] -> K blocks (%s) -> MMA2[%lld,%lld,%lld]\n",
+            c.name.c_str(), (long long) M1, (long long) N1, (long long) K1,
+            wtk.name, (long long) M2, (long long) N2, (long long) K2);
+
+    // ---- MMA1: X @ Wk^T -------------------------------------------------
+    std::vector<float> X, Wk;
+    datagen_fill(X, Wk, c);
+
+    const int wid1 = wquant_find(wt1.name);
+    const size_t w1bytes = wquant_blocks_bytes(wid1, N1, K1);
+    std::vector<uint8_t> w1_native(w1bytes), w1_blocks(w1bytes);
+    wt1.encode(Wk.data(), w1_native.data(), N1, K1);
+    wquant_reorder_to_tiled(wid1, w1_native.data(), w1_blocks.data(), N1, K1, ts1);
+
+    std::vector<uint8_t> a1_blocks;
+    act_quant_run_host(X.data(), M1, K1, ts1, c.A_bits, a1_blocks);
+
+    std::vector<float> C1((size_t) (M1 * N1));
+    gemm_run_host(wid1, w1_blocks.data(), a1_blocks.data(), a1_blocks.size(), C1.data(),
+                  nullptr, M1, N1, K1, ts1, c.A_bits, c.psum_bits);
+
+    ChainVerify v{};
+    std::vector<float> C1_ref;
+    golden_cpu_symmetric(wid1, w1_blocks.data(), a1_blocks, M1, N1, K1, ts1, c.A_bits, c.psum_bits, C1_ref);
+    v.err1 = compare(C1.data(), C1_ref.data(), M1 * N1);
+    fprintf(stderr, "[rgd] verify MMA1 (integer golden): max_abs=%.6g max_rel=%.6g mse=%.6g\n",
+            v.err1.max_abs, v.err1.max_rel, v.err1.mse);
+    v.dq1_max_abs = -1.0;
+    if (c.psum_bits == 0) {
+        const DequantCheck dq = golden_dequant_check(
+            wid1, w1_blocks.data(), a1_blocks, C1.data(), M1, N1, K1, ts1, c.A_bits, check_rows);
+        v.dq1_max_abs = dq.max_abs;
+        fprintf(stderr, "[rgd] verify MMA1 (reex dequant golden, %lld rows): max_abs=%.6g\n",
+                (long long) dq.rows, dq.max_abs);
+    }
+
+    // ---- fused output-stage quantization (GPU authoritative) ------------
+    std::vector<uint8_t> kblocks_pre, kblocks_pre_cpu;
+    out_quant_run_host(C1.data(), M1, N1, ts1, kbits, kblocks_pre);
+    out_quant_cpu(C1.data(), M1, N1, ts1, kbits, kblocks_pre_cpu);
+    v.k_bitexact = (kblocks_pre == kblocks_pre_cpu);
+    fprintf(stderr, "[rgd] verify K blocks (GPU vs CPU recompute, byte-for-byte): %s\n",
+            v.k_bitexact ? "MATCH" : "MISMATCH");
+
+    // ---- block-atomic transpose (HW block-transpose unit model) ---------
+    std::vector<uint8_t> kblocks_post;
+    kblocks_grid_transpose(kblocks_pre, kblocks_post, N2 /*num_keys*/, K2 / 64, kblock_bytes(kbits));
+
+    // ---- MMA2: Q @ K^T (K blocks consumed verbatim, NO requant) ---------
+    std::vector<float> Q;
+    datagen_fill_act(Q, M2 * K2, c.act_in, c.seed);
+    std::vector<uint8_t> q_blocks;
+    act_quant_run_host(Q.data(), M2, K2, ts2, c.A_bits, q_blocks);
+
+    std::vector<float> C2((size_t) (M2 * N2));
+    int nsp; const OutSpec * osp = out_specs(nsp);
+    std::vector<std::vector<uint8_t>> obufs(nsp);
+    uint8_t * out_ptrs[RGD_MAX_OUT] = {nullptr};
+    for (int s = 0; s < nsp; ++s) {
+        obufs[s].assign((size_t) (M2 * N2) * osp[s].bytes, 0);
+        out_ptrs[s] = obufs[s].data();
+    }
+    gemm_run_host(kwid, kblocks_post.data(), q_blocks.data(), q_blocks.size(), C2.data(),
+                  out_ptrs, M2, N2, K2, ts2, c.A_bits, c.psum_bits);
+
+    std::vector<float> C2_ref;
+    golden_cpu_symmetric(kwid, kblocks_post.data(), q_blocks, M2, N2, K2, ts2, c.A_bits, c.psum_bits, C2_ref);
+    v.err2 = compare(C2.data(), C2_ref.data(), M2 * N2);
+    fprintf(stderr, "[rgd] verify MMA2 (integer golden): max_abs=%.6g max_rel=%.6g mse=%.6g\n",
+            v.err2.max_abs, v.err2.max_rel, v.err2.mse);
+    v.dq2_max_abs = -1.0;
+    if (c.psum_bits == 0) {
+        const DequantCheck dq = golden_dequant_check(
+            kwid, kblocks_post.data(), q_blocks, C2.data(), M2, N2, K2, ts2, c.A_bits, M2);
+        v.dq2_max_abs = dq.max_abs;
+        fprintf(stderr, "[rgd] verify MMA2 (reex dequant golden, %lld rows): max_abs=%.6g\n",
+                (long long) dq.rows, dq.max_abs);
+    }
+
+    // ---- dump ------------------------------------------------------------
+    const char * w1_desc = "reex native struct {d(fp16); qs} (scale-first)";
+    const std::string dir = dump_chain_case(out_root, c.name, c, ts1, wt1,
+                                            w1_blocks.data(), w1bytes, w1_desc,
+                                            a1_blocks, X, Wk, C1,
+                                            kbits, wtk, kblocks_pre, kblocks_post,
+                                            ts2, M2, q_blocks, Q,
+                                            obufs.data(), C2_ref, v);
+    fprintf(stderr, "[rgd] dumped -> %s\n", dir.c_str());
+    return v.k_bitexact ? 0 : 2;
+}
+
 static bool parse_actdtype(const char * s, ActDType & out) {
     if      (!strcmp(s, "F32"))  out = ActDType::F32;
     else if (!strcmp(s, "F16"))  out = ActDType::F16;
@@ -42,6 +161,8 @@ static bool parse_actdtype(const char * s, ActDType & out) {
 int main(int argc, char ** argv) {
     std::string out_root = "output/datagen";
     std::string wtype    = "q8_0_64";  // default: symmetric Legacy W8
+    std::string chain;                 // "qkt" -> two-stage fused MMA (docs/chain-qkt.md)
+    int         kbits    = 8;          // chain: fused K-block precision (8|4)
     int64_t check_rows = 256;          // rows validated by the dequant golden
     GemmCase c;
     c.act_in   = ActDType::F16;
@@ -57,6 +178,8 @@ int main(int argc, char ** argv) {
             if (!parse_actdtype(argv[++i], c.act_in)) { fprintf(stderr, "bad --actin (F32/F16/BF16/E5M2/E4M3)\n"); return 1; }
         }
         else if (!strcmp(argv[i], "--psum")  && i + 1 < argc) c.psum_bits = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--chain") && i + 1 < argc) chain = argv[++i];
+        else if (!strcmp(argv[i], "--kbits") && i + 1 < argc) kbits = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--wbits") && i + 1 < argc) c.w_bits = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--asign") && i + 1 < argc) {
             const char c0 = argv[++i][0];
@@ -73,7 +196,8 @@ int main(int argc, char ** argv) {
         else if (!strcmp(argv[i], "-h") || !strcmp(argv[i], "--help")) {
             printf("Usage: %s [--out DIR] [--wtype NAME] [--abits 16|8|4] [--actin F32|F16|BF16|E5M2|E4M3]\n"
                    "          [--psum B] [--seed S] [--M m --N n --K k] [--check-rows R]\n"
-                   "          [--wbits 8|6|5|4|3|2] [--asign i|u] [--wsign i|u]   (INT path only)\n", argv[0]);
+                   "          [--wbits 8|6|5|4|3|2] [--asign i|u] [--wsign i|u]   (INT path only)\n"
+                   "          [--chain qkt] [--kbits 8|4]   (two-stage fused MMA, shapes fixed 64; docs/chain-qkt.md)\n", argv[0]);
             return 0;
         } else {
             fprintf(stderr, "Unknown arg: %s\n", argv[i]);
@@ -86,6 +210,12 @@ int main(int argc, char ** argv) {
     c.wtype_id = wid;
 
     const WQuantType & wt = wquant_get(wid);
+
+    if (!chain.empty()) {
+        if (chain != "qkt") { fprintf(stderr, "unknown --chain '%s' (only: qkt)\n", chain.c_str()); return 1; }
+        return run_chain_qkt(out_root, c, wt, kbits, check_rows);
+    }
+
     const TilingSpec   ts = tiling_for(wt.family);
     build_name(c, wt);
 

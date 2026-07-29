@@ -35,7 +35,18 @@
 #  @@-COPYRIGHT-END-@@
 # =============================================================================
 
-__version__ = "1.0.0"
+from importlib.metadata import PackageNotFoundError, version
+from pathlib import Path
+
+_source_version = Path(__file__).resolve().parents[1] / "VERSION"
+if _source_version.is_file():
+    __version__ = _source_version.read_text(encoding="utf-8").strip()
+else:
+    try:
+        __version__ = version("rx-met")
+    except PackageNotFoundError:
+        __version__ = "0+unknown"
+
 python_abi = None
 torch = None
 min_glibc = None

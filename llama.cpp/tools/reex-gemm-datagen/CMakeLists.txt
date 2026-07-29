@@ -28,6 +28,7 @@ add_executable(${TARGET}
     src/actquant.cu
     src/gemm.cu
     src/intgemm.cu
+    src/outquant.cu
 )
 
 set_target_properties(${TARGET} PROPERTIES

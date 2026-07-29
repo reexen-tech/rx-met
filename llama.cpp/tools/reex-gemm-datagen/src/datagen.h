@@ -11,6 +11,10 @@ namespace rgd {
 // Fill A[M*K] and W[N*K] with deterministic pseudo-random floats (case.seed).
 void datagen_fill(std::vector<float> & A, std::vector<float> & W, const GemmCase & c);
 
+// Fill a standalone activation vector (count elems) rounded through act_in.
+// Used by the qkt chain for the MMA2 query Q (seed decorrelated from datagen_fill).
+void datagen_fill_act(std::vector<float> & A, int64_t count, ActDType act_in, uint64_t seed);
+
 // Quantize activations A[M,K] into contiguous group blocks { fp16 d; int8 qs[agroup] },
 // one scale per agroup, stored in §4.1 act-block tile order. Output is a raw byte
 // buffer with stride act_block_bytes(ts); use act_group_slot() to address blocks.

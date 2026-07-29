@@ -46,10 +46,13 @@ bash run_legacy.sh
 
 ## 十六进制约定
 
-- **原始 bit pattern**，按**存储容器字节**对齐、**小写、带 `0x` 前缀、负数补码**。
-- 位宽：`int8/q4/I6/I4/U6/U4` → 2 位；`fp16/bf16/I16/U16` → 4 位；`e4m3/e5m2` → 2 位；`f32/i32` → 8 位。
-  - A16 激活为 int16 容器 → `act_int` 为 4 位 hex。
-- 示例：fp16 `1.0` → `0x3c00`；int8 `-8` → `0xf8`；int8 `127` → `0x7f`。
+- **原始 bit pattern**，**小写、带 `0x` 前缀**。
+- **K-quant 权重码 / sub_scale**、Legacy `q4_0_64` 码、IntBlock 窄整数：按 **实际量化位宽**
+  写 hex（有符号补码原码，**不符号扩展到 8 bit**）。例如 Q2 sub_scale `-8` → `0x8`（非 `0xf8`）；
+  Q3/Q4/Q5 sub_scale `-32` → `0x20`（非 `0xe0`）。
+- 仍按**存储容器字节**写的：`act_int`(A8/A4/A16 容器)、Legacy q8、fp16/bf16/I16/U16(4 hex)、
+  e4m3/e5m2/int8 容器(2 hex)、f32/i32(8 hex)。
+- 示例：fp16 `1.0` → `0x3c00`；A8 `-8` → `0xf8`；Q2 sub_scale `-8` → `0x8`；Q4 sub_scale `-1` → `0x3f`。
 
 ## scale 对应关系
 
