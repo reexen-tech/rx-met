@@ -30,8 +30,26 @@ def get_named_linears(module):
     return {name: m for name, m in module.named_modules() if isinstance(m, nn.Linear)}
 
 
+def is_qwen3_5_moe(model_or_module):
+    return model_or_module.__class__.__name__.startswith("Qwen3_5Moe")
+
+
+def get_hidden_states(output):
+    """Return decoder hidden states from tensor, tuple, or model output."""
+    if isinstance(output, torch.Tensor):
+        return output
+    if isinstance(output, (tuple, list)):
+        return output[0]
+    if hasattr(output, "last_hidden_state"):
+        return output.last_hidden_state
+    raise TypeError(f"Unsupported decoder output type: {type(output)}")
+
+
 def get_blocks(model):
     if model.__class__.__name__ in ("LlamaForCausalLM", "Qwen2ForCausalLM"):
+        layers = model.model.layers
+    elif is_qwen3_5_moe(model):
+        # Qwen3.5 MoE text-only CausalLM uses Qwen3_5MoeTextModel here.
         layers = model.model.layers
     elif model.__class__.__name__ == "InternVL3":
         layers = model.language_model.model.layers
@@ -54,12 +72,18 @@ def get_blocks(model):
     elif model.__class__.__name__ == "LlavaLlamaModel":
         layers = model.llm.model.layers
     else:
-        raise NotImplementedError(type(model))
+        raise NotImplementedError(
+            f"Unsupported AWQ model type: {type(model)}. "
+            "Add an architecture adapter in get_blocks() and move_embed()."
+        )
     return layers
 
 
 def move_embed(model, device):
     if isinstance(model, (LlamaForCausalLM, Qwen2ForCausalLM)):
+        model.model.embed_tokens = model.model.embed_tokens.to(device)
+        model.model.rotary_emb = model.model.rotary_emb.to(device)
+    elif is_qwen3_5_moe(model):
         model.model.embed_tokens = model.model.embed_tokens.to(device)
         model.model.rotary_emb = model.model.rotary_emb.to(device)
     elif model.__class__.__name__ == "InternVL3":
@@ -99,7 +123,10 @@ def move_embed(model, device):
     elif "llavallamamodel" in str(model.__class__).lower():
         model.llm.model.embed_tokens = model.llm.model.embed_tokens.to(device)
     else:
-        raise NotImplementedError(type(model))
+        raise NotImplementedError(
+            f"Unsupported AWQ model type: {type(model)}. "
+            "Add an architecture adapter in get_blocks() and move_embed()."
+        )
 
 
 @torch.no_grad()
@@ -196,7 +223,7 @@ def run_awq(
             )
         inps = inps.to(next(layer.parameters()).device)  # in case multi-gpu
         # get output as next layer's input
-        inps = layer(inps, **layer_kwargs)[0]
+        inps = get_hidden_states(layer(inps, **layer_kwargs))
         for h in handles:
             h.remove()
         # now solve for scaling and clipping
