@@ -1,4 +1,4 @@
-# rx-met @VERSION@ 离线使用说明
+# rx-met @VERSION@ 使用说明
 
 本发布包包含：
 
