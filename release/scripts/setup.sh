@@ -30,11 +30,18 @@ if [[ "${IMAGE}" == *"@VERSION@"* ]]; then
   die "IMAGE still contains @VERSION@; use a packaged release or substitute the version"
 fi
 
+ENABLE_GPUS="$(grep -E '^ENABLE_GPUS=' "${ENV_EXAMPLE}" | head -1 | cut -d= -f2- || true)"
+ENABLE_GPUS="${ENABLE_GPUS:-1}"
+
 log "docker load -> ${IMAGE_TAR}"
 docker load -i "${IMAGE_TAR}"
 
+smoke_args=(--rm)
+if [[ "${ENABLE_GPUS}" == "1" ]]; then
+  smoke_args+=(--gpus all)
+fi
 log "smoke: ${IMAGE} rx-met --help"
-docker run --rm --gpus all "${IMAGE}" rx-met --help
+docker run "${smoke_args[@]}" "${IMAGE}" rx-met --help
 
 log "prepare workspace -> ${WORKSPACE}"
 mkdir -p "${WORKSPACE}/runs"

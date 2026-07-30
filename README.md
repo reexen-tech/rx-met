@@ -8,17 +8,20 @@ rx-met 是面向模型量化与硬件部署的离线工具包，提供统一的 
 - 大语言模型从 Hugging Face 权重转换为 GGUF，并执行多种量化。
 - 支持 REEX block-64、混合精度、PPL 评估和硬件格式导出。
 - 集成 AIMET、PyTorch 和 QuantGRU，支持小模型 PTQ、QAT 与导出。
-- 以 CUDA 12.8 单镜像交付，客户机器无需安装 Python、PyTorch 或 CUDA Toolkit。
+- 以 CUDA 12.8 或纯 CPU 镜像交付，客户机器无需安装 Python、PyTorch 或 CUDA Toolkit。
 - Release Bundle 包含 Docker 镜像、示例配置和离线使用文档。
 
 ## 使用入口
 
-- 客户离线使用：[release/README.md](release/README.md)
+- 客户离线使用（GPU）：[release/README.md](release/README.md)
+- 客户离线使用（CPU）：[release/README.cpu.md](release/README.cpu.md)
 - LLM 配置说明：[examples/config/README.md](examples/config/README.md)
 - AIMET 定制说明：[aimet_README.md](aimet_README.md)
 - 版本记录：[CHANGELOG.md](CHANGELOG.md)
 
 ## 构建离线 Release
+
+### GPU 包（默认）
 
 构建机需要 Docker、NVIDIA Driver 和可用的 NVIDIA GPU。执行：
 
@@ -26,13 +29,32 @@ rx-met 是面向模型量化与硬件部署的离线工具包，提供统一的 
 ./scripts/release_build.sh
 ```
 
-脚本会依次完成多阶段镜像构建、运行时验证、镜像导出和 Release Bundle
-组装。默认制品位于 `.release/export/`：
+默认制品位于 `.release/export/`：
 
 ```text
 rx-met-<version>-release.tar.gz
 rx-met-<version>-release.tar.gz.sha256
 ```
+
+### CPU 包
+
+构建机只需 Docker（无需 GPU）。执行：
+
+```bash
+./scripts/release_build_cpu.sh
+```
+
+制品：
+
+```text
+rx-met-<version>-cpu-release.tar.gz
+rx-met-<version>-cpu-release.tar.gz.sha256
+```
+
+CPU 包不含 QuantGRU；`examples/quick_start.py` 小模型流程不可用，请使用 GPU 包。
+
+脚本会依次完成多阶段镜像构建、运行时验证、镜像导出和 Release Bundle
+组装。
 
 ## 主要目录
 
@@ -41,8 +63,8 @@ rx-met-<version>-release.tar.gz.sha256
 - `quant-gru-pytorch/`：QuantGRU 源码与 CUDA 扩展。
 - `llama.cpp/`：GGUF 转换、量化和硬件导出工具。
 - `examples/`：客户示例与配置。
-- `docker/`：CUDA 12.8 多阶段镜像定义。
-- `scripts/`：wheel、native、镜像验证和 Release 构建脚本。
+- `docker/`：CUDA 12.8 与 CPU 多阶段镜像定义（`Dockerfile` / `Dockerfile.cpu`）。
+- `scripts/`：wheel、native、镜像验证和 Release 构建脚本（含 `release_build_cpu.sh`）。
 
 ## 开发构建
 

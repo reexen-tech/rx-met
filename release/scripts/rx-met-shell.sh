@@ -20,12 +20,12 @@ set +a
 
 WORKSPACE="${WORKSPACE:-${DEFAULT_WORKSPACE}}"
 IMAGE="${IMAGE:-}"
+ENABLE_GPUS="${ENABLE_GPUS:-1}"
 [[ -n "${IMAGE}" ]] || die "IMAGE not set in ${ENV_FILE}"
 [[ -d "${WORKSPACE}" ]] || die "WORKSPACE is not a directory: ${WORKSPACE}"
 
 docker_args=(
   --rm
-  --gpus all
   --user "$(id -u):$(id -g)"
   -e HOME=/tmp
   -e USER="$(id -un)"
@@ -33,6 +33,10 @@ docker_args=(
   -v "${WORKSPACE}:/workspace"
   -w /workspace
 )
+
+if [[ "${ENABLE_GPUS}" == "1" ]]; then
+  docker_args+=(--gpus all)
+fi
 
 if [[ -n "${MODELS_DIR:-}" ]]; then
   [[ -d "${MODELS_DIR}" ]] || die "MODELS_DIR is not a directory: ${MODELS_DIR}"

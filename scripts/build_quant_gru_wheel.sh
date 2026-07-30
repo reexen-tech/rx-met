@@ -10,6 +10,11 @@ OUT_DIR="${RX_MET_WHEEL_OUT:-${ROOT}/.release/wheels}"
 
 log() { printf '[build_quant_gru_wheel] %s\n' "$*"; }
 
+if [[ "${RX_MET_ENABLE_CUDA:-1}" != "1" ]]; then
+    log "SKIP: quant_gru requires CUDA (RX_MET_ENABLE_CUDA=${RX_MET_ENABLE_CUDA:-0}). Use the GPU release for QuantGRU / quick_start.py."
+    exit 0
+fi
+
 if ! command -v "${PYTHON}" >/dev/null 2>&1; then
     log "ERROR: ${PYTHON} is required (runtime image uses Python 3.10)"
     exit 1
