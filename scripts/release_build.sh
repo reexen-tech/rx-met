@@ -81,7 +81,7 @@ mkdir -p "${RELEASE_DIR}"
 log "docker save -> ${IMAGE_TAR}"
 docker save -o "${IMAGE_TAR}" "${IMAGE}"
 
-log "assemble examples + README"
+log "assemble examples + README + scripts"
 tar -C "${ROOT}" \
     --exclude='examples/data' \
     --exclude='examples/output' \
@@ -89,7 +89,12 @@ tar -C "${ROOT}" \
     --exclude='*.pyc' \
     -cf - examples | tar -C "${RELEASE_DIR}" -xf -
 cp "${README_FILE}" "${RELEASE_DIR}/README.md"
-sed -i "s/@VERSION@/${VERSION}/g" "${RELEASE_DIR}/README.md"
+cp "${ROOT}/release/env.example" "${RELEASE_DIR}/env.example"
+cp -a "${ROOT}/release/scripts" "${RELEASE_DIR}/scripts"
+chmod +x "${RELEASE_DIR}/scripts/"*.sh
+sed -i "s/@VERSION@/${VERSION}/g" \
+    "${RELEASE_DIR}/README.md" \
+    "${RELEASE_DIR}/env.example"
 (
     cd "${RELEASE_DIR}"
     sha256sum "$(basename "${IMAGE_TAR}")" > SHA256SUMS

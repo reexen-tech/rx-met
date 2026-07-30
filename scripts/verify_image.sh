@@ -45,14 +45,14 @@ docker run --rm \
     --user "$(id -u):$(id -g)" \
     -e HOME=/tmp \
     -e USER="$(id -un)" \
-    -e RX_MET_SPEECH_COMMANDS_ROOT=/data/speech_commands \
+    -e RX_MET_SPEECH_COMMANDS_ROOT=/datasets/speech_commands_v0.02 \
     -v "${ROOT}/examples:/examples:ro" \
     -w /examples \
     "${IMAGE}" \
     python3 -c "
 import runpy
 ns = runpy.run_path('/examples/quick_start.py', run_name='verify_image')
-assert ns['DATA_ROOT'] == '/data/speech_commands'
+assert ns['DATA_ROOT'] == '/datasets/speech_commands_v0.02'
 print('quick_start import OK')
 "
 
