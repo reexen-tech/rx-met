@@ -20,15 +20,15 @@ rx-met-@VERSION@/
 ## 1. 导入镜像并初始化环境
 
 ```bash
-mkdir -p workspace && cd workspace
-mv /path/rx-met-@VERSION@-release.tar.gz .
-tar -xzf rx-met-@VERSION@-release.tar.gz
+cd rx-met-@VERSION@/
 sha256sum -c SHA256SUMS
 docker load -i rx-met-@VERSION@-image.tar
 docker run --rm --gpus all rx-met:@VERSION@ rx-met --help
+
+mkdir -p ../workspace && cd ../workspace
 WORKSPACE="$(pwd)"
-RELEASE_DIR="$WORKSPACE/rx-met-@VERSION@"
 mkdir -p "$WORKSPACE/runs"
+cp -r ../rx-met-@VERSION@/examples .
 ```
 
 ## 2. 大模型量化
@@ -50,11 +50,31 @@ mkdir -p "$WORKSPACE/runs"
 MODELS_DIR="$(cd /data/models && pwd)"
 ```
 
-Docker 启动后，`$MODELS_DIR` 会映射为容器内的 `/models`。
+> Docker 启动后，`$MODELS_DIR` 会映射为容器内的 `/models`。
 
-### 2.2 配置 JSON
+### 2.2 设置验证集目录
 
-编辑 `$RELEASE_DIR/examples/config/llm_quant.json`：
+> 不进行PPL评测可跳过
+
+验证集可以统一放在宿主机的任意目录，例如：
+
+```text
+/data/datasets/
+├── evaluation.txt
+└── ...
+```
+
+设置验证集根目录。将 `/data/datasets` 替换为实际路径：
+
+```bash
+DATASETS_DIR="$(cd /data/datasets && pwd)"
+```
+
+> Docker 启动后，`$DATASETS_DIR` 会映射为容器内的 `/datasets`。
+
+### 2.3 配置 JSON
+
+编辑 `$WORKSPACE/examples/config/llm_quant.json`：
 
 ```json
 {
@@ -73,43 +93,42 @@ Docker 启动后，`$MODELS_DIR` 会映射为容器内的 `/models`。
 - `model`：填写 `/models/` 下的模型目录。
 - `quant`：填写目标量化类型，例如 `Q4_K_64`、`Q4_0`。
 - `output`：填写 `/workspace/runs/` 下的输出目录, 不填默认在当前目录。
-- `eval.dataset`：填写 `/workspace/` 下的评测文件路径, 不需要 PPL 评测时，可以删除整个 `eval` 字段。
+- `eval.dataset`：填写 `/datasets/` 下的评测文件路径, 不需要 PPL 评测时，可以删除整个 `eval` 字段。
 - JSON 中填写容器路径，不填写宿主机绝对路径。
 
 > 配置字段说明见 `examples/config/README.md`。
 
-### 2.3 启动并进入容器
+### 2.4 启动并进入容器
 
 ```bash
-test -r "$WORKSPACE/datasets/evaluation.txt"
-
 docker run --rm -it --gpus all \
   --user "$(id -u):$(id -g)" \
   -e HOME=/tmp \
   -e USER="$(id -un)" \
   -v "$WORKSPACE:/workspace" \
   -v "$MODELS_DIR:/models:ro" \
+  -v "$DATASETS_DIR:/datasets:ro" \
   -w /workspace \
   rx-met:@VERSION@ \
   bash
 ```
 
-工作目录和模型目录已分别映射为容器内的 `/workspace` 和 `/models`。
-`/workspace` 可写，模型目录 `/models` 保持只读。
+工作目录、模型目录和验证集目录已分别映射为容器内的 `/workspace`、`/models` 和 `/datasets`。
+`/workspace` 可写，模型目录 `/models` 和验证集目录 `/datasets` 保持只读。
 
-### 2.4 在容器内使用
+### 2.5 在容器内使用
 
 先检查配置和执行计划：
 
 ```bash
 rx-met --dry-run \
-  "/workspace/rx-met-@VERSION@/examples/config/my_config.json"
+  "/workspace/examples/config/llm_quant.json"
 ```
 
 确认无误后运行：
 
 ```bash
-rx-met "/workspace/rx-met-@VERSION@/examples/config/my_config.json"
+rx-met "/workspace/examples/config/llm_quant.json"
 ```
 
 ## 3. 小模型示例
@@ -134,7 +153,7 @@ Docker 启动后，`$HOST_SPEECH_COMMANDS` 会映射为容器内的
 ```bash
 SMALL_MODEL_WORK="$WORKSPACE/small-model-work"
 mkdir -p "$SMALL_MODEL_WORK"
-cp -an "$RELEASE_DIR/examples/." "$SMALL_MODEL_WORK/"
+cp -an "$WORKSPACE/examples/." "$SMALL_MODEL_WORK/"
 
 docker run --rm -it --gpus all \
   --user "$(id -u):$(id -g)" \
