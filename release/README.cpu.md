@@ -62,12 +62,6 @@ DATASETS_DIR=/data/datasets
 ./scripts/rx-met-shell.sh
 ```
 
-进入后工作目录为 `/workspace`。也可直接跑命令：
-
-```bash
-./scripts/rx-met-shell.sh -- rx-met --help
-```
-
 ## 3. 大模型量化
 
 编辑 `$WORKSPACE/examples/config/llm_quant.json`（`$WORKSPACE` 即旁路 `workspace/`）：
