@@ -1,5 +1,8 @@
 #!/usr/bin/env bash
-# Build llama.cpp (REEX Q64 + CUDA) and pack bin/ + lib/ into native/*.tar.gz.
+# Build llama.cpp (REEX Q64; CUDA or CPU) and pack bin/ + lib/ into native/*.tar.gz.
+#
+# RX_MET_ENABLE_CUDA=1|0   是否开启 GGML CUDA（默认 1）
+# RX_MET_CUDA_VERSION      CUDA 版本号（如 12.8）；ENABLE_CUDA=1 时必填，用于产物命名
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -7,10 +10,19 @@ LLAMA="${ROOT}/llama.cpp"
 
 PRODUCT_VERSION="$(tr -d '[:space:]' < "${ROOT}/VERSION")"
 VERSION="${RX_MET_VERSION:-${PRODUCT_VERSION}}"
-CUDA_TAG="${RX_MET_CUDA_TAG:-cuda12.8}"
+ENABLE_CUDA="${RX_MET_ENABLE_CUDA:-1}"
+if [[ "${ENABLE_CUDA}" == "1" ]]; then
+    if [[ -z "${RX_MET_CUDA_VERSION:-}" ]]; then
+        printf '[package_native] ERROR: RX_MET_CUDA_VERSION is required when RX_MET_ENABLE_CUDA=1\n' >&2
+        exit 1
+    fi
+    PLATFORM_TAG="cuda${RX_MET_CUDA_VERSION}"
+else
+    PLATFORM_TAG="cpu"
+fi
 BUILD_DIR="${RX_MET_LLAMA_BUILD_DIR:-${LLAMA}/build_release}"
 OUT_DIR="${RX_MET_NATIVE_OUT:-${ROOT}/.release/native}"
-TARBALL="${OUT_DIR}/rx-met-native-${VERSION}-${CUDA_TAG}-linux_x86_64.tar.gz"
+TARBALL="${OUT_DIR}/rx-met-native-${VERSION}-${PLATFORM_TAG}-linux_x86_64.tar.gz"
 
 if [[ "$(uname -m)" != "x86_64" ]]; then
     printf '[package_native] ERROR: release target is x86_64, host is %s\n' "$(uname -m)"
@@ -46,18 +58,22 @@ if [[ "${VERSION}" != "${PRODUCT_VERSION}" ]]; then
 fi
 
 if [[ "${SKIP_LLAMA_BUILD:-0}" != "1" ]]; then
-    log "configure + build -> ${BUILD_DIR}"
+    log "configure + build -> ${BUILD_DIR} (platform=${PLATFORM_TAG}, enable_cuda=${ENABLE_CUDA})"
     cmake_args=(
         -DCMAKE_BUILD_TYPE=Release
-        -DGGML_CUDA=ON
         -DGGML_USE_REEX_Q64=ON
         -DGGML_USE_REEX=ON
         -DLLAMA_BUILD_TOOLS=ON
         -DLLAMA_TOOLS_INSTALL=ON
         -DREEX_HW_CONVERT=ON
     )
-    if [[ -n "${RX_MET_CUDA_ARCHITECTURES:-}" ]]; then
-        cmake_args+=("-DCMAKE_CUDA_ARCHITECTURES=${RX_MET_CUDA_ARCHITECTURES}")
+    if [[ "${ENABLE_CUDA}" == "1" ]]; then
+        cmake_args+=(-DGGML_CUDA=ON)
+        if [[ -n "${RX_MET_CUDA_ARCHITECTURES:-}" ]]; then
+            cmake_args+=("-DCMAKE_CUDA_ARCHITECTURES=${RX_MET_CUDA_ARCHITECTURES}")
+        fi
+    else
+        cmake_args+=(-DGGML_CUDA=OFF)
     fi
     cmake -S "${LLAMA}" -B "${BUILD_DIR}" "${cmake_args[@]}"
     cmake --build "${BUILD_DIR}" -j "${JOBS:-$(nproc)}"

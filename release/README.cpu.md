@@ -1,32 +1,34 @@
-# rx-met @VERSION@ 使用说明
+# rx-met @VERSION@-cpu 使用说明（纯 CPU）
+
+本发布包为 **CPU 版本**：不需要 NVIDIA Driver / GPU。大模型量化与 PPL 可在 CPU 上运行（较慢）。
+
+**不可用**：QuantGRU 与 `examples/quick_start.py` 小模型流程（依赖 CUDA）。小模型请使用 GPU 发布包。
 
 本发布包包含：
 
 ```text
-rx-met-@VERSION@/
+rx-met-@VERSION@-cpu/
 ├── README.md
 ├── SHA256SUMS
 ├── env.example
 ├── scripts/
 │   ├── setup.sh
 │   └── rx-met-shell.sh
-├── rx-met-@VERSION@-image.tar
+├── rx-met-@VERSION@-cpu-image.tar
 └── examples/
 ```
 
 ## 环境要求
 
 - Linux x86_64
-- 满足 CUDA 12.8 运行要求的 NVIDIA Driver
-- Docker
-- NVIDIA Container Toolkit
+- Docker（无需 NVIDIA Container Toolkit）
 
 ## 1. 首次初始化
 
 在解压后的发布包目录执行：
 
 ```bash
-cd rx-met-@VERSION@/
+cd rx-met-@VERSION@-cpu/
 ./scripts/setup.sh
 ```
 
@@ -48,12 +50,11 @@ DATASETS_DIR=/data/datasets
 
 /data/datasets/
 ├── evaluation.txt
-├── speech_commands_v0.02/
 └── ...
 ```
 
-> 启动后映射为：`$MODELS_DIR` → `/models`，`$DATASETS_DIR` → `/datasets`，`workspace` → `/workspace`。
-> 不做 PPL、也不跑小模型数据时，可将 `DATASETS_DIR` 留空。
+> 启动后映射为：`$MODELS_DIR` → `/models`，`$DATASETS_DIR` → `/datasets`，`workspace` → `/workspace`。  
+> 不做 PPL 时可将 `DATASETS_DIR` 留空。
 
 ## 2. 启动容器
 
@@ -61,7 +62,7 @@ DATASETS_DIR=/data/datasets
 ./scripts/rx-met-shell.sh
 ```
 
-## 3. 大模型示例
+## 3. 大模型量化
 
 编辑 `$WORKSPACE/examples/config/llm_quant.json`（`$WORKSPACE` 即旁路 `workspace/`）：
 
@@ -85,7 +86,8 @@ DATASETS_DIR=/data/datasets
 - `eval.dataset`：填写 `/datasets/` 下的评测文件；不需要 PPL 时可删除整个 `eval` 字段。
 - JSON 中只填写容器路径，不填写宿主机绝对路径。
 
-> 配置字段说明见 `examples/config/README.md`。
+> 配置字段说明见 `examples/config/README.md`。  
+> CPU 上 imatrix / PPL 会明显更慢；如需加快可减小 `calib.chunks` / `eval.chunks`。
 
 在容器内：
 
@@ -100,17 +102,3 @@ rx-met /workspace/examples/config/llm_quant.json
 ./scripts/rx-met-shell.sh -- \
   rx-met /workspace/examples/config/llm_quant.json
 ```
-
-## 4. 小模型示例
-
-将 `speech_commands_v0.02` 放在宿主机 `$DATASETS_DIR` 下，容器内路径为 `/datasets/speech_commands_v0.02`。
-
-在容器内：
-
-```bash
-cd /workspace/examples
-python3 quick_start.py
-```
-
-脚本会写入宿主机的 `workspace/examples/model_fp.pth` 和
-`workspace/examples/output/`。

@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
-# Smoke-test a built rx-met Docker image (§3.6 in Release_packaging.md).
+# Smoke-test a CPU-only rx-met Docker image (no CUDA / no quant_gru).
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PRODUCT_VERSION="$(tr -d '[:space:]' < "${ROOT}/VERSION")"
 VERSION="${RX_MET_VERSION:-${PRODUCT_VERSION}}"
-IMAGE="${RX_MET_IMAGE:-rx-met:${VERSION}}"
+IMAGE="${RX_MET_IMAGE:-rx-met:${VERSION}-cpu}"
 
-log() { printf '[verify_image] %s\n' "$*"; }
+log() { printf '[verify_image_cpu] %s\n' "$*"; }
 
 if [[ "${VERSION}" != "${PRODUCT_VERSION}" ]]; then
     log "ERROR: RX_MET_VERSION=${VERSION} differs from ${ROOT}/VERSION (${PRODUCT_VERSION})"
@@ -22,38 +22,27 @@ fi
 log "rx-met --help"
 docker run --rm "${IMAGE}" rx-met --help
 
-log "torch + aimet imports"
+log "torch + aimet imports (no quant_gru)"
 docker run --rm "${IMAGE}" python3 -c "
 import torch
 import torchvision
 import aimet_torch
 import onnxscript
 import onnxsim
-import quant_gru
 import rx_met_llm
 import gguf
 import transformers
 assert rx_met_llm.__version__ == '${VERSION}', (rx_met_llm.__version__, '${VERSION}')
+assert torch.cuda.is_available() is False, 'CPU image must not report CUDA'
 print('torch', torch.__version__, 'torchvision', torchvision.__version__, 'cuda', torch.cuda.is_available())
 print('onnxscript', onnxscript.__version__)
-print('quant_gru', quant_gru.__file__)
 print('rx_met_llm', rx_met_llm.__version__)
-"
-
-log "external quick_start.py imports with host UID"
-docker run --rm \
-    --user "$(id -u):$(id -g)" \
-    -e HOME=/tmp \
-    -e USER="$(id -un)" \
-    -e RX_MET_SPEECH_COMMANDS_ROOT=/datasets/speech_commands_v0.02 \
-    -v "${ROOT}/examples:/examples:ro" \
-    -w /examples \
-    "${IMAGE}" \
-    python3 -c "
-import runpy
-ns = runpy.run_path('/examples/quick_start.py', run_name='verify_image')
-assert ns['DATA_ROOT'] == '/datasets/speech_commands_v0.02'
-print('quick_start import OK')
+try:
+    import quant_gru
+except ImportError:
+    print('quant_gru absent (expected for CPU release)')
+else:
+    raise SystemExit('quant_gru must not be installed in CPU image')
 "
 
 log "Python dependency consistency"
@@ -69,13 +58,5 @@ test -x "${RX_MET_HOME}/bin/reex-hw-convert"
 test -f "${RX_MET_HOME}/bin/convert_hf_to_gguf.py"
 echo "binaries ok"
 '
-
-if [[ "${SKIP_GPU_TEST:-0}" == "1" ]]; then
-    log "SKIP_GPU_TEST=1, skipping required GPU smoke test"
-else
-    log "GPU torch.cuda.is_available()"
-    docker run --rm --gpus all "${IMAGE}" \
-        python3 -c "import torch; assert torch.cuda.is_available()"
-fi
 
 log "all checks passed for ${IMAGE}"

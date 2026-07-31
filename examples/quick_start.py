@@ -60,7 +60,9 @@ SEED = 42
 EPS = 1e-8
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-DATA_ROOT = os.environ.get("RX_MET_SPEECH_COMMANDS_ROOT", "/data/speech_commands")
+DATA_ROOT = os.environ.get(
+    "RX_MET_SPEECH_COMMANDS_ROOT", "/datasets/speech_commands_v0.02"
+)
 NUM_CLASSES = 35
 BATCH_SIZE = 64
 NUM_WORKERS = 4
