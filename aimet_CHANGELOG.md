@@ -7,6 +7,19 @@
 
 ## [Unreleased]
 
+### 🔄 变更
+
+- **`apply_power_of_2_workflow()` 的量化器信息打印受 `verbose` 控制**
+  （`aimet_torch/utils_rx.py`）
+  - 「修改后的量化参数」调用 `print_quantizer_info` 时传入 `verbose=verbose`
+  - `verbose=False` 时不再刷屏打印修改后的量化器详情
+
+- **降低 `prepare_model` 过程中的日志噪音**
+  （`aimet_torch/model_preparer.py`）
+  - `_prepare_traced_model` 不再对每个 Functional / Reused/Duplicate 节点输出
+    `Adding new module for node` 的 `logger.info`
+  - 图改写逻辑不变；大模型 prepare 时日志量显著减少
+
 ## [1.3.11] - 2026-07-17
 
 ### 🐛 Bug 修复
