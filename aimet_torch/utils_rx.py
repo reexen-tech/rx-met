@@ -398,8 +398,9 @@ def apply_power_of_2_workflow(sim_model, method: str = "cover_range", tolerance:
         print("\n" + "="*80)
         print("步骤 4: 对比修改前后的参数")
         print("="*80)
-    
-    issues = compare_quantizers(before_po2_info, after_po2_info)
+        issues = compare_quantizers(before_po2_info, after_po2_info)
+    else:
+        issues = []
     results['issues'] = issues
     
     # 8. (可选) Bias Scale 对齐到 Sx * Sw
