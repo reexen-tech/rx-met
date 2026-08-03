@@ -380,7 +380,7 @@ def apply_power_of_2_workflow(sim_model, method: str = "cover_range", tolerance:
         print("步骤 3: 验证修改后的量化参数")
         print("="*80)
     
-    modified_info = print_quantizer_info(sim_model, "修改后的量化参数")
+    modified_info = print_quantizer_info(sim_model, "修改后的量化参数", verbose=verbose)
     results['modified_info'] = modified_info
     
     # 6. 验证所有 scale 是否都是 2 的幂次方
@@ -398,8 +398,9 @@ def apply_power_of_2_workflow(sim_model, method: str = "cover_range", tolerance:
         print("\n" + "="*80)
         print("步骤 4: 对比修改前后的参数")
         print("="*80)
-    
-    issues = compare_quantizers(before_po2_info, after_po2_info)
+        issues = compare_quantizers(before_po2_info, after_po2_info)
+    else:
+        issues = []
     results['issues'] = issues
     
     # 8. (可选) Bias Scale 对齐到 Sx * Sw
