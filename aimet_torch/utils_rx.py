@@ -344,7 +344,7 @@ def apply_power_of_2_workflow(sim_model, method: str = "cover_range", tolerance:
         print("步骤 1: 校准后的量化器信息")
         print("="*80)
     
-    original_info = print_quantizer_info(sim_model, "校准后的原始量化参数")
+    original_info = print_quantizer_info(sim_model, "校准后的原始量化参数", verbose=verbose)
     results['original_info'] = original_info
     
     # 2. 收集修改前的量化器信息
@@ -384,7 +384,7 @@ def apply_power_of_2_workflow(sim_model, method: str = "cover_range", tolerance:
     results['modified_info'] = modified_info
     
     # 6. 验证所有 scale 是否都是 2 的幂次方
-    all_power_of_2 = verify_model_power_of_2(sim_model)
+    all_power_of_2 = verify_model_power_of_2(sim_model,verbose=verbose)
     results['all_power_of_2'] = all_power_of_2
     
     if verbose:
