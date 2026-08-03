@@ -142,6 +142,7 @@ poetry.toml
 /run-spec.sh
 /scripts/quantize_all_reex_q64.sh
 /scripts/quantize_mxfp4.sh
+/scripts/export_nvfp4.sh
 /.ccache/
 
 # IDE

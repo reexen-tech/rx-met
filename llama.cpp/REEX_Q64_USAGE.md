@@ -32,9 +32,30 @@ python export_awq_hf.py \
 # 4) HF → FP16 GGUF
 python convert_hf_to_gguf.py /path/to/hf_or_awq_hf \
   --outtype f16 --outfile /path/to/model-f16.gguf
+
+# 5a) (MoE 可选) MXFP4_MOE — RTN,无需校准;需先完成步骤 4
+#     布局: Expert 权重 → MXFP4; Attn/Embed/Shared FFN/Router 等 → Q8_0
+./build_cuda/bin/llama-quantize /path/to/model-f16.gguf \
+  /path/to/model-mxfp4_moe.gguf MXFP4_MOE
+
+# 5b) (MoE 可选) NVFP4 — ModelOpt PTQ(需校准);布局与 MXFP4_MOE 对齐
+#     依赖: pip install -U "nvidia-modelopt[all]" transformers accelerate
+#     MoE 推荐 --qformat nvfp4_experts_only; 校准默认 128 样本 × 512 seqlen
+#     --calib_data 可用本地 .jsonl(推荐) 或 modelopt 注册数据集名
+python export_nvfp4_hf.py \
+  --model_path /path/to/hf-model \
+  --output_dir /path/to/nvfp4-hf-out \
+  --qformat nvfp4_experts_only \
+  --calib_data /path/to/calib.jsonl \
+  --num_samples 128 --max_sample_length 512
+
+python convert_hf_to_gguf.py /path/to/nvfp4-hf-out \
+  --outfile /path/to/model-nvfp4.gguf --outtype q8_0
 ```
 
-流程: `HF (或 AWQ-HF) → f16.gguf → llama-quantize → Qx_*.gguf`。
+流程:
+- **Q64 整网量化**: `HF (或 AWQ-HF) → f16.gguf → llama-quantize → Qx_*_64.gguf`
+- **MoE FP4 混合**: `MXFP4_MOE` = f16.gguf → `llama-quantize MXFP4_MOE`(RTN); `NVFP4` = HF → `export_nvfp4_hf.py` → `convert_hf_to_gguf.py --outtype q8_0`(PTQ+校准)。二者均为 Expert FP4 + 其余 Q8_0。
 
 ## 1. 量化(选类型)
 
