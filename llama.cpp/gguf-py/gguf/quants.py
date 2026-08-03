@@ -251,6 +251,40 @@ class Q4_0(__Quant, qtype=GGMLQuantizationType.Q4_0):
         return (d * qs.astype(np.float32))
 
 
+class Q4_0_64(__Quant, qtype=GGMLQuantizationType.Q4_0_64):
+    """REEX signed two's-complement Q4 with one FP16 scale per 64 values."""
+
+    @classmethod
+    def quantize_blocks(cls, blocks: np.ndarray) -> np.ndarray:
+        n_blocks = blocks.shape[0]
+        imax = np.abs(blocks).argmax(axis=-1, keepdims=True)
+        signed_max = np.take_along_axis(blocks, imax, axis=-1)
+        d = signed_max / np.float32(-8.0)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            inv = np.where(d == 0, np.float32(0), np.float32(1) / d)
+        qs = np.rint(blocks * inv).clip(-8, 7).astype(np.int8)
+        qs = qs.reshape((n_blocks, 2, cls.block_size // 2))
+        packed = (
+            (qs[..., 0, :].astype(np.uint8) & np.uint8(0x0F))
+            | ((qs[..., 1, :].astype(np.uint8) & np.uint8(0x0F)) << np.uint8(4))
+        )
+        return np.concatenate([d.astype(np.float16).view(np.uint8), packed], axis=-1)
+
+    @classmethod
+    def dequantize_blocks(cls, blocks: np.ndarray) -> np.ndarray:
+        n_blocks = blocks.shape[0]
+        d, qs = np.hsplit(blocks, [2])
+        d = d.copy().view(np.float16).astype(np.float32)
+        low = (qs & np.uint8(0x0F)).astype(np.int8)
+        high = ((qs >> np.uint8(4)) & np.uint8(0x0F)).astype(np.int8)
+        low = np.where(low >= 8, low - 16, low).astype(np.int8)
+        high = np.where(high >= 8, high - 16, high).astype(np.int8)
+        signed = np.concatenate([low, high], axis=-1).reshape(
+            n_blocks, cls.block_size
+        )
+        return d * signed.astype(np.float32)
+
+
 class Q4_1(__Quant, qtype=GGMLQuantizationType.Q4_1):
     @classmethod
     def quantize_blocks(cls, blocks: np.ndarray) -> np.ndarray:
