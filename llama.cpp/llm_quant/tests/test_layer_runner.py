@@ -6,6 +6,9 @@ import torch.nn.functional as F
 from transformers import Qwen2Config, Qwen2ForCausalLM
 
 import llm_quant.gptq.layer_runner as runner
+from llm_quant.targets import ModelTargetPolicy
+from llm_quant.gptq.hessian import GPTQQ4064
+from llm_quant.gptq.sidecar import SidecarShardWriter
 
 
 class _TinyRoutedExperts(nn.Module):
@@ -49,7 +52,9 @@ class _TinyMoeLayer(nn.Module):
     def forward(self, hidden_states: torch.Tensor, **_kwargs) -> torch.Tensor:
         projected = self.proj(hidden_states)
         flat = projected.reshape(-1, 64)
-        routes = torch.zeros(flat.shape[0], 1, dtype=torch.long)
+        routes = (
+            torch.arange(flat.shape[0], dtype=torch.long).remainder(2).reshape(-1, 1)
+        )
         weights = torch.ones(flat.shape[0], 1)
         routed = self.mlp.experts(flat, routes, weights)
         return routed.reshape_as(projected)
@@ -155,7 +160,16 @@ def test_qwen35_conditional_quantizes_only_text_tower(monkeypatch) -> None:
     monkeypatch.setattr(runner, "get_calib_dataset", lambda **_kwargs: samples)
     monkeypatch.setattr(runner, "CALIBRATION_SAMPLES", len(samples))
 
-    result = runner.run_gptq(model, tokenizer=object(), device="cpu")
+    result = runner.run_gptq(
+        model,
+        tokenizer=object(),
+        device="cpu",
+        target_policy=ModelTargetPolicy(
+            family="tiny_qwen35",
+            linear_signatures=(frozenset({"proj"}),),
+            routed_experts=frozenset({"mlp.experts"}),
+        ),
+    )
 
     expected = {
         "model.language_model.layers.0.proj.weight",
@@ -163,10 +177,85 @@ def test_qwen35_conditional_quantizes_only_text_tower(monkeypatch) -> None:
         "model.language_model.layers.0.mlp.experts.down_proj",
     }
     assert set(result.tensor_data) == expected
-    assert (
-        result.layer_stats[0]["routed_experts"]["mlp.experts"]["experts"][1][
-            "gate_up_proj"
-        ]["fallback_reason"]
-        == "zero_samples"
+    assert all(
+        expert["gate_up_proj"]["method"] == "gptq"
+        for expert in result.layer_stats[0]["routed_experts"]["mlp.experts"][
+            "experts"
+        ]
     )
     torch.testing.assert_close(model.model.visual.weight, visual_weight)
+
+
+def test_resume_restores_tiny_moe_without_requantizing(
+    tmp_path, monkeypatch
+) -> None:
+    samples = [torch.arange(8, dtype=torch.long).reshape(1, 8)]
+    monkeypatch.setattr(runner, "get_calib_dataset", lambda **_kwargs: samples)
+    monkeypatch.setattr(runner, "CALIBRATION_SAMPLES", len(samples))
+    policy = ModelTargetPolicy(
+        family="tiny_qwen35",
+        linear_signatures=(frozenset({"proj"}),),
+        routed_experts=frozenset({"mlp.experts"}),
+    )
+    signature = {"path": "tiny-model"}
+    config = {
+        "algorithm": "gptq",
+        "format": "Q4_0_64",
+        "expert_hessian_weighting": "route_squared",
+    }
+
+    torch.manual_seed(123)
+    first_model = Qwen3_5MoeForConditionalGeneration().eval()
+    first_writer = SidecarShardWriter(
+        tmp_path,
+        source_model="tiny-model",
+        source_signature=signature,
+        quantization_config=config,
+    )
+    runner.run_gptq(
+        first_model,
+        tokenizer=object(),
+        device="cpu",
+        packed_only=True,
+        keep_tensor_data=False,
+        sidecar_writer=first_writer,
+        target_policy=policy,
+    )
+    first_writer.finish()
+
+    torch.manual_seed(123)
+    resumed_model = Qwen3_5MoeForConditionalGeneration().eval()
+    resumed_writer = SidecarShardWriter(
+        tmp_path,
+        source_model="tiny-model",
+        source_signature=signature,
+        quantization_config=config,
+        resume=True,
+    )
+
+    def fail_if_requantized(*_args, **_kwargs):
+        raise AssertionError("completed layer was requantized")
+
+    monkeypatch.setattr(GPTQQ4064, "fasterquant", fail_if_requantized)
+    runner.run_gptq(
+        resumed_model,
+        tokenizer=object(),
+        device="cpu",
+        packed_only=True,
+        keep_tensor_data=False,
+        sidecar_writer=resumed_writer,
+        target_policy=policy,
+    )
+    resumed_writer.finish()
+
+    first_layer = first_model.model.language_model.layers[0]
+    resumed_layer = resumed_model.model.language_model.layers[0]
+    torch.testing.assert_close(first_layer.proj.weight, resumed_layer.proj.weight)
+    torch.testing.assert_close(
+        first_layer.mlp.experts.gate_up_proj,
+        resumed_layer.mlp.experts.gate_up_proj,
+    )
+    torch.testing.assert_close(
+        first_layer.mlp.experts.down_proj,
+        resumed_layer.mlp.experts.down_proj,
+    )

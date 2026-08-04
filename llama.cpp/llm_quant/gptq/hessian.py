@@ -1,4 +1,4 @@
-"""Single-linear GPTQ using the physical Q4_0_64 runtime grid."""
+"""Single-linear GPTQ using a physical Q64 runtime grid."""
 
 from __future__ import annotations
 
@@ -7,15 +7,7 @@ from dataclasses import dataclass
 import torch
 import torch.nn as nn
 
-from .q4_0_64 import (
-    GROUP_SIZE,
-    dequantize_q4_0_64,
-    find_scales,
-    fixed_point_mask,
-    pack_q4_0_64,
-    quantize_q4_0_64,
-    quantize_with_scales,
-)
+from .formats import Q4_0_64, Q8_0_64, Q64Format, format_for_bits
 
 
 @dataclass(frozen=True)
@@ -32,17 +24,26 @@ class GPTQResult:
     fallback_reason: str | None
 
 
-class GPTQQ4064:
+class GPTQQuantizer:
     """Accumulate a full Hessian and quantize one ``nn.Linear`` in place."""
 
-    def __init__(self, layer: nn.Linear):
+    def __init__(
+        self,
+        layer: nn.Linear,
+        *,
+        block_format: Q64Format,
+        name: str | None = None,
+    ):
         if not isinstance(layer, nn.Linear):
-            raise TypeError("GPTQQ4064 only supports torch.nn.Linear")
-        if layer.in_features % GROUP_SIZE:
+            raise TypeError("GPTQ only supports torch.nn.Linear")
+        if layer.in_features % block_format.group_size:
             raise ValueError(
-                f"in_features={layer.in_features} is not divisible by {GROUP_SIZE}"
+                f"in_features={layer.in_features} is not divisible by "
+                f"{block_format.group_size}"
             )
         self.layer = layer
+        self.block_format = block_format
+        self.name = name or "<unnamed>"
         self.device = layer.weight.device
         self.columns = layer.in_features
         self.rows = layer.out_features
@@ -66,35 +67,23 @@ class GPTQQ4064:
         self.n_tokens += x.shape[0]
 
     @torch.no_grad()
-    def _rtn_fallback(self, reason: str, *, damp: float = 0.0) -> GPTQResult:
-        quantized = quantize_q4_0_64(self.layer.weight.detach())
-        self.layer.weight.copy_(quantized.dequant.to(self.layer.weight.dtype))
-        return GPTQResult(
-            dequant=quantized.dequant.to(torch.float32),
-            codes=quantized.codes,
-            scales=quantized.scales,
-            packed=quantized.packed,
-            fixed_point=fixed_point_mask(quantized.codes, quantized.scales),
-            loss=0.0,
-            dead_columns=0,
-            damp=damp,
-            method="rtn",
-            fallback_reason=reason,
-        )
-
-    @torch.no_grad()
     def fasterquant(
         self,
         *,
         lazy_block_size: int = 128,
         damp_percent: float = 0.01,
     ) -> GPTQResult:
-        if lazy_block_size <= 0 or lazy_block_size % GROUP_SIZE:
-            raise ValueError("lazy_block_size must be a positive multiple of 64")
+        group_size = self.block_format.group_size
+        if lazy_block_size <= 0 or lazy_block_size % group_size:
+            raise ValueError(
+                f"lazy_block_size must be a positive multiple of {group_size}"
+            )
         if damp_percent < 0:
             raise ValueError("damp_percent must be non-negative")
         if self.n_tokens == 0:
-            return self._rtn_fallback("zero_samples")
+            raise RuntimeError(
+                f"GPTQ calibration has zero samples for {self.name}"
+            )
 
         W = self.layer.weight.detach().to(torch.float32).clone()
         H = self.H_sum * (2.0 / self.n_tokens)
@@ -116,20 +105,19 @@ class GPTQQ4064:
             chol = torch.linalg.cholesky(H)
             inverse = torch.cholesky_inverse(chol)
             Hinv = torch.linalg.cholesky(inverse, upper=True)
-        except torch.linalg.LinAlgError:
+        except torch.linalg.LinAlgError as exc:
             diag = torch.diagonal(H)
-            reason = (
-                "cholesky_failure: "
+            raise RuntimeError(
+                f"GPTQ Cholesky failed for {self.name}: "
                 f"K={self.columns}, damp={float(damp):.6g}, "
                 f"diag_min={float(diag.min()):.6g}, "
                 f"diag_max={float(diag.max()):.6g}"
-            )
-            return self._rtn_fallback(reason, damp=float(damp))
+            ) from exc
 
         Q = torch.zeros_like(W)
         codes = torch.zeros_like(W, dtype=torch.int8)
         scales = torch.empty(
-            (self.rows, self.columns // GROUP_SIZE),
+            (self.rows, self.columns // group_size),
             dtype=torch.float16,
             device=self.device,
         )
@@ -145,18 +133,20 @@ class GPTQQ4064:
 
             for local_i in range(count):
                 global_i = block_start + local_i
-                group_index = global_i // GROUP_SIZE
-                if global_i % GROUP_SIZE == 0:
-                    group_end = global_i + GROUP_SIZE
+                group_index = global_i // group_size
+                if global_i % group_size == 0:
+                    group_end = global_i + group_size
                     if group_end > block_end:
                         raise RuntimeError("a physical group crosses a lazy block")
-                    _, stored_scale = find_scales(
-                        W1[:, local_i : local_i + GROUP_SIZE]
+                    _, stored_scale = self.block_format.find_scales(
+                        W1[:, local_i : local_i + group_size]
                     )
                     scales[:, group_index] = stored_scale.squeeze(-1)
 
                 w = W1[:, local_i]
-                q_code = quantize_with_scales(w, scales[:, group_index])
+                q_code = self.block_format.quantize_with_scales(
+                    w, scales[:, group_index]
+                )
                 q = (
                     q_code.to(torch.float32)
                     * scales[:, group_index].to(torch.float32)
@@ -178,12 +168,14 @@ class GPTQQ4064:
             Q[:, block_start:block_end] = Q1
             W[:, block_end:] -= Err1 @ Hinv[block_start:block_end, block_end:]
 
-        dequant = dequantize_q4_0_64(codes, scales)
+        dequant = self.block_format.dequantize(codes, scales)
         if not torch.equal(Q, dequant):
-            raise RuntimeError("internal Q4_0_64 dequantization mismatch")
+            raise RuntimeError(
+                f"internal {self.block_format.name} dequantization mismatch"
+            )
         self.layer.weight.copy_(dequant.to(self.layer.weight.dtype))
-        packed = pack_q4_0_64(codes, scales)
-        fixed_point = fixed_point_mask(codes, scales)
+        packed = self.block_format.pack(codes, scales)
+        fixed_point = self.block_format.fixed_point_mask(codes, scales)
         return GPTQResult(
             dequant=dequant,
             codes=codes,
@@ -201,3 +193,18 @@ class GPTQQ4064:
         self.H_sum = None  # type: ignore[assignment]
         if self.device.type == "cuda":
             torch.cuda.empty_cache()
+
+
+class GPTQQ4064(GPTQQuantizer):
+    def __init__(self, layer: nn.Linear, *, name: str | None = None):
+        super().__init__(layer, block_format=Q4_0_64, name=name)
+
+
+class GPTQQ8064(GPTQQuantizer):
+    def __init__(self, layer: nn.Linear, *, name: str | None = None):
+        super().__init__(layer, block_format=Q8_0_64, name=name)
+
+
+def quantizer_class_for_bits(bits: int) -> type[GPTQQuantizer]:
+    format_for_bits(bits)
+    return GPTQQ4064 if bits == 4 else GPTQQ8064

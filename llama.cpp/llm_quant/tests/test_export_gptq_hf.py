@@ -58,36 +58,43 @@ def test_export_writes_sidecar_and_metadata(tmp_path, monkeypatch) -> None:
         "model.layers.0.self_attn.q_proj.weight": {
             "codes": torch.zeros((2, 64), dtype=torch.int8),
             "scales": torch.zeros((2, 1), dtype=torch.float16),
-            "packed": torch.zeros((2, 34), dtype=torch.uint8),
+            "packed": torch.zeros((2, 66), dtype=torch.uint8),
+            "shape": [2, 64],
         }
     }
+    def fake_run(*_args, sidecar_writer, **_kwargs):
+        stats = {"layer": 0, "linears": {}, "routed_experts": {}}
+        sidecar_writer.write_layer(0, tensors, stats)
+        return GPTQRunResult(
+            tensor_data={},
+            layer_stats=[stats],
+            calibration_sequences=2,
+            fixed_point_ok=False,
+        )
+
     monkeypatch.setattr(
         export_gptq_hf,
         "run_gptq",
-        lambda *_args, **_kwargs: GPTQRunResult(
-            tensor_data=tensors,
-            layer_stats=[{"layer": 0}],
-            calibration_sequences=2,
-            fixed_point_ok=False,
-        ),
+        fake_run,
     )
 
     exported = export_gptq_hf.export_gptq_hf(
-        str(model_path), str(output_path), device="cpu"
+        str(model_path), str(output_path), device="cpu", bits=8
     )
     assert exported == str(output_path.resolve())
     sidecar = torch.load(
-        output_path / "gptq_q4_0_64.pt", map_location="cpu", weights_only=True
+        output_path / "gptq_q8_0_64.pt", map_location="cpu", weights_only=True
     )
-    assert sidecar["format"] == "Q4_0_64"
-    assert set(sidecar["tensors"]) == set(tensors)
+    assert sidecar["format"] == "Q8_0_64"
+    assert sidecar["version"] == 3
+    assert len(sidecar["shards"]) == 1
     metadata = json.loads((output_path / "gptq_export_meta.json").read_text())
-    assert metadata["execution"] == "W4A8"
+    assert metadata["execution"] == "W8A8"
     assert metadata["group_size"] == 64
-    assert metadata["gguf_export_path"] == "direct_q4_0_64_sidecar"
+    assert metadata["gguf_export_path"] == "direct_q8_0_64_sidecar"
 
 
-def test_qwen35_export_uses_bf16_model_and_sidecar_v2(
+def test_qwen35_export_uses_bf16_model_and_sidecar_v3(
     tmp_path, monkeypatch
 ) -> None:
     model_path = tmp_path / "source"
@@ -115,22 +122,26 @@ def test_qwen35_export_uses_bf16_model_and_sidecar_v2(
         load_model,
     )
     name = "model.language_model.layers.0.self_attn.q_proj.weight"
-    monkeypatch.setattr(
-        export_gptq_hf,
-        "run_gptq",
-        lambda *_args, **_kwargs: GPTQRunResult(
-            tensor_data={
-                name: {
-                    "codes": torch.zeros((2, 64), dtype=torch.int8),
-                    "scales": torch.zeros((2, 1), dtype=torch.float16),
-                    "packed": torch.zeros((2, 34), dtype=torch.uint8),
-                }
-            },
-            layer_stats=[{"layer": 0}],
+    tensors = {
+        name: {
+            "codes": torch.zeros((2, 64), dtype=torch.int8),
+            "scales": torch.zeros((2, 1), dtype=torch.float16),
+            "packed": torch.zeros((2, 34), dtype=torch.uint8),
+            "shape": [2, 64],
+        }
+    }
+
+    def fake_run(*_args, sidecar_writer, **_kwargs):
+        stats = {"layer": 0, "linears": {}, "routed_experts": {}}
+        sidecar_writer.write_layer(0, tensors, stats)
+        return GPTQRunResult(
+            tensor_data={},
+            layer_stats=[stats],
             calibration_sequences=2,
             fixed_point_ok=True,
-        ),
-    )
+        )
+
+    monkeypatch.setattr(export_gptq_hf, "run_gptq", fake_run)
 
     export_gptq_hf.export_gptq_hf(
         str(model_path), str(output_path), device="cpu"
@@ -141,7 +152,7 @@ def test_qwen35_export_uses_bf16_model_and_sidecar_v2(
         map_location="cpu",
         weights_only=True,
     )
-    assert manifest["version"] == 2
+    assert manifest["version"] == 3
     assert manifest["layout"] == "packed-only-sharded"
     metadata = json.loads((output_path / "gptq_export_meta.json").read_text())
     assert metadata["model_family"] == "Qwen3.5-35B-A3B"
@@ -158,4 +169,6 @@ def test_cli_only_exposes_paths_and_device() -> None:
         "device": "cuda",
         "resume": False,
         "max_layers": None,
+        "bits": 4,
+        "expert_hessian_weighting": "route_squared",
     }

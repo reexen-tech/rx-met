@@ -1,12 +1,16 @@
 from __future__ import annotations
 
+import pytest
 import torch
 from transformers import Qwen3Config, Qwen3ForCausalLM
 
 import llm_quant.gptq.layer_runner as runner
 
 
-def test_tiny_qwen3_runs_dense_text_gptq(monkeypatch) -> None:
+@pytest.mark.parametrize("bits,type_size", [(4, 34), (8, 66)])
+def test_tiny_qwen3_runs_dense_text_gptq(
+    monkeypatch, bits: int, type_size: int
+) -> None:
     config = Qwen3Config(
         vocab_size=128,
         hidden_size=64,
@@ -31,6 +35,7 @@ def test_tiny_qwen3_runs_dense_text_gptq(monkeypatch) -> None:
         tokenizer=object(),
         device="cpu",
         packed_only=True,
+        bits=bits,
     )
 
     expected = {
@@ -46,4 +51,12 @@ def test_tiny_qwen3_runs_dense_text_gptq(monkeypatch) -> None:
         )
     }
     assert set(result.tensor_data) == expected
-    assert all(set(entry) == {"packed", "shape"} for entry in result.tensor_data.values())
+    assert all(
+        set(entry) == {"packed", "shape", "method"}
+        for entry in result.tensor_data.values()
+    )
+    assert all(
+        entry["packed"].shape[-1]
+        == entry["shape"][-1] // 64 * type_size
+        for entry in result.tensor_data.values()
+    )

@@ -4,13 +4,15 @@ from __future__ import annotations
 
 import gc
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Literal
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from .hessian import GPTQQ4064, GPTQResult
+from .hessian import GPTQResult, quantizer_class_for_bits
+
+ExpertHessianWeighting = Literal["none", "route_squared"]
 
 
 @dataclass(frozen=True)
@@ -118,11 +120,18 @@ def quantize_routed_experts(
     lazy_block_size: int = 128,
     damp_percent: float = 0.01,
     packed_only: bool = False,
+    hessian_weighting: ExpertHessianWeighting = "route_squared",
+    bits: int = 4,
 ) -> ExpertQuantResult:
     """Quantize one 3D expert collection with one live Hessian at a time."""
 
     if not is_routed_experts(module):
         raise TypeError("module does not expose supported 3D routed expert weights")
+    if hessian_weighting not in {"none", "route_squared"}:
+        raise ValueError(
+            f"unsupported expert Hessian weighting: {hessian_weighting}"
+        )
+    quantizer_class = quantizer_class_for_bits(bits)
     gate_up = module.gate_up_proj
     down = module.down_proj
     if gate_up.shape[0] != down.shape[0]:
@@ -151,9 +160,16 @@ def quantize_routed_experts(
         original_gate_up = gate_up[expert_index].detach().clone()
 
         gate_layer = _temporary_linear(original_gate_up)
-        gate_quantizer = GPTQQ4064(gate_layer)
+        gate_quantizer = quantizer_class(
+            gate_layer,
+            name=f"{tensor_prefix}.{expert_index}.gate_up_proj",
+        )
         for selected, routing_weight in inputs:
-            weighted = selected * routing_weight.unsqueeze(-1).to(selected.dtype)
+            weighted = selected
+            if hessian_weighting == "route_squared":
+                weighted = selected * routing_weight.unsqueeze(-1).to(
+                    selected.dtype
+                )
             gate_quantizer.add_batch(weighted)
         gate_result = gate_quantizer.fasterquant(
             lazy_block_size=lazy_block_size, damp_percent=damp_percent
@@ -163,7 +179,10 @@ def quantize_routed_experts(
         del gate_quantizer, gate_layer
 
         down_layer = _temporary_linear(down[expert_index].detach())
-        down_quantizer = GPTQQ4064(down_layer)
+        down_quantizer = quantizer_class(
+            down_layer,
+            name=f"{tensor_prefix}.{expert_index}.down_proj",
+        )
         for selected, routing_weight in inputs:
             # true_sequential=false: down calibration always uses the original
             # gate/up weight, not the just-quantized gate_up_proj slice.
@@ -171,9 +190,9 @@ def quantize_routed_experts(
                 selected.to(torch.float32), original_gate_up.to(torch.float32)
             ).chunk(2, dim=-1)
             middle = module.act_fn(gate) * up
-            down_quantizer.add_batch(
-                middle * routing_weight.unsqueeze(-1).to(middle.dtype)
-            )
+            if hessian_weighting == "route_squared":
+                middle = middle * routing_weight.unsqueeze(-1).to(middle.dtype)
+            down_quantizer.add_batch(middle)
         down_result = down_quantizer.fasterquant(
             lazy_block_size=lazy_block_size, damp_percent=damp_percent
         )
@@ -203,14 +222,15 @@ def quantize_routed_experts(
         if device.type == "cuda":
             torch.cuda.empty_cache()
 
-    tensor_data: dict[str, dict[str, torch.Tensor | list[int]]] = {}
+    tensor_data: dict[str, dict[str, Any]] = {}
     for suffix, entries, shape in (
         ("gate_up_proj", gate_entries, gate_up.shape),
         ("down_proj", down_entries, down.shape),
     ):
-        output: dict[str, torch.Tensor | list[int]] = {
+        output: dict[str, Any] = {
             "packed": torch.stack(entries["packed"]),
             "shape": list(shape),
+            "method": "gptq",
         }
         if not packed_only:
             output["codes"] = torch.stack(entries["codes"])
