@@ -34,6 +34,7 @@ def test_qwen35_adapter_uses_nested_text_tower_and_config() -> None:
     assert adapter.text_config is model.config.text_config
     assert adapter.layers is model.model.language_model.layers
     assert adapter.tensor_prefix == "model.language_model.layers"
+    assert adapter.model_family == "qwen3_5_moe"
 
     changed = adapter.set_use_cache(False)
     assert model.config.use_cache is False
@@ -45,17 +46,3 @@ def test_qwen35_adapter_uses_nested_text_tower_and_config() -> None:
         config.use_cache = original
     assert model.config.use_cache is True
     assert model.config.text_config.use_cache is True
-
-
-def test_qwen35_adapter_keeps_shared_expert_router_gate_unquantized() -> None:
-    model = Qwen3_5MoeForConditionalGeneration()
-    adapter = get_model_adapter(model)
-    layer = nn.Module()
-    layer.self_attn = nn.Module()
-    layer.self_attn.q_proj = nn.Linear(64, 64, bias=False)
-    layer.mlp = nn.Module()
-    layer.mlp.shared_expert_gate = nn.Linear(64, 1, bias=False)
-
-    linears = adapter.named_linears(layer)
-    assert "self_attn.q_proj" in linears
-    assert "mlp.shared_expert_gate" not in linears

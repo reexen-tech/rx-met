@@ -48,4 +48,7 @@ def test_tiny_qwen35_moe_runs_text_gptq(monkeypatch) -> None:
     assert len(result.layer_stats) == 2
     assert any(name.endswith("mlp.experts.gate_up_proj") for name in result.tensor_data)
     assert all("mlp.shared_expert_gate" not in name for name in result.tensor_data)
-    assert all(set(entry) == {"packed", "shape"} for entry in result.tensor_data.values())
+    assert all(
+        set(entry) == {"packed", "shape", "method"}
+        for entry in result.tensor_data.values()
+    )

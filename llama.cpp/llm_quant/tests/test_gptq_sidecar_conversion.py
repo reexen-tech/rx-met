@@ -8,7 +8,10 @@ import torch
 
 import convert_hf_to_gguf as converter
 import validate_gptq_gguf as validator
+from llm_quant.gptq.formats import Q4_0_64, Q8_0_64
+from llm_quant.gptq.gguf_adapter import GPTQGGUFAdapter
 from llm_quant.gptq.q4_0_64 import pack_q4_0_64
+from llm_quant.gptq.q8_0_64 import pack_q8_0_64
 
 
 def _qwen35_model() -> converter.Qwen3_5MoeTextModel:
@@ -26,20 +29,21 @@ def _qwen35_model() -> converter.Qwen3_5MoeTextModel:
 
 
 def test_lookup_distinguishes_split_gate_up_entries() -> None:
-    model = _qwen35_model()
     source = "model.layers.0.mlp.experts.gate_up_proj"
     gate_name = "blk.0.ffn_gate_exps.weight"
     up_name = "blk.0.ffn_up_exps.weight"
-    model._gptq_q4_0_64_tensors = {
-        "gate": {"source_name": source, "gguf_name": gate_name},
-        "up": {"source_name": source, "gguf_name": up_name},
-    }
-    remaining = {"gate", "up"}
+    adapter = GPTQGGUFAdapter(
+        {
+            "gate": {"source_name": source, "gguf_name": gate_name},
+            "up": {"source_name": source, "gguf_name": up_name},
+        },
+        Q4_0_64,
+        {},
+    )
 
-    gate = model._lookup_gptq_sidecar_entry(source, gate_name, remaining)
+    gate = adapter._lookup(source, gate_name)
     assert gate is not None and gate[0] == "gate"
-    remaining.remove(gate[0])
-    up = model._lookup_gptq_sidecar_entry(source, up_name, remaining)
+    up = adapter._lookup(source, up_name)
     assert up is not None and up[0] == "up"
 
 
@@ -62,12 +66,13 @@ def test_qwen35_moe_experts_split_dim_minus_two_without_down_transpose() -> None
 
 def test_linear_attention_sidecar_matches_v_head_reorder() -> None:
     model = _qwen35_model()
+    adapter = GPTQGGUFAdapter({}, Q4_0_64, model.hparams)
     source = "model.layers.0.linear_attn.out_proj.weight"
     codes = (torch.arange(64 * 512).reshape(64, 512) % 16 - 8).to(torch.int8)
     scales = torch.arange(64 * 8, dtype=torch.float16).reshape(64, 8)
 
-    converted_codes, converted_scales = model._transform_gptq_sidecar(
-        codes, scales, source, "blk.0.ssm_out.weight", 0,
+    converted_codes, converted_scales = adapter.transform(
+        codes, scales, source,
     )
     expected_codes = model._reorder_v_heads(codes, 1, 2, 2, 128)
     expected_scales = model._reorder_v_heads(scales, 1, 2, 2, 2)
@@ -104,6 +109,39 @@ def test_validator_accepts_gguf_names_and_3d_packed(
     )
 
     validator.validate_gguf(tensors, tmp_path / "test.gguf")
+
+
+def test_validator_accepts_q8_3d_packed(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    codes = (torch.arange(2 * 3 * 64).reshape(2, 3, 64) % 255 - 127).to(
+        torch.int8
+    )
+    scales = torch.ones((2, 3, 1), dtype=torch.float16)
+    packed = pack_q8_0_64(codes, scales)
+    gguf_name = "blk.0.ffn_gate_exps.weight"
+    tensors = {
+        "gate": {
+            "source_name": "model.layers.0.mlp.experts.gate_up_proj",
+            "gguf_name": gguf_name,
+            "codes": codes,
+            "scales": scales,
+            "packed": packed,
+        },
+    }
+    gguf_tensor = SimpleNamespace(
+        name=gguf_name,
+        tensor_type=validator.gguf.GGMLQuantizationType.Q8_0_64,
+        data=np.asarray(packed),
+    )
+    monkeypatch.setattr(
+        validator.gguf,
+        "GGUFReader",
+        lambda _: SimpleNamespace(tensors=[gguf_tensor]),
+    )
+    validator.validate_gguf(
+        tensors, tmp_path / "test-q8.gguf", block_format=Q8_0_64
+    )
 
 
 def test_validator_keeps_qwen2_v1_name_mapping() -> None:

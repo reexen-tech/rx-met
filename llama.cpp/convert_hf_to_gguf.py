@@ -29,8 +29,9 @@ if 'NO_LOCAL_GGUF' not in os.environ:
     sys.path.insert(1, str(Path(__file__).parent / 'gguf-py'))
 import gguf
 from gguf.vocab import MistralTokenizerType, MistralVocab
-from llm_quant.gptq.q4_0_64 import pack_q4_0_64, unpack_q4_0_64
-from llm_quant.gptq.sidecar import SidecarShardReader
+# >>> REEX (reexen): isolated GPTQ sidecar integration.
+from llm_quant.gptq.gguf_adapter import GPTQGGUFAdapter
+# <<< REEX
 
 try:
     from mistral_common.tokens.tokenizers.base import TokenizerVersion # type: ignore[import-not-found, ty:unresolved-import]
@@ -143,23 +144,9 @@ class ModelBase:
         self._up_exp_buffer: dict[int, Tensor] = {}
         self.hparams = ModelBase.load_hparams(self.dir_model, self.is_mistral_format) if hparams is None else hparams
         self.model_tensors = self.index_tensors(remote_hf_model_id=remote_hf_model_id)
-        self._gptq_q4_0_64_tensors: Any = {}
-        sidecar_path = self.dir_model / "gptq_q4_0_64.pt"
-        if sidecar_path.is_file():
-            model_type = self.hparams.get("model_type")
-            if model_type not in {"qwen2", "qwen3"} and not str(model_type).startswith("qwen3_5"):
-                raise ValueError("Q4_0_64 GPTQ sidecar supports only Qwen2, Qwen3, and Qwen3.5")
-            payload = torch.load(sidecar_path, map_location="cpu", weights_only=True)
-            if not isinstance(payload, dict) or payload.get("format") != "Q4_0_64":
-                raise ValueError(f"invalid GPTQ sidecar: {sidecar_path}")
-            version = payload.get("version", 1)
-            if version == 1 and isinstance(payload.get("tensors"), dict):
-                self._gptq_q4_0_64_tensors = payload["tensors"]
-            elif version == 2:
-                self._gptq_q4_0_64_tensors = SidecarShardReader(sidecar_path)
-            else:
-                raise ValueError(f"invalid GPTQ sidecar: {sidecar_path}")
-            logger.info("Loaded %d pre-quantized Q4_0_64 tensors", len(self._gptq_q4_0_64_tensors))
+        # >>> REEX (reexen): load an optional GPTQ sidecar adapter.
+        self._gptq_adapter = GPTQGGUFAdapter.load(self.dir_model, self.hparams)
+        # <<< REEX
         self.metadata_override = metadata_override
         self.model_name = model_name
         self.dir_model_card = dir_model  # overridden in convert_lora_to_gguf.py
@@ -184,8 +171,10 @@ class ModelBase:
             else:
                 self.ftype = gguf.LlamaFileType.MOSTLY_F16
                 logger.info("heuristics unable to detect tensor dtype, defaulting to --outtype f16")
-        if self._gptq_q4_0_64_tensors:
-            self.ftype = gguf.LlamaFileType.MOSTLY_Q4_0_64
+        # >>> REEX (reexen): use the packed GPTQ sidecar's GGUF file type.
+        if self._gptq_adapter is not None:
+            self.ftype = self._gptq_adapter.file_type
+        # <<< REEX
 
         # Configure GGUF Writer
         self.gguf_writer = gguf.GGUFWriter(path=None, arch=gguf.MODEL_ARCH_NAMES[self.model_arch], endianess=self.endianess, use_temp_file=self.use_temp_file,
@@ -594,61 +583,6 @@ class ModelBase:
 
         return False
 
-    def _lookup_gptq_sidecar_entry(
-        self,
-        source_name: str,
-        gguf_name: str,
-        remaining: set[str],
-    ) -> tuple[str, dict[str, Any], bool] | None:
-        for key, transform in ((gguf_name, False), (source_name, True)):
-            if key in remaining:
-                entry = self._gptq_q4_0_64_tensors[key]
-                if not isinstance(entry, dict):
-                    raise ValueError(f"invalid Q4_0_64 sidecar entry for {key}")
-                entry_gguf_name = entry.get("gguf_name")
-                entry_source_name = entry.get("source_name")
-                if entry_gguf_name in (None, gguf_name) and entry_source_name in (
-                    None,
-                    source_name,
-                ):
-                    return key, entry, transform
-        if isinstance(self._gptq_q4_0_64_tensors, SidecarShardReader):
-            return None
-
-        matches: list[tuple[str, dict[str, Any], bool]] = []
-        for key in remaining:
-            entry = self._gptq_q4_0_64_tensors[key]
-            if not isinstance(entry, dict):
-                raise ValueError(f"invalid Q4_0_64 sidecar entry for {key}")
-            entry_gguf_name = entry.get("gguf_name")
-            entry_source_name = entry.get("source_name")
-            if key == gguf_name:
-                matches.append((key, entry, False))
-            elif entry_gguf_name == gguf_name and entry_source_name in (None, source_name):
-                matches.append((key, entry, entry_source_name == source_name))
-            elif key == source_name and entry_gguf_name in (None, gguf_name):
-                matches.append((key, entry, True))
-            elif entry_source_name == source_name and entry_gguf_name is None:
-                matches.append((key, entry, True))
-
-        if not matches:
-            return None
-        if len(matches) > 1:
-            keys = ", ".join(sorted(match[0] for match in matches))
-            raise ValueError(f"ambiguous Q4_0_64 sidecar entries for {gguf_name}: {keys}")
-        return matches[0]
-
-    def _transform_gptq_sidecar(
-        self,
-        codes: Tensor,
-        scales: Tensor,
-        source_name: str,
-        gguf_name: str,
-        bid: int | None,
-    ) -> tuple[Tensor, Tensor]:
-        del source_name, gguf_name, bid
-        return codes, scales
-
     # some models need extra generated tensors (like rope_freqs)
     def generate_extra_tensors(self) -> Iterable[tuple[str, Tensor]]:
         return ()
@@ -814,7 +748,6 @@ class ModelBase:
         del experts, merged
 
     def prepare_tensors(self):
-        remaining_gptq_tensors = set(self._gptq_q4_0_64_tensors)
         # detect NVFP4 quantization (ModelOpt format)
         quant_algo = (self.hparams.get("quantization_config") or {}).get("quant_algo")
         quant_method = (self.hparams.get("quantization_config") or {}).get("quant_method")
@@ -874,56 +807,20 @@ class ModelBase:
                     break
 
             for new_name, data_torch in (self.modify_tensors(data_torch, name, bid)):
-                sidecar_match = self._lookup_gptq_sidecar_entry(name, new_name, remaining_gptq_tensors)
-                if sidecar_match is not None:
-                    entry_key, entry, transform_from_source = sidecar_match
-                    packed = entry.get("packed")
-                    codes = entry.get("codes")
-                    scales = entry.get("scales")
-                    if not isinstance(packed, torch.Tensor):
-                        raise ValueError(f"invalid Q4_0_64 sidecar entry for {entry_key}")
-                    if not isinstance(codes, torch.Tensor) or not isinstance(scales, torch.Tensor):
-                        logical_shape = entry.get("shape")
-                        if (
-                            not isinstance(logical_shape, list)
-                            or len(logical_shape) != packed.ndim
-                        ):
-                            raise ValueError(
-                                f"packed-only Q4_0_64 entry lacks shape for {entry_key}"
-                            )
-                        codes, scales = unpack_q4_0_64(
-                            packed,
-                            logical_size=int(logical_shape[-1]),
-                        )
-                        if tuple(codes.shape) != tuple(logical_shape):
-                            raise ValueError(
-                                f"packed-only Q4_0_64 shape mismatch for {entry_key}"
-                            )
-                    if transform_from_source:
-                        codes, scales = self._transform_gptq_sidecar(
-                            codes, scales, name, new_name, bid,
-                        )
-                        packed = pack_q4_0_64(codes, scales)
-                    if codes.shape != data_torch.shape or codes.shape[-1] % 64:
-                        raise ValueError(
-                            f"Q4_0_64 sidecar shape mismatch for {entry_key}: "
-                            f"codes={tuple(codes.shape)}, weight={tuple(data_torch.shape)}"
-                        )
-                    expected_scales = (*codes.shape[:-1], codes.shape[-1] // 64)
-                    expected_packed = (*codes.shape[:-1], codes.shape[-1] // 64 * 34)
-                    if tuple(scales.shape) != expected_scales or tuple(packed.shape) != expected_packed:
-                        raise ValueError(f"invalid Q4_0_64 scales/packed shape for {entry_key}")
-                    data = packed.to(torch.uint8).contiguous().numpy()
-                    data_qtype = gguf.GGMLQuantizationType.Q4_0_64
-                    shape = gguf.quant_shape_from_byte_shape(data.shape, data_qtype)
-                    shape_str = f"{{{', '.join(str(n) for n in reversed(shape))}}}"
-                    logger.info(
-                        f"{f'%-{max_name_len}s' % f'{new_name},'} "
-                        f"{old_dtype} --> {data_qtype.name} (GPTQ sidecar), shape = {shape_str}"
+                # >>> REEX (reexen): emit an exact packed GPTQ sidecar tensor.
+                if (
+                    self._gptq_adapter is not None
+                    and self._gptq_adapter.emit_if_present(
+                        writer=self.gguf_writer,
+                        source_name=name,
+                        gguf_name=new_name,
+                        weight=data_torch,
+                        old_dtype=old_dtype,
+                        max_name_len=max_name_len,
                     )
-                    self.gguf_writer.add_tensor(new_name, data, raw_dtype=data_qtype)
-                    remaining_gptq_tensors.remove(entry_key)
+                ):
                     continue
+                # <<< REEX
 
                 # TODO: why do we squeeze here?
                 # data = data_torch.squeeze().numpy()
@@ -1002,10 +899,10 @@ class ModelBase:
                         data_qtype = gguf.GGMLQuantizationType.TQ1_0
                     elif self.ftype == gguf.LlamaFileType.MOSTLY_TQ2_0:
                         data_qtype = gguf.GGMLQuantizationType.TQ2_0
-                    elif self.ftype == gguf.LlamaFileType.MOSTLY_Q4_0_64:
-                        # GPTQ target matrices were emitted from the sidecar above.
-                        # Keep embeddings, output, norms, and other tensors lossless.
+                    # >>> REEX (reexen): preserve non-sidecar tensors as F16.
+                    elif self._gptq_adapter is not None:
                         data_qtype = gguf.GGMLQuantizationType.F16
+                    # <<< REEX
                     else:
                         raise ValueError(f"Unknown file type: {self.ftype.name}")
 
@@ -1026,9 +923,10 @@ class ModelBase:
 
                 self.gguf_writer.add_tensor(new_name, data, raw_dtype=data_qtype)
 
-        if remaining_gptq_tensors:
-            missing = ", ".join(sorted(remaining_gptq_tensors)[:8])
-            raise ValueError(f"GPTQ sidecar tensors were not found in the HF model: {missing}")
+        # >>> REEX (reexen): reject sidecar tensors not consumed by conversion.
+        if self._gptq_adapter is not None:
+            self._gptq_adapter.finish()
+        # <<< REEX
 
     def set_type(self):
         self.gguf_writer.add_type(gguf.GGUFType.MODEL)
@@ -3944,7 +3842,12 @@ class Qwen2Model(TextModel):
         try:
             self._set_vocab_sentencepiece()
         except (FileNotFoundError, ModuleNotFoundError):
+            # >>> REEX (reexen): also fall back to gpt2 when sentencepiece isn't
+            # installed (ModuleNotFoundError), not just on a missing tokenizer
+            # file — GPTQ-exported Qwen models are often shipped without the
+            # sentencepiece dependency installed in the export env.
             self._set_vocab_gpt2()
+            # <<< REEX
 
     def set_gguf_parameters(self):
         super().set_gguf_parameters()
@@ -5510,62 +5413,6 @@ class _LinearAttentionVReorderBase(Qwen3NextModel):
     def _repack_nvfp4(self, name: str, weight: Tensor, scale: Tensor, scale2: Tensor, input_scale: Tensor):
         weight, scale = self._transform_nvfp4_weight(name, weight, scale)
         super()._repack_nvfp4(name, weight, scale, scale2, input_scale)
-
-    def _transform_gptq_sidecar(
-        self,
-        codes: Tensor,
-        scales: Tensor,
-        source_name: str,
-        gguf_name: str,
-        bid: int | None,
-    ) -> tuple[Tensor, Tensor]:
-        del gguf_name, bid
-        if "linear_attn." not in source_name:
-            return codes, scales
-
-        num_k_heads = self.hparams.get("linear_num_key_heads", 0)
-        num_v_heads = self.hparams.get("linear_num_value_heads", 0)
-        if num_k_heads <= 0 or num_v_heads <= 0 or num_k_heads == num_v_heads:
-            return codes, scales
-
-        head_k_dim = self.hparams["linear_key_head_dim"]
-        head_v_dim = self.hparams["linear_value_head_dim"]
-        num_v_per_k = num_v_heads // num_k_heads
-
-        def reorder_rows(tensor: Tensor, head_dim: int) -> Tensor:
-            return self._reorder_v_heads(
-                tensor, 0, num_k_heads, num_v_per_k, head_dim,
-            )
-
-        if ".in_proj_qkv." in source_name:
-            q_dim = head_k_dim * num_k_heads
-            k_dim = head_k_dim * num_k_heads
-            codes = torch.cat((
-                codes[:q_dim],
-                codes[q_dim:q_dim + k_dim],
-                reorder_rows(codes[q_dim + k_dim:], head_v_dim),
-            ), dim=0)
-            scales = torch.cat((
-                scales[:q_dim],
-                scales[q_dim:q_dim + k_dim],
-                reorder_rows(scales[q_dim + k_dim:], head_v_dim),
-            ), dim=0)
-        elif ".in_proj_z." in source_name:
-            codes = reorder_rows(codes, head_v_dim)
-            scales = reorder_rows(scales, head_v_dim)
-        elif ".in_proj_b." in source_name or ".in_proj_a." in source_name:
-            codes = reorder_rows(codes, 1)
-            scales = reorder_rows(scales, 1)
-        elif ".out_proj." in source_name:
-            if head_v_dim % 64:
-                raise ValueError("Q4_0_64 linear-attention V head dimension must be divisible by 64")
-            codes = self._reorder_v_heads(
-                codes, 1, num_k_heads, num_v_per_k, head_v_dim,
-            )
-            scales = self._reorder_v_heads(
-                scales, 1, num_k_heads, num_v_per_k, head_v_dim // 64,
-            )
-        return codes.contiguous(), scales.contiguous()
 
     def modify_tensors(self, data_torch: Tensor, name: str, bid: int | None) -> Iterable[tuple[str, Tensor]]:
         num_k_heads = self.hparams.get("linear_num_key_heads", 0)

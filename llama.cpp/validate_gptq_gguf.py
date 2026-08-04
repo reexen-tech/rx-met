@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Validate exact GPTQ Q4_0_64 sidecar bytes in a converted GGUF."""
+"""Validate exact GPTQ Q64 sidecar bytes in a converted GGUF."""
 
 from __future__ import annotations
 
@@ -17,7 +17,8 @@ sys.path.insert(0, str(ROOT / "gguf-py"))
 
 import gguf  # noqa: E402
 
-from llm_quant.gptq.q4_0_64 import pack_q4_0_64, unpack_q4_0_64
+from llm_quant.gptq.formats import Q4_0_64, Q64Format
+from llm_quant.gptq.gguf_adapter import GPTQGGUFAdapter
 from llm_quant.gptq.sidecar import SidecarShardReader
 
 
@@ -75,32 +76,34 @@ def sidecar_gguf_name(key: str, entry: dict[str, object]) -> str:
 
 def validate_sidecar(sidecar_path: Path):
     payload = torch.load(sidecar_path, map_location="cpu", weights_only=True)
-    if (
-        not isinstance(payload, dict)
-        or payload.get("format") != "Q4_0_64"
-    ):
-        raise ValueError("not a Q4_0_64 GPTQ sidecar")
-    if payload.get("version", 1) == 2:
+    if not isinstance(payload, dict):
+        raise ValueError("not a GPTQ sidecar")
+    if payload.get("version") == 3:
         return SidecarShardReader(sidecar_path)
-    if payload.get("version", 1) != 1:
-        raise ValueError("unsupported Q4_0_64 GPTQ sidecar version")
-    tensors = payload.get("tensors")
-    if not isinstance(tensors, dict) or not tensors:
-        raise ValueError("sidecar contains no tensors")
-    for name, entry in tensors.items():
-        if not isinstance(name, str) or not isinstance(entry, dict):
-            raise ValueError("invalid sidecar tensor entry")
-        sidecar_gguf_name(name, entry)
-        repacked = pack_q4_0_64(entry["codes"], entry["scales"])
-        if not torch.equal(repacked, entry["packed"]):
-            raise ValueError(f"packed bytes do not match codes/scales for {name}")
-    return tensors
+    raise ValueError(
+        f"unsupported GPTQ sidecar version "
+        f"{payload.get('version')!r}; expected version 3"
+    )
 
 
-def validate_gguf(tensors, gguf_path: Path) -> None:
+def validate_gguf(
+    tensors,
+    gguf_path: Path,
+    block_format: Q64Format | None = None,
+) -> None:
+    if block_format is None:
+        block_format = (
+            tensors.block_format
+            if isinstance(tensors, SidecarShardReader)
+            else Q4_0_64
+        )
+    expected_qtype = {
+        "Q4_0_64": gguf.GGMLQuantizationType.Q4_0_64,
+        "Q8_0_64": gguf.GGMLQuantizationType.Q8_0_64,
+    }[block_format.name]
     reader = gguf.GGUFReader(gguf_path)
     gguf_tensors = {tensor.name: tensor for tensor in reader.tensors}
-    transformer = None
+    transformer: GPTQGGUFAdapter | None = None
     if isinstance(tensors, SidecarShardReader) and isinstance(
         tensors.source_model, str
     ):
@@ -108,19 +111,19 @@ def validate_gguf(tensors, gguf_path: Path) -> None:
         if config_path.is_file():
             config = json.loads(config_path.read_text(encoding="utf-8"))
             if config.get("model_type") == "qwen3_5_moe":
-                from convert_hf_to_gguf import Qwen3_5MoeTextModel
-
-                transformer = Qwen3_5MoeTextModel.__new__(Qwen3_5MoeTextModel)
-                transformer.hparams = config["text_config"]
+                transformer = GPTQGGUFAdapter(
+                    tensors, block_format, config["text_config"]
+                )
     for sidecar_name in tensors:
         entry = tensors[sidecar_name]
         gguf_name = sidecar_gguf_name(sidecar_name, entry)
         if gguf_name not in gguf_tensors:
             raise ValueError(f"missing GGUF tensor {gguf_name}")
         tensor = gguf_tensors[gguf_name]
-        if tensor.tensor_type != gguf.GGMLQuantizationType.Q4_0_64:
+        if tensor.tensor_type != expected_qtype:
             raise ValueError(
-                f"{gguf_name} has type {tensor.tensor_type.name}, expected Q4_0_64"
+                f"{gguf_name} has type {tensor.tensor_type.name}, "
+                f"expected {block_format.name}"
             )
         expected_packed = entry["packed"]
         source_name = entry.get("source_name", sidecar_name)
@@ -130,18 +133,14 @@ def validate_gguf(tensors, gguf_path: Path) -> None:
             if not isinstance(codes, torch.Tensor) or not isinstance(
                 scales, torch.Tensor
             ):
-                codes, scales = unpack_q4_0_64(
+                codes, scales = block_format.unpack(
                     expected_packed,
                     logical_size=int(entry["shape"][-1]),
                 )
-            codes, scales = transformer._transform_gptq_sidecar(
-                codes,
-                scales,
-                source_name,
-                gguf_name,
-                None,
+            codes, scales = transformer.transform(
+                codes, scales, source_name
             )
-            expected_packed = pack_q4_0_64(codes, scales)
+            expected_packed = block_format.pack(codes, scales)
         expected = expected_packed.cpu().numpy().reshape(-1)
         actual = np.asarray(tensor.data).view(np.uint8).reshape(-1)
         if actual.size != expected.size:
@@ -166,7 +165,10 @@ def main(argv: list[str] | None = None) -> None:
     args = parse_args(argv)
     tensors = validate_sidecar(args.sidecar)
     validate_gguf(tensors, args.gguf)
-    print(f"Validated {len(tensors)} GPTQ Q4_0_64 tensors byte-for-byte.")
+    print(
+        f"Validated {len(tensors)} GPTQ "
+        f"{tensors.block_format.name} tensors byte-for-byte."
+    )
 
 
 if __name__ == "__main__":
