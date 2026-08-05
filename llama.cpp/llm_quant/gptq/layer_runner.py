@@ -21,8 +21,8 @@ from .expert_quant import (
     get_routed_experts,
     quantize_routed_experts,
 )
-from .formats import format_for_bits
-from .hessian import GPTQQuantizer, quantizer_class_for_bits
+from .formats import format_for_bits, format_for_name
+from .hessian import GPTQQuantizer, quantizer_class_for_format
 from .sidecar import (
     SidecarShardWriter,
     restore_layer_tensors,
@@ -126,30 +126,6 @@ def _stats_fixed_point_ok(stats: dict[str, Any]) -> bool:
     )
 
 
-def _validate_model(model: nn.Module) -> None:
-    adapter = get_model_adapter(model)
-    if model.__class__.__name__ != "Qwen2ForCausalLM":
-        return
-    config = adapter.text_config
-    expected = {
-        "model_type": "qwen2",
-        "hidden_size": 896,
-        "num_hidden_layers": 24,
-        "intermediate_size": 4864,
-    }
-    mismatches = {
-        name: (getattr(config, name, None), value)
-        for name, value in expected.items()
-        if getattr(config, name, None) != value
-    }
-    if mismatches:
-        detail = ", ".join(
-            f"{name}={actual!r} (expected {wanted!r})"
-            for name, (actual, wanted) in mismatches.items()
-        )
-        raise NotImplementedError(f"the MVP is fixed to Qwen2.5-0.5B: {detail}")
-
-
 @torch.no_grad()
 def _capture_first_layer_inputs(
     adapter: QwenGPTQAdapter,
@@ -219,6 +195,7 @@ def run_gptq(
     target_policy: ModelTargetPolicy | None = None,
     expert_hessian_weighting: ExpertHessianWeighting = "route_squared",
     bits: int = 4,
+    format_name: str | None = None,
 ) -> GPTQRunResult:
     """Quantize supported Qwen text towers in place with W4A8 or W8A8/G64."""
 
@@ -227,17 +204,19 @@ def run_gptq(
             f"unsupported expert Hessian weighting: "
             f"{expert_hessian_weighting}"
         )
-    quantizer_class = quantizer_class_for_bits(bits)
-    block_format = format_for_bits(bits)
+    block_format = (
+        format_for_name(format_name) if format_name else format_for_bits(bits)
+    )
+    quantizer_class = quantizer_class_for_format(block_format)
+    bits = block_format.bits
     if (
         sidecar_writer is not None
         and sidecar_writer.format_name != block_format.name
     ):
         raise ValueError(
-            f"GPTQ bits={bits} requires {block_format.name} sidecar, got "
-            f"{sidecar_writer.format_name}"
+            f"GPTQ format {block_format.name} requires a matching sidecar, "
+            f"got {sidecar_writer.format_name}"
         )
-    _validate_model(model)
     adapter = get_model_adapter(model)
     policy = target_policy or get_model_target_policy(adapter.model_family)
     target_device = torch.device(device)
@@ -386,7 +365,7 @@ def run_gptq(
                     damp_percent=0.01,
                     packed_only=packed_only,
                     hessian_weighting=expert_hessian_weighting,
-                    bits=bits,
+                    format_name=block_format.name,
                 )
                 layer_tensor_data.update(result.tensor_data)
                 fixed_point_ok = fixed_point_ok and result.fixed_point_ok

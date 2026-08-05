@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from .formats import format_for_bits
+from .formats import format_for_bits, format_for_name
 
 
 def fixed_gptq_config(
@@ -13,8 +13,11 @@ def fixed_gptq_config(
     fake_quant_dtype: str = "float16",
     expert_hessian_weighting: str = "route_squared",
     bits: int = 4,
+    format_name: str | None = None,
 ) -> dict[str, Any]:
-    block_format = format_for_bits(bits)
+    block_format = (
+        format_for_name(format_name) if format_name else format_for_bits(bits)
+    )
     return {
         "algorithm": "gptq",
         "format_target": block_format.name,

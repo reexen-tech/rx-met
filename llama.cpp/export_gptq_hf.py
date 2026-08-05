@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Export Q4_0_64 or Q8_0_64 GPTQ artifacts for supported Qwen models."""
+"""Export physical Q64 GPTQ artifacts for supported Qwen models."""
 
 from __future__ import annotations
 
@@ -17,7 +17,7 @@ from transformers import (
 )
 
 from llm_quant.artifacts import build_source_signature
-from llm_quant.gptq.formats import format_for_bits
+from llm_quant.gptq.formats import format_for_bits, format_for_name
 from llm_quant.gptq.layer_runner import run_gptq
 from llm_quant.gptq.metadata import fixed_gptq_config
 from llm_quant.gptq.sidecar import SidecarShardWriter
@@ -32,6 +32,7 @@ def export_gptq_hf(
     max_layers: int | None = None,
     expert_hessian_weighting: str = "route_squared",
     bits: int = 4,
+    format_name: str | None = None,
 ) -> str:
     """Quantize in place and save fake HF plus an exact Q64 sidecar."""
 
@@ -44,7 +45,11 @@ def export_gptq_hf(
             f"unsupported expert Hessian weighting: "
             f"{expert_hessian_weighting}"
         )
-    block_format = format_for_bits(bits)
+    block_format = (
+        format_for_name(format_name) if format_name else format_for_bits(bits)
+    )
+    if block_format.bits != bits:
+        raise ValueError(f"{block_format.name} requires --bits {block_format.bits}")
     destination.mkdir(parents=True, exist_ok=True)
 
     config = AutoConfig.from_pretrained(source, trust_remote_code=False)
@@ -56,10 +61,11 @@ def export_gptq_hf(
     elif config.model_type == "qwen3":
         family = "Qwen3-8B"
     else:
-        family = "Qwen2.5-0.5B"
+        family = source.name
     metadata = fixed_gptq_config(
         model_family=family,
         fake_quant_dtype="bfloat16" if use_bfloat16 else "float16",
+        format_name=block_format.name,
         expert_hessian_weighting=expert_hessian_weighting,
         bits=bits,
     )
@@ -102,6 +108,7 @@ def export_gptq_hf(
         max_layers=max_layers,
         expert_hessian_weighting=expert_hessian_weighting,
         bits=bits,
+        format_name=block_format.name,
     )
 
     model.cpu()
@@ -147,7 +154,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--resume",
         action="store_true",
-        help="Reuse completed Qwen3.5 sidecar shards",
+        help="Reuse compatible completed sidecar shards",
     )
     parser.add_argument(
         "--max_layers",
@@ -161,6 +168,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         choices=(4, 8),
         default=4,
         help="Weight bit width (default: 4)",
+    )
+    parser.add_argument(
+        "--format",
+        dest="format_name",
+        choices=("Q4_0_64", "Q4_1_64", "Q8_0_64"),
+        default=None,
+        help="Physical weight format (default: selected from --bits)",
     )
     parser.add_argument(
         "--expert-hessian-weighting",
@@ -181,11 +195,13 @@ def main(argv: list[str] | None = None) -> None:
         max_layers=args.max_layers,
         expert_hessian_weighting=args.expert_hessian_weighting,
         bits=args.bits,
+        format_name=args.format_name,
     )
     print("Next:")
+    output_format = args.format_name or format_for_bits(args.bits).name
     print(
-        f"  python convert_hf_to_gguf.py {output_dir} "
-        f"--outtype f16 --outfile model-gptq-Q{args.bits}_0_64.gguf"
+        f"  python convert_hf_to_gguf.py {output_dir} --outtype f16 "
+        f"--outfile model-gptq-{output_format}.gguf"
     )
 
 

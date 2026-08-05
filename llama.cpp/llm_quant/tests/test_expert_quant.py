@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import pytest
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -9,6 +10,8 @@ from llm_quant.gptq.expert_quant import (
     quantize_routed_experts,
 )
 from llm_quant.gptq.hessian import GPTQQ4064
+from llm_quant.gptq.q4_0_64 import quantize_q4_0_64
+from llm_quant.gptq.q8_0_64 import quantize_q8_0_64
 
 
 class _TinyExperts(nn.Module):
@@ -121,3 +124,42 @@ def test_experts_support_q8_packed_output() -> None:
     ]
     assert gate["packed"].shape == (2, 128, 66)
     assert down["packed"].shape == (2, 64, 66)
+
+
+@pytest.mark.parametrize("bits", [4, 8])
+def test_zero_sample_expert_falls_back_to_reference_rtn(bits: int) -> None:
+    experts = _TinyExperts()
+    original_gate = experts.gate_up_proj[1].detach().clone()
+    original_down = experts.down_proj[1].detach().clone()
+    hidden = torch.randn(6, 64)
+    batches = [
+        ExpertCalibrationBatch(
+            hidden,
+            torch.zeros((6, 1), dtype=torch.long),
+            torch.ones((6, 1)),
+        )
+    ]
+
+    result = quantize_routed_experts(
+        experts,
+        batches,
+        tensor_prefix="model.layers.0.mlp.experts",
+        bits=bits,
+        packed_only=True,
+    )
+
+    quantize = quantize_q4_0_64 if bits == 4 else quantize_q8_0_64
+    gate = result.tensor_data[
+        "model.layers.0.mlp.experts.gate_up_proj"
+    ]
+    down = result.tensor_data[
+        "model.layers.0.mlp.experts.down_proj"
+    ]
+    assert torch.equal(gate["packed"][1], quantize(original_gate).packed)
+    assert torch.equal(down["packed"][1], quantize(original_down).packed)
+    fallback = result.stats["experts"][1]
+    assert fallback["selected_tokens"] == 0
+    for name in ("gate_up_proj", "down_proj"):
+        assert fallback[name]["method"] == "rtn"
+        assert fallback[name]["fallback_reason"] == "zero_calibration_samples"
+        assert fallback[name]["loss"] is None

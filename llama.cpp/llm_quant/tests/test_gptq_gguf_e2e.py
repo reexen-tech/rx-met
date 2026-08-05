@@ -12,6 +12,7 @@ from transformers import PreTrainedTokenizerFast, Qwen2Config, Qwen2ForCausalLM
 
 from llm_quant.artifacts import build_source_signature
 from llm_quant.gptq.q4_0_64 import quantize_q4_0_64
+from llm_quant.gptq.q4_1_64 import quantize_q4_1_64
 from llm_quant.gptq.q8_0_64 import quantize_q8_0_64
 from llm_quant.gptq.sidecar import write_sidecar_v3
 from validate_gptq_gguf import validate_gguf, validate_sidecar
@@ -24,6 +25,7 @@ def _write_tiny_qwen2(
     *,
     sidecar_version: int = 3,
     bits: int = 4,
+    format_name: str | None = None,
 ) -> None:
     vocabulary = {"<unk>": 0, "<bos>": 1, "<eos>": 2}
     for token in ByteLevel.alphabet():
@@ -54,8 +56,11 @@ def _write_tiny_qwen2(
     tokenizer.save_pretrained(path)
 
     tensors: dict[str, dict[str, torch.Tensor]] = {}
-    quantize = quantize_q4_0_64 if bits == 4 else quantize_q8_0_64
-    format_name = f"Q{bits}_0_64"
+    if format_name == "Q4_1_64":
+        quantize = quantize_q4_1_64
+    else:
+        quantize = quantize_q4_0_64 if bits == 4 else quantize_q8_0_64
+        format_name = f"Q{bits}_0_64"
     for name, module in model.named_modules():
         if not isinstance(module, torch.nn.Linear) or not name.startswith("model.layers."):
             continue
@@ -88,13 +93,16 @@ def _write_tiny_qwen2(
         )
 
 
-@pytest.mark.parametrize("bits", [4, 8])
+@pytest.mark.parametrize(
+    "format_name,bits",
+    [("Q4_0_64", 4), ("Q4_1_64", 4), ("Q8_0_64", 8)],
+)
 def test_sidecar_is_written_directly_to_gguf(
-    tmp_path: Path, monkeypatch, bits: int
+    tmp_path: Path, monkeypatch, format_name: str, bits: int
 ) -> None:
     model_path = tmp_path / "tiny-qwen2"
     model_path.mkdir()
-    _write_tiny_qwen2(model_path, bits=bits)
+    _write_tiny_qwen2(model_path, bits=bits, format_name=format_name)
     gguf_path = tmp_path / "tiny-qwen2-gptq.gguf"
 
     def set_test_vocab(instance: converter.Qwen2Model) -> None:
@@ -111,13 +119,13 @@ def test_sidecar_is_written_directly_to_gguf(
     )
     model.set_vocab()
     model.write()
-    expected_ftype = (
-        gguf.LlamaFileType.MOSTLY_Q4_0_64
-        if bits == 4
-        else gguf.LlamaFileType.MOSTLY_Q8_0_64
-    )
+    expected_ftype = {
+        "Q4_0_64": gguf.LlamaFileType.MOSTLY_Q4_0_64,
+        "Q4_1_64": gguf.LlamaFileType.MOSTLY_Q4_1_64,
+        "Q8_0_64": gguf.LlamaFileType.MOSTLY_Q8_0_64,
+    }[format_name]
     assert model.ftype == expected_ftype
-    tensors = validate_sidecar(model_path / f"gptq_q{bits}_0_64.pt")
+    tensors = validate_sidecar(model_path / f"gptq_{format_name.lower()}.pt")
     validate_gguf(tensors, gguf_path)
 
 
