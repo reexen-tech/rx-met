@@ -4,21 +4,30 @@ from __future__ import annotations
 
 import gc
 from dataclasses import dataclass
-from typing import Any, Callable
+from typing import Any
 
 import torch
 import torch.nn as nn
+from tqdm import tqdm
 
 from llm_quant.awq.utils.calib_data import get_calib_dataset
+from llm_quant.targets import ModelTargetPolicy, get_model_target_policy
 
 from .adapters import QwenGPTQAdapter, get_model_adapter
 from .expert_quant import (
+    ExpertHessianWeighting,
     ExpertCalibrationBatch,
     capture_expert_batch,
     get_routed_experts,
     quantize_routed_experts,
 )
-from .hessian import GPTQQ4064
+from .formats import format_for_bits
+from .hessian import GPTQQuantizer, quantizer_class_for_bits
+from .sidecar import (
+    SidecarShardWriter,
+    restore_layer_tensors,
+    target_descriptors,
+)
 
 CALIBRATION_SAMPLES = 128
 CALIBRATION_SEQUENCE_LENGTH = 512
@@ -62,6 +71,59 @@ def _hidden_output(output: Any) -> torch.Tensor:
     if hasattr(output, "last_hidden_state"):
         return output.last_hidden_state
     raise TypeError(f"unsupported transformer layer output: {type(output).__name__}")
+
+
+def _layer_destinations(
+    adapter: QwenGPTQAdapter,
+    layer_index: int,
+    named_linears: dict[str, nn.Linear],
+    routed_experts: dict[str, nn.Module],
+) -> dict[str, torch.Tensor]:
+    prefix = f"{adapter.tensor_prefix}.{layer_index}"
+    destinations = {
+        f"{prefix}.{name}.weight": linear.weight
+        for name, linear in named_linears.items()
+    }
+    for name, experts in routed_experts.items():
+        destinations[f"{prefix}.{name}.gate_up_proj"] = experts.gate_up_proj
+        destinations[f"{prefix}.{name}.down_proj"] = experts.down_proj
+    return destinations
+
+
+@torch.no_grad()
+def _propagate_layer(
+    layer: nn.Module,
+    batches: list[_CalibrationBatch],
+    target_device: torch.device,
+) -> list[_CalibrationBatch]:
+    next_batches: list[_CalibrationBatch] = []
+    for batch in batches:
+        output = _hidden_output(
+            layer(
+                batch.hidden_states.to(target_device),
+                **_move_tree(batch.kwargs, target_device),
+            )
+        )
+        next_batches.append(
+            _CalibrationBatch(
+                hidden_states=output.detach().cpu(),
+                kwargs=batch.kwargs,
+            )
+        )
+    return next_batches
+
+
+def _stats_fixed_point_ok(stats: dict[str, Any]) -> bool:
+    groups = list(stats.get("linears", {}).values())
+    for routed in stats.get("routed_experts", {}).values():
+        for expert in routed.get("experts", []):
+            groups.extend(
+                value for key, value in expert.items() if key != "expert"
+            )
+    return all(
+        item.get("fixed_point_blocks") == item.get("total_blocks")
+        for item in groups
+    )
 
 
 def _validate_model(model: nn.Module) -> None:
@@ -151,17 +213,33 @@ def run_gptq(
     *,
     device: str | torch.device = "cuda",
     packed_only: bool = False,
-    layer_sink: Callable[
-        [int, dict[str, dict[str, Any]], dict[str, Any]], None
-    ]
-    | None = None,
+    sidecar_writer: SidecarShardWriter | None = None,
     keep_tensor_data: bool = True,
     max_layers: int | None = None,
+    target_policy: ModelTargetPolicy | None = None,
+    expert_hessian_weighting: ExpertHessianWeighting = "route_squared",
+    bits: int = 4,
 ) -> GPTQRunResult:
-    """Quantize supported Qwen text towers in place with W4A8/G64."""
+    """Quantize supported Qwen text towers in place with W4A8 or W8A8/G64."""
 
+    if expert_hessian_weighting not in {"none", "route_squared"}:
+        raise ValueError(
+            f"unsupported expert Hessian weighting: "
+            f"{expert_hessian_weighting}"
+        )
+    quantizer_class = quantizer_class_for_bits(bits)
+    block_format = format_for_bits(bits)
+    if (
+        sidecar_writer is not None
+        and sidecar_writer.format_name != block_format.name
+    ):
+        raise ValueError(
+            f"GPTQ bits={bits} requires {block_format.name} sidecar, got "
+            f"{sidecar_writer.format_name}"
+        )
     _validate_model(model)
     adapter = get_model_adapter(model)
+    policy = target_policy or get_model_target_policy(adapter.model_family)
     target_device = torch.device(device)
     if target_device.type == "cuda" and not torch.cuda.is_available():
         raise RuntimeError("CUDA was requested but is not available")
@@ -178,17 +256,45 @@ def run_gptq(
 
     try:
         selected_layers = layers if max_layers is None else layers[:max_layers]
-        for layer_index, layer in enumerate(selected_layers):
+        pbar = tqdm(
+            enumerate(selected_layers),
+            total=len(selected_layers),
+            desc="GPTQ",
+            unit="layer",
+        )
+        for layer_index, layer in pbar:
             layer = layer.to(target_device)
-            named_linears = adapter.named_linears(layer)
+            named_linears = policy.select_linears(layer)
             routed_experts = get_routed_experts(layer)
-            if not named_linears and not routed_experts:
-                raise RuntimeError(
-                    f"layer {layer_index} contains no quantizable weights"
+            policy.validate_routed_experts(set(routed_experts))
+            destinations = _layer_destinations(
+                adapter, layer_index, named_linears, routed_experts
+            )
+
+            if sidecar_writer is not None and sidecar_writer.has_layer(layer_index):
+                entries, current_stats = sidecar_writer.load_layer(
+                    layer_index,
+                    target_descriptors(destinations, block_format),
                 )
+                restore_layer_tensors(entries, destinations, block_format)
+                batches = _propagate_layer(layer, batches, target_device)
+                layer_stats.append(current_stats)
+                fixed_point_ok = (
+                    fixed_point_ok and _stats_fixed_point_ok(current_stats)
+                )
+                layers[layer_index] = layer.cpu()
+                del layer, destinations, entries
+                gc.collect()
+                if target_device.type == "cuda":
+                    torch.cuda.empty_cache()
+                continue
 
             quantizers = {
-                name: GPTQQ4064(linear) for name, linear in named_linears.items()
+                name: quantizer_class(
+                    linear,
+                    name=f"{adapter.tensor_prefix}.{layer_index}.{name}.weight",
+                )
+                for name, linear in named_linears.items()
             }
             expert_batches: dict[str, list[ExpertCalibrationBatch]] = {
                 name: [] for name in routed_experts
@@ -202,7 +308,7 @@ def run_gptq(
                     inputs: tuple[torch.Tensor, ...],
                     _output: torch.Tensor,
                     *,
-                    target: GPTQQ4064 = quantizer,
+                    target: GPTQQuantizer = quantizer,
                 ) -> None:
                     target.add_batch(inputs[0])
 
@@ -247,6 +353,7 @@ def run_gptq(
                 entry: dict[str, Any] = {
                     "packed": result.packed.cpu(),
                     "shape": list(result.codes.shape),
+                    "method": result.method,
                 }
                 if not packed_only:
                     entry["codes"] = result.codes.cpu()
@@ -278,29 +385,24 @@ def run_gptq(
                     lazy_block_size=128,
                     damp_percent=0.01,
                     packed_only=packed_only,
+                    hessian_weighting=expert_hessian_weighting,
+                    bits=bits,
                 )
                 layer_tensor_data.update(result.tensor_data)
                 fixed_point_ok = fixed_point_ok and result.fixed_point_ok
                 current_stats["routed_experts"][name] = result.stats
 
-            next_batches: list[_CalibrationBatch] = []
-            for batch in batches:
-                output = _hidden_output(
-                    layer(
-                        batch.hidden_states.to(target_device),
-                        **_move_tree(batch.kwargs, target_device),
-                    )
-                )
-                next_batches.append(
-                    _CalibrationBatch(
-                        hidden_states=output.detach().cpu(),
-                        kwargs=batch.kwargs,
-                    )
-                )
-            batches = next_batches
+            batches = _propagate_layer(layer, batches, target_device)
             layer_stats.append(current_stats)
-            if layer_sink is not None:
-                layer_sink(layer_index, layer_tensor_data, current_stats)
+            linear_stats = current_stats.get("linears", {})
+            if linear_stats:
+                passed = sum(s["fixed_point_blocks"] for s in linear_stats.values())
+                total = sum(s["total_blocks"] for s in linear_stats.values())
+                pbar.set_postfix(fixed_point=f"{passed}/{total}")
+            if sidecar_writer is not None:
+                sidecar_writer.write_layer(
+                    layer_index, layer_tensor_data, current_stats
+                )
             if keep_tensor_data:
                 tensor_data.update(layer_tensor_data)
             layers[layer_index] = layer.cpu()

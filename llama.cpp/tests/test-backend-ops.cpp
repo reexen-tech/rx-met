@@ -8354,16 +8354,34 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
         }
     }
 
-    // REEX block-64 legacy + asymmetric K: exercise CUDA weight->F32 paths
-    // (dequant, mmvq, mmq, get_rows) and MoE MUL_MAT_ID against the CPU reference.
-    // Runtime-guarded (not #ifdef GGML_USE_REEX_Q64): ggml-base applies that
-    // define PRIVATE, so test-backend-ops never sees it at compile time. Enum
-    // values always exist in ggml.h; emit cases only when to_float is registered.
-    // k = 256 covers Q4_0_64 (4×64) and one Q4_K_64 super-block; n > 8 hits
-    // CUDA mmvq prefill token-chunking.
+    // >>> REEX (reexen): block-64 test cases for Q4_0_64 / Q4_K_64 / block-64 K-quants.
+    //
+    // Why this replaces the old block (deleted): the previous block was guarded by
+    //   #ifdef GGML_USE_REEX_Q64
+    //   ... Q4_0_64 / Q4_K_64 MUL_MAT_ID cases ...
+    //   #endif
+    // That compile-time guard never fired in this translation unit: ggml-base marks
+    // GGML_USE_REEX_Q64 as PRIVATE (dllexport/dllimport linkage), so the macro is
+    // not visible at compile time to test-backend-ops. The #ifdef therefore always
+    // evaluated to false and those MUL_MAT_ID cases were dead code — never compiled
+    // in, never run. Keeping the #ifdef block would silently keep them disabled.
+    //
+    // New implementation: replace the compile-time #ifdef with a RUNTIME guard —
+    // skip a type when ggml_get_type_traits(type)->to_float == nullptr, i.e. the
+    // linked ggml was built without GGML_USE_REEX_Q64 and did not register these
+    // types. The enum values always exist in ggml.h regardless of the build, so the
+    // cases can always be instantiated; they no-op cleanly when the type is absent.
+    // No extra compile definition is needed for the test binary.
+    //
+    // Coverage added on top of the deleted block (was MUL_MAT_ID only):
+    //   - MUL_MAT (single/batched weights) + GET_ROWS for Q4_0_64 / Q4_K_64,
+    //   - MUL_MAT + batched + MUL_MAT_ID + GET_ROWS for the symmetric K-quants.
+    // k = 256 covers Q4_0_64 (4×64) and one Q4_K_64 super-block; n > 8 exercises the
+    // CUDA mmvq prefill token-chunking; batched ne2/ne3 cover per-expert offsets.
+    // <<< REEX
     for (ggml_type type_a : {GGML_TYPE_Q4_0_64, GGML_TYPE_Q4_K_64}) {
         if (ggml_get_type_traits(type_a)->to_float == nullptr) {
-            continue; // ggml built without GGML_USE_REEX_Q64
+            continue; // REEX: ggml built without GGML_USE_REEX_Q64 — type not registered
         }
         for (int n : {1, 2, 8, 16, 32, 129, 256}) {
             test_cases.emplace_back(new test_mul_mat(type_a, GGML_TYPE_F32, 256, n, 256, {1, 1}, {1, 1}));
@@ -8379,12 +8397,15 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
         }
     }
 
-    // REEX block-64 symmetric K-quants: same four CUDA weight->F32 paths.
-    // MMQ only covers Q6_K_64/Q3_K_64; the S types fall through the dequant path.
+    // >>> REEX (reexen): block-64 symmetric K-quants — same four CUDA weight->F32
+    // paths (dequant, mmvq, mmq, get_rows) plus MoE MUL_MAT_ID, runtime-guarded as
+    // above. MMQ only covers Q6_K_64/Q3_K_64; the S types fall through the dequant
+    // path.
+    // <<< REEX
     for (ggml_type type_a : {GGML_TYPE_Q6_K_64, GGML_TYPE_Q5_K_64S,
                              GGML_TYPE_Q4_K_64S, GGML_TYPE_Q3_K_64, GGML_TYPE_Q2_K_64S}) {
         if (ggml_get_type_traits(type_a)->to_float == nullptr) {
-            continue; // ggml built without GGML_USE_REEX_Q64
+            continue; // REEX: ggml built without GGML_USE_REEX_Q64 — type not registered
         }
         for (int n : {1, 2, 8, 16, 32, 129, 256}) {
             test_cases.emplace_back(new test_mul_mat(type_a, GGML_TYPE_F32, 256, n, 256, {1, 1}, {1, 1}));

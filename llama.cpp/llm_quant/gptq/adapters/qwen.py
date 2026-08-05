@@ -17,6 +17,7 @@ class QwenGPTQAdapter:
     text_model: nn.Module
     text_config: Any
     tensor_prefix: str
+    model_family: str
 
     @property
     def layers(self) -> Any:
@@ -30,16 +31,6 @@ class QwenGPTQAdapter:
 
     def forward_text(self, input_ids: torch.Tensor) -> Any:
         return self.text_model(input_ids=input_ids)
-
-    def named_linears(self, layer: nn.Module) -> dict[str, nn.Linear]:
-        linears = {
-            name: module
-            for name, module in layer.named_modules()
-            if isinstance(module, nn.Linear)
-        }
-        if type(self.model).__name__.startswith("Qwen3_5Moe"):
-            linears.pop("mlp.shared_expert_gate", None)
-        return linears
 
     def set_use_cache(self, value: bool) -> list[tuple[Any, Any]]:
         changed: list[tuple[Any, Any]] = []
@@ -66,6 +57,7 @@ def get_model_adapter(model: nn.Module) -> QwenGPTQAdapter:
             text_model=model.model,
             text_config=model.config,
             tensor_prefix="model.layers",
+            model_family="qwen2",
         )
 
     if class_name == "Qwen3ForCausalLM":
@@ -77,6 +69,7 @@ def get_model_adapter(model: nn.Module) -> QwenGPTQAdapter:
             text_model=text_model,
             text_config=model.config,
             tensor_prefix="model.layers",
+            model_family="qwen3",
         )
 
     if class_name == "Qwen3_5MoeForConditionalGeneration":
@@ -97,6 +90,7 @@ def get_model_adapter(model: nn.Module) -> QwenGPTQAdapter:
             text_model=text_model,
             text_config=text_config,
             tensor_prefix="model.language_model.layers",
+            model_family="qwen3_5_moe",
         )
 
     if class_name == "Qwen3_5MoeForCausalLM":
@@ -108,6 +102,7 @@ def get_model_adapter(model: nn.Module) -> QwenGPTQAdapter:
             text_model=text_model,
             text_config=model.config,
             tensor_prefix="model.layers",
+            model_family="qwen3_5_moe",
         )
 
     raise NotImplementedError(f"unsupported GPTQ model: {class_name}")
