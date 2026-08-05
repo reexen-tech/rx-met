@@ -22,6 +22,18 @@ def is_qwen3_5_moe_decoder(module):
     return module.__class__.__name__ == "Qwen3_5MoeDecoderLayer"
 
 
+def get_qwen3_5_layer_type(module):
+    # transformers >=5.9 uses layer_type; older/custom builds used block_type.
+    layer_type = getattr(module, "layer_type", None)
+    if layer_type is None:
+        layer_type = getattr(module, "block_type", None)
+    if layer_type is None:
+        raise AttributeError(
+            f"{module.__class__.__name__} has neither layer_type nor block_type"
+        )
+    return layer_type
+
+
 def is_rms_norm(module):
     return isinstance(module, (LlamaRMSNorm, Qwen2RMSNorm)) or (
         module.__class__.__name__ == "Qwen3_5MoeRMSNorm"
@@ -276,7 +288,8 @@ def auto_scale_block(module, module_kwargs, w_bit, q_config, input_feat):
         )
 
     elif is_qwen3_5_moe_decoder(module):
-        if module.block_type == "full_attention":
+        layer_type = get_qwen3_5_layer_type(module)
+        if layer_type == "full_attention":
             scales_list.append(
                 _auto_get_scale(
                     prev_op=module.input_layernorm,
@@ -290,7 +303,7 @@ def auto_scale_block(module, module_kwargs, w_bit, q_config, input_feat):
                     kwargs=module_kwargs,
                 )
             )
-        elif module.block_type == "linear_attention":
+        elif layer_type == "linear_attention":
             scales_list.append(
                 _auto_get_scale(
                     prev_op=module.input_layernorm,
@@ -307,7 +320,7 @@ def auto_scale_block(module, module_kwargs, w_bit, q_config, input_feat):
             )
         else:
             raise NotImplementedError(
-                f"Unsupported Qwen3.5 MoE block type: {module.block_type}"
+                f"Unsupported Qwen3.5 MoE block type: {layer_type}"
             )
 
         # The sparse MoE expert projections are 3-D Parameters rather than
