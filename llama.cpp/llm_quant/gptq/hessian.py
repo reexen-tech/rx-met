@@ -7,7 +7,7 @@ from dataclasses import dataclass
 import torch
 import torch.nn as nn
 
-from .formats import Q4_0_64, Q8_0_64, Q64Format, format_for_bits
+from .formats import Q4_0_64, Q4_1_64, Q8_0_64, Q64Format, format_for_bits
 
 
 @dataclass(frozen=True)
@@ -17,9 +17,9 @@ class GPTQResult:
     scales: torch.Tensor
     packed: torch.Tensor
     fixed_point: torch.Tensor
-    loss: float
-    dead_columns: int
-    damp: float
+    loss: float | None
+    dead_columns: int | None
+    damp: float | None
     method: str
     fallback_reason: str | None
 
@@ -116,8 +116,11 @@ class GPTQQuantizer:
 
         Q = torch.zeros_like(W)
         codes = torch.zeros_like(W, dtype=torch.int8)
+        scale_shape = (self.rows, self.columns // group_size)
+        if self.block_format.parameter_count > 1:
+            scale_shape += (self.block_format.parameter_count,)
         scales = torch.empty(
-            (self.rows, self.columns // group_size),
+            scale_shape,
             dtype=torch.float16,
             device=self.device,
         )
@@ -138,18 +141,20 @@ class GPTQQuantizer:
                     group_end = global_i + group_size
                     if group_end > block_end:
                         raise RuntimeError("a physical group crosses a lazy block")
-                    _, stored_scale = self.block_format.find_scales(
+                    _, stored_scales = self.block_format.find_scales(
                         W1[:, local_i : local_i + group_size]
                     )
-                    scales[:, group_index] = stored_scale.squeeze(-1)
+                    if self.block_format.parameter_count == 1:
+                        stored_scales = stored_scales.squeeze(-1)
+                    scales[:, group_index] = stored_scales
 
                 w = W1[:, local_i]
+                group_scales = scales[:, group_index]
                 q_code = self.block_format.quantize_with_scales(
-                    w, scales[:, group_index]
+                    w, group_scales
                 )
-                q = (
-                    q_code.to(torch.float32)
-                    * scales[:, group_index].to(torch.float32)
+                q = self.block_format.dequantize_with_scales(
+                    q_code, group_scales
                 )
                 sensitivity = Hinv1[local_i, local_i]
                 if not torch.isfinite(sensitivity) or sensitivity == 0:
@@ -189,6 +194,27 @@ class GPTQQuantizer:
             fallback_reason=None,
         )
 
+    @torch.no_grad()
+    def rtn_fallback(self, *, reason: str) -> GPTQResult:
+        """Use reference RTN when GPTQ has no calibration observations."""
+
+        result = self.block_format.quantize(self.layer.weight.detach())
+        self.layer.weight.copy_(result.dequant.to(self.layer.weight.dtype))
+        return GPTQResult(
+            dequant=result.dequant,
+            codes=result.codes,
+            scales=result.scales,
+            packed=result.packed,
+            fixed_point=self.block_format.fixed_point_mask(
+                result.codes, result.scales
+            ),
+            loss=None,
+            dead_columns=None,
+            damp=None,
+            method="rtn",
+            fallback_reason=reason,
+        )
+
     def free(self) -> None:
         self.H_sum = None  # type: ignore[assignment]
         if self.device.type == "cuda":
@@ -200,11 +226,25 @@ class GPTQQ4064(GPTQQuantizer):
         super().__init__(layer, block_format=Q4_0_64, name=name)
 
 
+class GPTQQ4164(GPTQQuantizer):
+    def __init__(self, layer: nn.Linear, *, name: str | None = None):
+        super().__init__(layer, block_format=Q4_1_64, name=name)
+
+
 class GPTQQ8064(GPTQQuantizer):
     def __init__(self, layer: nn.Linear, *, name: str | None = None):
         super().__init__(layer, block_format=Q8_0_64, name=name)
 
 
+def quantizer_class_for_format(
+    block_format: Q64Format,
+) -> type[GPTQQuantizer]:
+    return {
+        "Q4_0_64": GPTQQ4064,
+        "Q4_1_64": GPTQQ4164,
+        "Q8_0_64": GPTQQ8064,
+    }[block_format.name]
+
+
 def quantizer_class_for_bits(bits: int) -> type[GPTQQuantizer]:
-    format_for_bits(bits)
-    return GPTQQ4064 if bits == 4 else GPTQQ8064
+    return quantizer_class_for_format(format_for_bits(bits))

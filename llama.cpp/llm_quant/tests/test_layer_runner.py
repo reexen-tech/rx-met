@@ -6,7 +6,7 @@ import torch.nn.functional as F
 from transformers import Qwen2Config, Qwen2ForCausalLM
 
 import llm_quant.gptq.layer_runner as runner
-from llm_quant.targets import ModelTargetPolicy
+from llm_quant.targets import ModelTargetPolicy, get_model_target_policy
 from llm_quant.gptq.hessian import GPTQQ4064
 from llm_quant.gptq.sidecar import SidecarShardWriter
 
@@ -104,7 +104,6 @@ def test_layer_runner_quantizes_and_propagates_quantized_output(
         torch.arange(8, dtype=torch.long).reshape(1, 8),
         torch.arange(8, 16, dtype=torch.long).reshape(1, 8),
     ]
-    monkeypatch.setattr(runner, "_validate_model", lambda _model: None)
     monkeypatch.setattr(
         runner,
         "get_calib_dataset",
@@ -136,7 +135,7 @@ def test_layer_runner_quantizes_and_propagates_quantized_output(
         assert tensors["packed"].dtype == torch.uint8
 
 
-def test_mvp_model_validation_rejects_other_qwen_sizes() -> None:
+def test_qwen2_adapter_accepts_other_model_sizes() -> None:
     config = Qwen2Config(
         hidden_size=64,
         intermediate_size=128,
@@ -145,12 +144,20 @@ def test_mvp_model_validation_rejects_other_qwen_sizes() -> None:
         num_key_value_heads=2,
     )
     model = Qwen2ForCausalLM(config)
-    try:
-        runner._validate_model(model)
-    except NotImplementedError as exc:
-        assert "Qwen2.5-0.5B" in str(exc)
-    else:
-        raise AssertionError("non-MVP Qwen2 configuration was accepted")
+    adapter = runner.get_model_adapter(model)
+    policy = get_model_target_policy(adapter.model_family)
+
+    assert adapter.model_family == "qwen2"
+    assert len(adapter.layers) == 1
+    assert set(policy.select_linears(adapter.layers[0])) == {
+        "self_attn.q_proj",
+        "self_attn.k_proj",
+        "self_attn.v_proj",
+        "self_attn.o_proj",
+        "mlp.gate_proj",
+        "mlp.up_proj",
+        "mlp.down_proj",
+    }
 
 
 def test_qwen35_conditional_quantizes_only_text_tower(monkeypatch) -> None:

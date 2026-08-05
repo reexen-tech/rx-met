@@ -24,6 +24,16 @@ from .sidecar import SidecarShardReader
 logger = logging.getLogger("hf-to-gguf")
 
 
+def layout_hparams(hparams: dict[str, Any]) -> dict[str, Any]:
+    """Hyper-parameters used for Qwen3.5 linear-attention GGUF layout."""
+
+    if hparams.get("model_type") == "qwen3_5_moe":
+        text = hparams.get("text_config")
+        if isinstance(text, dict):
+            return text
+    return hparams
+
+
 class GPTQGGUFAdapter:
     """Load and emit packed GPTQ tensors without leaking details to converter."""
 
@@ -51,6 +61,7 @@ class GPTQGGUFAdapter:
             path
             for path in (
                 directory / "gptq_q4_0_64.pt",
+                directory / "gptq_q4_1_64.pt",
                 directory / "gptq_q8_0_64.pt",
             )
             if path.is_file()
@@ -59,8 +70,7 @@ class GPTQGGUFAdapter:
             return None
         if len(paths) > 1:
             raise ValueError(
-                "multiple GPTQ sidecars found; keep exactly one of "
-                "gptq_q4_0_64.pt or gptq_q8_0_64.pt"
+                "multiple GPTQ sidecars found; keep exactly one manifest"
             )
 
         model_type = hparams.get("model_type")
@@ -76,12 +86,13 @@ class GPTQGGUFAdapter:
             len(reader),
             reader.block_format.name,
         )
-        return cls(reader, reader.block_format, hparams)
+        return cls(reader, reader.block_format, layout_hparams(hparams))
 
     @property
     def file_type(self) -> gguf.LlamaFileType:
         return {
             "Q4_0_64": gguf.LlamaFileType.MOSTLY_Q4_0_64,
+            "Q4_1_64": gguf.LlamaFileType.MOSTLY_Q4_1_64,
             "Q8_0_64": gguf.LlamaFileType.MOSTLY_Q8_0_64,
         }[self.block_format.name]
 
@@ -89,6 +100,7 @@ class GPTQGGUFAdapter:
     def tensor_type(self) -> gguf.GGMLQuantizationType:
         return {
             "Q4_0_64": gguf.GGMLQuantizationType.Q4_0_64,
+            "Q4_1_64": gguf.GGMLQuantizationType.Q4_1_64,
             "Q8_0_64": gguf.GGMLQuantizationType.Q8_0_64,
         }[self.block_format.name]
 
@@ -294,6 +306,8 @@ class GPTQGGUFAdapter:
 
         n_blocks = codes.shape[-1] // self.block_format.group_size
         expected_scales = (*codes.shape[:-1], n_blocks)
+        if self.block_format.parameter_count > 1:
+            expected_scales += (self.block_format.parameter_count,)
         expected_packed = (
             *codes.shape[:-1],
             n_blocks * self.block_format.type_size,

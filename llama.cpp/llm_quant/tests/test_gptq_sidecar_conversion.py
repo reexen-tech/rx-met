@@ -152,3 +152,17 @@ def test_validator_keeps_qwen2_v1_name_mapping() -> None:
     assert validator.sidecar_gguf_name(
         "model.layers.3.self_attn.q_proj.weight", entry,
     ) == "blk.3.attn_q.weight"
+
+
+def test_layout_hparams_prefers_qwen35_text_config() -> None:
+    from llm_quant.gptq.gguf_adapter import layout_hparams
+
+    root = {
+        "model_type": "qwen3_5_moe",
+        "text_config": {
+            "linear_num_key_heads": 16,
+            "linear_num_value_heads": 32,
+        },
+    }
+    assert layout_hparams(root)["linear_num_key_heads"] == 16
+    assert layout_hparams({"model_type": "qwen2"})["model_type"] == "qwen2"

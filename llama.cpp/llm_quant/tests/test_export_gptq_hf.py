@@ -92,6 +92,7 @@ def test_export_writes_sidecar_and_metadata(tmp_path, monkeypatch) -> None:
     assert metadata["execution"] == "W8A8"
     assert metadata["group_size"] == 64
     assert metadata["gguf_export_path"] == "direct_q8_0_64_sidecar"
+    assert metadata["model_family"] == "source"
 
 
 def test_qwen35_export_uses_bf16_model_and_sidecar_v3(
@@ -170,5 +171,6 @@ def test_cli_only_exposes_paths_and_device() -> None:
         "resume": False,
         "max_layers": None,
         "bits": 4,
+        "format_name": None,
         "expert_hessian_weighting": "route_squared",
     }

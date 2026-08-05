@@ -18,7 +18,7 @@ sys.path.insert(0, str(ROOT / "gguf-py"))
 import gguf  # noqa: E402
 
 from llm_quant.gptq.formats import Q4_0_64, Q64Format
-from llm_quant.gptq.gguf_adapter import GPTQGGUFAdapter
+from llm_quant.gptq.gguf_adapter import GPTQGGUFAdapter, layout_hparams
 from llm_quant.gptq.sidecar import SidecarShardReader
 
 
@@ -99,6 +99,7 @@ def validate_gguf(
         )
     expected_qtype = {
         "Q4_0_64": gguf.GGMLQuantizationType.Q4_0_64,
+        "Q4_1_64": gguf.GGMLQuantizationType.Q4_1_64,
         "Q8_0_64": gguf.GGMLQuantizationType.Q8_0_64,
     }[block_format.name]
     reader = gguf.GGUFReader(gguf_path)
@@ -110,9 +111,9 @@ def validate_gguf(
         config_path = Path(tensors.source_model) / "config.json"
         if config_path.is_file():
             config = json.loads(config_path.read_text(encoding="utf-8"))
-            if config.get("model_type") == "qwen3_5_moe":
+            if str(config.get("model_type", "")).startswith("qwen3_5"):
                 transformer = GPTQGGUFAdapter(
-                    tensors, block_format, config["text_config"]
+                    tensors, block_format, layout_hparams(config)
                 )
     for sidecar_name in tensors:
         entry = tensors[sidecar_name]

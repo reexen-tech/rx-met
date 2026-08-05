@@ -10,7 +10,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from .hessian import GPTQResult, quantizer_class_for_bits
+from .formats import format_for_bits, format_for_name
+from .hessian import GPTQResult, quantizer_class_for_format
 
 ExpertHessianWeighting = Literal["none", "route_squared"]
 
@@ -122,6 +123,7 @@ def quantize_routed_experts(
     packed_only: bool = False,
     hessian_weighting: ExpertHessianWeighting = "route_squared",
     bits: int = 4,
+    format_name: str | None = None,
 ) -> ExpertQuantResult:
     """Quantize one 3D expert collection with one live Hessian at a time."""
 
@@ -131,7 +133,10 @@ def quantize_routed_experts(
         raise ValueError(
             f"unsupported expert Hessian weighting: {hessian_weighting}"
         )
-    quantizer_class = quantizer_class_for_bits(bits)
+    block_format = (
+        format_for_name(format_name) if format_name else format_for_bits(bits)
+    )
+    quantizer_class = quantizer_class_for_format(block_format)
     gate_up = module.gate_up_proj
     down = module.down_proj
     if gate_up.shape[0] != down.shape[0]:
@@ -157,6 +162,7 @@ def quantize_routed_experts(
 
     for expert_index in range(gate_up.shape[0]):
         inputs = _selected_inputs(batches, expert_index, device)
+        selected_tokens = sum(selected.shape[0] for selected, _ in inputs)
         original_gate_up = gate_up[expert_index].detach().clone()
 
         gate_layer = _temporary_linear(original_gate_up)
@@ -164,16 +170,21 @@ def quantize_routed_experts(
             gate_layer,
             name=f"{tensor_prefix}.{expert_index}.gate_up_proj",
         )
-        for selected, routing_weight in inputs:
-            weighted = selected
-            if hessian_weighting == "route_squared":
-                weighted = selected * routing_weight.unsqueeze(-1).to(
-                    selected.dtype
-                )
-            gate_quantizer.add_batch(weighted)
-        gate_result = gate_quantizer.fasterquant(
-            lazy_block_size=lazy_block_size, damp_percent=damp_percent
-        )
+        if selected_tokens == 0:
+            gate_result = gate_quantizer.rtn_fallback(
+                reason="zero_calibration_samples"
+            )
+        else:
+            for selected, routing_weight in inputs:
+                weighted = selected
+                if hessian_weighting == "route_squared":
+                    weighted = selected * routing_weight.unsqueeze(-1).to(
+                        selected.dtype
+                    )
+                gate_quantizer.add_batch(weighted)
+            gate_result = gate_quantizer.fasterquant(
+                lazy_block_size=lazy_block_size, damp_percent=damp_percent
+            )
         gate_up[expert_index].copy_(gate_result.dequant.to(gate_up.dtype))
         gate_quantizer.free()
         del gate_quantizer, gate_layer
@@ -183,19 +194,24 @@ def quantize_routed_experts(
             down_layer,
             name=f"{tensor_prefix}.{expert_index}.down_proj",
         )
-        for selected, routing_weight in inputs:
-            # true_sequential=false: down calibration always uses the original
-            # gate/up weight, not the just-quantized gate_up_proj slice.
-            gate, up = F.linear(
-                selected.to(torch.float32), original_gate_up.to(torch.float32)
-            ).chunk(2, dim=-1)
-            middle = module.act_fn(gate) * up
-            if hessian_weighting == "route_squared":
-                middle = middle * routing_weight.unsqueeze(-1).to(middle.dtype)
-            down_quantizer.add_batch(middle)
-        down_result = down_quantizer.fasterquant(
-            lazy_block_size=lazy_block_size, damp_percent=damp_percent
-        )
+        if selected_tokens == 0:
+            down_result = down_quantizer.rtn_fallback(
+                reason="zero_calibration_samples"
+            )
+        else:
+            for selected, routing_weight in inputs:
+                # true_sequential=false: down calibration always uses the original
+                # gate/up weight, not the just-quantized gate_up_proj slice.
+                gate, up = F.linear(
+                    selected.to(torch.float32), original_gate_up.to(torch.float32)
+                ).chunk(2, dim=-1)
+                middle = module.act_fn(gate) * up
+                if hessian_weighting == "route_squared":
+                    middle = middle * routing_weight.unsqueeze(-1).to(middle.dtype)
+                down_quantizer.add_batch(middle)
+            down_result = down_quantizer.fasterquant(
+                lazy_block_size=lazy_block_size, damp_percent=damp_percent
+            )
         down[expert_index].copy_(down_result.dequant.to(down.dtype))
         down_quantizer.free()
         del down_quantizer, down_layer, original_gate_up, inputs
@@ -205,6 +221,7 @@ def quantize_routed_experts(
         expert_stats.append(
             {
                 "expert": expert_index,
+                "selected_tokens": selected_tokens,
                 "gate_up_proj": _result_stats(gate_result),
                 "down_proj": _result_stats(down_result),
             }
