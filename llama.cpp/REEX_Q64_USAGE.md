@@ -29,6 +29,16 @@ python export_awq_hf.py \
   --w_bit 4 --q_group_size 64 \
   --n_samples 128 --seqlen 512 --calib_data pileval # 使用pileval数据集进行校准， 校准样本128个， 序列长度512.
 
+# === REEX_SMOOTHQUANT BEGIN: SmoothQuant 平滑 HF 作为 Q64 的可选前置步骤 ===
+# 3b) (可选,与 AWQ 二选一) SmoothQuant 平滑 → FP16/BF16 HF；用于 Q*_64 对比实验
+#     只做 SmoothQuant 第一步(校准+等价平滑),量化由后面的 llama-quantize 完成
+python llm_quant/smoothquant/scripts/export_smoothquant_hf.py \
+  --model_path /path/to/model \
+  --output_dir /path/to/out-smoothquant-hf \
+  --alpha 0.85 \
+  --n_samples 512 --seqlen 512 --calib_data /path/to/calib.jsonl
+# === REEX_SMOOTHQUANT END ===
+
 # 4) HF → FP16 GGUF
 python convert_hf_to_gguf.py /path/to/hf_or_awq_hf \
   --outtype f16 --outfile /path/to/model-f16.gguf
@@ -55,6 +65,15 @@ python convert_hf_to_gguf.py /path/to/nvfp4-hf-out \
 
 流程:
 - **Q64 整网量化**: `HF (或 AWQ-HF) → f16.gguf → llama-quantize → Qx_*_64.gguf`
+<!-- === REEX_SMOOTHQUANT BEGIN: SmoothQuant + Q64 链路说明 === -->
+- **SQ-smooth + Q64**: `HF → llm_quant/smoothquant/scripts/export_smoothquant_hf.py → f16.gguf → llama-quantize Q*_64`。
+  当前实验不使用 imatrix；量化时保留 `--token-embedding-type f16 --output-tensor-type f16
+  --leave-output-tensor`，不加 `--pure`。做对比实验时各组必须用同一套 flag。
+  与论文 W8A8 的差异:权重 scale 是 block-64 而非 per-output-channel,激活是运行时每 64 元素在线量化
+  而非 per-token;收益依赖最终格式，Q4_0_64 实测会退化，不能从 Q8 直接外推。端到端实验入口见
+  `llm_quant/smoothquant/scripts/run_smoothquant_experiment.py`,
+  细节见 [`llm_quant/README.md`](llm_quant/README.md)。
+<!-- === REEX_SMOOTHQUANT END === -->
 - **MoE FP4 混合**: `MXFP4_MOE` = f16.gguf → `llama-quantize MXFP4_MOE`(RTN); `NVFP4` = HF → `export_nvfp4_hf.py` → `convert_hf_to_gguf.py --outtype q8_0`(PTQ+校准)。二者均为 Expert FP4 + 其余 Q8_0。
 
 ## 1. 量化(选类型)

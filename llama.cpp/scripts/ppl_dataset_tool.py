@@ -141,6 +141,15 @@ def render_math500(record: dict[str, Any]) -> str:
     return f"Problem:\n{problem}\n\nSolution:\n{solution}"
 
 
+def render_math500_prompt(record: dict[str, Any]) -> str:
+    problem = as_text(first_present(record, ("problem", "question", "prompt", "input")))
+    return problem
+
+
+def render_mbpp_prompt(record: dict[str, Any]) -> str:
+    return as_text(first_present(record, ("text", "prompt", "question", "input")))
+
+
 def render_mt_bench(record: dict[str, Any]) -> str:
     question_id = first_present(record, ("question_id", "id"))
     category = first_present(record, ("category", "domain"))
@@ -186,6 +195,10 @@ def render_record(record: Any, dataset_type: str) -> str:
         return render_gsm8k(record)
     if dataset_type == "math500":
         return render_math500(record)
+    if dataset_type == "math500-prompt":
+        return render_math500_prompt(record)
+    if dataset_type == "mbpp-prompt":
+        return render_mbpp_prompt(record)
     if dataset_type in {"mt-bench", "mt_batch", "mt-batch"}:
         return render_mt_bench(record)
     if dataset_type == "plain":
@@ -227,7 +240,17 @@ def main() -> None:
     p_convert.add_argument("-o", "--output", type=Path, required=True)
     p_convert.add_argument(
         "--type",
-        choices=("auto", "plain", "gsm8k", "math500", "mt-bench", "mt_batch", "mt-batch"),
+        choices=(
+            "auto",
+            "plain",
+            "gsm8k",
+            "math500",
+            "math500-prompt",
+            "mbpp-prompt",
+            "mt-bench",
+            "mt_batch",
+            "mt-batch",
+        ),
         default="auto",
         help="Dataset rendering template",
     )
