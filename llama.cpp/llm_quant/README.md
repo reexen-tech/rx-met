@@ -7,12 +7,12 @@ llama.cpp/
   export_awq_hf.py            # CLI：一步导出 AWQ-scaled FP16 HF
   llm_quant/
     awq/                      # AWQ search（从 llm-awq copy）
+    gptq/                     # GPTQ for Q4_0_64
     smoothquant/              # SmoothQuant Step 1（从 mit-han-lab/smoothquant copy）
       scripts/                # 导出、实验、评测与交叉验证 CLI
       test/                   # SmoothQuant 专属测试
     requirements.txt
     README.md
-    # gptq/ ...        # 预留
 ```
 
 ## AWQ → AWQ-scaled FP16 HF
