@@ -243,14 +243,18 @@ llama_build_and_test(test-gguf.cpp)
 llama_build_and_test(test-backend-ops.cpp)
 
 if (GGML_USE_REEX)
-  llama_build(test-reex-lut.cpp)
-  target_link_libraries(test-reex-lut PRIVATE ggml llama)
+  add_executable(test-reex-lut test-reex-lut.cpp)
+  target_link_libraries(test-reex-lut PRIVATE ggml)
   target_compile_definitions(test-reex-lut PRIVATE GGML_USE_REEX)
   target_include_directories(test-reex-lut PRIVATE 
     ${CMAKE_CURRENT_SOURCE_DIR}/../ggml/src
     ${CMAKE_CURRENT_SOURCE_DIR}/../ggml/src/ggml-cpu
+    ${CMAKE_CURRENT_SOURCE_DIR}/../ggml/src/ggml-cuda/reex
   )
-  llama_test(test-reex-lut)
+  if (TARGET ggml-cuda)
+    target_link_libraries(test-reex-lut PRIVATE ggml-cuda)
+    target_compile_definitions(test-reex-lut PRIVATE GGML_CUDA)
+  endif()
 endif()
 
 llama_build_and_test(test-reex-custom-switch.cpp)

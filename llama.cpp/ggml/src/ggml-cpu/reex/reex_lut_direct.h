@@ -1,6 +1,5 @@
 /**
- * Reex direct LUT — Sigmoid, Exponential, Silu (CPU backend).
- * Uses shared tables from ggml-reex-lut.h; clamp input to LUT range.
+ * REEX exp2-reduced exp, composed sigmoid, and SiLU mixed-FP16 interface.
  */
 #pragma once
 
@@ -14,21 +13,10 @@
 extern "C" {
 #endif
 
-float ggml_sigmoid_lut_fp16_f32_REEX(float x);
-float ggml_sigmoid_lut_bf16_f32_REEX(float x);
 float ggml_sigmoid_lut_mixed_fp16_f32_REEX(float x);
-float ggml_exp_lut_fp16_f32_REEX(float x);
-float ggml_exp_lut_bf16_f32_REEX(float x);
 float ggml_exp_lut_mixed_fp16_f32_REEX(float x);
-float ggml_silu_lut_fp16_f32_REEX(float x);
-float ggml_silu_lut_bf16_f32_REEX(float x);
 float ggml_silu_lut_mixed_fp16_f32_REEX(float x);
 
-/*
- * Unified expf replacement using Mixed-FP16 LUT.
- * Called by GGML_EXPF() in ops.cpp to redirect all exp calls
- * through the REEX mixed-FP16 piecewise-linear LUT.
- */
 static inline float ggml_reex_expf_(float x) {
     return ggml_exp_lut_mixed_fp16_f32_REEX(x);
 }
