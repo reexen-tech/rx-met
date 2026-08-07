@@ -3,6 +3,11 @@ include README.md
 include LICENSE
 include VERSION
 include requirements.txt
+include requirements-build.txt
+
+# Include rx-met's AIMET native source for source distributions
+recursive-include native/aimet *
+include scripts/build_aimet_native.sh
 
 # Include all JSON config files
 recursive-include aimet_common *.json
@@ -29,16 +34,3 @@ recursive-include export_onnx_and_encodings/data *
 # Exclude compiled Python files
 global-exclude __pycache__
 global-exclude *.py[co]
-
-
-
-
-
-
-
-
-
-
-
-
-

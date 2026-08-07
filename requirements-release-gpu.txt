@@ -1,0 +1,3 @@
+# Install after requirements-release.txt so this distribution owns the shared
+# onnxruntime Python package files in the CUDA image.
+onnxruntime-gpu==1.23.2
