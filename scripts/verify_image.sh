@@ -40,6 +40,12 @@ print('quant_gru', quant_gru.__file__)
 print('rx_met_llm', rx_met_llm.__version__)
 "
 
+log "AIMET ONNX CUDA native QuantSim"
+docker run --rm --gpus all \
+    -v "${ROOT}/native/aimet/tests/smoke_onnx_runtime.py:/tmp/smoke_onnx_runtime.py:ro" \
+    "${IMAGE}" \
+    python3 /tmp/smoke_onnx_runtime.py --provider CUDAExecutionProvider
+
 log "external quick_start.py imports with host UID"
 docker run --rm \
     --user "$(id -u):$(id -g)" \

@@ -45,6 +45,12 @@ else:
     raise SystemExit('quant_gru must not be installed in CPU image')
 "
 
+log "AIMET ONNX CPU native QuantSim"
+docker run --rm \
+    -v "${ROOT}/native/aimet/tests/smoke_onnx_runtime.py:/tmp/smoke_onnx_runtime.py:ro" \
+    "${IMAGE}" \
+    python3 /tmp/smoke_onnx_runtime.py --provider CPUExecutionProvider
+
 log "Python dependency consistency"
 docker run --rm "${IMAGE}" python3 -m pip check
 

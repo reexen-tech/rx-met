@@ -1,12 +1,23 @@
 # Core dependencies
-numpy>=1.20.0
+numpy>=1.20.0,<2
 scipy>=1.7.0
 onnx>=1.11.0
-onnxruntime>=1.13.0
+onnxruntime>=1.23.2
 onnxscript>=0.7.1
 torch>=1.13.0
 torchvision>=0.24.1
 pillow>=8.0.0
+
+# AIMET ONNX runtime
+Jinja2>=3.0.3
+PyYAML
+hvplot
+onnx2torch
+osqp
+pandas
+psutil
+scikit-learn
+tqdm
 
 # Visualization
 bokeh>=2.4.0
@@ -16,16 +27,3 @@ jsonschema>=3.2.0
 
 # Optional dependencies
 # tensorboard>=2.8.0
-
-
-
-
-
-
-
-
-
-
-
-
-

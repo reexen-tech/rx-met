@@ -80,6 +80,35 @@ def test_hooks_are_removed_even_when_forward_fails(tmp_path) -> None:
     assert not model.first._forward_hooks
 
 
+def test_act_scale_allowlist_only_hooks_named_linears(tmp_path) -> None:
+    calib = write_calib_jsonl(tmp_path / "calib.jsonl", ["allowlist"])
+    model = _TwoLinears()
+
+    scales = get_act_scales(
+        model,
+        _StubTokenizer(64),
+        calib,
+        num_samples=1,
+        seq_len=8,
+        progress_every=0,
+        target_modules={"first"},
+    )
+
+    assert set(scales) == {"first"}
+
+
+def test_act_scale_allowlist_rejects_missing_target(tmp_path) -> None:
+    calib = write_calib_jsonl(tmp_path / "calib.jsonl", ["missing"])
+    with pytest.raises(KeyError, match="not found"):
+        get_act_scales(
+            _TwoLinears(),
+            _StubTokenizer(64),
+            calib,
+            num_samples=1,
+            target_modules={"not_a_module"},
+        )
+
+
 def test_resolve_calib_dataset_prefers_explicit_path(tmp_path, monkeypatch) -> None:
     calib = write_calib_jsonl(tmp_path / "calib.jsonl", ["x"])
     monkeypatch.setenv("SMOOTHQUANT_PILEVAL_PATH", "/nonexistent.jsonl")

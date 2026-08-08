@@ -25,6 +25,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates
         python3-dev \
         python3-pip \
         libgomp1 \
+        libeigen3-dev \
         git \
     && rm -rf /var/lib/apt/lists/*
 
@@ -33,6 +34,10 @@ RUN --mount=type=cache,id=rx-met-pip-cpu,target=/root/.cache/pip,sharing=locked 
         pip==25.2 \
         setuptools==70.2.0 \
         wheel==0.45.1
+
+COPY requirements-build.txt /tmp/requirements-build.txt
+RUN --mount=type=cache,id=rx-met-pip-cpu,target=/root/.cache/pip,sharing=locked \
+    python3 -m pip install -r /tmp/requirements-build.txt
 
 RUN --mount=type=cache,id=rx-met-pip-cpu,target=/root/.cache/pip,sharing=locked \
     python3 -m pip install \
@@ -47,11 +52,13 @@ ENV RX_MET_ENABLE_CUDA=0
 ENV RX_MET_NATIVE_OUT=/artifacts/native
 ENV RX_MET_WHEEL_OUT=/artifacts/wheels
 ENV RX_MET_LLAMA_BUILD_DIR=/build/llama
+ENV RX_MET_AIMET_BUILD_DIR=/build/aimet
 ENV RX_MET_PYTHON=python3
 
 RUN --mount=type=cache,id=rx-met-pip-cpu,target=/root/.cache/pip,sharing=locked \
     ./scripts/package_native.sh
 RUN --mount=type=cache,id=rx-met-pip-cpu,target=/root/.cache/pip,sharing=locked \
+    --mount=type=cache,id=rx-met-aimet-cpu,target=/build/aimet,sharing=locked \
     ./scripts/build_wheel.sh
 # quant-gru requires CUDA Toolkit + CUDA PyTorch; not built for the CPU release.
 # Customers needing QuantGRU / quick_start.py must use the GPU package.

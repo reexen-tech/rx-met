@@ -31,6 +31,7 @@ import socket
 import subprocess
 import sys
 import time
+import warnings
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -39,6 +40,8 @@ _SCRIPT_DIR = Path(__file__).resolve().parent
 _ROOT = Path(__file__).resolve().parents[3]
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
+
+from llm_quant.smoothquant.runner import _source_model_fingerprint  # noqa: E402
 
 _PPL_FINAL_RE = re.compile(r"Final estimate:\s*PPL\s*=\s*([0-9.]+)\s*\+/-\s*([0-9.]+)")
 
@@ -51,6 +54,8 @@ QUANTIZE_FLAGS = [
     "f16",
     "--leave-output-tensor",
 ]
+
+BASELINE_PROVENANCE_SCHEMA_VERSION = 1
 
 
 @dataclass
@@ -78,11 +83,21 @@ class SmoothQuantExperiment:
         self._total_elapsed = 0.0
 
         self.smooth_hf = self.output_dir / "smoothquant-hf"
-        self.act_scales = self.output_dir / "act_scales.pt"
+        self.act_scales = (
+            Path(args.act_scales_cache).expanduser().resolve()
+            if args.act_scales_cache
+            else self.output_dir / "act_scales.pt"
+        )
         self.fp16_gguf = self.output_dir / "model-f16.gguf"
         self.smooth_f16_gguf = self.output_dir / "model-smooth-f16.gguf"
         self.baseline_quant = self.output_dir / f"model-baseline-{args.quant_type}.gguf"
         self.smooth_quant = self.output_dir / f"model-smooth-{args.quant_type}.gguf"
+        self.baseline_provenance = self.output_dir / "baseline_provenance.json"
+        self.baseline_reuse: dict[str, dict[str, Any]] = {
+            "fp16_gguf": {"requested": args.fp16_gguf, "reused": False},
+            "baseline_quant": {"requested": args.baseline_quant, "reused": False},
+        }
+        self._resolve_external_baseline()
 
     # --- planning -----------------------------------------------------
 
@@ -92,12 +107,15 @@ class SmoothQuantExperiment:
             ("smoothquant_export", self._cmd_export()),
             ("convert_smooth_hf", self._cmd_convert(self.smooth_hf, self.smooth_f16_gguf)),
         ]
-        if not a.skip_baseline:
+        if not a.skip_baseline and not self.baseline_reuse["fp16_gguf"]["reused"]:
             plan.append(("convert_fp16", self._cmd_convert(Path(a.model_path), self.fp16_gguf)))
         plan.append(("quantize_smooth", self._cmd_quantize(self.smooth_f16_gguf, self.smooth_quant)))
         if not a.skip_baseline:
+            if not self.baseline_reuse["baseline_quant"]["reused"]:
+                plan.append(
+                    ("quantize_baseline", self._cmd_quantize(self.fp16_gguf, self.baseline_quant))
+                )
             plan += [
-                ("quantize_baseline", self._cmd_quantize(self.fp16_gguf, self.baseline_quant)),
                 ("ppl_fp16", self._cmd_ppl(self.fp16_gguf)),
                 ("ppl_baseline_quant", self._cmd_ppl(self.baseline_quant)),
             ]
@@ -105,6 +123,106 @@ class SmoothQuantExperiment:
         if a.ref_repo:
             plan.append(("ref_compare", self._cmd_ref_compare()))
         return plan
+
+    def _resolve_external_baseline(self) -> None:
+        a = self.args
+        if not a.fp16_gguf and not a.baseline_quant:
+            return
+        provenance_path = Path(
+            a.baseline_provenance
+            or Path(a.baseline_quant or a.fp16_gguf).expanduser().parent / "provenance.json"
+        ).expanduser()
+        try:
+            provenance = json.loads(provenance_path.read_text())
+        except (OSError, json.JSONDecodeError) as error:
+            self._reject_external("fp16_gguf", f"cannot read {provenance_path}: {error}")
+            self._reject_external("baseline_quant", f"cannot read {provenance_path}: {error}")
+            return
+
+        common_reason = self._validate_provenance_common(provenance)
+        if a.fp16_gguf:
+            reason = common_reason or self._validate_external_fp16(
+                Path(a.fp16_gguf).expanduser(), provenance
+            )
+            if reason:
+                self._reject_external("fp16_gguf", reason)
+            else:
+                self.fp16_gguf = Path(a.fp16_gguf).expanduser().resolve()
+                self.baseline_reuse["fp16_gguf"].update(
+                    {"reused": True, "provenance": str(provenance_path.resolve())}
+                )
+        if a.baseline_quant:
+            reason = common_reason or self._validate_external_quant(
+                Path(a.baseline_quant).expanduser(), provenance
+            )
+            if reason:
+                self._reject_external("baseline_quant", reason)
+            else:
+                self.baseline_quant = Path(a.baseline_quant).expanduser().resolve()
+                self.baseline_reuse["baseline_quant"].update(
+                    {"reused": True, "provenance": str(provenance_path.resolve())}
+                )
+
+    def _reject_external(self, artifact: str, reason: str) -> None:
+        if not self.baseline_reuse[artifact]["requested"]:
+            return
+        self.baseline_reuse[artifact]["reason"] = reason
+        warnings.warn(
+            f"rejecting external {artifact}: {reason}; rebuilding in {self.output_dir}",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+
+    def _validate_provenance_common(self, provenance: dict[str, Any]) -> str | None:
+        if provenance.get("schema_version") != BASELINE_PROVENANCE_SCHEMA_VERSION:
+            return "baseline provenance schema_version mismatch"
+        expected_source = _source_model_fingerprint(self.args.model_path)
+        if provenance.get("source_model_fingerprint") != expected_source:
+            return "source model/config fingerprint mismatch"
+        current_commit = _capture(["git", "-C", str(_ROOT), "rev-parse", "HEAD"])
+        if provenance.get("llama_cpp_commit") != current_commit:
+            return "llama.cpp commit mismatch"
+        return None
+
+    def _validate_external_fp16(
+        self, artifact: Path, provenance: dict[str, Any]
+    ) -> str | None:
+        return _validate_artifact_fingerprint(artifact, provenance.get("fp16_gguf"))
+
+    def _validate_external_quant(
+        self, artifact: Path, provenance: dict[str, Any]
+    ) -> str | None:
+        reason = _validate_artifact_fingerprint(
+            artifact, provenance.get("baseline_quant")
+        )
+        if reason:
+            return reason
+        quantize = provenance.get("quantize")
+        if not isinstance(quantize, dict):
+            return "missing quantize provenance"
+        recorded_fp16 = provenance.get("fp16_gguf")
+        if not isinstance(recorded_fp16, dict) or not recorded_fp16.get("path"):
+            return "missing FP16 input provenance"
+        reason = _validate_artifact_fingerprint(
+            Path(recorded_fp16["path"]), recorded_fp16
+        )
+        if reason:
+            return f"recorded FP16 input {reason}"
+        expected_command = self._cmd_quantize(
+            Path(recorded_fp16["path"]), artifact.resolve()
+        )
+        if quantize.get("command") != expected_command:
+            return "complete llama-quantize command/flags mismatch"
+        if quantize.get("flags") != ([] if self.args.quantize_full else QUANTIZE_FLAGS):
+            return "llama-quantize flags mismatch"
+        if quantize.get("quant_type") != self.args.quant_type:
+            return "quant type mismatch"
+        binary_reason = _validate_artifact_fingerprint(
+            Path(self.args.llama_quantize), quantize.get("binary")
+        )
+        if binary_reason:
+            return f"quantizer binary {binary_reason}"
+        return None
 
     def _cmd_export(self) -> list[str]:
         a = self.args
@@ -119,11 +237,18 @@ class SmoothQuantExperiment:
             "--calib_data", a.calib_data,
             "--device", a.device,
             "--act_scales_cache", str(self.act_scales),
+            "--calibration-mode", a.calibration_mode,
         ]
+        if a.min_samples is not None:
+            cmd += ["--min_samples", str(a.min_samples)]
+        if a.max_samples is not None:
+            cmd += ["--max_samples", str(a.max_samples)]
         if a.dtype:
             cmd += ["--dtype", a.dtype]
         if a.reuse_act_scales:
             cmd.append("--reuse_act_scales")
+        if a.resume_act_scales:
+            cmd.append("--resume_act_scales")
         return cmd
 
     def _cmd_convert(self, hf_dir: Path, outfile: Path) -> list[str]:
@@ -183,10 +308,41 @@ class SmoothQuantExperiment:
         finally:
             self._total_elapsed = time.time() - t0
             self._finished_at = datetime.datetime.now().isoformat(timespec="seconds")
+            self._maybe_write_baseline_provenance()
             self._finalize_manifest()
             self._write_manifest()
             self._write_report()
         return self._summary()
+
+    def _maybe_write_baseline_provenance(self) -> None:
+        if self.args.skip_baseline:
+            return
+        generated_fp16 = not self.baseline_reuse["fp16_gguf"]["reused"]
+        generated_quant = not self.baseline_reuse["baseline_quant"]["reused"]
+        if not (generated_fp16 or generated_quant):
+            return
+        successful = {stage.name: stage.exit_code == 0 for stage in self.stages}
+        if generated_fp16 and not successful.get("convert_fp16"):
+            return
+        if generated_quant and not successful.get("quantize_baseline"):
+            return
+        payload = {
+            "schema_version": BASELINE_PROVENANCE_SCHEMA_VERSION,
+            "source_model_fingerprint": _source_model_fingerprint(self.args.model_path),
+            "llama_cpp_commit": _capture(["git", "-C", str(_ROOT), "rev-parse", "HEAD"]),
+            "fp16_gguf": _fingerprint_path(str(self.fp16_gguf), hash_files=True),
+            "baseline_quant": _fingerprint_path(str(self.baseline_quant), hash_files=True),
+            "convert_command": self._cmd_convert(Path(self.args.model_path), self.fp16_gguf),
+            "quantize": {
+                "command": self._cmd_quantize(self.fp16_gguf, self.baseline_quant),
+                "flags": [] if self.args.quantize_full else QUANTIZE_FLAGS,
+                "quant_type": self.args.quant_type,
+                "binary": _fingerprint_path(self.args.llama_quantize, hash_files=True),
+            },
+        }
+        self.baseline_provenance.write_text(
+            json.dumps(payload, indent=2, ensure_ascii=False)
+        )
 
     def _run_stage(self, name: str, cmd: list[str]) -> Stage:
         self._log_index += 1
@@ -244,6 +400,7 @@ class SmoothQuantExperiment:
                 "llama_quantize": _fingerprint_path(self.args.llama_quantize),
                 "llama_perplexity": _fingerprint_path(self.args.llama_perplexity),
             },
+            "baseline_reuse": self.baseline_reuse,
         }
 
     def _finalize_manifest(self) -> None:
@@ -477,6 +634,26 @@ def _fingerprint_md(val: dict[str, Any] | None) -> str:
     return "  \n  ".join(parts)
 
 
+def _validate_artifact_fingerprint(
+    artifact: Path, recorded: dict[str, Any] | None
+) -> str | None:
+    if not isinstance(recorded, dict):
+        return "missing artifact fingerprint"
+    resolved = artifact.expanduser().resolve()
+    if not resolved.is_file():
+        return f"artifact does not exist: {resolved}"
+    if recorded.get("path") != str(resolved):
+        return "artifact path mismatch"
+    if recorded.get("size_bytes") != resolved.stat().st_size:
+        return "artifact size mismatch"
+    recorded_sha = recorded.get("sha256")
+    if not recorded_sha:
+        return "artifact SHA-256 missing"
+    if recorded_sha != _sha256_file(resolved):
+        return "artifact SHA-256 mismatch"
+    return None
+
+
 def _stage_dict(s: Stage) -> dict[str, Any]:
     return {
         "name": s.name,
@@ -492,7 +669,12 @@ def _stage_dict(s: Stage) -> dict[str, Any]:
 
 
 _BOOLEAN_FLAGS = frozenset(
-    {"--leave-output-tensor", "--reuse_act_scales", "--continue-on-error"}
+    {
+        "--leave-output-tensor",
+        "--reuse_act_scales",
+        "--resume_act_scales",
+        "--continue-on-error",
+    }
 )
 
 
@@ -573,9 +755,21 @@ def parse_args(argv=None) -> argparse.Namespace:
     p.add_argument("--alpha", type=float, default=0.85)
     p.add_argument("--n_samples", type=int, default=512)
     p.add_argument("--seqlen", type=int, default=512)
+    p.add_argument(
+        "--calibration-mode", choices=("fixed", "smoke", "formal"), default="fixed"
+    )
+    p.add_argument("--min_samples", type=int, default=None)
+    p.add_argument("--max_samples", type=int, default=None)
     p.add_argument("--dtype", default=None, choices=["float16", "bfloat16", "float32"])
     p.add_argument("--device", default="auto", help="device_map for calibration")
-    p.add_argument("--reuse_act_scales", action="store_true")
+    p.add_argument(
+        "--act-scales-cache",
+        default=None,
+        help="Shared calibration cache path (may be outside this alpha output directory)",
+    )
+    cache_mode = p.add_mutually_exclusive_group()
+    cache_mode.add_argument("--reuse_act_scales", action="store_true")
+    cache_mode.add_argument("--resume_act_scales", action="store_true")
     p.add_argument("--outtype", default="f16", help="convert_hf_to_gguf --outtype")
     p.add_argument(
         "--quant-type",
@@ -599,6 +793,21 @@ def parse_args(argv=None) -> argparse.Namespace:
         "--skip_baseline",
         action="store_true",
         help="Only run the smoothed arm; use when sweeping alpha against a known baseline",
+    )
+    p.add_argument(
+        "--fp16-gguf",
+        default=None,
+        help="Existing FP16 GGUF; reused only with matching baseline provenance",
+    )
+    p.add_argument(
+        "--baseline-quant",
+        default=None,
+        help="Existing direct-quant GGUF; reused only with matching provenance",
+    )
+    p.add_argument(
+        "--baseline-provenance",
+        default=None,
+        help="Provenance JSON for external baseline artifacts (default: sibling provenance.json)",
     )
     p.add_argument("--container", default=None, help="Container name recorded in the report")
     p.add_argument("--continue-on-error", dest="continue_on_error", action="store_true")

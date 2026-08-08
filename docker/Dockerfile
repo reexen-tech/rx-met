@@ -10,8 +10,8 @@ FROM nvidia/cuda:${CUDA_VERSION}-devel-ubuntu${UBUNTU_VERSION} AS builder
 
 ARG DEBIAN_FRONTEND=noninteractive
 ARG RX_MET_VERSION
-ARG CUDA_ARCHITECTURES=80;86;89;120
-ARG TORCH_CUDA_ARCH_LIST=8.0;8.6;8.9;12.0
+ARG CUDA_ARCHITECTURES=80;86;89;90;120
+ARG TORCH_CUDA_ARCH_LIST=8.0;8.6;8.9;9.0;12.0
 
 RUN test -n "${RX_MET_VERSION}"
 
@@ -27,6 +27,7 @@ RUN sed -i \
         python3-dev \
         python3-pip \
         libgomp1 \
+        libeigen3-dev \
     && rm -rf /var/lib/apt/lists/*
 
 # The devel image ships libcuda.so but no SONAME symlink because the real
@@ -38,6 +39,10 @@ RUN --mount=type=cache,id=rx-met-pip-cu128,target=/root/.cache/pip,sharing=locke
         pip==25.2 \
         setuptools==70.2.0 \
         wheel==0.45.1
+
+COPY requirements-build.txt /tmp/requirements-build.txt
+RUN --mount=type=cache,id=rx-met-pip-cu128,target=/root/.cache/pip,sharing=locked \
+    python3 -m pip install -r /tmp/requirements-build.txt
 
 RUN --mount=type=cache,id=rx-met-pip-cu128,target=/root/.cache/pip,sharing=locked \
     python3 -m pip install \
@@ -56,6 +61,7 @@ ENV RX_MET_NATIVE_OUT=/artifacts/native
 ENV RX_MET_WHEEL_OUT=/artifacts/wheels
 ENV RX_MET_LLAMA_BUILD_DIR=/build/llama
 ENV RX_MET_QUANT_GRU_BUILD_DIR=/build/quant-gru
+ENV RX_MET_AIMET_BUILD_DIR=/build/aimet
 ENV RX_MET_PYTHON=python3
 # GPU-less image builds link CUDA driver symbols against NVIDIA's stub library.
 # The stub is never copied into the runtime image; the host driver supplies libcuda.
@@ -65,6 +71,7 @@ ENV LD_LIBRARY_PATH=/usr/local/cuda/lib64/stubs:${LD_LIBRARY_PATH}
 RUN --mount=type=cache,id=rx-met-pip-cu128,target=/root/.cache/pip,sharing=locked \
     ./scripts/package_native.sh
 RUN --mount=type=cache,id=rx-met-pip-cu128,target=/root/.cache/pip,sharing=locked \
+    --mount=type=cache,id=rx-met-aimet-cu128,target=/build/aimet,sharing=locked \
     ./scripts/build_wheel.sh
 RUN --mount=type=cache,id=rx-met-pip-cu128,target=/root/.cache/pip,sharing=locked \
     ./scripts/build_quant_gru_wheel.sh
@@ -100,11 +107,13 @@ RUN --mount=type=cache,id=rx-met-pip-cu128,target=/root/.cache/pip,sharing=locke
         --index-url https://download.pytorch.org/whl/cu128
 
 COPY requirements-release.txt /tmp/requirements-release.txt
+COPY requirements-release-gpu.txt /tmp/requirements-release-gpu.txt
 COPY --from=builder /artifacts/wheels/ /tmp/wheels/
 RUN --mount=type=cache,id=rx-met-pip-cu128,target=/root/.cache/pip,sharing=locked \
     python3 -m pip install -r /tmp/requirements-release.txt \
+    && python3 -m pip install --force-reinstall --no-deps -r /tmp/requirements-release-gpu.txt \
     && python3 -m pip install /tmp/wheels/*.whl \
-    && rm -rf /tmp/wheels /tmp/requirements-release.txt
+    && rm -rf /tmp/wheels /tmp/requirements-release.txt /tmp/requirements-release-gpu.txt
 
 COPY --from=builder /artifacts/native/rx-met-native-*.tar.gz /tmp/
 RUN mkdir -p /opt/rx-met \

@@ -12,6 +12,8 @@ _ALPHA_BY_MODEL_TYPE = {
     "llama": 0.85,
     "qwen2": 0.85,
     "qwen3": 0.85,
+    "qwen3_5_moe": 0.85,
+    "qwen3_5_moe_text": 0.85,
     "mistral": 0.80,
     "mixtral": 0.80,
     "falcon": 0.70,

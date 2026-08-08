@@ -65,6 +65,7 @@ CPU 包不含 QuantGRU；`examples/quick_start.py` 小模型流程不可用，�
 - `examples/`：客户示例与配置。
 - `docker/`：CUDA 12.8 与 CPU 多阶段镜像定义（`Dockerfile` / `Dockerfile.cpu`）。
 - `scripts/`：wheel、native、镜像验证和 Release 构建脚本（含 `release_build_cpu.sh`）。
+- `native/aimet/`：rx-met 自维护的 AIMET native 源码及固定版本的 ORT 头文件。
 
 ## 开发构建
 
@@ -73,6 +74,12 @@ CPU 包不含 QuantGRU；`examples/quick_start.py` 小模型流程不可用，�
 ```bash
 ./scripts/build_wheel.sh
 ```
+
+该命令先从仓库内源码编译 `_libpymo`、`libquant_info` 和
+`libaimet_onnxrt_ops.so`，再生成 `cp310-cp310-linux_x86_64` wheel。默认
+为 CPU 版本；CUDA 版本使用 `RX_MET_ENABLE_CUDA=1`，可通过
+`RX_MET_CUDA_ARCHITECTURES` 指定目标架构。完整说明见
+[doc/AIMET_ONNX_NATIVE.md](doc/AIMET_ONNX_NATIVE.md)。
 
 仅运行镜像验收：
 
