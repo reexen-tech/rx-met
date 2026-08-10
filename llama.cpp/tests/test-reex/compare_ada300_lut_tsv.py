@@ -17,7 +17,7 @@ def load(path: Path) -> list[tuple[str, str, int, int, str]]:
     rows = []
     with path.open() as source:
         header = source.readline().rstrip("\n")
-        if header != "# reex-lut-bit-v1 segments=16 precision=mixed_fp16":
+        if not header.startswith("# reex-lut-bit-v1 segments=") or " precision=mixed_fp16" not in header:
             raise ValueError(f"{path}: invalid header: {header!r}")
         for line_number, line in enumerate(source, 2):
             fields = line.rstrip("\n").split("\t")
