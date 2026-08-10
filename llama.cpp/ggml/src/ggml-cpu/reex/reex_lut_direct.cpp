@@ -8,6 +8,7 @@
 #include <cmath>
 #include <limits>
 
+#ifndef GGML_REEX_EXP_NO_LUT
 static inline float round_fp16(float value) {
     return ggml_fp16_to_fp32(ggml_fp32_to_fp16(value));
 }
@@ -23,8 +24,12 @@ static inline float exp2_core_mixed_fp16(float fraction) {
     }
     return std::numeric_limits<float>::quiet_NaN();
 }
+#endif
 
 float ggml_exp_lut_mixed_fp16_f32_REEX(float x) {
+#ifdef GGML_REEX_EXP_NO_LUT
+    return std::exp(x);
+#else
     if (std::isnan(x)) {
         return x;
     }
@@ -51,6 +56,7 @@ float ggml_exp_lut_mixed_fp16_f32_REEX(float x) {
     const float core = exp2_core_mixed_fp16(fraction);
     const double reconstructed = std::ldexp(static_cast<double>(core), static_cast<int>(exponent_d));
     return static_cast<float>(reconstructed);
+#endif
 }
 
 float ggml_sigmoid_lut_mixed_fp16_f32_REEX(float x) {

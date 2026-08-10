@@ -75,6 +75,17 @@ function(ggml_add_cpu_backend_variant_impl tag_name)
 
     if (GGML_USE_REEX)
         target_compile_definitions(${GGML_CPU_NAME} PRIVATE GGML_USE_REEX)
+        foreach(REEX_NO_LUT_OPTION IN ITEMS
+                GGML_REEX_SIN_COS_NO_LUT
+                GGML_REEX_EXP_NO_LUT
+                GGML_REEX_LOG_NO_LUT
+                GGML_REEX_RECIPROCAL_NO_LUT
+                GGML_REEX_RSQRT_NO_LUT
+                GGML_REEX_SQRT_NO_LUT)
+            if (${REEX_NO_LUT_OPTION})
+                target_compile_definitions(${GGML_CPU_NAME} PRIVATE ${REEX_NO_LUT_OPTION})
+            endif()
+        endforeach()
         if (GGML_USE_BF16_LUT)
             target_compile_definitions(${GGML_CPU_NAME} PRIVATE GGML_USE_BF16_LUT)
         endif()

@@ -12,42 +12,54 @@
 void ggml_cuda_init_trigonometric_lut_REEX(int device_id) {
     ggml_init_trigonometric_lut_REEX();
     cudaSetDevice(device_id);
+#ifndef GGML_REEX_SIN_COS_NO_LUT
     cudaMemcpyToSymbol(ggml_cuda_sin_fp32_compare_max, ggml_reex_sin_fp32_compare_max,
         sizeof(float) * GGML_LUT_NUM_SEGMENTS_REEX);
     cudaMemcpyToSymbol(ggml_cuda_sin_fp32_b, ggml_reex_sin_fp32_b,
         sizeof(float) * GGML_LUT_NUM_SEGMENTS_REEX);
     cudaMemcpyToSymbol(ggml_cuda_sin_fp32_c, ggml_reex_sin_fp32_c,
         sizeof(float) * GGML_LUT_NUM_SEGMENTS_REEX);
+#endif
+#ifndef GGML_REEX_EXP_NO_LUT
     cudaMemcpyToSymbol(ggml_cuda_exponential_fp32_compare_max, ggml_reex_exponential_fp32_compare_max,
         sizeof(float) * GGML_LUT_NUM_SEGMENTS_REEX);
     cudaMemcpyToSymbol(ggml_cuda_exponential_fp32_b, ggml_reex_exponential_fp32_b,
         sizeof(float) * GGML_LUT_NUM_SEGMENTS_REEX);
     cudaMemcpyToSymbol(ggml_cuda_exponential_fp32_c, ggml_reex_exponential_fp32_c,
         sizeof(float) * GGML_LUT_NUM_SEGMENTS_REEX);
+#endif
+#ifndef GGML_REEX_RSQRT_NO_LUT
     cudaMemcpyToSymbol(ggml_cuda_rsqrt_fp32_compare_max, ggml_reex_rsqrt_fp32_compare_max,
         sizeof(float) * GGML_LUT_NUM_SEGMENTS_REEX);
     cudaMemcpyToSymbol(ggml_cuda_rsqrt_fp32_b, ggml_reex_rsqrt_fp32_b,
         sizeof(float) * GGML_LUT_NUM_SEGMENTS_REEX);
     cudaMemcpyToSymbol(ggml_cuda_rsqrt_fp32_c, ggml_reex_rsqrt_fp32_c,
         sizeof(float) * GGML_LUT_NUM_SEGMENTS_REEX);
+#endif
+#ifndef GGML_REEX_SQRT_NO_LUT
     cudaMemcpyToSymbol(ggml_cuda_sqrt_fp32_compare_max, ggml_reex_sqrt_fp32_compare_max,
         sizeof(float) * GGML_LUT_NUM_SEGMENTS_REEX);
     cudaMemcpyToSymbol(ggml_cuda_sqrt_fp32_b, ggml_reex_sqrt_fp32_b,
         sizeof(float) * GGML_LUT_NUM_SEGMENTS_REEX);
     cudaMemcpyToSymbol(ggml_cuda_sqrt_fp32_c, ggml_reex_sqrt_fp32_c,
         sizeof(float) * GGML_LUT_NUM_SEGMENTS_REEX);
+#endif
+#ifndef GGML_REEX_LOG_NO_LUT
     cudaMemcpyToSymbol(ggml_cuda_log_fp32_compare_max, ggml_reex_log_fp32_compare_max,
         sizeof(float) * GGML_LUT_NUM_SEGMENTS_REEX);
     cudaMemcpyToSymbol(ggml_cuda_log_fp32_b, ggml_reex_log_fp32_b,
         sizeof(float) * GGML_LUT_NUM_SEGMENTS_REEX);
     cudaMemcpyToSymbol(ggml_cuda_log_fp32_c, ggml_reex_log_fp32_c,
         sizeof(float) * GGML_LUT_NUM_SEGMENTS_REEX);
+#endif
+#ifndef GGML_REEX_RECIPROCAL_NO_LUT
     cudaMemcpyToSymbol(ggml_cuda_reciprocal_fp32_compare_max, ggml_reex_reciprocal_fp32_compare_max,
         sizeof(float) * GGML_LUT_NUM_SEGMENTS_REEX);
     cudaMemcpyToSymbol(ggml_cuda_reciprocal_fp32_b, ggml_reex_reciprocal_fp32_b,
         sizeof(float) * GGML_LUT_NUM_SEGMENTS_REEX);
     cudaMemcpyToSymbol(ggml_cuda_reciprocal_fp32_c, ggml_reex_reciprocal_fp32_c,
         sizeof(float) * GGML_LUT_NUM_SEGMENTS_REEX);
+#endif
 }
 #endif
 

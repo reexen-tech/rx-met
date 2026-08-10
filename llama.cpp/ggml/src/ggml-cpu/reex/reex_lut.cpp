@@ -7,6 +7,7 @@
 #include <cmath>
 #include <limits>
 
+#ifndef GGML_REEX_SIN_COS_NO_LUT
 static inline float round_fp16(float value) {
     return ggml_fp16_to_fp32(ggml_fp32_to_fp16(value));
 }
@@ -46,13 +47,22 @@ static inline float sin_like_mixed_fp16(float x, double phase) {
     const float core = sin_core_mixed_fp16(u);
     return quadrant <= 1 ? core : -core;
 }
+#endif
 
 float ggml_sin_lut_mixed_fp16_f32_REEX(float x) {
+#ifdef GGML_REEX_SIN_COS_NO_LUT
+    return std::sin(x);
+#else
     return sin_like_mixed_fp16(x, 0.0);
+#endif
 }
 
 float ggml_cos_lut_mixed_fp16_f32_REEX(float x) {
+#ifdef GGML_REEX_SIN_COS_NO_LUT
+    return std::cos(x);
+#else
     return sin_like_mixed_fp16(x, GGML_REEX_HALF_PI_D);
+#endif
 }
 
 #endif /* GGML_USE_REEX */
