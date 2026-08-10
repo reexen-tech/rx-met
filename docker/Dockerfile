@@ -6,7 +6,8 @@ ARG UBUNTU_VERSION=22.04
 # ---------------------------------------------------------------------------
 # Builder: CUDA Toolkit, compiler and source exist only in this stage.
 # ---------------------------------------------------------------------------
-FROM nvidia/cuda:${CUDA_VERSION}-devel-ubuntu${UBUNTU_VERSION} AS builder
+# AIMET ONNX CUDA ops include ORT cuda_context.h, which requires cuDNN headers.
+FROM nvidia/cuda:${CUDA_VERSION}-cudnn-devel-ubuntu${UBUNTU_VERSION} AS builder
 
 ARG DEBIAN_FRONTEND=noninteractive
 ARG RX_MET_VERSION
