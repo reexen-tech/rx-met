@@ -13,13 +13,21 @@ static inline float round_fp16(float value) {
     return ggml_fp16_to_fp32(ggml_fp32_to_fp16(value));
 }
 
+static inline float lut_core_output(float value) {
+#ifdef GGML_REEX_LUT_FP32_OUTPUT
+    return value;
+#else
+    return round_fp16(value);
+#endif
+}
+
 static inline float exp2_core_mixed_fp16(float fraction) {
     for (int i = 0; i < GGML_LUT_NUM_SEGMENTS_REEX; ++i) {
         if (fraction <= ggml_reex_exponential_fp32_compare_max[i] ||
             i == GGML_LUT_NUM_SEGMENTS_REEX - 1) {
             volatile float product = ggml_reex_exponential_fp32_b[i] * fraction;
             const float sum = product + ggml_reex_exponential_fp32_c[i];
-            return round_fp16(sum);
+            return lut_core_output(sum);
         }
     }
     return std::numeric_limits<float>::quiet_NaN();

@@ -15,6 +15,14 @@ static inline float round_fp16(float value) {
     return ggml_fp16_to_fp32(ggml_fp32_to_fp16(value));
 }
 
+static inline float lut_core_output(float value) {
+#ifdef GGML_REEX_LUT_FP32_OUTPUT
+    return value;
+#else
+    return round_fp16(value);
+#endif
+}
+
 static inline void normalize_to_1_2(float x, float * mantissa, int * exponent) {
     int e;
     *mantissa = static_cast<float>(std::frexp(static_cast<double>(x), &e) * 2.0);
@@ -27,7 +35,7 @@ static inline float normalized_core_mixed_fp16(
         if (mantissa <= threshold[i] || i == GGML_LUT_NUM_SEGMENTS_REEX - 1) {
             volatile float product = slope[i] * mantissa;
             const float sum = product + offset[i];
-            return round_fp16(sum);
+            return lut_core_output(sum);
         }
     }
     return std::numeric_limits<float>::quiet_NaN();

@@ -81,7 +81,11 @@ static __device__ __forceinline__ float ggml_cuda_lut_core_mixed_fp16_reex(
         if (x <= compare_max[i] || i == GGML_CUDA_LUT_NUM_SEGMENTS - 1) {
             const float product = ggml_cuda_fmul_rn_ieee_reex(slope[i], x);
             const float sum = ggml_cuda_fadd_rn_ieee_reex(product, offset[i]);
+#ifdef GGML_REEX_LUT_FP32_OUTPUT
+            return sum;
+#else
             return __half2float(__float2half_rn(sum));
+#endif
         }
     }
     return NAN;

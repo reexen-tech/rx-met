@@ -11,7 +11,7 @@ from pathlib import Path
 
 
 HEADER_PATTERN = re.compile(
-    r"# reex-lut-bit-v1 segments=(16|31|63) precision=mixed_fp16"
+    r"# reex-lut-bit-v1 segments=(16|31|63) precision=(mixed_fp16|fp32)"
 )
 
 

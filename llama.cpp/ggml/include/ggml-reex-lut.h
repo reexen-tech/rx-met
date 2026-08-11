@@ -6,8 +6,9 @@
  * reex/ggml-reex-lut-config.h) selects the branch at compile time.
  * Override: -DGGML_LUT_NUM_SEGMENTS_REEX=63
  *
- * Each LUT core performs separate FP32 multiply/add operations and rounds that
- * core output to FP16 before operator-specific reconstruction.
+ * Each LUT core performs separate FP32 multiply/add operations. By default the
+ * core output is rounded to FP16 before operator-specific reconstruction;
+ * GGML_REEX_LUT_FP32_OUTPUT keeps it in FP32 instead.
  */
 #pragma once
 

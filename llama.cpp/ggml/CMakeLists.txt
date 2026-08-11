@@ -169,6 +169,7 @@ option(GGML_REEX_LOG_NO_LUT "ggml: use native log while keeping other Reex LUT o
 option(GGML_REEX_RECIPROCAL_NO_LUT "ggml: use native reciprocal while keeping other Reex LUT operators enabled" OFF)
 option(GGML_REEX_RSQRT_NO_LUT "ggml: use native reciprocal sqrt while keeping other Reex LUT operators enabled" OFF)
 option(GGML_REEX_SQRT_NO_LUT "ggml: use native sqrt while keeping other Reex LUT operators enabled" OFF)
+option(GGML_REEX_LUT_FP32_OUTPUT "ggml: keep Reex LUT primitive core output in FP32 (skip FP16 core-output rounding)" OFF)
 option(GGML_USE_REEX_Q64     "ggml: Reex block=64 legacy quantization types (Q4_0_64/Q8_0_64), hardware-aligned" ON)
 option(GGML_REEX_FP16_PIPELINE    "ggml: Reex FP16 main data flow pipeline (cast F32 GEMM output to FP16)" OFF)
 option(GGML_REEX_KV_EXPERIMENTAL  "ggml: Reex KV cache experimental features (smooth scaling, per-layer type override)" OFF)

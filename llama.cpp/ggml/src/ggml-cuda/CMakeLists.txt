@@ -196,6 +196,9 @@ if (CUDAToolkit_FOUND)
                 target_compile_definitions(ggml-cuda PRIVATE ${REEX_NO_LUT_OPTION})
             endif()
         endforeach()
+        if (GGML_REEX_LUT_FP32_OUTPUT)
+            target_compile_definitions(ggml-cuda PRIVATE GGML_REEX_LUT_FP32_OUTPUT)
+        endif()
         # REEX LUT uses __constant__ memory defined in unary.cu but referenced
         # from norm.cu, softmax.cu, rope.cu, fattn-*.cuh etc. via extern __constant__.
         # Without separable compilation each TU has its own __constant__ copy
