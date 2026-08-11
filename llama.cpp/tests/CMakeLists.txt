@@ -245,7 +245,10 @@ llama_build_and_test(test-backend-ops.cpp)
 if (GGML_USE_REEX)
   add_executable(test-reex-lut test-reex-lut.cpp)
   target_link_libraries(test-reex-lut PRIVATE ggml)
-  target_compile_definitions(test-reex-lut PRIVATE GGML_USE_REEX)
+  target_compile_definitions(test-reex-lut PRIVATE
+    GGML_USE_REEX
+    GGML_LUT_NUM_SEGMENTS_REEX=${GGML_LUT_NUM_SEGMENTS_REEX}
+  )
   target_include_directories(test-reex-lut PRIVATE 
     ${CMAKE_CURRENT_SOURCE_DIR}/../ggml/src
     ${CMAKE_CURRENT_SOURCE_DIR}/../ggml/src/ggml-cpu

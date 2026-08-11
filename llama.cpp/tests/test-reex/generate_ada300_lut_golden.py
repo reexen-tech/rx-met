@@ -16,7 +16,12 @@ import numpy as np
 
 
 OPS = ("exp", "sigmoid", "sin", "cos", "reciprocal", "rsqrt", "sqrt", "log", "silu")
-SUPPORTED_SEGMENTS = (16, 31)
+SEGMENT_SEEDS = {
+    16: 0xADA30016,
+    31: 0xADA3001F,
+    63: 0xADA3003F,
+}
+SUPPORTED_SEGMENTS = tuple(SEGMENT_SEEDS)
 
 
 def bits_to_f32(bits: int) -> np.float32:
@@ -38,7 +43,7 @@ def sha256(path: Path) -> str:
 def seed_for_segments(segments: int) -> int:
     if segments not in SUPPORTED_SEGMENTS:
         raise ValueError(f"unsupported segments: {segments}")
-    return 0xADA30000 | segments
+    return SEGMENT_SEEDS[segments]
 
 
 def load_runner(abc_root: Path, segments: int):

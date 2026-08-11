@@ -9,6 +9,7 @@
 #include "ggml-alloc.h"
 #include "ggml-backend.h"
 
+#include "reex/ggml-reex-lut-config.h"
 #ifdef GGML_USE_REEX
 #include "reex/reex_lut.h"
 #include "reex/reex_lut_direct.h"
@@ -34,8 +35,10 @@
 #include <string>
 #include <vector>
 
-static constexpr const char * TSV_HEADER =
-    "# reex-lut-bit-v1 segments=16 precision=mixed_fp16";
+static std::string tsv_header() {
+    return "# reex-lut-bit-v1 segments=" + std::to_string(GGML_LUT_NUM_SEGMENTS_REEX) +
+           " precision=mixed_fp16";
+}
 
 struct test_case {
     std::string op;
@@ -117,7 +120,7 @@ static std::vector<test_case> load_cases(const std::string & path) {
         throw std::runtime_error("cannot open golden TSV: " + path);
     }
     std::string line;
-    if (!std::getline(input, line) || line != TSV_HEADER) {
+    if (!std::getline(input, line) || line != tsv_header()) {
         throw std::runtime_error("invalid or missing TSV header: " + path);
     }
 
@@ -195,7 +198,7 @@ static bool write_and_check(
     if (!output) {
         throw std::runtime_error("cannot open output TSV: " + path);
     }
-    output << TSV_HEADER << '\n';
+    output << tsv_header() << '\n';
 
     std::map<std::string, op_stats> stats;
     bool passed = true;

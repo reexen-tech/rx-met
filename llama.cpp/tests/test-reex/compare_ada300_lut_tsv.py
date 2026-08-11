@@ -5,19 +5,25 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 from collections import defaultdict
 from pathlib import Path
+
+
+HEADER_PATTERN = re.compile(
+    r"# reex-lut-bit-v1 segments=(16|31|63) precision=mixed_fp16"
+)
 
 
 def ordered(bits: int) -> int:
     return (~bits & 0xFFFFFFFF) if bits & 0x80000000 else (bits | 0x80000000)
 
 
-def load(path: Path) -> list[tuple[str, str, int, int, str]]:
+def load(path: Path) -> tuple[str, list[tuple[str, str, int, int, str]]]:
     rows = []
     with path.open() as source:
         header = source.readline().rstrip("\n")
-        if not header.startswith("# reex-lut-bit-v1 segments=") or " precision=mixed_fp16" not in header:
+        if HEADER_PATTERN.fullmatch(header) is None:
             raise ValueError(f"{path}: invalid header: {header!r}")
         for line_number, line in enumerate(source, 2):
             fields = line.rstrip("\n").split("\t")
@@ -25,12 +31,15 @@ def load(path: Path) -> list[tuple[str, str, int, int, str]]:
                 raise ValueError(f"{path}:{line_number}: expected five TSV fields")
             op, case_id, input_hex, output_hex, cls = fields
             rows.append((op, case_id, int(input_hex, 16), int(output_hex, 16), cls))
-    return rows
+    return header, rows
 
 
 def compare(golden_path: Path, actual_path: Path) -> dict:
-    golden = load(golden_path)
-    actual = load(actual_path)
+    golden_header, golden = load(golden_path)
+    actual_header, actual = load(actual_path)
+    if golden_header != actual_header:
+        raise ValueError(
+            f"TSV contract differs: golden={golden_header!r} actual={actual_header!r}")
     if len(golden) != len(actual):
         raise ValueError(f"row count differs: golden={len(golden)} actual={len(actual)}")
 
@@ -73,6 +82,7 @@ def compare(golden_path: Path, actual_path: Path) -> dict:
     for row in stats.values():
         row["exact_rate"] = row["exact"] / row["total"] if row["total"] else 1.0
     return {
+        "contract": golden_header,
         "golden": str(golden_path.resolve()),
         "actual": str(actual_path.resolve()),
         "passed": first_failure is None,

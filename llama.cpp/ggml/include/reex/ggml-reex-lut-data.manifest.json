@@ -6,51 +6,51 @@
   "default_segments": 16,
   "header": {
     "path": "/home/chengxing.zou.srv/projects/aimet_rx/llama.cpp/ggml/include/reex/ggml-reex-lut-data.h",
-    "sha256": "d14999cfbdcdd6c70a9624faeb8d12dc33138dc32636b74942c91155191827b6"
+    "sha256": "9a035f2806f8b46c6fb95911dd1d96b27fc232cca6cd1007637ac709325df5a4"
   },
   "layouts": {
     "16": {
       "output_dir": "ada300_bxc_16segments",
       "runner": {
         "path": "lut_fp/test_ada300_bxc_16seg.py",
-        "sha256": "8d88b1a791486c1a0a77b1c3e2db3c14460c1a416c20be80d8c7e84f0b21210f"
+        "sha256": "71292d52e2e0619c45ccbeec7ce8c93ee1ecced532944e6cf6f77e17df383fec"
       },
       "tables": {
         "exponential": {
           "path": "lut_fp/output/ada300_bxc_16segments/exponential_exp2_fp32_lut.json",
           "segments": 16,
           "semantics": "[0,1) exp2 core",
-          "sha256": "c6d990f0fb4548d12ae331c8f529a51c22c187f565d4b9098b82ab3a3f0020cd"
+          "sha256": "92ae15f05eb3ab092839220a8601fc03a81ba54fc172143aa7005286cd884d29"
         },
         "log": {
           "path": "lut_fp/output/ada300_bxc_16segments/log_normalized_fp32_lut.json",
           "segments": 16,
           "semantics": "[1,2) normalized core",
-          "sha256": "cb5cc1d976dc9bef65b2880101ce114f321376ed3fc451b1e9ad9261ea13da42"
+          "sha256": "cc56c405353b7c93f0e588f861e57c6f13dd53040c3ed27b2d784af320ec87ec"
         },
         "reciprocal": {
           "path": "lut_fp/output/ada300_bxc_16segments/reciprocal_normalized_fp32_lut.json",
           "segments": 16,
           "semantics": "[1,2) normalized core",
-          "sha256": "ee45af595c055edb1ff0c4345ebd52e0442f7248de87ae504c1415ce5598e1a6"
+          "sha256": "e5e8436ad3d8fabaea4baf0e54dd6a0b7df7cd9f25c73a28bcc9a368d7eaf5ff"
         },
         "rsqrt": {
           "path": "lut_fp/output/ada300_bxc_16segments/rsqrt_normalized_fp32_lut.json",
           "segments": 16,
           "semantics": "[1,2) normalized core",
-          "sha256": "10579b681609ede2de8eb5cecd0c1151eef76f38a6cf3ec96d9191ec28b0ca43"
+          "sha256": "d184232595cd53b400db2356d4f2c0b87e3b38d78eaa522f88041f26c1062300"
         },
         "sin": {
           "path": "lut_fp/output/ada300_bxc_16segments/sin_halfpi_fp32_lut.json",
           "segments": 16,
           "semantics": "[0,pi/2] shared sin core",
-          "sha256": "af59da4e7f0753dd3bf550014ab022a04387e6c66e24f3801a8cc529f44ba663"
+          "sha256": "21fd5d78e14d36618c9a0c5b7f1fed6eb492b470c1395b8127700e158d46d88a"
         },
         "sqrt": {
           "path": "lut_fp/output/ada300_bxc_16segments/sqrt_normalized_fp32_lut.json",
           "segments": 16,
           "semantics": "[1,2) normalized core",
-          "sha256": "018f4173218617c8ed5c960666c23b9fab4da5ee199782a7aab8bb4ea4956a5b"
+          "sha256": "a79626fae66e738abdb1f3a27ffd50b6e5bfec571e7a81c6775b211e1b8c9fac"
         }
       }
     },
@@ -58,44 +58,89 @@
       "output_dir": "ada300_bxc_31segments",
       "runner": {
         "path": "lut_fp/test_ada300_bxc_31seg.py",
-        "sha256": "09fc5feaa05a5c2117aff57ae6c2094510f70bb804bc0ac61af8a7c41e3ca5f4"
+        "sha256": "cab7889f548b7e9e909a89c6ef88a2585bc857fce2f5f1ad507d8f0bb1acf0ae"
       },
       "tables": {
         "exponential": {
           "path": "lut_fp/output/ada300_bxc_31segments/exponential_exp2_fp32_lut.json",
           "segments": 31,
           "semantics": "[0,1) exp2 core",
-          "sha256": "6202f388a0f8a03497ee35632019536011636388753e78550f45fecde7870d8d"
+          "sha256": "ca734f7415be6e5153501a045cc83ed2b56f8631d61231b97ac89cd416276231"
         },
         "log": {
           "path": "lut_fp/output/ada300_bxc_31segments/log_normalized_fp32_lut.json",
           "segments": 31,
           "semantics": "[1,2) normalized core",
-          "sha256": "648b3e5755b308ae34d990fd0c1172e9133417015ed1bae01e9a439a23952bc5"
+          "sha256": "4ae34e205f0e997c04d2e7def7176793f0f27772c4821417e087d35c3f35fd2c"
         },
         "reciprocal": {
           "path": "lut_fp/output/ada300_bxc_31segments/reciprocal_normalized_fp32_lut.json",
           "segments": 31,
           "semantics": "[1,2) normalized core",
-          "sha256": "0e3d5e4f0d6b48f77204d2d05a726702768322e6ea1c0fe9a1d601ac05ad8f07"
+          "sha256": "86e8bd771fe0bcc2644cac7696d7d1d8388fce5a8559a1ad572b2c2378424f03"
         },
         "rsqrt": {
           "path": "lut_fp/output/ada300_bxc_31segments/rsqrt_normalized_fp32_lut.json",
           "segments": 31,
           "semantics": "[1,2) normalized core",
-          "sha256": "9e9c48c3d9515dd81c1d4a69f7d02821aaea6d82d973d317983ef90d4d8b7a8f"
+          "sha256": "ed270c058f8e91c1783dc686f99a659d2363fbd349154b09cd5cc7077e892077"
         },
         "sin": {
           "path": "lut_fp/output/ada300_bxc_31segments/sin_halfpi_fp32_lut.json",
           "segments": 31,
           "semantics": "[0,pi/2] shared sin core",
-          "sha256": "726a7d0de83426d850deaf390882d0d9d62fe8da02670b4ae18f0c841c9e39bb"
+          "sha256": "0e26f52218b88b4ea868949a6ac568970da53b334ae1bc374c4d785110a68ddc"
         },
         "sqrt": {
           "path": "lut_fp/output/ada300_bxc_31segments/sqrt_normalized_fp32_lut.json",
           "segments": 31,
           "semantics": "[1,2) normalized core",
-          "sha256": "9ba4cc1a29e656e14115ca7db34e1f95f8f98b652df2df21c142e4a17d92ece2"
+          "sha256": "aaf2009f62e289e9656a150bb3e9e45de8df165c0b56199b4440d34df9eb9bdc"
+        }
+      }
+    },
+    "63": {
+      "output_dir": "ada300_bxc_63segments",
+      "runner": {
+        "path": "lut_fp/test_ada300_bxc_63seg.py",
+        "sha256": "af0f04cb3f92696c8e8ec54118ae470c01bd16c302ecba5b5d67d1157f7f1858"
+      },
+      "tables": {
+        "exponential": {
+          "path": "lut_fp/output/ada300_bxc_63segments/exponential_exp2_fp32_lut.json",
+          "segments": 63,
+          "semantics": "[0,1) exp2 core",
+          "sha256": "abeb56865d6f204637f98bcb2355359215379c947114c63f11e8563e33df2b4c"
+        },
+        "log": {
+          "path": "lut_fp/output/ada300_bxc_63segments/log_normalized_fp32_lut.json",
+          "segments": 63,
+          "semantics": "[1,2) normalized core",
+          "sha256": "b7772e7ddc2a83cd39ae397b246c2573f09e540745782007cdc825149b5dd3ac"
+        },
+        "reciprocal": {
+          "path": "lut_fp/output/ada300_bxc_63segments/reciprocal_normalized_fp32_lut.json",
+          "segments": 63,
+          "semantics": "[1,2) normalized core",
+          "sha256": "c1d4f7ab8befe03fb3bdcc48aa09566cc1e01672f66c164eb6c38d4ef897ebdf"
+        },
+        "rsqrt": {
+          "path": "lut_fp/output/ada300_bxc_63segments/rsqrt_normalized_fp32_lut.json",
+          "segments": 63,
+          "semantics": "[1,2) normalized core",
+          "sha256": "086f837973b33d2dc0516834db079357380febef2f2e9a3b2618631ac114b438"
+        },
+        "sin": {
+          "path": "lut_fp/output/ada300_bxc_63segments/sin_halfpi_fp32_lut.json",
+          "segments": 63,
+          "semantics": "[0,pi/2] shared sin core",
+          "sha256": "02cfee754323d718c300e467afbd06fb249304c1dd85262829976017a4a4b324"
+        },
+        "sqrt": {
+          "path": "lut_fp/output/ada300_bxc_63segments/sqrt_normalized_fp32_lut.json",
+          "segments": 63,
+          "semantics": "[1,2) normalized core",
+          "sha256": "7ba5e7114a794821dfe46389e5c2a65e3ff4c57017f4c95ddc7f768bd992dcba"
         }
       }
     }
@@ -105,6 +150,7 @@
   "segment_compare": "effective FP32 upper bound derived from range_float",
   "supported_segments": [
     16,
-    31
+    31,
+    63
   ]
 }

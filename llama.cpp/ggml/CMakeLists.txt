@@ -153,6 +153,16 @@ option(GGML_CPU_REPACK       "ggml: use runtime weight conversion of Q4_0 to Q4_
 option(GGML_CPU_KLEIDIAI     "ggml: use KleidiAI optimized kernels if applicable" OFF)
 option(GGML_REEX_GEMM        "ggml: Reex GEMM backend (W4 x Q8/Q16/FLOAT, see GGML_REEX_GEMM_ACTIVATION)" OFF)
 option(GGML_USE_REEX         "ggml: Reex LUT for sin/cos/silu/rsqrt etc. (piecewise linear)" OFF)
+set(GGML_LUT_NUM_SEGMENTS_REEX "16" CACHE STRING "ggml: number of segments in the Reex LUT (16, 31, or 63)")
+set_property(CACHE GGML_LUT_NUM_SEGMENTS_REEX PROPERTY STRINGS "16" "31" "63")
+if (NOT GGML_LUT_NUM_SEGMENTS_REEX STREQUAL "16" AND
+    NOT GGML_LUT_NUM_SEGMENTS_REEX STREQUAL "31" AND
+    NOT GGML_LUT_NUM_SEGMENTS_REEX STREQUAL "63")
+    message(FATAL_ERROR "GGML_LUT_NUM_SEGMENTS_REEX must be 16, 31, or 63")
+endif()
+if (GGML_USE_REEX)
+    add_compile_definitions(GGML_LUT_NUM_SEGMENTS_REEX=${GGML_LUT_NUM_SEGMENTS_REEX})
+endif()
 option(GGML_REEX_SIN_COS_NO_LUT "ggml: use native sin/cos while keeping other Reex LUT operators enabled" OFF)
 option(GGML_REEX_EXP_NO_LUT "ggml: use native exp while keeping other Reex LUT operators enabled" OFF)
 option(GGML_REEX_LOG_NO_LUT "ggml: use native log while keeping other Reex LUT operators enabled" OFF)
