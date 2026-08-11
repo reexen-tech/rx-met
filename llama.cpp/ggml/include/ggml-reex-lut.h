@@ -1,9 +1,14 @@
 /**
  * Shared ADA300 mixed-FP16 LUT definitions.
  *
- * The generated header contains FP32 thresholds and coefficients. Each LUT
- * core performs separate FP32 multiply/add operations and rounds that core
- * output to FP16 before operator-specific reconstruction.
+ * The generated header contains FP32 thresholds and coefficients for
+ * 16-, 31-, and 63-segment layouts. GGML_LUT_NUM_SEGMENTS_REEX (see
+ * reex/ggml-reex-lut-config.h) selects the branch at compile time.
+ * Override: -DGGML_LUT_NUM_SEGMENTS_REEX=63
+ *
+ * Each LUT core performs separate FP32 multiply/add operations. By default the
+ * core output is rounded to FP16 before operator-specific reconstruction;
+ * GGML_REEX_LUT_FP32_OUTPUT keeps it in FP32 instead.
  */
 #pragma once
 

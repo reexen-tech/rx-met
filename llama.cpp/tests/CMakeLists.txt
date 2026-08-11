@@ -245,7 +245,10 @@ llama_build_and_test(test-backend-ops.cpp)
 if (GGML_USE_REEX)
   add_executable(test-reex-lut test-reex-lut.cpp)
   target_link_libraries(test-reex-lut PRIVATE ggml)
-  target_compile_definitions(test-reex-lut PRIVATE GGML_USE_REEX)
+  target_compile_definitions(test-reex-lut PRIVATE
+    GGML_USE_REEX
+    GGML_LUT_NUM_SEGMENTS_REEX=${GGML_LUT_NUM_SEGMENTS_REEX}
+  )
   target_include_directories(test-reex-lut PRIVATE 
     ${CMAKE_CURRENT_SOURCE_DIR}/../ggml/src
     ${CMAKE_CURRENT_SOURCE_DIR}/../ggml/src/ggml-cpu
@@ -254,6 +257,50 @@ if (GGML_USE_REEX)
   if (TARGET ggml-cuda)
     target_link_libraries(test-reex-lut PRIVATE ggml-cuda)
     target_compile_definitions(test-reex-lut PRIVATE GGML_CUDA)
+  endif()
+
+  if (GGML_REEX_SIN_COS_NO_LUT)
+    add_executable(test-reex-sin-cos-no-lut test-reex-sin-cos-no-lut.cpp)
+    target_link_libraries(test-reex-sin-cos-no-lut PRIVATE ggml)
+    target_compile_definitions(test-reex-sin-cos-no-lut PRIVATE
+      GGML_USE_REEX
+      GGML_REEX_SIN_COS_NO_LUT
+    )
+    target_include_directories(test-reex-sin-cos-no-lut PRIVATE
+      ${CMAKE_CURRENT_SOURCE_DIR}/../ggml/src/ggml-cpu
+    )
+    if (TARGET ggml-cuda)
+      target_link_libraries(test-reex-sin-cos-no-lut PRIVATE ggml-cuda)
+      target_compile_definitions(test-reex-sin-cos-no-lut PRIVATE GGML_CUDA)
+    endif()
+    add_test(NAME test-reex-sin-cos-no-lut COMMAND test-reex-sin-cos-no-lut)
+  endif()
+
+  if (GGML_REEX_EXP_NO_LUT OR GGML_REEX_LOG_NO_LUT OR
+      GGML_REEX_RECIPROCAL_NO_LUT OR GGML_REEX_RSQRT_NO_LUT OR
+      GGML_REEX_SQRT_NO_LUT)
+    add_executable(test-reex-no-lut-switches test-reex-no-lut-switches.cpp)
+    target_link_libraries(test-reex-no-lut-switches PRIVATE ggml)
+    target_compile_definitions(test-reex-no-lut-switches PRIVATE GGML_USE_REEX)
+    foreach(REEX_NO_LUT_OPTION IN ITEMS
+            GGML_REEX_EXP_NO_LUT
+            GGML_REEX_LOG_NO_LUT
+            GGML_REEX_RECIPROCAL_NO_LUT
+            GGML_REEX_RSQRT_NO_LUT
+            GGML_REEX_SQRT_NO_LUT)
+      if (${REEX_NO_LUT_OPTION})
+        target_compile_definitions(test-reex-no-lut-switches PRIVATE ${REEX_NO_LUT_OPTION})
+      endif()
+    endforeach()
+    target_include_directories(test-reex-no-lut-switches PRIVATE
+      ${CMAKE_CURRENT_SOURCE_DIR}/../ggml/src/ggml-cpu
+      ${CMAKE_CURRENT_SOURCE_DIR}/../ggml/src/ggml-cuda/reex
+    )
+    if (TARGET ggml-cuda)
+      target_link_libraries(test-reex-no-lut-switches PRIVATE ggml-cuda)
+      target_compile_definitions(test-reex-no-lut-switches PRIVATE GGML_CUDA)
+    endif()
+    add_test(NAME test-reex-no-lut-switches COMMAND test-reex-no-lut-switches)
   endif()
 endif()
 

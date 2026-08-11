@@ -25,6 +25,12 @@
 |------------|------|------------|--------------|
 | *(无)* | — | — | **上游基线**：不启用 REEX。 |
 | `GGML_USE_REEX` | OFF | `GGML_USE_REEX` | PWNL/LUT：sin/cos/silu 等分段近似。 |
+| `GGML_REEX_SIN_COS_NO_LUT` | OFF | `GGML_REEX_SIN_COS_NO_LUT` | 保留其他 REEX LUT，仅让 CPU/CUDA sin/cos（含 unary、RoPE、timestep embedding）使用原生实现。 |
+| `GGML_REEX_EXP_NO_LUT` | OFF | `GGML_REEX_EXP_NO_LUT` | exp helper 使用原生实现；自然影响 sigmoid、softmax、GDN、softplus 等所有 helper 调用者。 |
+| `GGML_REEX_LOG_NO_LUT` | OFF | `GGML_REEX_LOG_NO_LUT` | log helper 使用原生实现。 |
+| `GGML_REEX_RECIPROCAL_NO_LUT` | OFF | `GGML_REEX_RECIPROCAL_NO_LUT` | reciprocal helper 使用原生除法。 |
+| `GGML_REEX_RSQRT_NO_LUT` | OFF | `GGML_REEX_RSQRT_NO_LUT` | rsqrt helper 使用原生 reciprocal sqrt。 |
+| `GGML_REEX_SQRT_NO_LUT` | OFF | `GGML_REEX_SQRT_NO_LUT` | sqrt helper 使用原生 sqrt。 |
 | `GGML_REEX_FP16_PIPELINE` | OFF | `GGML_REEX_FP16_PIPELINE` | 主数据流 F16 边界（Qwen3 MoE 等 + CPU/CUDA 若干 op 的 F16 路径）；**KV 写入在 `llama_kv_cache` 内 `F16→F32` 后再走上游 `ggml_set_rows`**。 |
 | `GGML_REEX_GEMM` | OFF | `GGML_USE_REEX_GEMM` 等 | W4×Q8/Q16/FLOAT GEMM 后端；**与 `GGML_CPU_REPACK=ON` 互斥**。 |
 | `GGML_REEX_GEMM_ACTIVATION` | Q16 | `GGML_REEX_GEMM_ACTIVATION_Q8` / `_Q16` / `_FLOAT` | GEMM 激活位宽。 |
@@ -35,6 +41,7 @@
 
 - **`GGML_REEX_FP16_PIPELINE` 常与 `GGML_USE_REEX=ON` 一起开**：PWNL + F16 主线是当前自研推理的默认组合。  
 - **宏只影响编译进分支的代码**；同一源码树可同时保留多条 build 目录，互不干扰。
+- `*_NO_LUT` 是 helper 边界开关，不是 call-site 开关。做单变量消融时一次只能启用一个，其他 `*_NO_LUT` 必须保持 `OFF`。
 
 ---
 
@@ -129,6 +136,24 @@ VERIFY_SKIP_RUNTIME=1 ./scripts/verify_build_variants.sh
 
 ---
 
+### REEX LUT / 原生 helper 开关专项
+
+默认全 LUT 回归使用 `test-reex-lut` 与 Python golden 比较。启用任意一个非
+sin/cos 的 `*_NO_LUT` 开关后，构建并运行 `test-reex-no-lut-switches`：
+
+```bash
+cmake -S . -B build_cuda_lut_exp_nolut \
+  -DCMAKE_BUILD_TYPE=Release -DGGML_CUDA=ON -DGGML_USE_REEX=ON \
+  -DGGML_REEX_EXP_NO_LUT=ON
+cmake --build build_cuda_lut_exp_nolut -j --target test-reex-no-lut-switches
+build_cuda_lut_exp_nolut/bin/test-reex-no-lut-switches
+```
+
+对 `LOG/RECIPROCAL/RSQRT/SQRT` 使用对应选项重复。CPU 结果须与
+原生公式逐 bit 一致；CUDA 结果须通过测试内的严格容差，且禁止 CPU fallback。
+
+---
+
 ### Tier 3 — 可选：Wikitext 冒烟 / CUDA 轨迹 / GEMM E2E
 
 在 Tier 1 构建产物就绪后，按需使用（详见各脚本注释）：
@@ -160,6 +185,7 @@ VERIFY_SKIP_RUNTIME=1 ./scripts/verify_build_variants.sh
 - [ ] **Tier 0**：无 REEX 构建 + `test-backend-ops` 通过  
 - [ ] **Tier 1**：`./scripts/run_reex_full_validation.sh` 或 `verify_build_variants.sh` 通过  
 - [ ] 若改动 **FP16 / KV / ggml op**：**Tier 2** `run_fp16_pipeline_precision_test.sh` 至少跑通 backend-ops  
+- [ ] 若改动 **LUT/helper 开关**：默认 `test-reex-lut` golden 回归通过；每个启用的 `*_NO_LUT` profile 通过 `test-reex-no-lut-switches`
 - [ ] 若改动 **CUDA kernel / 调度**：加跑 `verify_build_cuda_reex.sh` 或自测 `test-reex-cuda-q16`  
 - [ ] 文档与注释中若提到「set_rows F16 源」，应已与当前实现一致：**KV 为 F16→`ggml_cast`→F32→`set_rows`**
 

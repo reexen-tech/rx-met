@@ -24,12 +24,24 @@
     extern __constant__ float ggml_cuda_##op##_fp32_c[GGML_CUDA_LUT_NUM_SEGMENTS]
 #endif
 
+#ifndef GGML_REEX_EXP_NO_LUT
 GGML_CUDA_REEX_DECLARE_TABLE(exponential);
+#endif
+#ifndef GGML_REEX_SIN_COS_NO_LUT
 GGML_CUDA_REEX_DECLARE_TABLE(sin);
+#endif
+#ifndef GGML_REEX_RECIPROCAL_NO_LUT
 GGML_CUDA_REEX_DECLARE_TABLE(reciprocal);
+#endif
+#ifndef GGML_REEX_RSQRT_NO_LUT
 GGML_CUDA_REEX_DECLARE_TABLE(rsqrt);
+#endif
+#ifndef GGML_REEX_SQRT_NO_LUT
 GGML_CUDA_REEX_DECLARE_TABLE(sqrt);
+#endif
+#ifndef GGML_REEX_LOG_NO_LUT
 GGML_CUDA_REEX_DECLARE_TABLE(log);
+#endif
 
 #undef GGML_CUDA_REEX_DECLARE_TABLE
 
@@ -69,13 +81,20 @@ static __device__ __forceinline__ float ggml_cuda_lut_core_mixed_fp16_reex(
         if (x <= compare_max[i] || i == GGML_CUDA_LUT_NUM_SEGMENTS - 1) {
             const float product = ggml_cuda_fmul_rn_ieee_reex(slope[i], x);
             const float sum = ggml_cuda_fadd_rn_ieee_reex(product, offset[i]);
+#ifdef GGML_REEX_LUT_FP32_OUTPUT
+            return sum;
+#else
             return __half2float(__float2half_rn(sum));
+#endif
         }
     }
     return NAN;
 }
 
 static __device__ __forceinline__ float ggml_cuda_exp_lut_mixed_fp16_reex(float x) {
+#ifdef GGML_REEX_EXP_NO_LUT
+    return expf(x);
+#else
     const uint32_t bits = __float_as_uint(x);
     const uint32_t magnitude_bits = bits & 0x7fffffffU;
     if (ggml_cuda_f32_is_nan_reex(magnitude_bits)) {
@@ -104,8 +123,10 @@ static __device__ __forceinline__ float ggml_cuda_exp_lut_mixed_fp16_reex(float 
         fraction, ggml_cuda_exponential_fp32_compare_max,
         ggml_cuda_exponential_fp32_b, ggml_cuda_exponential_fp32_c);
     return ggml_cuda_f64_to_f32_rn_ieee_reex(ldexp((double) core, (int) exponent_d));
+#endif
 }
 
+#ifndef GGML_REEX_SIN_COS_NO_LUT
 static __device__ __forceinline__ float ggml_cuda_sin_like_lut_mixed_fp16_reex(float x, double phase) {
     const uint32_t magnitude_bits = ggml_cuda_f32_magnitude_bits_reex(x);
     if (magnitude_bits >= 0x7f800000U) {
@@ -137,6 +158,15 @@ static __device__ __forceinline__ float ggml_cuda_sin_lut_mixed_fp16_reex(float 
 static __device__ __forceinline__ float ggml_cuda_cos_lut_mixed_fp16_reex(float x) {
     return ggml_cuda_sin_like_lut_mixed_fp16_reex(x, GGML_REEX_HALF_PI_D);
 }
+#else
+static __device__ __forceinline__ float ggml_cuda_sin_lut_mixed_fp16_reex(float x) {
+    return sinf(x);
+}
+
+static __device__ __forceinline__ float ggml_cuda_cos_lut_mixed_fp16_reex(float x) {
+    return cosf(x);
+}
+#endif
 
 static __device__ __forceinline__ void ggml_cuda_normalize_to_1_2_reex(
         float x, float * mantissa, int * exponent) {
@@ -161,6 +191,9 @@ static __device__ __forceinline__ int ggml_cuda_floor_divide_by_two_reex(int val
 }
 
 static __device__ __forceinline__ float ggml_cuda_reciprocal_lut_mixed_fp16_reex(float x) {
+#ifdef GGML_REEX_RECIPROCAL_NO_LUT
+    return 1.0f / x;
+#else
     const uint32_t bits = __float_as_uint(x);
     const uint32_t magnitude_bits = bits & 0x7fffffffU;
     if (ggml_cuda_f32_is_nan_reex(magnitude_bits)) {
@@ -182,9 +215,13 @@ static __device__ __forceinline__ float ggml_cuda_reciprocal_lut_mixed_fp16_reex
     const float scale = ggml_cuda_f64_to_f32_rn_ieee_reex(ldexp(1.0, -exponent));
     const float reconstructed = ggml_cuda_fmul_rn_ieee_reex(core, scale);
     return __uint_as_float(__float_as_uint(reconstructed) | (bits & 0x80000000U));
+#endif
 }
 
 static __device__ __forceinline__ float ggml_cuda_rsqrt_lut_mixed_fp16_reex(float x) {
+#ifdef GGML_REEX_RSQRT_NO_LUT
+    return rsqrtf(x);
+#else
     const uint32_t bits = __float_as_uint(x);
     const uint32_t magnitude_bits = bits & 0x7fffffffU;
     if (ggml_cuda_f32_is_nan_reex(magnitude_bits) ||
@@ -210,9 +247,13 @@ static __device__ __forceinline__ float ggml_cuda_rsqrt_lut_mixed_fp16_reex(floa
     const float scaled = ggml_cuda_fmul_rn_ieee_reex(core, scale);
     return ggml_cuda_fmul_rn_ieee_reex(
         scaled, parity == 1 ? GGML_CUDA_INV_SQRT2 : 1.0f);
+#endif
 }
 
 static __device__ __forceinline__ float ggml_cuda_sqrt_lut_mixed_fp16_reex(float x) {
+#ifdef GGML_REEX_SQRT_NO_LUT
+    return sqrtf(x);
+#else
     const uint32_t bits = __float_as_uint(x);
     const uint32_t magnitude_bits = bits & 0x7fffffffU;
     if (ggml_cuda_f32_is_nan_reex(magnitude_bits) ||
@@ -235,9 +276,13 @@ static __device__ __forceinline__ float ggml_cuda_sqrt_lut_mixed_fp16_reex(float
     const float scaled = ggml_cuda_fmul_rn_ieee_reex(core, scale);
     return ggml_cuda_fmul_rn_ieee_reex(
         scaled, parity == 1 ? GGML_CUDA_SQRT2 : 1.0f);
+#endif
 }
 
 static __device__ __forceinline__ float ggml_cuda_log_lut_mixed_fp16_reex(float x) {
+#ifdef GGML_REEX_LOG_NO_LUT
+    return logf(x);
+#else
     const uint32_t bits = __float_as_uint(x);
     const uint32_t magnitude_bits = bits & 0x7fffffffU;
     if (ggml_cuda_f32_is_nan_reex(magnitude_bits) ||
@@ -259,6 +304,7 @@ static __device__ __forceinline__ float ggml_cuda_log_lut_mixed_fp16_reex(float 
         ggml_cuda_log_fp32_b, ggml_cuda_log_fp32_c);
     const float exponent_term = ggml_cuda_fmul_rn_ieee_reex((float) exponent, GGML_CUDA_LN2);
     return ggml_cuda_fadd_rn_ieee_reex(core, exponent_term);
+#endif
 }
 
 static __device__ __forceinline__ float ggml_cuda_sigmoid_lut_mixed_fp16_reex(float x) {

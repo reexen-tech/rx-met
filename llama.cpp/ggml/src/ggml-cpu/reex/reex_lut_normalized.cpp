@@ -15,6 +15,14 @@ static inline float round_fp16(float value) {
     return ggml_fp16_to_fp32(ggml_fp32_to_fp16(value));
 }
 
+static inline float lut_core_output(float value) {
+#ifdef GGML_REEX_LUT_FP32_OUTPUT
+    return value;
+#else
+    return round_fp16(value);
+#endif
+}
+
 static inline void normalize_to_1_2(float x, float * mantissa, int * exponent) {
     int e;
     *mantissa = static_cast<float>(std::frexp(static_cast<double>(x), &e) * 2.0);
@@ -27,7 +35,7 @@ static inline float normalized_core_mixed_fp16(
         if (mantissa <= threshold[i] || i == GGML_LUT_NUM_SEGMENTS_REEX - 1) {
             volatile float product = slope[i] * mantissa;
             const float sum = product + offset[i];
-            return round_fp16(sum);
+            return lut_core_output(sum);
         }
     }
     return std::numeric_limits<float>::quiet_NaN();
@@ -39,6 +47,9 @@ static inline int floor_divide_by_two(int value) {
 }
 
 float ggml_sqrt_lut_mixed_fp16_f32_REEX(float x) {
+#ifdef GGML_REEX_SQRT_NO_LUT
+    return std::sqrt(x);
+#else
     if (std::isnan(x) || x < 0.0f) {
         return std::numeric_limits<float>::quiet_NaN();
     }
@@ -55,9 +66,13 @@ float ggml_sqrt_lut_mixed_fp16_f32_REEX(float x) {
     const int parity = exponent - 2 * k;
     const float scaled = core * std::ldexp(1.0f, k);
     return scaled * (parity == 1 ? GGML_REEX_SQRT2_F : 1.0f);
+#endif
 }
 
 float ggml_log_lut_mixed_fp16_f32_REEX(float x) {
+#ifdef GGML_REEX_LOG_NO_LUT
+    return std::log(x);
+#else
     if (std::isnan(x) || x < 0.0f) {
         return std::numeric_limits<float>::quiet_NaN();
     }
@@ -75,9 +90,13 @@ float ggml_log_lut_mixed_fp16_f32_REEX(float x) {
         mantissa, ggml_reex_log_fp32_compare_max, ggml_reex_log_fp32_b, ggml_reex_log_fp32_c);
     const float exponent_term = static_cast<float>(exponent) * GGML_REEX_LN2_F;
     return core + exponent_term;
+#endif
 }
 
 float ggml_reciprocal_lut_mixed_fp16_f32_REEX(float x) {
+#ifdef GGML_REEX_RECIPROCAL_NO_LUT
+    return 1.0f / x;
+#else
     if (std::isnan(x)) {
         return x;
     }
@@ -97,9 +116,13 @@ float ggml_reciprocal_lut_mixed_fp16_f32_REEX(float x) {
         ggml_reex_reciprocal_fp32_b, ggml_reex_reciprocal_fp32_c);
     const float reconstructed = core * std::ldexp(1.0f, -exponent);
     return std::copysign(reconstructed, x);
+#endif
 }
 
 float ggml_rsqrt_lut_mixed_fp16_f32_REEX(float x) {
+#ifdef GGML_REEX_RSQRT_NO_LUT
+    return 1.0f / std::sqrt(x);
+#else
     if (std::isnan(x) || x < 0.0f) {
         return std::numeric_limits<float>::quiet_NaN();
     }
@@ -119,6 +142,7 @@ float ggml_rsqrt_lut_mixed_fp16_f32_REEX(float x) {
     const int parity = exponent - 2 * k;
     const float scaled = core * std::ldexp(1.0f, -k);
     return scaled * (parity == 1 ? GGML_REEX_INV_SQRT2_F : 1.0f);
+#endif
 }
 
 /* power_2 is intentionally unchanged: it is a direct x*x operation, not a LUT. */

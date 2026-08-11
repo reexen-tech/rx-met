@@ -1,5 +1,5 @@
 /**
- * ADA300 mixed-FP16 LUT bit-level conformance test.
+ * ADA300 LUT bit-level conformance test.
  *
  * Python is the only input/golden producer. This executable consumes the exact
  * input bits, invokes production CPU/CUDA interfaces, and writes result TSVs.
@@ -9,6 +9,7 @@
 #include "ggml-alloc.h"
 #include "ggml-backend.h"
 
+#include "reex/ggml-reex-lut-config.h"
 #ifdef GGML_USE_REEX
 #include "reex/reex_lut.h"
 #include "reex/reex_lut_direct.h"
@@ -34,8 +35,10 @@
 #include <string>
 #include <vector>
 
-static constexpr const char * TSV_HEADER =
-    "# reex-lut-bit-v1 segments=16 precision=mixed_fp16";
+static std::string tsv_header(const std::string & precision) {
+    return "# reex-lut-bit-v1 segments=" + std::to_string(GGML_LUT_NUM_SEGMENTS_REEX) +
+           " precision=" + precision;
+}
 
 struct test_case {
     std::string op;
@@ -111,13 +114,13 @@ static uint32_t parse_hex32(const std::string & text, size_t line_number) {
     return value;
 }
 
-static std::vector<test_case> load_cases(const std::string & path) {
+static std::vector<test_case> load_cases(const std::string & path, const std::string & precision) {
     std::ifstream input(path);
     if (!input) {
         throw std::runtime_error("cannot open golden TSV: " + path);
     }
     std::string line;
-    if (!std::getline(input, line) || line != TSV_HEADER) {
+    if (!std::getline(input, line) || line != tsv_header(precision)) {
         throw std::runtime_error("invalid or missing TSV header: " + path);
     }
 
@@ -187,7 +190,7 @@ static std::vector<float> eval_all_cpu(const std::vector<test_case> & cases) {
 
 static bool write_and_check(
         const std::vector<test_case> & cases, const std::vector<float> & actual,
-        const std::string & path, const char * backend_name) {
+        const std::string & path, const char * backend_name, const std::string & precision) {
     if (actual.size() != cases.size()) {
         throw std::runtime_error("result count mismatch");
     }
@@ -195,7 +198,7 @@ static bool write_and_check(
     if (!output) {
         throw std::runtime_error("cannot open output TSV: " + path);
     }
-    output << TSV_HEADER << '\n';
+    output << tsv_header(precision) << '\n';
 
     std::map<std::string, op_stats> stats;
     bool passed = true;
@@ -342,9 +345,11 @@ static std::vector<float> eval_all_cuda(
 
 static void usage(const char * argv0) {
 #ifdef GGML_CUDA
-    fprintf(stderr, "usage: %s --golden PATH --cpu-output PATH --cuda-output PATH\n", argv0);
+    fprintf(stderr, "usage: %s --golden PATH --cpu-output PATH --cuda-output PATH "
+                    "[--precision mixed_fp16|fp32]\n", argv0);
 #else
-    fprintf(stderr, "usage: %s --golden PATH --cpu-output PATH\n", argv0);
+    fprintf(stderr, "usage: %s --golden PATH --cpu-output PATH "
+                    "[--precision mixed_fp16|fp32]\n", argv0);
 #endif
 }
 
@@ -356,6 +361,7 @@ int main(int argc, char ** argv) {
     std::string golden_path;
     std::string cpu_output_path;
     std::string cuda_output_path;
+    std::string precision = "mixed_fp16";
     for (int i = 1; i < argc; ++i) {
         if (strcmp(argv[i], "--golden") == 0 && i + 1 < argc) {
             golden_path = argv[++i];
@@ -363,6 +369,8 @@ int main(int argc, char ** argv) {
             cpu_output_path = argv[++i];
         } else if (strcmp(argv[i], "--cuda-output") == 0 && i + 1 < argc) {
             cuda_output_path = argv[++i];
+        } else if (strcmp(argv[i], "--precision") == 0 && i + 1 < argc) {
+            precision = argv[++i];
         } else {
             usage(argv[0]);
             return 2;
@@ -376,12 +384,17 @@ int main(int argc, char ** argv) {
         usage(argv[0]);
         return 2;
     }
+    if (precision != "mixed_fp16" && precision != "fp32") {
+        fprintf(stderr, "unsupported precision: %s\n", precision.c_str());
+        usage(argv[0]);
+        return 2;
+    }
 
     try {
         ggml_init_trigonometric_lut_REEX();
-        const std::vector<test_case> cases = load_cases(golden_path);
+        const std::vector<test_case> cases = load_cases(golden_path, precision);
         const bool cpu_passed = write_and_check(
-            cases, eval_all_cpu(cases), cpu_output_path, "CPU");
+            cases, eval_all_cpu(cases), cpu_output_path, "CPU", precision);
         bool cuda_passed = true;
 #ifdef GGML_CUDA
         ggml_backend_t backend = ggml_backend_cuda_init(0);
@@ -389,7 +402,7 @@ int main(int argc, char ** argv) {
             throw std::runtime_error("CUDA backend unavailable; fallback is forbidden");
         }
         cuda_passed = write_and_check(
-            cases, eval_all_cuda(backend, cases), cuda_output_path, "CUDA");
+            cases, eval_all_cuda(backend, cases), cuda_output_path, "CUDA", precision);
         ggml_backend_free(backend);
 #else
         if (!cuda_output_path.empty()) {
@@ -397,7 +410,7 @@ int main(int argc, char ** argv) {
         }
 #endif
         const bool passed = cpu_passed && cuda_passed;
-        printf("ADA300 mixed-FP16 CPU/CUDA gate: %s\n", passed ? "PASS" : "FAIL");
+        printf("ADA300 %s CPU/CUDA gate: %s\n", precision.c_str(), passed ? "PASS" : "FAIL");
         return passed ? 0 : 1;
     } catch (const std::exception & error) {
         fprintf(stderr, "test-reex-lut: %s\n", error.what());

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate deterministic input/golden TSV for ADA300 mixed-FP16 LUT operators."""
+"""Generate deterministic input/golden TSV for ADA300 LUT operators."""
 
 from __future__ import annotations
 
@@ -16,7 +16,13 @@ import numpy as np
 
 
 OPS = ("exp", "sigmoid", "sin", "cos", "reciprocal", "rsqrt", "sqrt", "log", "silu")
-SEED = 0xADA30016
+SEGMENT_SEEDS = {
+    16: 0xADA30016,
+    31: 0xADA3001F,
+    63: 0xADA3003F,
+}
+SUPPORTED_SEGMENTS = tuple(SEGMENT_SEEDS)
+SUPPORTED_PRECISIONS = ("mixed_fp16", "fp32")
 
 
 def bits_to_f32(bits: int) -> np.float32:
@@ -35,12 +41,18 @@ def sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def load_runner(abc_root: Path):
+def seed_for_segments(segments: int) -> int:
+    if segments not in SUPPORTED_SEGMENTS:
+        raise ValueError(f"unsupported segments: {segments}")
+    return SEGMENT_SEEDS[segments]
+
+
+def load_runner(abc_root: Path, segments: int):
     lut_fp = abc_root / "lut_fp"
     sys.path.insert(0, str(lut_fp))
     sys.path.insert(0, str(abc_root))
-    path = lut_fp / "test_ada300_bxc_16seg.py"
-    spec = importlib.util.spec_from_file_location("ada300_bxc_16seg_reference", path)
+    path = lut_fp / f"test_ada300_bxc_{segments}seg.py"
+    spec = importlib.util.spec_from_file_location(f"ada300_bxc_{segments}seg_reference", path)
     if spec is None or spec.loader is None:
         raise RuntimeError(f"cannot import {path}")
     module = importlib.util.module_from_spec(spec)
@@ -72,8 +84,8 @@ def unique(values: list[np.float32]) -> np.ndarray:
     return np.asarray(result, dtype=np.float32)
 
 
-def random_values(op: str, count: int) -> list[np.float32]:
-    rng = np.random.default_rng(SEED ^ sum(ord(ch) << (i % 8) for i, ch in enumerate(op)))
+def random_values(op: str, count: int, *, seed: int) -> list[np.float32]:
+    rng = np.random.default_rng(seed ^ sum(ord(ch) << (i % 8) for i, ch in enumerate(op)))
     result: list[np.float32] = []
     while len(result) < count:
         candidates = rng.integers(0, 2**32, size=max(4096, count * 2), dtype=np.uint32).view(np.float32)
@@ -95,7 +107,7 @@ def table_thresholds(bundle: dict) -> list[float]:
     return [segment["threshold_quantized"][1] for segment in bundle["lut_fp32"][key]["segments"][:-1]]
 
 
-def make_inputs(op: str, runner, bundles: dict, random_count: int) -> np.ndarray:
+def make_inputs(op: str, runner, bundles: dict, random_count: int, *, seed: int) -> np.ndarray:
     values: list[np.float32] = []
     ranges = {
         "exp": (-20.0, 11.0),
@@ -136,45 +148,46 @@ def make_inputs(op: str, runner, bundles: dict, random_count: int) -> np.ndarray
         for value in (-150.0, -100.0, -20.0, -6.0, -0.0, 0.0, 6.0, 20.0, 100.0, 150.0):
             add_neighbors(values, value)
 
-    values.extend(random_values(op, random_count))
+    values.extend(random_values(op, random_count, seed=seed))
     special_bits = [0x00000000, 0x80000000, 0x7F800000, 0xFF800000, 0x7FC00001, 0xFFC12345]
     values.extend(bits_to_f32(bits) for bits in special_bits)
     return unique(values)
 
 
-def eval_finite(op: str, x: np.ndarray, runner, bundles: dict) -> np.ndarray:
+def eval_finite(op: str, x: np.ndarray, runner, bundles: dict, precision: str) -> np.ndarray:
     if op == "exp":
-        return runner.exp_eval(bundles["exp2"], x, "mixed_fp16")
+        return runner.exp_eval(bundles["exp2"], x, precision)
     if op == "sin":
-        return runner.sin_like_eval(bundles["sin"], x, 0.0, "mixed_fp16")
+        return runner.sin_like_eval(bundles["sin"], x, 0.0, precision)
     if op == "cos":
-        return runner.sin_like_eval(bundles["sin"], x, runner.HALF_PI, "mixed_fp16")
+        return runner.sin_like_eval(bundles["sin"], x, runner.HALF_PI, precision)
     if op in ("reciprocal", "rsqrt", "sqrt", "log"):
-        return runner.normalized_eval(bundles[op], op, x, "mixed_fp16")
-    exp_neg = runner.exp_eval(bundles["exp2"], -x, "mixed_fp16")
+        return runner.normalized_eval(bundles[op], op, x, precision)
+    exp_neg = runner.exp_eval(bundles["exp2"], -x, precision)
     denominator = (np.float32(1.0) + exp_neg).astype(np.float32)
-    sigmoid = runner.normalized_eval(bundles["reciprocal"], "reciprocal", denominator, "mixed_fp16")
+    sigmoid = runner.normalized_eval(bundles["reciprocal"], "reciprocal", denominator, precision)
     sigmoid[np.isposinf(denominator)] = np.float32(0.0)
     if op == "sigmoid":
         return sigmoid
     return (x * sigmoid).astype(np.float32)
 
 
-def eval_op(op: str, inputs: np.ndarray, runner, bundles: dict) -> np.ndarray:
+def eval_op(op: str, inputs: np.ndarray, runner, bundles: dict, precision: str) -> np.ndarray:
     outputs = np.full(inputs.shape, np.nan, dtype=np.float32)
     finite = np.isfinite(inputs)
     valid = finite.copy()
     if op in ("reciprocal", "rsqrt", "sqrt", "log"):
         valid &= inputs > 0.0
     if np.any(valid):
-        outputs[valid] = eval_finite(op, inputs[valid], runner, bundles)
+        outputs[valid] = eval_finite(op, inputs[valid], runner, bundles, precision)
 
     pos_inf = np.isposinf(inputs)
     neg_inf = np.isneginf(inputs)
     if op == "exp":
         outputs[pos_inf], outputs[neg_inf] = np.inf, np.float32(0.0)
     elif op == "sigmoid":
-        outputs[pos_inf], outputs[neg_inf] = np.float32(1.0), np.float32(0.0)
+        outputs[pos_inf] = eval_finite(op, inputs[pos_inf], runner, bundles, precision)
+        outputs[neg_inf] = np.float32(0.0)
     elif op == "silu":
         outputs[pos_inf], outputs[neg_inf] = np.inf, np.nan
     elif op == "reciprocal":
@@ -194,9 +207,6 @@ def eval_op(op: str, inputs: np.ndarray, runner, bundles: dict) -> np.ndarray:
         outputs[zero_pos], outputs[zero_neg] = np.float32(0.0), np.float32(-0.0)
     elif op == "log":
         outputs[zero_pos], outputs[zero_neg] = -np.inf, -np.inf
-    elif op in ("sigmoid", "silu"):
-        outputs[zero_pos] = np.float32(0.5) if op == "sigmoid" else np.float32(0.0)
-        outputs[zero_neg] = np.float32(0.5) if op == "sigmoid" else np.float32(-0.0)
     return outputs
 
 
@@ -222,31 +232,46 @@ def main() -> None:
     parser.add_argument("--manifest", type=Path, required=True)
     parser.add_argument("--ops", nargs="+", choices=OPS, default=list(OPS))
     parser.add_argument("--random-count", type=int, default=4096)
+    parser.add_argument("--segments", type=int, choices=SUPPORTED_SEGMENTS, default=16)
+    parser.add_argument("--precision", choices=SUPPORTED_PRECISIONS, default="mixed_fp16")
     args = parser.parse_args()
 
-    runner, runner_path = load_runner(args.abc_lut_root.resolve())
-    bundle_root = args.abc_lut_root.resolve() / "lut_fp/output/ada300_bxc_16segments"
-    bundles = runner.load_all(str(bundle_root))
+    seed = seed_for_segments(args.segments)
+    runner, runner_path = load_runner(args.abc_lut_root.resolve(), args.segments)
+    bundle_root = args.abc_lut_root.resolve() / f"lut_fp/output/ada300_bxc_{args.segments}segments"
+    bundle_stems = {
+        "exp2": "exponential_exp2",
+        "sin": "sin_halfpi",
+        "reciprocal": "reciprocal_normalized",
+        "rsqrt": "rsqrt_normalized",
+        "sqrt": "sqrt_normalized",
+        "log": "log_normalized",
+        "power_2": "power_2_normalized",
+    }
+    bundles = {
+        name: runner.load_lut_bundle(stem, str(bundle_root))
+        for name, stem in bundle_stems.items()
+    }
     rows = []
     counts = {}
     for op in args.ops:
-        inputs = make_inputs(op, runner, bundles, args.random_count)
-        outputs = eval_op(op, inputs, runner, bundles)
+        inputs = make_inputs(op, runner, bundles, args.random_count, seed=seed)
+        outputs = eval_op(op, inputs, runner, bundles, args.precision)
         counts[op] = int(inputs.size)
         for index, (input_value, output_value) in enumerate(zip(inputs, outputs)):
             rows.append((op, f"{index:06d}", f32_bits(input_value), f32_bits(output_value), value_class(output_value)))
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
     with args.output.open("w") as out:
-        out.write("# reex-lut-bit-v1 segments=16 precision=mixed_fp16\n")
+        out.write(f"# reex-lut-bit-v1 segments={args.segments} precision={args.precision}\n")
         for op, case_id, input_bits, output_bits, cls in rows:
             out.write(f"{op}\t{case_id}\t{input_bits:08x}\t{output_bits:08x}\t{cls}\n")
 
     manifest = {
         "schema": "reex-lut-bit-v1",
-        "segments": 16,
-        "precision": "mixed_fp16",
-        "seed": SEED,
+        "segments": args.segments,
+        "precision": args.precision,
+        "seed": seed,
         "random_count_per_op": args.random_count,
         "ops": args.ops,
         "case_counts": counts,

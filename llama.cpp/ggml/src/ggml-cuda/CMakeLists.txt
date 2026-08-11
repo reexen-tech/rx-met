@@ -185,6 +185,20 @@ if (CUDAToolkit_FOUND)
 
     if (GGML_USE_REEX)
         target_compile_definitions(ggml-cuda PRIVATE GGML_USE_REEX)
+        foreach(REEX_NO_LUT_OPTION IN ITEMS
+                GGML_REEX_SIN_COS_NO_LUT
+                GGML_REEX_EXP_NO_LUT
+                GGML_REEX_LOG_NO_LUT
+                GGML_REEX_RECIPROCAL_NO_LUT
+                GGML_REEX_RSQRT_NO_LUT
+                GGML_REEX_SQRT_NO_LUT)
+            if (${REEX_NO_LUT_OPTION})
+                target_compile_definitions(ggml-cuda PRIVATE ${REEX_NO_LUT_OPTION})
+            endif()
+        endforeach()
+        if (GGML_REEX_LUT_FP32_OUTPUT)
+            target_compile_definitions(ggml-cuda PRIVATE GGML_REEX_LUT_FP32_OUTPUT)
+        endif()
         # REEX LUT uses __constant__ memory defined in unary.cu but referenced
         # from norm.cu, softmax.cu, rope.cu, fattn-*.cuh etc. via extern __constant__.
         # Without separable compilation each TU has its own __constant__ copy

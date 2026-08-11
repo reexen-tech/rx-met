@@ -74,6 +74,9 @@ BATCH = 512
 NGL = 99
 GPU_INDEX = 0
 MIN_BASELINE_HEADROOM = 40 * 1024**3
+RUN_PROFILES = {
+    "q8": frozenset({1, 2, 3, 7, 8}),
+}
 CUDA_ENV = {
     "HOME": "/root",
     "PATH": "/usr/local/cuda/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
@@ -214,6 +217,19 @@ def gpu_snapshot() -> dict[str, Any]:
     }
 
 
+def probe_container_cuda(build_name: str) -> dict[str, Any]:
+    binary = BUILDS[build_name] / "bin/llama-perplexity"
+    completed = subprocess.run(docker_command([str(binary), "--version"]), capture_output=True, text=True)
+    output = completed.stdout + completed.stderr
+    marker = re.search(r"ggml_cuda_init: found ([1-9][0-9]*) CUDA devices?", output)
+    return {
+        "valid": completed.returncode == 0 and marker is not None,
+        "exit_code": completed.returncode,
+        "device_count": int(marker.group(1)) if marker else 0,
+        "output": output.strip(),
+    }
+
+
 def validate_kld(path: Path) -> dict[str, Any]:
     result: dict[str, Any] = {"path": str(path), "valid": False}
     if not path.is_file():
@@ -265,7 +281,10 @@ def parse_and_validate_log(path: Path, is_kld: bool) -> dict[str, Any]:
     errors = []
     fatal_patterns = {
         "decode failure": r"failed to decode|llama_decode\(\) failed",
-        "CUDA failure": r"CUDA error|CUDA failure|cudaError|GGML_ASSERT|CUDA out of memory",
+        "CUDA failure": (
+            r"CUDA error|CUDA failure|cudaError|GGML_ASSERT|CUDA out of memory|"
+            r"failed to initialize CUDA|no usable GPU found"
+        ),
         "model load failure": r"unable to load model|failed to load model|failed to create context",
         "allocation failure": r"out of memory|bad_alloc|failed to allocate",
         "corrupt input": r"does not look like a file|failed reading|inconsistent vocabulary",
@@ -273,6 +292,18 @@ def parse_and_validate_log(path: Path, is_kld: bool) -> dict[str, Any]:
     for label, pattern in fatal_patterns.items():
         if re.search(pattern, content, flags=re.IGNORECASE):
             errors.append(label)
+
+    if re.search(r"ggml_cuda_init: found [1-9][0-9]* CUDA devices?", content) is None:
+        errors.append("missing CUDA device initialization marker")
+    offload = re.findall(r"load_tensors: offloaded ([0-9]+)/([0-9]+) layers to GPU", content)
+    if not offload or not any(int(done) == int(total) and int(total) > 0 for done, total in offload):
+        errors.append("model layers were not fully offloaded to GPU")
+    if re.search(r"CUDA[0-9]+ model buffer size", content) is None:
+        errors.append("missing CUDA model buffer marker")
+    if re.search(r"CUDA[0-9]+ compute buffer size", content) is None:
+        errors.append("missing CUDA compute buffer marker")
+    if re.search(r"^sched_reserve:\s+CPU compute buffer size", content, flags=re.MULTILINE):
+        errors.append("CPU compute fallback detected")
 
     metrics: dict[str, Any] = {}
     if is_kld:
@@ -346,7 +377,7 @@ def preflight(*, require_idle: bool, hash_datasets: bool = True) -> dict[str, An
         "GGML_REEX_GEMM": "OFF",
         "GGML_LUT_NUM_SEGMENTS_REEX": "16",
     }
-    cache_summary: dict[str, dict[str, str]] = {}
+    cache_summary: dict[str, dict[str, Any]] = {}
     for build_name, build_dir in BUILDS.items():
         binary = build_dir / "bin/llama-perplexity"
         if not binary.is_file() or not os.access(binary, os.X_OK):
@@ -364,6 +395,10 @@ def preflight(*, require_idle: bool, hash_datasets: bool = True) -> dict[str, An
         expected_reex = "ON" if build_name == "lut" else "OFF"
         if selected["GGML_USE_REEX"] != expected_reex:
             errors.append(f"{build_name} GGML_USE_REEX={selected['GGML_USE_REEX']}, expected {expected_reex}")
+        cuda_probe = probe_container_cuda(build_name)
+        selected["container_cuda_probe"] = cuda_probe
+        if not cuda_probe["valid"]:
+            errors.append(f"{build_name} cannot initialize CUDA inside {CONTAINER}: {cuda_probe}")
 
     gguf_entries = load_gguf_manifest()
     artifact_summary = []
@@ -506,6 +541,9 @@ def run_one(spec: RunSpec, sample_seconds: float) -> bool:
     occupied = compute_processes()
     if occupied:
         raise RuntimeError(f"GPU became non-exclusive before {spec.run_id}: {occupied}")
+    cuda_probe = probe_container_cuda(spec.build)
+    if not cuda_probe["valid"]:
+        raise RuntimeError(f"container CUDA probe failed before {spec.run_id}: {cuda_probe}")
 
     attempt = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     log_dir = RESULT_ROOT / "logs" / "runs" / spec.model_key / spec.dataset_key
@@ -655,7 +693,10 @@ def main() -> int:
     preflight_parser.add_argument("--allow-busy-gpu", action="store_true", help="diagnostic only; never accepted by the run action")
     run_parser = subparsers.add_parser("run", help="run all pending experiments sequentially")
     run_parser.add_argument("--sample-seconds", type=float, default=2.0)
-    run_parser.add_argument("--only", help="run exactly one full run_id (dependencies must already exist)")
+    run_parser.add_argument("--dataset", choices=DATASETS, help="limit the run to one dataset")
+    selection = run_parser.add_mutually_exclusive_group()
+    selection.add_argument("--only", help="run exactly one full run_id (dependencies must already exist)")
+    selection.add_argument("--profile", choices=RUN_PROFILES, help="run a fixed subset of the experiment matrix")
     args = parser.parse_args()
 
     if args.action == "matrix":
@@ -686,6 +727,10 @@ def main() -> int:
         selected = [spec for spec in selected if spec.run_id == args.only]
         if not selected:
             parser.error(f"unknown --only run_id: {args.only}")
+    elif args.profile:
+        selected = [spec for spec in selected if spec.number in RUN_PROFILES[args.profile]]
+    if args.dataset:
+        selected = [spec for spec in selected if spec.dataset_key == args.dataset]
     for spec in selected:
         if not run_one(spec, args.sample_seconds):
             return 3
