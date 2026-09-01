@@ -1,11 +1,20 @@
 """
 Power-of-2 量化工具
 用于将量化器的scale修改为2的幂次方，以便硬件实现
+
+纯数值函数（is_power_of_2 / find_closest_power_of_2_scale /
+verify_power_of_2_scale）放在 aimet_common.power_of_2，此处再导出以保持
+``from aimet_torch.power_of_2_quantization import ...`` 兼容。
+本文件只保留依赖 Torch v2 quantizer 的遍历与改写。
 """
 
 import torch
-import math
 from typing import Dict, List, Tuple
+from aimet_common.power_of_2 import (
+    find_closest_power_of_2_scale,
+    is_power_of_2,
+    verify_power_of_2_scale,
+)
 from aimet_torch.v2.nn import QuantizationMixin
 from aimet_torch.v2.nn.base import BaseQuantizationMixin
 
@@ -157,106 +166,6 @@ def get_single_quantizer_info(quantizer) -> Dict:
         info['zero_point'] = 0.0
     
     return info
-
-
-def is_power_of_2(value: float, relative_tolerance: float = 0.02) -> bool:
-    """
-    判断一个值是否接近 2 的幂次方（考虑相对误差）
-    
-    由于量化校准时的浮点数误差和统计波动，real_range 可能不会精确等于 2^n。
-    例如：real_range = 2.007884，非常接近 2.0 (误差 0.39%)，应该被视为"是 2^n"。
-    
-    Args:
-        value: 要检查的值
-        relative_tolerance: 相对容差（默认 2%）
-            - 如果 |value - 2^n| / 2^n < relative_tolerance，则认为是 2^n
-            - 例如：2% 容差允许 [1.96, 2.04] 范围内的值被视为 2.0
-        
-    Returns:
-        是否接近 2 的幂次方
-        
-    Examples:
-        >>> is_power_of_2(2.0)          # True (精确匹配)
-        >>> is_power_of_2(2.007884)     # True (误差 0.39% < 2%)
-        >>> is_power_of_2(2.05)         # False (误差 2.5% > 2%)
-        >>> is_power_of_2(1.98)         # True (误差 1% < 2%)
-    """
-    if value <= 0:
-        return False
-    
-    # 计算 log2(value)
-    log2_val = math.log2(value)
-    
-    # 找到最接近的整数 n
-    n_nearest = round(log2_val)
-    
-    # 计算最接近的 2^n
-    nearest_power_of_2 = 2 ** n_nearest
-    
-    # 计算相对误差
-    relative_error = abs(value - nearest_power_of_2) / nearest_power_of_2
-    
-    # 检查相对误差是否在容差范围内
-    return relative_error < relative_tolerance
-
-
-def find_closest_power_of_2_scale(scale: float, method: str = "round", 
-                                   qmin: float = None, qmax: float = None,
-                                   rmin: float = None, rmax: float = None,
-                                   tolerance: float = 0.02) -> Tuple[float, int]:
-    """
-    找到最接近给定scale的2的幂次方scale (1/2^n)
-    
-    Args:
-        scale: 原始scale值
-        method: 选择策略
-            - "round": 四舍五入到最近的 2^n（默认）
-            - "cover_range": 智能策略
-                - 如果 real_max - real_min 接近 2^n（相对误差 < tolerance）：使用四舍五入
-                - 否则：向上取整以覆盖原范围
-        qmin: 量化最小值（method="cover_range" 时需要）
-        qmax: 量化最大值（method="cover_range" 时需要）
-        rmin: 浮点最小值（method="cover_range" 时需要）
-        rmax: 浮点最大值（method="cover_range" 时需要）
-        tolerance: 判断是否为 2^n 的相对容差（默认 2%）
-            - 例如：real_range=2.007884 与 2.0 的相对误差 0.39% < 2%，被视为 2^n
-        
-    Returns:
-        (new_scale, n): 新的scale值和对应的n值，其中new_scale = 1/2^n
-    """
-    if scale <= 0:
-        raise ValueError(f"Scale必须为正数，得到: {scale}")
-    
-    # 计算log2(1/scale) = -log2(scale)
-    # 如果scale = 1/2^n, 那么log2(1/scale) = n
-    n = -math.log2(scale)
-    
-    if method == "round":
-        # 四舍五入到最近的整数（最小化 |new_scale - old_scale|）
-        n_rounded = round(n)
-    elif method == "cover_range":
-        # 智能策略：判断 real_range 是否接近 2^n
-        if qmin is None or qmax is None or rmin is None or rmax is None:
-            raise ValueError("cover_range 方法需要提供 qmin, qmax, rmin, rmax 参数")
-        
-        # 计算 real_range
-        real_range = abs(rmax - rmin)
-        
-        # 判断 real_range 是否接近 2^n（使用相对容差）
-        if is_power_of_2(real_range, relative_tolerance=tolerance):
-            # real_range 接近 2^n，使用四舍五入
-            n_rounded = round(n)
-        else:
-            # real_range 不接近 2^n，向上取整以覆盖原范围
-            # 向上取整 = floor(n)，这样 scale 会更大，覆盖范围更大
-            n_rounded = math.floor(n)
-    else:
-        raise ValueError(f"不支持的 method: {method}，必须是 'round' 或 'cover_range'")
-    
-    # 计算新的scale = 1/2^n
-    new_scale = 1.0 / (2 ** n_rounded)
-    
-    return new_scale, n_rounded
 
 
 def apply_power_of_2_quantization(model, method: str = "round", tolerance: float = 0.02, verbose=True):
@@ -620,33 +529,6 @@ def modify_quantizer_to_power_of_2(quantizer, quantizer_name: str, method: str =
             import traceback
             traceback.print_exc()
         return False
-
-
-def verify_power_of_2_scale(scale: float, tolerance: float = 1e-9) -> Tuple[bool, int]:
-    """
-    验证给定的scale是否为2的幂次方
-    
-    Args:
-        scale: 要验证的scale值
-        tolerance: 容差
-        
-    Returns:
-        (is_power_of_2, n): 是否为2的幂次方，以及对应的n值
-    """
-    if scale <= 0:
-        return False, -1
-    
-    # 计算log2(1/scale)
-    n = -math.log2(scale)
-    n_rounded = round(n)
-    
-    # 检查是否接近整数
-    if abs(n - n_rounded) < tolerance:
-        expected_scale = 1.0 / (2 ** n_rounded)
-        if abs(scale - expected_scale) / expected_scale < tolerance:
-            return True, n_rounded
-    
-    return False, -1
 
 
 def verify_model_power_of_2(model, verbose=True):

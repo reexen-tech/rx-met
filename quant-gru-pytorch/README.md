@@ -160,7 +160,7 @@ config = gru.get_quant_config("update_gate_output")  # 不传参数则返回全�
 3. 使用 legacy exporter：`torch.onnx.export(..., dynamo=False)`
 4. 传入 `custom_opsets=get_quant_gru_custom_opsets()`
 
-**与 `aimet_rx` 分工：** 本项目提供标准 ONNX `GRU` 节点与量化参数接口；整模型导出、encodings 合并由 `aimet_rx/export_onnx_and_encodings` 负责。多 GRU 模型建议导出前调用 `set_quant_gru_module_names(model)`。
+**与 rx-met 分工：** 本项目提供标准 ONNX `GRU` 节点与量化参数接口；整模型导出、encodings 合并由 `aimet_torch/rx_export` 负责。多 GRU 模型建议导出前调用 `set_quant_gru_module_names(model)`。
 
 完整代码见 `example_onnx_export()`。
 

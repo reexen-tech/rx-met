@@ -1191,6 +1191,18 @@ class QuantizationSimModel:
         with compute_encodings(self):
             forward_pass_callback(*args)
 
+    def set_percentile_value(self, percentile_value: float):
+        """Set the percentile used by every percentile quantizer before calibration.
+
+        Matches ``aimet_torch.v2.QuantizationSimModel.set_percentile_value``.
+        Must be called after all quantizers exist and before ``compute_encodings``.
+        """
+        self._percentile_value = float(percentile_value)
+        for quantizer in self.qc_quantize_op_dict.values():
+            setter = getattr(quantizer, "set_percentile_value", None)
+            if setter is not None:
+                setter(percentile_value)
+
     def _compute_param_encodings(
         self,
         *,

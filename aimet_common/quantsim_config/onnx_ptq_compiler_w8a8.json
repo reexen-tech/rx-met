@@ -1,0 +1,99 @@
+{
+  "defaults": {
+    "ops": {
+      "is_output_quantized": "True",
+      "is_symmetric": "True"
+    },
+    "params": {
+      "is_quantized": "True",
+      "is_symmetric": "True"
+    },
+    "strict_symmetric": "False",
+    "per_channel_quantization": "True"
+  },
+  "params": {
+    "bias": {
+      "is_quantized": "True"
+    }
+  },
+  "op_type": {
+    "BatchNormalization": {
+      "params": {
+        "running_mean": {
+          "is_quantized": "False"
+        },
+        "running_var": {
+          "is_quantized": "False"
+        }
+      }
+    },
+    "Conv": {
+      "is_input_quantized": "True",
+      "is_output_quantized": "True"
+    },
+    "ConvTranspose": {
+      "is_input_quantized": "True",
+      "is_output_quantized": "True"
+    },
+    "Gemm": {
+      "is_input_quantized": "True",
+      "is_output_quantized": "True",
+      "per_channel_quantization": "True"
+    },
+    "MatMul": {
+      "is_input_quantized": "True",
+      "is_output_quantized": "True"
+    },
+    "Add": {
+      "is_input_quantized": "True",
+      "is_output_quantized": "True"
+    },
+    "Mul": {
+      "is_input_quantized": "True",
+      "is_output_quantized": "True"
+    },
+    "Sub": {
+      "is_input_quantized": "True",
+      "is_output_quantized": "True"
+    },
+    "Div": {
+      "is_input_quantized": "True",
+      "is_output_quantized": "True"
+    },
+    "Relu": {
+      "is_input_quantized": "True",
+      "is_output_quantized": "True"
+    },
+    "Clip": {
+      "is_input_quantized": "True",
+      "is_output_quantized": "True"
+    },
+    "Pad": {
+      "is_input_quantized": "True",
+      "is_output_quantized": "True"
+    },
+    "LayerNormalization": {
+      "per_channel_quantization": "False"
+    },
+    "Cast": {
+      "is_output_quantized": "False"
+    },
+    "Mean": {
+      "is_output_quantized": "False"
+    },
+    "Shape": {
+      "is_output_quantized": "False"
+    },
+    "If": {
+      "is_output_quantized": "False"
+    }
+  },
+  "supergroup_pass_list": [],
+  "supergroups": [],
+  "model_input": {
+    "is_input_quantized": "True"
+  },
+  "model_output": {
+    "is_output_quantized": "True"
+  }
+}

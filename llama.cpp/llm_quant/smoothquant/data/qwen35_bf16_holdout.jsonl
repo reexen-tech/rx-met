@@ -1,4 +1,0 @@
-{"category":"general","text":"Explain the physical mechanism that causes Earth's seasons, and distinguish it from changes caused by Earth's distance from the Sun."}
-{"category":"code","text":"Write a Python function that returns the length of the longest substring without repeated characters. Include the algorithmic complexity and two edge-case tests."}
-{"category":"math","text":"Let a, b, and c be positive real numbers with abc = 1. Prove that (1 + a)(1 + b)(1 + c) is at least 8."}
-{"category":"dialogue","text":"A teammate says a production deployment is delayed by an intermittent test failure. Respond with a concise diagnostic plan and ask only the questions needed to choose the next action."}

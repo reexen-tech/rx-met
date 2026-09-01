@@ -1,116 +1,85 @@
-# rx-met @VERSION@ 使用说明
+# ADA200 rx-met @DATE_TAG@
 
-本发布包包含：
+面向 ADA200 统一 Docker（`ada200_docker`）的小模型量化软件包。
+包内是预编译 wheel 和 examples，**不含 Docker 镜像**。
 
 ```text
-rx-met-@VERSION@/
+@BUNDLE_NAME@/
 ├── README.md
-├── SHA256SUMS
-├── env.example
-├── scripts/
-│   ├── setup.sh
-│   └── rx-met-shell.sh
-├── rx-met-@VERSION@-image.tar
+├── ChangeLog.md
+├── install.sh
+├── wheels/
 └── examples/
 ```
 
+Wheel 版本：`@VERSION@`。
+
 ## 环境要求
 
-- Linux x86_64
-- 满足 CUDA 12.8 运行要求的 NVIDIA Driver
-- Docker
-- NVIDIA Container Toolkit
+- 已导入的 `ada200_docker:latest`（Ubuntu 22.04，Python 3.10，`torch==2.8.0+cu128`）
+- 宿主机 NVIDIA Driver + NVIDIA Container Toolkit
+- 不需要再装 CUDA Toolkit / nvcc
 
-## 1. 首次初始化
+本包会覆盖镜像里的官方 `aimet-torch` / `aimet-onnx`，换成 rx-met 定制 AIMET 和 QuantGRU。
+ONNX Runtime 继续用镜像自带的 CPU 版。
 
-在解压后的发布包目录执行：
+## 1. 启动统一 Docker
 
-```bash
-cd rx-met-@VERSION@/
-./scripts/setup.sh
-```
-
-脚本会：校验包、导入镜像、创建旁路 `workspace/`、拷贝 `examples/`、生成 `workspace/.env`。
-
-编辑 `../workspace/.env`，按实际路径填写：
+把发布包和数据集挂进容器：
 
 ```bash
-MODELS_DIR=/data/models
-DATASETS_DIR=/data/datasets
+docker run --gpus all --rm -it \
+  --user "$(id -u):$(id -g)" \
+  -e HOME=/tmp \
+  -v /path/to/@BUNDLE_NAME@:/opt/rx-met:ro \
+  -v /path/to/workspace:/workspace \
+  -v /path/to/datasets:/datasets:ro \
+  -w /workspace \
+  ada200_docker:latest \
+  bash
 ```
 
-宿主机目录建议组织为：
+`install.sh` 会改系统 Python，若容器用户没有写 `site-packages` 的权限，请去掉 `--user` 用镜像默认用户安装。
 
-```text
-/data/models/
-├── Qwen3.5-35B-A3B/
-└── ...
-
-/data/datasets/
-├── evaluation.txt
-├── speech_commands_v0.02/
-└── ...
-```
-
-> 启动后映射为：`$MODELS_DIR` → `/models`，`$DATASETS_DIR` → `/datasets`，`workspace` → `/workspace`。
-> 不做 PPL、也不跑小模型数据时，可将 `DATASETS_DIR` 留空。
-
-## 2. 启动容器
+## 2. 安装
 
 ```bash
-./scripts/rx-met-shell.sh
+cp -a /opt/rx-met /workspace/rx-met
+cd /workspace/rx-met
+./install.sh
 ```
 
-## 3. 大模型示例
+脚本会校验 CPython 3.10、Linux x86_64、`torch==2.8.0` 且 `torch.version.cuda == 12.8`，
+然后离线安装 `wheels/`。临时跳过检查：`RX_MET_SKIP_ENV_CHECK=1 ./install.sh`。
 
-编辑 `$WORKSPACE/examples/config/llm_quant.json`（`$WORKSPACE` 即旁路 `workspace/`）：
+## 3. 小模型示例（PyTorch / QuantGRU）
 
-```json
-{
-  "model": "/models/Qwen/Qwen3.5-35B-A3B",
-  "quant": "Q4_0_64",
-  "eval": {
-    "dataset": "/datasets/evaluation.txt"
-  },
-  "hw_export": true,
-  "output": "/workspace/runs/Qwen3.5-35B-A3B-q4-0-64"
-}
-```
-
-字段填写规则：
-
-- `model`：填写 `/models/` 下的模型目录。
-- `quant`：填写目标量化类型，例如 `Q4_K_64`、`Q4_0`。
-- `output`：填写 `/workspace/runs/` 下的输出目录；不填时默认写入当前工作目录下的 `runs/`。
-- `eval.dataset`：填写 `/datasets/` 下的评测文件；不需要 PPL 时可删除整个 `eval` 字段。
-- JSON 中只填写容器路径，不填写宿主机绝对路径。
-
-> 配置字段说明见 `examples/config/README.md`。
-
-在容器内：
+将 Speech Commands 放到宿主机数据集目录，容器内路径为
+`/datasets/speech_commands_v0.02`。
 
 ```bash
-rx-met --dry-run /workspace/examples/config/llm_quant.json
-rx-met /workspace/examples/config/llm_quant.json
-```
-
-或在宿主机一条命令执行：
-
-```bash
-./scripts/rx-met-shell.sh -- \
-  rx-met /workspace/examples/config/llm_quant.json
-```
-
-## 4. 小模型示例
-
-将 `speech_commands_v0.02` 放在宿主机 `$DATASETS_DIR` 下，容器内路径为 `/datasets/speech_commands_v0.02`。
-
-在容器内：
-
-```bash
-cd /workspace/examples
+cd /workspace/rx-met/examples
+# ada200_docker 若未登记 CUDA runtime，先: source /workspace/rx-met/cuda_libs.env
+export RX_MET_SPEECH_COMMANDS_ROOT=/datasets/speech_commands_v0.02
 python3 quick_start.py
 ```
 
-脚本会写入宿主机的 `workspace/examples/model_fp.pth` 和
-`workspace/examples/output/`。
+输出写在 `examples/output/`。量化 JSON 见 `examples/config/README.md`。
+
+## 4. ONNX 直量化示例
+
+默认读 `/datasets/<name>/`，也可用环境变量覆盖：
+
+| 变量 | 默认 |
+| --- | --- |
+| `RX_MET_ONNX_PTQ_ROOT` | `/datasets` |
+| `RX_MET_ONNX_PTQ_EXAMPLE` | `yolo-fastest` |
+| `RX_MET_ONNX_PTQ_MODEL` | `$RX_MET_ONNX_PTQ_ROOT/yolo-fastest/yolo-fastest.onnx` |
+| `RX_MET_ONNX_PTQ_CALIB` | `$RX_MET_ONNX_PTQ_ROOT/yolo-fastest/input` |
+
+```bash
+cd /workspace/rx-met/examples
+python3 onnx_ptq_quick_start.py
+```
+
+这条路径使用 CPU ONNX Runtime，与 example 默认 `USE_CPU = True` 一致。

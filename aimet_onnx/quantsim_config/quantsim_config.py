@@ -68,6 +68,7 @@ from aimet_common.quantsim_config.quantsim_config import (
 )
 from aimet_common.utils import AimetLogger
 from aimet_common.onnx._utils import _is_grid_preserving_op
+from aimet_common.quantsim_config.compute_ops import apply_compute_op_io_defaults
 from aimet_onnx.meta.connectedgraph import ConnectedGraph, CONSTANT_TYPE
 from aimet_onnx.utils import get_product_name_from_quantized_name
 from aimet_onnx.qc_quantize_op import OpMode, QcQuantizeOp
@@ -325,8 +326,9 @@ class QuantSimConfigurator(AimetCommonQuantSimConfigurator):
             op = self._conn_graph.get_all_ops()[op_name]
             if _is_grid_preserving_op(op.type) and op.type not in op_configs:
                 op_configs[op.type] = {"is_output_quantized": False}
-            if op.type in op_configs:
-                op_config = op_configs[op.type]
+            op_config = apply_compute_op_io_defaults(op.type, op_configs.get(op.type))
+            if op_config:
+                op_configs[op.type] = op_config
                 self._set_config_for_op(
                     op_name, op_to_quantizer, op_config, modified_quantize_ops
                 )
@@ -367,6 +369,9 @@ class QuantSimConfigurator(AimetCommonQuantSimConfigurator):
                     model_input_configs,
                     modified_quantize_ops,
                 )
+
+        if ConfigDictKeys.IS_INPUT_QUANTIZED not in model_input_configs:
+            return
 
         for activation_name in self._input_quantizers:
             if self._quant_ops_dict[activation_name] not in modified_quantize_ops:
@@ -576,6 +581,22 @@ class QuantSimConfigurator(AimetCommonQuantSimConfigurator):
                         ConfigDictKeys.MAX: quantizer._encoding_min_max_fixed_vals[1],
                     }  # pylint: disable=protected-access
                 if current_setting != quantizer_setting:
+                    if setting_name in [
+                        ConfigDictKeys.IS_INPUT_QUANTIZED,
+                        ConfigDictKeys.IS_OUTPUT_QUANTIZED,
+                    ]:
+                        # ONNX 一条 tensor 只有一个 quantizer，无法同时表达
+                        # 「Reshape 输出不量化」和「Add 输入再 fake-quant」。
+                        # Torch 是两份对象：reshape.output 关、add.input 开，
+                        # 效果是消费端入口再量化一次。这里按 Torch 取 enabled。
+                        if bool(current_setting) != bool(quantizer_setting):
+                            quantizer.enabled = True
+                            quantizer.op_mode = OpMode.updateStats
+                            logger.warning(
+                                "Shared tensor: keep quantizer enabled to match "
+                                "Torch consumer input fake-quant"
+                            )
+                            continue
                     logger.error(
                         "Conflicting tensor quantizer settings for symmetric encodings"
                     )
