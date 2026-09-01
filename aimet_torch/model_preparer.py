@@ -227,6 +227,7 @@ functional_with_stateless_api = {
     "rsqrt": aimet_modules.RSqrt,
     "hypot": aimet_modules.Hypot,
     "sqrt": aimet_modules.Sqrt,
+    "log": aimet_modules.Log,
     "abs": aimet_modules.Abs,
     "sign": aimet_modules.ElementwiseUnarySign,
     "neg": aimet_modules.Neg,
