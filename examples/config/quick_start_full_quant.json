@@ -148,6 +148,41 @@
     "QuantizedPad": {
       "disable_quantization": true,
       "comment": "padding 常量索引，量化无意义"
+    },
+    "QuantizedUnfold": {
+      "disable_quantization": true,
+      "comment": "SpeechFeatures 分帧（tf.signal.frame），滑窗取数不是计算"
+    },
+    "QuantizedMatMul": {
+      "input_bitwidth": 8,
+      "output_bitwidth": 8,
+      "input_symmetric": true,
+      "output_symmetric": true,
+      "disable_quantization": false,
+      "comment": "RDFT / Mel / DCT / attention Dot"
+    },
+    "QuantizedLog": {
+      "input_bitwidth": 8,
+      "output_bitwidth": 8,
+      "input_symmetric": true,
+      "output_symmetric": true,
+      "disable_quantization": false,
+      "comment": "SpeechFeatures log(max(x, eps))"
+    },
+    "QuantizedClamp": {
+      "input_bitwidth": 8,
+      "output_bitwidth": 8,
+      "input_symmetric": true,
+      "output_symmetric": true,
+      "disable_quantization": false,
+      "comment": "log 前的 epsilon 下限"
+    },
+    "QuantizedSoftmax": {
+      "input_bitwidth": 8,
+      "output_bitwidth": 8,
+      "input_symmetric": true,
+      "output_symmetric": true,
+      "disable_quantization": false
     }
   },
 
