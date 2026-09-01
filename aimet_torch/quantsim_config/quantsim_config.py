@@ -73,6 +73,11 @@ from aimet_common.quantsim_config.quantsim_config import (
     SupergroupConfigCallback as AimetCommonSupergroupConfigCallback,
 )
 from aimet_common.onnx._utils import _is_grid_preserving_op
+from aimet_common.quantsim_config.compute_ops import (
+    is_compute_module,
+    is_compute_op,
+    skips_generic_quantizers,
+)
 
 from aimet_torch.meta.connectedgraph import ConnectedGraph
 from aimet_torch.onnx_utils import (
@@ -187,6 +192,7 @@ class QuantSimConfigurator(AimetCommonQuantSimConfigurator):
                 )
         self._set_quantsim_configs()
         self._generate_and_apply_op_instance_specific_config()
+        self._disable_generic_quantizers_on_skipped_modules()
 
     def _create_named_modules_to_tensor_quantizers_dict(
         self,
@@ -611,6 +617,90 @@ class QuantSimConfigurator(AimetCommonQuantSimConfigurator):
                     op_config,
                     modified_tensor_quantizers,
                 )
+
+        self._enable_compute_op_input_quantizers()
+
+    def _is_compute_torch_module(self, module: torch.nn.Module) -> bool:
+        onnx_types = map_torch_types_to_onnx.get(type(module))
+        if onnx_types:
+            return is_compute_module(module, onnx_types)
+        backend_type = aimet_op_to_backend_op_name_map.get(type(module))
+        if backend_type:
+            return is_compute_module(module, [backend_type])
+        return is_compute_module(module)
+
+    def _enable_compute_op_input_quantizers(self):
+        """Enable input quantizers on compute ops even when JSON omitted the type.
+
+        Output quantizers already come from defaults. This fills the official
+        gap that ``is_input_quantized`` cannot live in ``defaults``.
+        Must run before supergroups so Conv-Relu fusion can still turn off
+        the last op's input.
+        """
+        modified_tensor_quantizers = {}
+        compute_input_config = {ConfigDictKeys.IS_INPUT_QUANTIZED: True}
+        enabled_count = 0
+
+        for (
+            module,
+            input_output_tensor_quantizers,
+        ) in self._named_modules_to_tensor_quantizers_dict.items():
+            if not self._is_compute_torch_module(module):
+                continue
+            wrapper = self._module_to_quantsim_wrapper_dict.get(module)
+            already_enabled = bool(
+                wrapper
+                and any(quantizer.enabled for quantizer in wrapper.input_quantizers)
+            )
+            self._set_config_for_module(
+                input_output_tensor_quantizers,
+                compute_input_config,
+                modified_tensor_quantizers,
+                module,
+            )
+            if (
+                wrapper
+                and not already_enabled
+                and any(quantizer.enabled for quantizer in wrapper.input_quantizers)
+            ):
+                enabled_count += 1
+
+        for (
+            op,
+            input_output_tensor_quantizers,
+        ) in self._elementwise_op_to_tensor_quantizers_dict.items():
+            if not is_compute_op(op.type):
+                continue
+            self._set_config_for_module(
+                input_output_tensor_quantizers,
+                compute_input_config,
+                modified_tensor_quantizers,
+            )
+
+        if enabled_count:
+            logger.info(
+                "Enabled input quantization for %s compute module(s) "
+                "not listed under op_type",
+                enabled_count,
+            )
+
+    def _disable_generic_quantizers_on_skipped_modules(self):
+        """Keep QuantGRU on GRU_config; official defaults would re-enable I/O/params."""
+        disabled_count = 0
+        for module, wrapper in self._module_to_quantsim_wrapper_dict.items():
+            if not skips_generic_quantizers(module):
+                continue
+            for quantizer in wrapper.input_quantizers + wrapper.output_quantizers:
+                quantizer.enabled = False
+            for quantizer in wrapper.param_quantizers.values():
+                quantizer.enabled = False
+            disabled_count += 1
+        if disabled_count:
+            logger.info(
+                "Disabled generic I/O/param quantizers on %s module(s) "
+                "that own encodings",
+                disabled_count,
+            )
 
     def _set_config_for_module(
         self,

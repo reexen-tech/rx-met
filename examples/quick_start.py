@@ -44,9 +44,8 @@ from aimet_torch.staged_quantization_utils import load_quantizer_encodings
 from aimet_torch.quantizable_batchnorm import QuantizableBatchNorm2d
 from quant_gru import QuantGRU
 
-# 仓库自定义的 ONNX 导出工具（含 QuantGRU / QuantizableBatchNorm2d 的自定义符号化逻辑），
-# 已随安装包一起发布
-from export_onnx_and_encodings.export_onnx_json import export_onnx_json
+# 仓库自定义的 ONNX 导出工具（含 QuantGRU 的 GRU 导出与后处理），已随安装包一起发布
+from aimet_torch.rx_export.export_onnx_json import export_onnx_json
 
 # 当前 demo 的本地辅助模块（与本脚本同目录），运行 demo 时请进入 examples/ 后再启动
 from common.fft2band import BandConverter
@@ -105,24 +104,52 @@ def set_seed(seed: int = SEED) -> None:
 
 
 def worker_init_fn(worker_id: int) -> None:
+    setup_audio_backend()
     seed = SEED + worker_id
     random.seed(seed)
     np.random.seed(seed)
 
 
 def setup_audio_backend() -> None:
-    """torchaudio 后端选择，避免对 torchcodec 的硬依赖。"""
-    for backend in ("soundfile", "sox_io"):
-        try:
-            torchaudio.set_audio_backend(backend)
-            return
-        except Exception:
-            continue
+    """优先 soundfile / sox，避免 torchaudio 2.11+ 默认走 torchcodec。"""
+    if hasattr(torchaudio, "set_audio_backend"):
+        for backend in ("soundfile", "sox_io"):
+            try:
+                torchaudio.set_audio_backend(backend)
+                return
+            except Exception:
+                continue
+        return
+    try:
+        import soundfile as sf
+    except ImportError:
+        return
+
+    def _load_with_soundfile(uri, *args, **kwargs):
+        data, sr = sf.read(str(uri), dtype="float32", always_2d=True)
+        wav = torch.from_numpy(data.T)
+        frame_offset = kwargs.get("frame_offset") or 0
+        num_frames = kwargs.get("num_frames", -1)
+        if frame_offset:
+            wav = wav[:, int(frame_offset):]
+        if num_frames is not None and int(num_frames) > 0:
+            wav = wav[:, : int(num_frames)]
+        return wav, sr
+
+    torchaudio.load = _load_with_soundfile
 
 
 # ============================================================================
 # 数据集（非 AIMET 标准用法，与量化无关）
 # ============================================================================
+def _load_wav(path) -> tuple[torch.Tensor, int]:
+    """用 soundfile 读 wav，避免 torchaudio 2.11 强制依赖 torchcodec。"""
+    import soundfile as sf
+
+    data, sr = sf.read(str(path), dtype="float32", always_2d=True)
+    return torch.from_numpy(data.T), int(sr)
+
+
 def list_from_txt(path: str) -> list:
     with open(path, "r") as f:
         return [ln.strip() for ln in f if ln.strip()]
@@ -170,7 +197,7 @@ class SpeechCommands(Dataset):
         noise_dir = self.root / "_background_noise_"
         if noise_dir.exists():
             for w in noise_dir.glob("*.wav"):
-                wav, sr = torchaudio.load(w)
+                wav, sr = _load_wav(w)
                 if sr != self.sr:
                     wav = torchaudio.functional.resample(wav, sr, self.sr)
                 self.bg_noises.append(wav.squeeze(0))
@@ -215,7 +242,7 @@ class SpeechCommands(Dataset):
 
     def __getitem__(self, idx):
         path, label = self.items[idx]
-        wav, sr = torchaudio.load(path)
+        wav, sr = _load_wav(path)
         if wav.shape[0] > 1:
             wav = wav.mean(dim=0, keepdim=True)
         if sr != self.sr:
@@ -250,7 +277,7 @@ def build_dataloaders(root: str):
         return DataLoader(
             ds, batch_size=BATCH_SIZE, shuffle=shuffle, num_workers=NUM_WORKERS,
             pin_memory=True, collate_fn=collate, drop_last=drop_last,
-            worker_init_fn=worker_init_fn if shuffle else None,
+            worker_init_fn=worker_init_fn,
             generator=generator,
         )
 

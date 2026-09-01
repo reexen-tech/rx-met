@@ -592,36 +592,9 @@ def _is_grid_preserving_op(op_type: str) -> bool:
         * y  = f(x_q)
         * y' = requantize(y, scale_x, zp_x)
     """
-    return op_type in (
-        "BatchToSpace",
-        "Col2Im",
-        "Compress",
-        "DepthToSpace",
-        "Dropout",
-        "Expand",
-        "Flatten",
-        "Gather",
-        "GatherElements",
-        "GatherND",
-        "Identity",
-        "MaxPool",
-        "MaxRoiPool",
-        "NonZero",
-        "Pad",
-        "ReduceMax",
-        "ReduceMin",
-        "Reshape",
-        "Slice",
-        "SpaceToBatch",
-        "SpaceToDepth",
-        "Split",
-        "SplitToSequence",
-        "Squeeze",
-        "Tile",
-        "TopK",
-        "Transpose",
-        "Unsqueeze",
-    )
+    from aimet_common.quantsim_config.compute_ops import is_grid_preserving_op
+
+    return is_grid_preserving_op(op_type)
 
 
 def _is_htp_interpolation_op(op_type: str) -> bool:

@@ -9,6 +9,54 @@
 
 ### 🔄 变更
 
+- **重组 ONNX 导出与 PTQ 模块路径**
+  - PyTorch sim → ONNX + encodings（含 GRU 导出/后处理）迁至 `aimet_torch/rx_export/`
+  - 直接 ONNX PTQ 迁至 `aimet_onnx/rx_ptq/`
+  - 删除原顶层包 `export_onnx_and_encodings/`（不再提供旧 import 路径）
+
+### ✨ 新增功能
+
+- **计算类算子默认打开输入/输出量化**
+  （`aimet_common/quantsim_config/compute_ops.py`、`aimet_torch/quantsim_config/quantsim_config.py`、`aimet_onnx/quantsim_config/quantsim_config.py`）
+  - 定点编译器要求每个计算节点都有 I/O encodings；官方 JSON 不允许 `defaults.is_input_quantized`
+  - 配置器按黑名单判定计算类（非 grid-preserving / 非索引控制流），未写入 `op_type` 的 Relu/BN/自定义 leaf 也会打开输入量化
+  - `QuantGRU` 不套用这套默认，仍走 `GRU_config`；配置结束后会关掉它身上被官方 defaults 重新打开的 I/O/param 量化器
+  - JSON 1 的 `op_type` 只保留例外；搬数据/索引算子（Reshape/Pad/Floor）默认不开
+  - Torch / ONNX / compiler encodings 共用同一套判定；`examples/config/mrnn_quantsim_config_custom_mixed_precision_v2.json` 已清空计算类清单
+  - 单测：`tests/test_compute_ops.py`、`tests/test_compute_op_io_defaults.py`
+
+- **ONNX 输入 PTQ**
+  （`aimet_onnx/`、`aimet_common/power_of_2.py`、`export_onnx_and_encodings/onnx_ptq/`）
+  - 直接读取已有 ONNX，校准后输出 clean ONNX 与 compiler-native encodings（`schema_version: 3`），不经过 `aimet_torch` 导出链
+  - 入口：`scripts/ptq_onnx_compiler.py`、`examples/onnx_ptq_quick_start.py`
+  - 与 `examples/quick_start.py` 共用 JSON 1 / JSON 2；图里没有的 `Quantized*` 与 `GRU_config` 忽略
+  - `aimet_onnx` 补 `set_percentile_value`：必须在 `compute_encodings` 前设置；native 默认 100 等于 min-max。默认 `percentile=99.99`
+  - RX 量化原文抽到 `aimet_common/power_of_2.py`，供 Torch / ONNX 共用，不改写算法：
+    `is_power_of_2` / `find_closest_power_of_2_scale` / `verify_power_of_2_scale` /
+    `recompute_min_max_for_new_scale` / `compute_aligned_bias_range`
+
+### 🔄 变更
+
+- **Torch JSON 2 对不上的 `layer_type_config` 改为忽略，拼写错误仍报错**
+  （`aimet_torch/utils_rx.py`）
+  - 已注册的 `Quantized*` 当前模型没有 → 忽略（与 ONNX、通用清单约定对齐）
+  - 未注册且模型里也没有 → `ValueError`（如 `QuantizedConv2D`）
+  - verbose 时打印忽略的类型
+
+- **ONNX PTQ 对齐现有 Torch RX 契约**
+  （`aimet_onnx/quantsim_config/quantsim_config.py`、`aimet_torch/power_of_2_quantization.py`、`aimet_torch/utils_rx.py`）
+  - `cover_range`（容差 2%）、激活/权重对称、Conv/Gemm/MatMul 的 bias encodings 不走统计校准，校准后再写 `Sb = Sx * Sw`（默认 INT32，不走官方 INT32 concretize）
+  - `aimet_torch.power_of_2_quantization` 中上述纯数值函数改为从 `aimet_common.power_of_2` 再导出，原有 import 路径保持兼容
+  - `apply_mixed_precision_bitwidth` 对带 `qc_quantize_op_dict` 的 ONNX sim 复用 JSON 2
+  - QuantSim 配置器：同一 tensor 上 Reshape 输出与 Add 输入冲突时打开 quantizer（对齐 Torch 消费端再 fake-quant），不再断言失败
+
+- **compiler encodings 为计算节点补齐 I/O**
+  （`export_onnx_and_encodings/onnx_ptq/compiler_encodings.py`、`mixed_precision.py`、`po2.py`）
+  - 导出时沿 Pad/Reshape/MaxPool 等 grid-preserving 边补齐 I/O，后级 Conv/Concat 不再缺 input
+  - 复用 JSON 2 时不映射 `QuantizedPad`（Torch 整数 Pad disable），避免关掉空间 ZeroPad
+  - Po2 遇到 scale<=0 的 quantizer 时关闭它，不再中断导出
+  - 校准前关闭 Conv/Gemm/MatMul bias fake-quant：近零 per-channel `scale=0` 会向后续图注入 Inf（watchhar SE `fc1.bias` 会把输出打成全 0）
+
 - **`apply_power_of_2_workflow()` 的量化器信息打印受 `verbose` 控制**
   （`aimet_torch/utils_rx.py`）
   - 「修改后的量化参数」调用 `print_quantizer_info` 时传入 `verbose=verbose`

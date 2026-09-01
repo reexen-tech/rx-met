@@ -2,12 +2,9 @@
 requires = ["setuptools>=66.1", "wheel"]
 build-backend = "setuptools.build_meta"
 
-# ---------------------------------------------------------------------------
-# PEP 621 项目元数据
-# ---------------------------------------------------------------------------
 [project]
 name = "rx-met"
-description = "Offline model quantization toolkit for AIMET, QuantGRU, and llama.cpp"
+description = "Offline PyTorch / AIMET / QuantGRU quantization toolkit"
 readme = "README.md"
 license = { text = "BSD-3-Clause" }
 requires-python = "==3.10.*"
@@ -25,15 +22,8 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
 
-# 产品版本与运行时依赖分别读取 VERSION 和 requirements.txt
 dynamic = ["version", "dependencies"]
 
-[project.scripts]
-rx-met = "rx_met_llm.pipeline:_cli"
-
-# ---------------------------------------------------------------------------
-# setuptools 后端配置（替代旧 setup.py 中的对应字段）
-# ---------------------------------------------------------------------------
 [tool.setuptools]
 include-package-data = true
 zip-safe = false
@@ -50,15 +40,9 @@ include = [
     "aimet_onnx.*",
     "aimet_torch",
     "aimet_torch.*",
-    "rx_met_llm",
-    "rx_met_llm.*",
-    "export_onnx_and_encodings",
-    "export_onnx_and_encodings.*",
 ]
 
 [tool.setuptools.package-data]
-aimet_common = ["*.json", "*.so", "*.pyd", "*.dll", "bin/*"]
+aimet_common = ["*.json", "*.so", "*.pyd", "*.dll", "bin/*", "quantsim_config/*.json"]
 aimet_onnx = ["*.json", "*.so", "*.pyd", "*.dll"]
 aimet_torch = ["*.json", "*.so", "*.pyd", "*.dll"]
-rx_met_llm = ["*.md"]
-export_onnx_and_encodings = ["*.json", "*.pt", "data/*"]

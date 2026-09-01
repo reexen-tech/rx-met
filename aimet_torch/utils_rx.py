@@ -2,7 +2,7 @@
 AIMET 量化工具函数库
 专注于量化相关的工具函数：Percentile 校准、Power-of-2 量化、量化器分析等
 """
-from typing import Dict, Any
+from typing import Dict, Any, Iterable, Mapping, Set, Tuple
 import json
 from pathlib import Path
 
@@ -299,7 +299,8 @@ def _enable_quant_gru_pot2(sim_model, verbose: bool = True) -> int:
 
 
 def apply_power_of_2_workflow(sim_model, method: str = "cover_range", tolerance: float = 0.02, 
-                              align_bias_scale: bool = False, verbose: bool = True) -> Dict[str, Any]:
+                              align_bias_scale: bool = False, verbose: bool = True,
+                              bias_bitwidth: int = 32) -> Dict[str, Any]:
     """
     完整的 Power-of-2 量化工作流
     
@@ -312,7 +313,8 @@ def apply_power_of_2_workflow(sim_model, method: str = "cover_range", tolerance:
     6. (可选) Bias Scale 对齐到 Sx * Sw
     
     Args:
-        sim_model: AIMET QuantizationSimModel.model
+        sim_model: Torch 侧传 ``QuantizationSimModel.model``；ONNX 侧传
+            ``aimet_onnx.QuantizationSimModel``（含 ``qc_quantize_op_dict``）
         method: Power-of-2 选择策略
             - "round": 全部四舍五入
             - "cover_range": 智能策略（默认）
@@ -325,10 +327,25 @@ def apply_power_of_2_workflow(sim_model, method: str = "cover_range", tolerance:
             - True: 执行对齐，使得硬件可以直接计算 (Qx*Qw + Qb)
             - False: 跳过对齐
         verbose: 是否打印详细信息
+        bias_bitwidth: 仅 ONNX 路径使用，对齐后的 Conv/Gemm/MatMul bias 位宽
     
     Returns:
         结果字典，包含统计信息和对比结果
     """
+    if hasattr(sim_model, "qc_quantize_op_dict"):
+        from aimet_onnx.rx_ptq.po2 import (
+            apply_power_of_2_workflow as apply_onnx_power_of_2_workflow,
+        )
+
+        return apply_onnx_power_of_2_workflow(
+            sim_model,
+            method=method,
+            tolerance=tolerance,
+            align_bias_scale=align_bias_scale,
+            verbose=verbose,
+            bias_bitwidth=bias_bitwidth,
+        )
+
     from aimet_torch.power_of_2_quantization import (
         print_quantizer_info,
         apply_power_of_2_quantization,
@@ -601,387 +618,57 @@ def load_mixed_precision_config(config_file: str) -> Dict[str, Any]:
     return config
 
 
-# def apply_mixed_precision_bitwidth(sim_model, config_file: str, verbose: bool = True) -> Dict[str, int]:
-    """
-    根据 JSON 配置文件应用混合精度位宽设置
-    
-    支持的配置项：
-    - weight_bitwidth: 权重位宽
-    - bias_bitwidth: 偏置位宽
-    - input_bitwidth: 输入位宽
-    - input_bitwidths: 按输入下标指定输入位宽，例如 [8, 16]
-    - output_bitwidth: 输出位宽
-    - weight_symmetric: 权重对称量化 (True/False)
-    - output_symmetric: 输出对称量化 (True/False)
-    - input_symmetric: 输入对称量化 (True/False)
-    - per_channel_quantization: 逐通道量化 (True/False)
-    - disable_quantization: 禁用量化 (True/False)
-    
-    支持模式匹配（在 layer_name_config 中）：
-    - 使用 "*" 通配符匹配层名称
-    - 例如：
-      "*.seq_t.cells.0.weight_ih": {...}  匹配所有GRU的weight_ih层
-      "enc_seqs.*.seq_t.*": {...}         匹配所有encoder的GRU内部层
-    
-    配置优先级：
-    1. layer_name_config - 精确匹配（优先级最高）
-    2. layer_name_config - 模式匹配
-    3. layer_type_config（按类型匹配）
-    4. default_bitwidth（默认值）
-    
-    Args:
-        sim_model: AIMET QuantizationSimModel.model
-        config_file: JSON 配置文件路径
-        verbose: 是否打印详细信息
-    
-    Returns:
-        统计字典，包含各类型层的设置数量
-    """
-    import fnmatch
-    
-    # 加载配置
-    config = load_mixed_precision_config(config_file)
-    
-    default_bitwidth = config.get('default_bitwidth', {})
-    default_config = config.get('default_config', {})  # 读取 default_config 字段
-    layer_type_config = config.get('layer_type_config', {})
-    layer_name_config = config.get('layer_name_config', {})
-    
-    # 过滤掉注释字段
-    layer_name_config = {k: v for k, v in layer_name_config.items() 
-                        if not k.startswith('_') and k not in ['examples', 'comment']}
-    
-    # 检查默认配置是否要求禁用量化
-    default_disable_quantization = default_config.get('disable_quantization', False)
-    
-    if verbose:
-        print("\n" + "="*70)
-        print("🔧 应用混合精度位宽配置")
-        print("="*70)
-        print(f"📄 配置文件: {config_file}")
-        print(f"📝 默认位宽: weight={default_bitwidth.get('weight', 8)}-bit, output={default_bitwidth.get('output', 8)}-bit")
-        if default_disable_quantization:
-            print(f"📝 默认策略: 禁用所有未匹配层的量化")
-        print(f"📝 类型配置数量: {len(layer_type_config)} 个层类型")
-        print(f"📝 名称配置数量: {len(layer_name_config)} 个具体层")
-        print("="*70)
-    
-    valid_layer_types = sorted({type(module).__name__ for _, module in sim_model.named_modules()})
-    invalid_layer_types = sorted(layer_type for layer_type in layer_type_config if layer_type not in valid_layer_types)
-    if invalid_layer_types:
-        valid_layer_types_msg = "\n  - " + "\n  - ".join(valid_layer_types)
-        invalid_layer_types_msg = ", ".join(repr(layer_type) for layer_type in invalid_layer_types)
-        raise ValueError(
-            "Unsupported layer_type_config key(s): "
-            f"{invalid_layer_types_msg}.\n"
-            "Layer type names are case-sensitive and must match type(module).__name__ in sim.model.\n"
-            f"Supported layer_type_config keys ({len(valid_layer_types)} total):{valid_layer_types_msg}"
-        )
-
-    # 统计信息
-    stats = {
-        'conv_count': 0,
-        'linear_count': 0,
-        'activation_count': 0,
-        'add_count': 0,
-        'multiply_count': 0,
-        'subtract_count': 0,
-        'disabled_count': 0,
-        'name_matched_count': 0,
-        'type_matched_count': 0,
-        'default_count': 0
+_LAYER_TYPE_CONFIG_COMMENT_KEYS = frozenset({"comment", "examples"})
+_LAYER_TYPE_CONFIG_JSON_ALIASES = frozenset(
+    {
+        "QuantizedSign",
     }
-    
-    # 遍历所有模块
-    for name, module in sim_model.named_modules():
-        module_type = type(module).__name__
-        
-        # 确定使用哪个配置（优先级：精确名称 > 模式匹配 > 类型 > 默认）
-        layer_config = None
-        match_type = None
-        matched_pattern = None
-        
-        # 1. 尝试按名称精确匹配
-        if name in layer_name_config:
-            layer_config = layer_name_config[name]
-            match_type = 'name'
-            stats['name_matched_count'] += 1
+)
 
-        # 2. 尝试按类型匹配（优先于通配符模式）
-        if layer_config is None and module_type in layer_type_config:
-            layer_config = layer_type_config[module_type]
-            match_type = 'type'
-            stats['type_matched_count'] += 1
 
-        # 3. 尝试按模式匹配（支持通配符 *，仅在无类型配置时生效）
-        if layer_config is None:
-            for pattern, config in layer_name_config.items():
-                if '*' in pattern and fnmatch.fnmatch(name, pattern):
-                    layer_config = config
-                    match_type = 'pattern'
-                    matched_pattern = pattern
-                    stats['name_matched_count'] += 1
-                    break
-        
-        # 4. 对于未匹配的模块，检查是否需要禁用量化
-        if layer_config is None:
-            # 检查模块是否有量化器（更可靠的判断方式）
-            has_quantizers = (
-                (hasattr(module, 'param_quantizers') and module.param_quantizers) or
-                (hasattr(module, 'output_quantizers') and len(module.output_quantizers) > 0 and any(q is not None for q in module.output_quantizers)) or
-                (hasattr(module, 'input_quantizers') and len(module.input_quantizers) > 0 and any(q is not None for q in module.input_quantizers))
-            )
-            
-            # 如果默认配置要求禁用量化，且模块有量化器，则禁用量化
-            if default_disable_quantization and has_quantizers:
-                _disable_quantization(module, name, verbose=False)
-                stats['disabled_count'] += 1
-                continue
-            # 否则，对于已量化的层，使用默认位宽配置
-            elif has_quantizers:
-                layer_config = default_bitwidth
-                match_type = 'default'
-                stats['default_count'] += 1
-        
-        # 应用配置
-        if layer_config:
-            # 检查是否禁用量化
-            if layer_config.get('disable_quantization', False):
-                _disable_quantization(module, name, verbose)
-                stats['disabled_count'] += 1
-                continue
-            
-            # 设置权重量化参数
-            if hasattr(module, 'param_quantizers') and 'weight' in module.param_quantizers:
-                weight_quantizer = module.param_quantizers['weight']
-                if weight_quantizer is not None:
-                    changes = []
-                    
-                    # 位宽
-                    weight_bw = layer_config.get('weight_bitwidth')
-                    if weight_bw:
-                        weight_quantizer.bitwidth = weight_bw
-                        # 🔧 FIX: 更新 qmin 和 qmax 以匹配新的位宽
-                        if hasattr(weight_quantizer, 'symmetric') and weight_quantizer.symmetric:
-                            # 对称量化
-                            weight_quantizer.qmin = -(2 ** (weight_bw - 1))
-                            weight_quantizer.qmax = 2 ** (weight_bw - 1) - 1
-                        else:
-                            # 非对称量化
-                            weight_quantizer.qmin = 0
-                            weight_quantizer.qmax = 2 ** weight_bw - 1
-                        changes.append(f"{weight_bw}-bit")
-                    
-                    # 对称性
-                    weight_sym = layer_config.get('weight_symmetric')
-                    if weight_sym is not None:
-                        weight_quantizer.symmetric = weight_sym
-                        # 🔧 如果改变了对称性，需要重新计算 qmin/qmax
-                        # 使用配置的位宽或当前的位宽
-                        bw = weight_bw if weight_bw else weight_quantizer.bitwidth
-                        if weight_sym:
-                            weight_quantizer.qmin = -(2 ** (bw - 1))
-                            weight_quantizer.qmax = 2 ** (bw - 1) - 1
-                        else:
-                            weight_quantizer.qmin = 0
-                            weight_quantizer.qmax = 2 ** bw - 1
-                        changes.append(f"{'sym' if weight_sym else 'asym'}")
-                    
-                    if changes:
-                        if verbose:
-                            if match_type == 'pattern':
-                                print(f"  ✅ [pattern: {matched_pattern}] {name}.weight: {', '.join(changes)}")
-                            else:
-                                print(f"  ✅ [{match_type}] {name}.weight: {', '.join(changes)}")
-                    
-                    if 'Conv' in module_type:
-                        stats['conv_count'] += 1
-                    elif 'Linear' in module_type:
-                        stats['linear_count'] += 1
-                    elif 'Add' in module_type:
-                        stats['add_count'] += 1
-                    elif 'Multiply' in module_type:
-                        stats['multiply_count'] += 1
-                    elif 'Subtract' in module_type:
-                        stats['subtract_count'] += 1
-                else:
-                    # 调试：量化器是 None
-                    if match_type == 'pattern' and 'Linear' in module_type and verbose:
-                        print(f"  ⚠️  [pattern: {matched_pattern}] {name}.weight: 量化器是 None，无法设置")
-            else:
-                # 调试：没有 param_quantizers
-                if match_type == 'pattern' and 'Linear' in module_type and verbose:
-                    print(f"  ⚠️  [pattern: {matched_pattern}] {name}: 没有 param_quantizers['weight']")
-            
-            # 设置 bias 量化参数（新增）
-            if hasattr(module, 'param_quantizers') and 'bias' in module.param_quantizers:
-                bias_quantizer = module.param_quantizers['bias']
-                if bias_quantizer is not None:
-                    changes = []
-                    
-                    # 位宽
-                    bias_bw = layer_config.get('bias_bitwidth')
-                    if bias_bw:
-                        bias_quantizer.bitwidth = bias_bw
-                        # 🔧 FIX: 更新 qmin 和 qmax 以匹配新的位宽
-                        if hasattr(bias_quantizer, 'symmetric') and bias_quantizer.symmetric:
-                            # 对称量化
-                            bias_quantizer.qmin = -(2 ** (bias_bw - 1))
-                            bias_quantizer.qmax = 2 ** (bias_bw - 1) - 1
-                        else:
-                            # 非对称量化
-                            bias_quantizer.qmin = 0
-                            bias_quantizer.qmax = 2 ** bias_bw - 1
-                        changes.append(f"{bias_bw}-bit")
-                    
-                    # bias 通常使用对称量化
-                    bias_sym = layer_config.get('bias_symmetric')
-                    if bias_sym is not None:
-                        bias_quantizer.symmetric = bias_sym
-                        # 🔧 如果改变了对称性，需要重新计算 qmin/qmax
-                        # 使用配置的位宽或当前的位宽
-                        bw = bias_bw if bias_bw else bias_quantizer.bitwidth
-                        if bias_sym:
-                            bias_quantizer.qmin = -(2 ** (bw - 1))
-                            bias_quantizer.qmax = 2 ** (bw - 1) - 1
-                        else:
-                            bias_quantizer.qmin = 0
-                            bias_quantizer.qmax = 2 ** bw - 1
-                        changes.append(f"{'sym' if bias_sym else 'asym'}")
-                    
-                    if changes and verbose:
-                        if match_type == 'pattern':
-                            print(f"  ✅ [pattern: {matched_pattern}] {name}.bias: {', '.join(changes)}")
-                        else:
-                            print(f"  ✅ [{match_type}] {name}.bias: {', '.join(changes)}")
-            
-            # 设置输入量化参数
-            if hasattr(module, 'input_quantizers') and len(module.input_quantizers) > 0:
-                for idx, input_quantizer in enumerate(module.input_quantizers):
-                    if input_quantizer is not None:
-                        changes = []
-                        
-                        # 位宽
-                        input_bw = layer_config.get('input_bitwidth')
-                        if input_bw:
-                            input_quantizer.bitwidth = input_bw
-                            # 🔧 FIX: 更新 qmin 和 qmax 以匹配新的位宽
-                            if hasattr(input_quantizer, 'symmetric') and input_quantizer.symmetric:
-                                # 对称量化
-                                input_quantizer.qmin = -(2 ** (input_bw - 1))
-                                input_quantizer.qmax = 2 ** (input_bw - 1) - 1
-                            else:
-                                # 非对称量化
-                                input_quantizer.qmin = 0
-                                input_quantizer.qmax = 2 ** input_bw - 1
-                            changes.append(f"{input_bw}-bit")
-                        
-                        # 对称性
-                        input_sym = layer_config.get('input_symmetric')
-                        if input_sym is not None:
-                            input_quantizer.symmetric = input_sym
-                            # 🔧 如果改变了对称性，需要重新计算 qmin/qmax
-                            # 使用配置的位宽或当前的位宽
-                            bw = input_bw if input_bw else input_quantizer.bitwidth
-                            if input_sym:
-                                input_quantizer.qmin = -(2 ** (bw - 1))
-                                input_quantizer.qmax = 2 ** (bw - 1) - 1
-                            else:
-                                input_quantizer.qmin = 0
-                                input_quantizer.qmax = 2 ** bw - 1
-                            changes.append(f"{'sym' if input_sym else 'asym'}")
-                        
-                        if verbose and changes:
-                            # 对于多个输入量化器，显示索引
-                            if len(module.input_quantizers) > 1:
-                                print(f"  ✅ [{match_type}] {name}.input[{idx}]: {', '.join(changes)}")
-                            else:
-                                print(f"  ✅ [{match_type}] {name}.input: {', '.join(changes)}")
-            
-            # 设置输出量化参数
-            if hasattr(module, 'output_quantizers') and len(module.output_quantizers) > 0:
-                output_quantizer = module.output_quantizers[0]
-                output_bw = layer_config.get('output_bitwidth')
-                output_sym = layer_config.get('output_symmetric')
-                if output_quantizer is None and output_bw is not None:
-                    try:
-                        from aimet_torch.v2.quantization.affine import QuantizeDequantize
-                        import torch.nn as _nn
-                        sym = output_sym if output_sym is not None else True
-                        new_q = QuantizeDequantize(shape=(), bitwidth=output_bw, symmetric=sym)
-                        slots = list(module.output_quantizers)
-                        slots[0] = new_q
-                        module.output_quantizers = _nn.ModuleList(slots)
-                        output_quantizer = new_q
-                        if verbose:
-                            label = f"pattern: {matched_pattern}" if match_type == 'pattern' else match_type
-                            print(f"  ➕ [{label}] {name}.output[0]: 创建新 quantizer {output_bw}-bit {'sym' if sym else 'asym'}")
-                    except Exception as _e:
-                        if verbose:
-                            print(f"  ⚠️  {name}.output[0]: 创建 quantizer 失败 - {_e}")
-                if output_quantizer is not None:
-                    changes = []
-                    
-                    # 位宽
-                    if output_bw:
-                        output_quantizer.bitwidth = output_bw
-                        # 🔧 FIX: 更新 qmin 和 qmax 以匹配新的位宽
-                        if hasattr(output_quantizer, 'symmetric') and output_quantizer.symmetric:
-                            # 对称量化
-                            output_quantizer.qmin = -(2 ** (output_bw - 1))
-                            output_quantizer.qmax = 2 ** (output_bw - 1) - 1
-                        else:
-                            # 非对称量化
-                            output_quantizer.qmin = 0
-                            output_quantizer.qmax = 2 ** output_bw - 1
-                        changes.append(f"{output_bw}-bit")
-                    
-                    # 对称性
-                    if output_sym is not None:
-                        output_quantizer.symmetric = output_sym
-                        # 🔧 如果改变了对称性，需要重新计算 qmin/qmax
-                        # 使用配置的位宽或当前的位宽
-                        bw = output_bw if output_bw else output_quantizer.bitwidth
-                        if output_sym:
-                            output_quantizer.qmin = -(2 ** (bw - 1))
-                            output_quantizer.qmax = 2 ** (bw - 1) - 1
-                        else:
-                            output_quantizer.qmin = 0
-                            output_quantizer.qmax = 2 ** bw - 1
-                        changes.append(f"{'sym' if output_sym else 'asym'}")
-                    
-                    if verbose and changes:
-                        # 只在没有设置权重时打印，避免重复
-                        if not (hasattr(module, 'param_quantizers') and 'weight' in module.param_quantizers):
-                            print(f"  ✅ [{match_type}] {name}.output: {', '.join(changes)}")
-                    
-                    # 统计不同类型的层（只统计有输出量化器的层）
-                    if 'Tanh' in module_type or 'Sigmoid' in module_type or 'ReLU' in module_type:
-                        stats['activation_count'] += 1
-                    elif 'Add' in module_type:
-                        stats['add_count'] += 1
-                    elif 'Multiply' in module_type:
-                        stats['multiply_count'] += 1
-                    elif 'Subtract' in module_type:
-                        stats['subtract_count'] += 1
-    
-    # 打印统计
-    if verbose:
-        print("="*70)
-        print(f"📊 位宽设置统计:")
-        print(f"  • Conv 层:         {stats['conv_count']} 个")
-        print(f"  • Linear 层:       {stats['linear_count']} 个")
-        print(f"  • Add 层:          {stats['add_count']} 个")
-        print(f"  • Multiply 层:     {stats['multiply_count']} 个")
-        print(f"  • Subtract 层:     {stats['subtract_count']} 个")
-        print(f"  • 激活函数层:      {stats['activation_count']} 个")
-        print(f"  • 禁用量化层:      {stats['disabled_count']} 个")
-        print(f"  • 按名称匹配:      {stats['name_matched_count']} 个")
-        print(f"  • 按类型匹配:      {stats['type_matched_count']} 个")
-        print(f"  • 使用默认值:      {stats['default_count']} 个")
-        print("="*70)
-    
-    return stats
+def _is_layer_type_config_comment(key: str) -> bool:
+    return str(key).startswith("_") or key in _LAYER_TYPE_CONFIG_COMMENT_KEYS
+
+
+def known_layer_type_config_keys() -> Set[str]:
+    """Registered ``Quantized*`` class names that JSON 2 may list, plus aliases."""
+    names: Set[str] = set(_LAYER_TYPE_CONFIG_JSON_ALIASES)
+    try:
+        import aimet_torch.v2.nn.true_quant  # noqa: F401
+        import aimet_torch.v2.nn.modules.custom  # noqa: F401
+        from aimet_torch.quantizable_batchnorm import QuantizableBatchNorm2d  # noqa: F401
+        from aimet_torch.v2.nn import QuantizationMixin
+
+        names.update(qcls.__name__ for qcls in QuantizationMixin.cls_to_qcls.values())
+    except ImportError:
+        pass
+    return names
+
+
+def classify_unused_layer_type_config_keys(
+    layer_type_config: Mapping[str, Any],
+    present_layer_types: Iterable[str],
+) -> Tuple[list, list]:
+    """Split JSON 2 type keys that are not in the model into (ignored, typos).
+
+    * Present in ``sim.model``: applied later, not returned.
+    * Registered ``Quantized*`` (or a documented alias) but absent here: ignore.
+    * Anything else: treat as a misspelled type name.
+    """
+    present = set(present_layer_types)
+    known = known_layer_type_config_keys()
+    ignored = []
+    unknown = []
+    for layer_type in layer_type_config:
+        if _is_layer_type_config_comment(layer_type) or layer_type in present:
+            continue
+        if layer_type in known:
+            ignored.append(layer_type)
+        else:
+            unknown.append(layer_type)
+    return sorted(ignored), sorted(unknown)
+
+
 
 def apply_mixed_precision_bitwidth(sim_model, config_file: str, verbose: bool = True) -> Dict[str, int]:
     """
@@ -1001,6 +688,12 @@ def apply_mixed_precision_bitwidth(sim_model, config_file: str, verbose: bool = 
     - param_symmetric: 通用参数对称量化 (True/False)，与 param_bitwidth 配合使用
     - per_channel_quantization: 逐通道量化 (True/False)
     - disable_quantization: 禁用量化 (True/False)
+
+    Torch 侧扫 ``sim.model`` 的 ``Quantized*`` 模块。JSON 2 是通用类型清单：
+    当前模型没有、但已注册的 ``Quantized*`` 直接忽略（与 ONNX 一致）；未注册
+    且模型里也没有的 key 视为拼写错误并报错。ONNX 侧传入带
+    ``qc_quantize_op_dict`` 的 sim 时复用同一份 JSON，对不上的类型和
+    ``GRU_config`` 同样忽略。
     
     支持模式匹配（在 layer_name_config 中）：
     - 使用 "*" 通配符匹配层名称
@@ -1022,6 +715,15 @@ def apply_mixed_precision_bitwidth(sim_model, config_file: str, verbose: bool = 
     Returns:
         统计字典，包含各类型层的设置数量
     """
+    if hasattr(sim_model, "qc_quantize_op_dict"):
+        from aimet_onnx.rx_ptq.mixed_precision import (
+            apply_onnx_mixed_precision_bitwidth,
+        )
+
+        return apply_onnx_mixed_precision_bitwidth(
+            sim_model, config_file, verbose=verbose
+        )
+
     import fnmatch
     
     # 加载配置
@@ -1051,17 +753,20 @@ def apply_mixed_precision_bitwidth(sim_model, config_file: str, verbose: bool = 
         print(f"📝 名称配置数量: {len(layer_name_config)} 个具体层")
         print("="*70)
     
-    valid_layer_types = sorted({type(module).__name__ for _, module in sim_model.named_modules()})
-    invalid_layer_types = sorted(layer_type for layer_type in layer_type_config if layer_type not in valid_layer_types)
-    if invalid_layer_types:
-        valid_layer_types_msg = "\n  - " + "\n  - ".join(valid_layer_types)
-        invalid_layer_types_msg = ", ".join(repr(layer_type) for layer_type in invalid_layer_types)
+    present_layer_types = {type(module).__name__ for _, module in sim_model.named_modules()}
+    ignored_layer_types, unknown_layer_types = classify_unused_layer_type_config_keys(
+        layer_type_config, present_layer_types
+    )
+    if unknown_layer_types:
+        unknown_msg = ", ".join(repr(name) for name in unknown_layer_types)
         raise ValueError(
-            "Unsupported layer_type_config key(s): "
-            f"{invalid_layer_types_msg}.\n"
-            "Layer type names are case-sensitive and must match type(module).__name__ in sim.model.\n"
-            f"Supported layer_type_config keys ({len(valid_layer_types)} total):{valid_layer_types_msg}"
+            "Unknown layer_type_config key(s): "
+            f"{unknown_msg}. "
+            "Not a registered Quantized* type and not present in sim.model; "
+            "check spelling. Types that exist but are absent from this model are ignored."
         )
+    if ignored_layer_types and verbose:
+        print(f"  忽略当前模型没有的类型: {ignored_layer_types}")
 
     # 统计信息
     stats = {

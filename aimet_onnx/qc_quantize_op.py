@@ -554,6 +554,23 @@ class QcQuantizeOp:
         self._tensor_quantizer = self._build_tensor_quantizer()
         self.reset_encoding_stats()
 
+    def set_percentile_value(self, percentile_value: float):
+        """Set percentile used by the C++ encoding analyzer.
+
+        No-op unless this quantizer uses ``QuantScheme.post_training_percentile``.
+        The native analyzer defaults to 100 (plain min/max) until this is called.
+        """
+        if self.quant_scheme != QuantScheme.post_training_percentile:
+            return
+        if not 50.0 < float(percentile_value) <= 100.0:
+            raise ValueError(f"percentile 必须在 (50, 100]，得到: {percentile_value}")
+        tensor_quantizer = self._tensor_quantizer
+        if not hasattr(tensor_quantizer, "setPercentileValue"):
+            raise RuntimeError(
+                "当前 libpymo BlockTensorQuantizer 缺少 setPercentileValue"
+            )
+        tensor_quantizer.setPercentileValue(float(percentile_value))
+
     def compute_encodings(self) -> Optional[List[libpymo.TfEncoding]]:
         """
         Compute and return encodings of each tensor quantizer
