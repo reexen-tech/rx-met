@@ -126,8 +126,8 @@ cat <<EOF
 
 下一步：
   1. 将数据集挂到容器 /datasets
-       小模型:  /datasets/speech_commands_v0.02
-       ONNX:    /datasets/yolo-fastest  或  /datasets/watchhar
+       PyTorch: /datasets/speech_commands_v0.02
+       ONNX:    /datasets/mobilenetv2（先运行 examples/prepare_onnx_ptq_data.py）
   2. cd ${PKG_DIR}/examples
   3. python3 quick_start_kws.py
      python3 onnx_ptq_quick_start.py

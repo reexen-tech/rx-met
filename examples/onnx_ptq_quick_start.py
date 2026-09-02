@@ -1,5 +1,5 @@
 """
-AIMET ONNX PTQ 演示 — 标准用法
+RX-MET ONNX PTQ 演示 — 标准用法
 
 对应 examples/quick_start.py 的 Torch QAT 入口。流程对齐，接口尽量复用：
 
@@ -18,8 +18,8 @@ main() 只编排已有模块，不复制量化规则。
 
     python onnx_ptq_quick_start.py
 
-默认跑 yolo-fastest。数据集根目录默认 `/datasets`，可用
-`RX_MET_ONNX_PTQ_ROOT` / `RX_MET_ONNX_PTQ_MODEL` / `RX_MET_ONNX_PTQ_CALIB` 覆盖。
+跑 MobileNetV2 示例。先用 `prepare_onnx_ptq_data.py` 从 ImageNette
+parquet 生成 calib/val npy。模型和校准目录可用环境变量覆盖。
 """
 
 from __future__ import annotations
@@ -52,19 +52,14 @@ from aimet_onnx.rx_ptq import (
 # ============================================================================
 # 全局配置（复制后改这里即可，无 CLI）
 # ============================================================================
-EXAMPLE = os.environ.get("RX_MET_ONNX_PTQ_EXAMPLE", "yolo-fastest")
+EXAMPLE = os.environ.get("RX_MET_ONNX_PTQ_EXAMPLE", "mobilenetv2")
 
 _DATA = Path(os.environ.get("RX_MET_ONNX_PTQ_ROOT", "/datasets"))
 EXAMPLES = {
-    "yolo-fastest": {
-        "model": _DATA / "yolo-fastest" / "yolo-fastest.onnx",
-        "calib_dir": _DATA / "yolo-fastest" / "input",
-        "prefix": "yolo_fastest_ptq",
-    },
-    "watchhar": {
-        "model": _DATA / "watchhar" / "watchhar.onnx",
-        "calib_dir": _DATA / "watchhar" / "input",
-        "prefix": "watchhar_ptq",
+    "mobilenetv2": {
+        "model": _DATA / "mobilenetv2" / "mobilenetv2-12.onnx",
+        "calib_dir": _DATA / "mobilenetv2" / "calib",
+        "prefix": "mobilenetv2_ptq",
     },
 }
 
@@ -151,7 +146,7 @@ def print_stage_timings(timings: dict) -> None:
 # ============================================================================
 def main() -> None:
     if EXAMPLE not in EXAMPLES:
-        raise KeyError(f"未知 EXAMPLE={EXAMPLE}，可选: {sorted(EXAMPLES)}")
+        raise KeyError(f"未知 EXAMPLE={EXAMPLE}，当前支持: {sorted(EXAMPLES)}")
 
     spec = EXAMPLES[EXAMPLE]
     model_path = Path(os.environ.get("RX_MET_ONNX_PTQ_MODEL", spec["model"]))
@@ -161,7 +156,7 @@ def main() -> None:
     timings: dict = {}
 
     print("=" * 70)
-    print("AIMET ONNX PTQ 演示 — 标准用法（复用 RX 量化接口）")
+    print("RX-MET ONNX PTQ 演示 — 标准用法（复用 RX 量化接口）")
     print("=" * 70)
     print(f"example:    {EXAMPLE}")
     print(f"model:      {model_path}")
@@ -268,7 +263,7 @@ def main() -> None:
 
     # ------------------------------------------------------------------
     # 步骤 7: 保存量化产物
-    #   对应 export_onnx_json：clean ONNX + compiler encodings + AIMET raw。
+    #   对应 export_onnx_json：clean ONNX + compiler encodings + RX-MET raw。
     # ------------------------------------------------------------------
     with stage("步骤 7: 保存量化产物", timings):
         artifacts = export_onnx_compiler_artifacts(
@@ -276,7 +271,7 @@ def main() -> None:
         )
         print(f"ONNX:              {artifacts['onnx']}")
         print(f"compiler encodings:{artifacts['encodings']}")
-        print(f"AIMET encodings:   {artifacts['aimet_encodings']}")
+        print(f"RX-MET encodings:   {artifacts['rxmet_encodings']}")
         print(
             "coverage: "
             f"{artifacts['coverage']['mapped_quantizers']}/"
@@ -319,7 +314,7 @@ def main() -> None:
             "clean_onnx_vs_fp32": reload_report,
             "onnx": str(artifacts["onnx"]),
             "compiler_encodings": str(artifacts["encodings"]),
-            "aimet_encodings": str(artifacts["aimet_encodings"]),
+            "rxmet_encodings": str(artifacts["rxmet_encodings"]),
         },
     )
     print_stage_timings(timings)

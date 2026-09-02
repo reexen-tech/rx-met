@@ -16,7 +16,6 @@
 - 小模型示例：`examples/quick_start_kws.py`
 - ONNX PTQ 示例：`examples/onnx_ptq_quick_start.py`
 - 量化配置：[examples/config/README.md](examples/config/README.md)
-- AIMET 定制说明：[aimet_README.md](aimet_README.md)
 
 ## 主要目录
 

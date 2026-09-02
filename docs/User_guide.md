@@ -1,7 +1,7 @@
 # rx-met 用户使用指南
 
 > 本文档遵循《Reexen 工具链软件文档管理规范》第 11.1 节「工具链快速上手」基线模板编写，
-> 面向首次接触 rx-met 的客户与内部用户，目标是让你在最短时间内跑通第一个量化流程。
+> 面向首次接触 rx-met 的用户，目标是让你在最短时间内跑通第一个量化流程。
 
 | 项目 | 内容 |
 |------|------|
@@ -90,7 +90,7 @@ pip install --no-index --no-deps rx_met-*.whl quant_gru-*.whl
 |-------------|------|----------|
 | `RX_MET_SPEECH_COMMANDS_ROOT` | Speech Commands 数据集根目录，默认 `/datasets/speech_commands_v0.02` | 普通模型 |
 | `RX_MET_ONNX_PTQ_ROOT` | ONNX 示例数据集根目录，默认 `/datasets` | ONNX PTQ |
-| `RX_MET_ONNX_PTQ_EXAMPLE` | `yolo-fastest` 或 `watchhar` | ONNX PTQ |
+| `RX_MET_ONNX_PTQ_EXAMPLE` | 示例名称，默认 `mobilenetv2` | ONNX PTQ |
 | `RX_MET_ONNX_PTQ_MODEL` / `RX_MET_ONNX_PTQ_CALIB` | 覆盖模型与校准目录 | ONNX PTQ |
 | `RX_MET_SKIP_ENV_CHECK` | `1` 时跳过 `install.sh` 环境检查 | 安装 |
 | 运行目录 | demo 须 `cd examples/` 后运行 | 两者 |
@@ -242,7 +242,7 @@ cd examples
 python onnx_ptq_quick_start.py
 ```
 
-默认跑 yolo-fastest，数据根目录 `/datasets`。换 watchhar 或自己的模型时，改 `RX_MET_ONNX_PTQ_EXAMPLE` / 路径环境变量。更细的编译器产物说明见 [`ONNX_PTQ_COMPILER.md`](./ONNX_PTQ_COMPILER.md)。
+本示例使用 MobileNetV2。Zoo 模型是动态 batch，校准样本也不是 npy，需要先跑 `examples/prepare_onnx_ptq_data.py`（冻结 batch=1，按 ImageNet 预处理写出 calib/val npy）。数据根目录默认 `/datasets/mobilenetv2`。换自己的模型时，用 `RX_MET_ONNX_PTQ_MODEL` 和 `RX_MET_ONNX_PTQ_CALIB` 指向对应文件与校准目录。更细的编译器产物说明见 [`ONNX_PTQ_COMPILER.md`](./ONNX_PTQ_COMPILER.md)。
 
 ---
 

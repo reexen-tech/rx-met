@@ -144,8 +144,8 @@ def iter_calibration_feeds(
 
     ``npz`` files must contain one array per ONNX input name.  For a
     single-input model, individual ``npy`` files are accepted.  For the
-    two-input watchhar layout, files containing ``imu`` and ``audio`` are
-    paired by their sample prefix.
+    two-input layout, files that share a sample prefix are paired
+    (for example ``imu`` with ``audio``).
     """
     root = Path(calibration_dir)
     if not root.is_dir():

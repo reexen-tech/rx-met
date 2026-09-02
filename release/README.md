@@ -52,10 +52,17 @@ cd /workspace/rx-met
 脚本会校验 CPython 3.10、Linux x86_64、`torch==2.8.0` 且 `torch.version.cuda == 12.8`，
 然后离线安装 `wheels/`。临时跳过检查：`RX_MET_SKIP_ENV_CHECK=1 ./install.sh`。
 
-## 3. 小模型示例（kws_streaming att_mh_rnn / QuantGRU）
+## 3. PyTorch 模型示例（kws_streaming att_mh_rnn / QuantGRU）
 
-将 Speech Commands 放到宿主机数据集目录，容器内路径为
-`/datasets/speech_commands_v0.02`。
+将 Speech Commands v0.02 放到宿主机数据集目录（容器内是
+`/datasets/speech_commands_v0.02`）：
+
+```bash
+mkdir -p /path/to/datasets/speech_commands_v0.02
+wget -O speech_commands_v0.02.tar.gz \
+  https://storage.googleapis.com/download.tensorflow.org/data/speech_commands_v0.02.tar.gz
+tar -xf speech_commands_v0.02.tar.gz -C /path/to/datasets/speech_commands_v0.02
+```
 
 ```bash
 cd /workspace/rx-met/examples
@@ -68,18 +75,26 @@ python3 quick_start_kws.py
 
 ## 4. ONNX 直量化示例
 
-默认读 `/datasets/<name>/`，也可用环境变量覆盖：
+本示例使用 MobileNetV2。先在能访问 `hf-mirror.com` 的机器上准备数据：
 
-| 变量 | 默认 |
-| --- | --- |
-| `RX_MET_ONNX_PTQ_ROOT` | `/datasets` |
-| `RX_MET_ONNX_PTQ_EXAMPLE` | `yolo-fastest` |
-| `RX_MET_ONNX_PTQ_MODEL` | `$RX_MET_ONNX_PTQ_ROOT/yolo-fastest/yolo-fastest.onnx` |
-| `RX_MET_ONNX_PTQ_CALIB` | `$RX_MET_ONNX_PTQ_ROOT/yolo-fastest/input` |
+```bash
+wget -O mobilenetv2-12.onnx \
+  https://hf-mirror.com/onnxmodelzoo/mobilenetv2-12/resolve/main/mobilenetv2-12.onnx
+wget -O imagenette2-320.parquet \
+  https://hf-mirror.com/datasets/johnowhitaker/imagenette2-320/resolve/main/data/train-00000-of-00001.parquet
+python3 prepare_onnx_ptq_data.py \
+  --onnx mobilenetv2-12.onnx \
+  --parquet imagenette2-320.parquet \
+  --out-root /datasets/mobilenetv2
+```
+
+脚本会写出静态 batch=1 的 ONNX，以及不重叠的 `calib/`、`val/` npy。然后：
 
 ```bash
 cd /workspace/rx-met/examples
 python3 onnx_ptq_quick_start.py
 ```
+
+模型和校准目录默认是 `/datasets/mobilenetv2/`。换自己的模型时，用 `RX_MET_ONNX_PTQ_MODEL` 和 `RX_MET_ONNX_PTQ_CALIB` 指向对应文件与校准 npy 目录。
 
 这条路径使用 CPU ONNX Runtime，与 example 默认 `USE_CPU = True` 一致。

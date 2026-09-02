@@ -28,6 +28,7 @@ dist/
 *.egg
 .eggs/
 pip-wheel-metadata/
+*/tmp/
 
 # ===== 测试 / Lint =====
 .pytest_cache/

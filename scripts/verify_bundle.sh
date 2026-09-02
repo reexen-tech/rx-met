@@ -38,6 +38,7 @@ log "layout"
 [[ -f "${PKG}/ChangeLog.md" ]] || die "ChangeLog.md missing"
 [[ -f "${PKG}/examples/quick_start_kws.py" ]] || die "quick_start_kws.py missing"
 [[ -f "${PKG}/examples/onnx_ptq_quick_start.py" ]] || die "onnx_ptq_quick_start.py missing"
+[[ -f "${PKG}/examples/prepare_onnx_ptq_data.py" ]] || die "prepare_onnx_ptq_data.py missing"
 [[ -f "${PKG}/examples/config/mrnn_quantsim_config_custom_mixed_precision_v2.json" ]] \
     || die "QuantSim config JSON missing"
 [[ -f "${PKG}/examples/config/quick_start_full_quant.json" ]] \

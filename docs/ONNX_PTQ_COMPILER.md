@@ -20,33 +20,20 @@ python onnx_ptq_quick_start.py
 - 已构建 rx-met 的 ONNX native runtime；
 - 校准目录使用真实数据，不使用随机数据生成正式产物。
 
-## yolo-fastest
+## MobileNetV2
 
-现有 3 个 `.npy` 样本可用于通路验证：
-
-```bash
-python3 scripts/ptq_onnx_compiler.py \
-  --model /mnt/data1/share/datasets/ziguangzhanrui/model/yolo-fast_face/yolo-fastest.onnx \
-  --calib-dir /mnt/data1/share/datasets/ziguangzhanrui/model/yolo-fast_face/input \
-  --output-dir /mnt/data1/share/datasets/ziguangzhanrui/output/yolo-fastest-ptq \
-  --prefix yolo_fastest_ptq \
-  --cpu
-```
-
-输入名 `image_input` 会从 ONNX 图自动读取，不需要重命名为 `input`。
-
-## watchhar
-
-工具会按 `sampleN` 自动配对 IMU 与 audio：
+先用 `examples/prepare_onnx_ptq_data.py` 生成静态 batch=1 的 ONNX 和 calib npy：
 
 ```bash
 python3 scripts/ptq_onnx_compiler.py \
-  --model /mnt/data1/share/datasets/ziguangzhanrui/model/watchhar/watchhar.onnx \
-  --calib-dir /mnt/data1/share/datasets/ziguangzhanrui/model/watchhar/input \
-  --output-dir /mnt/data1/share/datasets/ziguangzhanrui/output/watchhar-ptq \
-  --prefix watchhar_ptq \
+  --model /datasets/mobilenetv2/mobilenetv2-12.onnx \
+  --calib-dir /datasets/mobilenetv2/calib \
+  --output-dir /datasets/mobilenetv2/output \
+  --prefix mobilenetv2_ptq \
   --cpu
 ```
+
+输入名从 ONNX 图自动读取。多输入模型可用同一 sample 前缀的 npy，或改用 npz。
 
 ## 输出
 
