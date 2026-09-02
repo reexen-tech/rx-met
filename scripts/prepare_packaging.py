@@ -49,8 +49,9 @@ def main() -> None:
 
     root: Path = args.root
     version = args.version.strip()
+    # Wheel / PEP 440 cannot start with "v". Use the component MAJOR.MINOR.PATCH.
     if not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", version):
-        raise SystemExit(f"invalid PEP 440 release version: {version}")
+        raise SystemExit(f"invalid wheel version, expected MAJOR.MINOR.PATCH: {version}")
 
     pyproject = root / "pyproject.toml"
     pyproject.write_text(_strip_pyproject(pyproject.read_text(encoding="utf-8")), encoding="utf-8")

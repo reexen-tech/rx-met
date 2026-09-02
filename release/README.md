@@ -12,7 +12,7 @@
 └── examples/
 ```
 
-Wheel 版本：`@VERSION@`。
+软件包：`@BUNDLE_NAME@`。组件版本：`@SEMVER@`（wheel `@VERSION@`）。所属 ADA200 SDK：`@SDK_TAG@`。
 
 ## 环境要求
 
@@ -52,7 +52,7 @@ cd /workspace/rx-met
 脚本会校验 CPython 3.10、Linux x86_64、`torch==2.8.0` 且 `torch.version.cuda == 12.8`，
 然后离线安装 `wheels/`。临时跳过检查：`RX_MET_SKIP_ENV_CHECK=1 ./install.sh`。
 
-## 3. 小模型示例（PyTorch / QuantGRU）
+## 3. 小模型示例（kws_streaming att_mh_rnn / QuantGRU）
 
 将 Speech Commands 放到宿主机数据集目录，容器内路径为
 `/datasets/speech_commands_v0.02`。
@@ -61,10 +61,10 @@ cd /workspace/rx-met
 cd /workspace/rx-met/examples
 # ada200_docker 若未登记 CUDA runtime，先: source /workspace/rx-met/cuda_libs.env
 export RX_MET_SPEECH_COMMANDS_ROOT=/datasets/speech_commands_v0.02
-python3 quick_start.py
+python3 quick_start_kws.py
 ```
 
-输出写在 `examples/output/`。量化 JSON 见 `examples/config/README.md`。
+输出写在 `examples/output/quick_start_kws/`。量化 JSON 见 `examples/config/README.md`。
 
 ## 4. ONNX 直量化示例
 

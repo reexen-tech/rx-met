@@ -129,7 +129,7 @@ cat <<EOF
        小模型:  /datasets/speech_commands_v0.02
        ONNX:    /datasets/yolo-fastest  或  /datasets/watchhar
   2. cd ${PKG_DIR}/examples
-  3. python3 quick_start.py
+  3. python3 quick_start_kws.py
      python3 onnx_ptq_quick_start.py
 
 EOF

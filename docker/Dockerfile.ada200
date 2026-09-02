@@ -1,0 +1,21 @@
+# ada200 运行时契约。仅在本机没有官方 ada200_docker 时使用。
+# 不要打成 ada200_docker:latest。
+FROM ubuntu:22.04
+
+ARG DEBIAN_FRONTEND=noninteractive
+ENV TZ=Asia/Shanghai
+
+RUN ln -snf /usr/share/zoneinfo/$TZ /etc/localtime && echo $TZ > /etc/timezone \
+    && apt-get update && apt-get install -y --no-install-recommends \
+        ca-certificates \
+        python3 \
+        python3-pip \
+    && ln -sf /usr/bin/python3 /usr/bin/python \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN python3 -m pip install --no-cache-dir \
+        torch==2.8.0 \
+        torchvision==0.23.0 \
+        --index-url https://download.pytorch.org/whl/cu128
+
+LABEL rx.met.role="ada200-runtime"

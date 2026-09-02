@@ -17,13 +17,14 @@ log "torchaudio 2.8.0 (cu128, no deps — torch is already in ada200_docker)"
     --index-url https://download.pytorch.org/whl/cu128 \
     torchaudio==2.8.0
 
-log "librosa + soundfile + onnxsim and their missing transitive wheels"
+log "librosa + soundfile + onnxsim + tqdm and their missing transitive wheels"
 "${PYTHON}" -m pip download \
     --dest "${OUT_DIR}" \
     --only-binary=:all: \
     librosa==0.11.0 \
     soundfile==0.13.1 \
-    onnxsim==0.7.0
+    onnxsim==0.7.0 \
+    tqdm==4.67.1
 
 # Keep the tarball from carrying a second copy of packages already in ada200_docker.
 shopt -s nullglob

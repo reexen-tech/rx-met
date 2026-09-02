@@ -21,7 +21,6 @@ env/
 ENV/
 
 # ===== 打包 / 构建产物 =====
-/VERSION
 build/
 dist/
 /.release/

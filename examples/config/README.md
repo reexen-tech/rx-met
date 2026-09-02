@@ -8,7 +8,7 @@
 | `mrnn_quantsim_config_custom_mixed_precision_v2.json` | QuantSim 基础配置 | `QuantizationSimModel(..., config_file=...)` |
 | `quick_start_full_quant.json` | 混合精度位宽 | `apply_mixed_precision_bitwidth(..., config_file=...)` |
 
-完整流程见 `examples/quick_start.py` 和 `examples/onnx_ptq_quick_start.py`。
+完整流程见 `examples/quick_start_kws.py` 和 `examples/onnx_ptq_quick_start.py`。
 
 ## 1. 基础配置（QuantSim）
 

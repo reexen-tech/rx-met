@@ -36,12 +36,15 @@ log "layout"
 [[ -x "${PKG}/install.sh" ]] || die "install.sh missing or not executable"
 [[ -f "${PKG}/README.md" ]] || die "README.md missing"
 [[ -f "${PKG}/ChangeLog.md" ]] || die "ChangeLog.md missing"
-[[ -f "${PKG}/examples/quick_start.py" ]] || die "quick_start.py missing"
+[[ -f "${PKG}/examples/quick_start_kws.py" ]] || die "quick_start_kws.py missing"
 [[ -f "${PKG}/examples/onnx_ptq_quick_start.py" ]] || die "onnx_ptq_quick_start.py missing"
-[[ -f "${PKG}/examples/data/to_band_matrix_erb_240_256.pt" ]] \
-    || die "examples/data/to_band_matrix_erb_240_256.pt missing"
-[[ -f "${PKG}/examples/data/inv_to_band_matrix_erb_240_256.pt" ]] \
-    || die "examples/data/inv_to_band_matrix_erb_240_256.pt missing"
+[[ -f "${PKG}/examples/config/mrnn_quantsim_config_custom_mixed_precision_v2.json" ]] \
+    || die "QuantSim config JSON missing"
+[[ -f "${PKG}/examples/config/quick_start_full_quant.json" ]] \
+    || die "bitwidth config JSON missing"
+[[ ! -e "${PKG}/examples/quick_start.py" ]] || die "legacy MRNN quick_start.py must not be packaged"
+[[ ! -e "${PKG}/examples/data/to_band_matrix_erb_240_256.pt" ]] \
+    || die "legacy MRNN band matrix must not be packaged"
 [[ ! -e "${PKG}/examples/llm_quick_start.py" ]] || die "LLM example must not be packaged"
 [[ ! -e "${PKG}/examples/config/llm_quant.json" ]] || die "llm_quant.json must not be packaged"
 [[ ! -e "${PKG}/scripts/setup.sh" ]] || die "legacy setup.sh must not be packaged"
@@ -87,9 +90,9 @@ print("quant_gru", quant_gru.__file__)
 
 os.chdir("/tmp/rx-met/examples")
 sys.path.insert(0, "/tmp/rx-met/examples")
-ns = runpy.run_path("quick_start.py", run_name="verify_rx_met")
+ns = runpy.run_path("quick_start_kws.py", run_name="verify_rx_met")
 assert ns["DATA_ROOT"] == "/datasets/speech_commands_v0.02"
-print("quick_start import OK")
+print("quick_start_kws import OK")
 ns = runpy.run_path("onnx_ptq_quick_start.py", run_name="verify_rx_met")
 assert ns["USE_CPU"] is True
 assert str(ns["_DATA"]) == "/datasets"
