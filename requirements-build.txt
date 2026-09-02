@@ -1,2 +1,0 @@
-# Build-only dependencies for the vendored AIMET ONNX native sources.
-pybind11==2.13.6

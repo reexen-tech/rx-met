@@ -3,7 +3,6 @@ include README.md
 include LICENSE
 include VERSION
 include requirements.txt
-include requirements-build.txt
 
 # Include rx-met's AIMET native source for source distributions
 recursive-include native/aimet *

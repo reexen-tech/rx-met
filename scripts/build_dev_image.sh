@@ -42,8 +42,7 @@ rx_met_require_image_name "${DEV_IMAGE}"
 
 for required in \
     "${ROOT}/docker/Dockerfile" \
-    "${ROOT}/docker/Dockerfile.ada200" \
-    "${ROOT}/requirements-build.txt"
+    "${ROOT}/docker/Dockerfile.ada200"
 do
     [[ -f "${required}" ]] || { log "ERROR: missing ${required}"; exit 1; }
 done

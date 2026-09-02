@@ -78,11 +78,10 @@ RUN if [ -e /usr/local/cuda/lib64/stubs/libcuda.so ] && [ ! -e /usr/local/cuda/l
         ln -sf libcuda.so /usr/local/cuda/lib64/stubs/libcuda.so.1; \
     fi
 
-COPY requirements-build.txt /tmp/requirements-build.txt
 RUN python3 -m pip install --no-cache-dir \
         setuptools==70.2.0 \
         wheel==0.45.1 \
-        -r /tmp/requirements-build.txt
+        pybind11==2.13.6
 
 ENV CUDA_HOME=/usr/local/cuda
 ENV PATH=/usr/local/cuda/bin:${PATH}
