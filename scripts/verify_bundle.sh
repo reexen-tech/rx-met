@@ -1,115 +1,202 @@
 #!/usr/bin/env bash
-# Verify an ada200-rx-met software bundle against ada200_docker:latest.
+# 验证最终 rx-met 镜像；--gpu 额外运行真实 CUDA/QuantGRU 冒烟测试。
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-BUNDLE="${1:-}"
-IMAGE="${RX_MET_ADA200_IMAGE:-ada200_docker:latest}"
+BAKE_FILE="${ROOT}/docker/docker-bake.hcl"
+VERSION="$(tr -d '[:space:]' < "${ROOT}/VERSION")"
+IMAGE_REPOSITORY="${RX_MET_IMAGE_REPOSITORY:-rx-met}"
+VERIFY_GPU="${RX_MET_VERIFY_GPU:-0}"
+TARGETS=()
 
 log() { printf '[verify_bundle] %s\n' "$*"; }
 die() { printf '[verify_bundle] ERROR: %s\n' "$*" >&2; exit 1; }
 
-if [[ -z "${BUNDLE}" ]]; then
-    latest="$(ls -1t "${ROOT}/.release/export"/ada200-rx-met-v*-linux_x86_64.tar.gz 2>/dev/null | head -1 || true)"
-    [[ -n "${latest}" ]] || die "usage: ./scripts/verify_bundle.sh /path/to/ada200-rx-met-vYYMMDD-linux_x86_64.tar.gz"
-    BUNDLE="${latest}"
+while (($#)); do
+    case "$1" in
+        --gpu) VERIFY_GPU=1 ;;
+        --no-gpu) VERIFY_GPU=0 ;;
+        -h|--help)
+            printf '用法: ./scripts/verify_bundle.sh [--gpu|--no-gpu] [cu118|cu126|cu130 ...]\n'
+            exit 0
+            ;;
+        cu118|cu126|cu130) TARGETS+=("$1") ;;
+        *) die "未知参数: $1" ;;
+    esac
+    shift
+done
+if ((${#TARGETS[@]} == 0)); then
+    TARGETS=(cu118 cu126 cu130)
 fi
-[[ -f "${BUNDLE}" ]] || die "bundle not found: ${BUNDLE}"
+declare -A seen_targets=()
+for target in "${TARGETS[@]}"; do
+    [[ -z "${seen_targets[${target}]:-}" ]] || die "目标重复: ${target}"
+    seen_targets["${target}"]=1
+done
+[[ "${VERIFY_GPU}" == "0" || "${VERIFY_GPU}" == "1" ]] \
+    || die "RX_MET_VERIFY_GPU 必须是 0 或 1"
+[[ "${IMAGE_REPOSITORY}" =~ ^[A-Za-z0-9._/-]+$ ]] \
+    || die "无效的镜像仓库名: ${IMAGE_REPOSITORY}"
+for command in docker git python3; do
+    command -v "${command}" >/dev/null 2>&1 || die "缺少命令: ${command}"
+done
 
-if ! docker image inspect "${IMAGE}" >/dev/null 2>&1; then
-    die "image not found: ${IMAGE}"
-fi
-
-WORK="$(mktemp -d -t rx-met-verify.XXXXXX)"
-cleanup() { rm -rf "${WORK}"; }
+BAKE_JSON="$(mktemp -t rx-met-verify-bake.XXXXXX.json)"
+cleanup() { rm -f "${BAKE_JSON}"; }
 trap cleanup EXIT
+VERSION="${VERSION}" IMAGE_REPOSITORY="${IMAGE_REPOSITORY}" \
+SOURCE_REVISION="$(git -C "${ROOT}" rev-parse HEAD 2>/dev/null || printf unknown)" \
+docker buildx bake -f "${BAKE_FILE}" --print "${TARGETS[@]}" > "${BAKE_JSON}"
 
-log "extract $(basename "${BUNDLE}")"
-tar -C "${WORK}" -xzf "${BUNDLE}"
-shopt -s nullglob
-dirs=("${WORK}"/ada200-rx-met-v*-linux_x86_64)
-shopt -u nullglob
-[[ ${#dirs[@]} -eq 1 ]] || die "expected one top-level ada200-rx-met-* directory"
-PKG="${dirs[0]}"
-
-log "layout"
-[[ -x "${PKG}/install.sh" ]] || die "install.sh missing or not executable"
-[[ -f "${PKG}/README.md" ]] || die "README.md missing"
-[[ -f "${PKG}/ChangeLog.md" ]] || die "ChangeLog.md missing"
-[[ -f "${PKG}/examples/quick_start_kws.py" ]] || die "quick_start_kws.py missing"
-[[ -f "${PKG}/examples/onnx_ptq_quick_start.py" ]] || die "onnx_ptq_quick_start.py missing"
-[[ -f "${PKG}/examples/prepare_onnx_ptq_data.py" ]] || die "prepare_onnx_ptq_data.py missing"
-[[ -f "${PKG}/examples/config/mrnn_quantsim_config_custom_mixed_precision_v2.json" ]] \
-    || die "QuantSim config JSON missing"
-[[ -f "${PKG}/examples/config/quick_start_full_quant.json" ]] \
-    || die "bitwidth config JSON missing"
-[[ ! -e "${PKG}/examples/quick_start.py" ]] || die "legacy MRNN quick_start.py must not be packaged"
-[[ ! -e "${PKG}/examples/data/to_band_matrix_erb_240_256.pt" ]] \
-    || die "legacy MRNN band matrix must not be packaged"
-[[ ! -e "${PKG}/examples/llm_quick_start.py" ]] || die "LLM example must not be packaged"
-[[ ! -e "${PKG}/examples/config/llm_quant.json" ]] || die "llm_quant.json must not be packaged"
-[[ ! -e "${PKG}/scripts/setup.sh" ]] || die "legacy setup.sh must not be packaged"
-if grep -R -n --include='*.py' --include='*.json' -E 'rx_met_llm|llm_quant|llama-quantize' "${PKG}/examples" >/dev/null; then
-    die "examples still mention LLM artifacts"
-fi
-if unzip -l "${PKG}"/wheels/rx_met-*.whl | grep -q rx_met_llm; then
-    die "rx_met wheel contains rx_met_llm"
-fi
-
-INNER="${WORK}/in_container.sh"
-cat > "${INNER}" <<'INNER'
-#!/usr/bin/env bash
-set -euo pipefail
-cp -a /opt/rx-met /tmp/rx-met
-cd /tmp/rx-met
-./install.sh
-python3 - <<'PY'
-import os
-import runpy
+for target in "${TARGETS[@]}"; do
+    values="$(python3 - "${BAKE_JSON}" "${target}" <<'PY'
+import json
 import sys
 
-import torch
-import aimet_torch
-import aimet_onnx
-import quant_gru
-import torchaudio
-import librosa
-import soundfile
-
-assert torch.__version__.startswith("2.8.0"), torch.__version__
-assert torch.version.cuda == "12.8", torch.version.cuda
-assert torch.cuda.is_available(), "GPU not visible inside ada200_docker"
-try:
-    import rx_met_llm
-except ImportError:
-    pass
-else:
-    raise SystemExit("rx_met_llm must not be importable")
-print("torch", torch.__version__, "cuda", torch.cuda.get_device_name(0))
-print("aimet_torch", aimet_torch.__file__)
-print("quant_gru", quant_gru.__file__)
-
-os.chdir("/tmp/rx-met/examples")
-sys.path.insert(0, "/tmp/rx-met/examples")
-ns = runpy.run_path("quick_start_kws.py", run_name="verify_rx_met")
-assert ns["DATA_ROOT"] == "/datasets/speech_commands_v0.02"
-print("quick_start_kws import OK")
-ns = runpy.run_path("onnx_ptq_quick_start.py", run_name="verify_rx_met")
-assert ns["USE_CPU"] is True
-assert str(ns["_DATA"]) == "/datasets"
-print("onnx_ptq defaults OK", ns["_DATA"])
+target = json.load(open(sys.argv[1], encoding="utf-8"))["target"][sys.argv[2]]
+args = target["args"]
+print(
+    "\t".join(
+        [
+            target["tags"][0],
+            args["CUDA_VARIANT"],
+            args["RX_MET_CUDA_VERSION"],
+            args["TORCH_VERSION"],
+            args["TORCHVISION_VERSION"],
+            args["TORCHAUDIO_VERSION"],
+        ]
+    )
+)
 PY
-python3 -m pip check
-INNER
-chmod +x "${INNER}"
+)"
+    IFS=$'\t' read -r image variant cuda_version torch_version vision_version audio_version <<< "${values}"
+    docker image inspect "${image}" >/dev/null 2>&1 || die "本地镜像不存在: ${image}"
+    log "验证 ${image}（GPU=${VERIFY_GPU}）"
 
-log "install + imports in ${IMAGE}"
-docker run --rm --gpus all \
-    -e RX_MET_SPEECH_COMMANDS_ROOT=/datasets/speech_commands_v0.02 \
-    -v "${PKG}:/opt/rx-met:ro" \
-    -v "${INNER}:/tmp/in_container.sh:ro" \
-    -w /tmp \
-    "${IMAGE}" \
-    bash /tmp/in_container.sh
+    docker_args=(-i --rm)
+    if ((VERIFY_GPU)); then
+        docker_args+=(--gpus all)
+    fi
+    docker_args+=(
+        -e "EXPECTED_VARIANT=${variant}"
+        -e "EXPECTED_CUDA=${cuda_version}"
+        -e "EXPECTED_TORCH=${torch_version}"
+        -e "EXPECTED_TORCHVISION=${vision_version}"
+        -e "EXPECTED_TORCHAUDIO=${audio_version}"
+        -e "VERIFY_GPU=${VERIFY_GPU}"
+    )
 
-log "all checks passed for ${BUNDLE}"
+    docker run "${docker_args[@]}" "${image}" python3 - <<'PY'
+import importlib.metadata
+import os
+import runpy
+import subprocess
+from pathlib import Path
+
+import aimet_onnx
+import aimet_torch
+import numpy as np
+import onnx
+import onnxruntime
+import quant_gru
+import torch
+import torchaudio
+import torchvision
+
+expected = {
+    "torch": os.environ["EXPECTED_TORCH"],
+    "torchvision": os.environ["EXPECTED_TORCHVISION"],
+    "torchaudio": os.environ["EXPECTED_TORCHAUDIO"],
+}
+for package, version in expected.items():
+    actual = importlib.metadata.version(package).split("+", 1)[0]
+    assert actual == version, (package, actual, version)
+assert torch.version.cuda == os.environ["EXPECTED_CUDA"], torch.version.cuda
+assert os.environ["CUDA_VARIANT"] == os.environ["EXPECTED_VARIANT"]
+
+runpy.run_path("/opt/rx-met/examples/quick_start_kws.py", run_name="verify_rx_met")
+runpy.run_path("/opt/rx-met/examples/onnx_ptq_quick_start.py", run_name="verify_rx_met")
+assert "CPUExecutionProvider" in onnxruntime.get_available_providers()
+
+# 使用真实 AIMET ONNX custom op 跑一个最小 CPU 校准和推理。
+input_info = onnx.helper.make_tensor_value_info(
+    "input", onnx.TensorProto.FLOAT, [1, 4]
+)
+output_info = onnx.helper.make_tensor_value_info(
+    "output", onnx.TensorProto.FLOAT, [1, 4]
+)
+graph = onnx.helper.make_graph(
+    [onnx.helper.make_node("Relu", ["input"], ["output"])],
+    "rx_met_smoke",
+    [input_info],
+    [output_info],
+)
+model = onnx.helper.make_model(
+    graph, opset_imports=[onnx.helper.make_opsetid("", 13)]
+)
+model.ir_version = 8
+feed = {"input": np.array([[-1.0, 0.0, 1.0, 2.0]], dtype=np.float32)}
+onnx_sim = aimet_onnx.QuantizationSimModel(
+    model, dummy_input=feed, providers=["CPUExecutionProvider"]
+)
+onnx_sim.compute_encodings([feed])
+assert onnx_sim.session.run(None, feed)[0].shape == (1, 4)
+
+site = Path("/usr/local/lib/python3.10/dist-packages")
+patterns = [
+    site / "aimet_common" / "_libpymo*.so",
+    site / "aimet_common" / "libquant_info*.so",
+    site / "aimet_common" / "libaimet_onnxrt_ops.so",
+    site / "gru_interface_binding*.so",
+    site / "lib" / "libgru_quant_shared.so",
+]
+libraries = []
+for pattern in patterns:
+    matches = list(pattern.parent.glob(pattern.name))
+    assert matches, f"缺少原生库: {pattern}"
+    libraries.extend(matches)
+for library in libraries:
+    output = subprocess.run(
+        ["ldd", str(library)], check=True, stdout=subprocess.PIPE, text=True
+    ).stdout
+    unresolved = [
+        line.strip()
+        for line in output.splitlines()
+        if "not found" in line and "libcuda.so.1" not in line
+    ]
+    assert not unresolved, (library, unresolved)
+
+if os.environ["VERIFY_GPU"] == "1":
+    assert torch.cuda.is_available(), "容器内不可见 CUDA GPU"
+    import torch.nn as nn
+    import aimet_torch.v2 as aimet_v2
+
+    dummy = torch.randn(2, 4, device="cuda")
+    torch_sim = aimet_v2.quantsim.QuantizationSimModel(
+        nn.Sequential(nn.Linear(4, 4), nn.ReLU()).cuda().eval(),
+        dummy,
+        config_file=(
+            "/opt/rx-met/examples/config/"
+            "mrnn_quantsim_config_custom_mixed_precision_v2.json"
+        ),
+    )
+    with aimet_v2.nn.compute_encodings(torch_sim.model):
+        torch_sim.model(dummy)
+    assert torch.isfinite(torch_sim.model(dummy)).all()
+
+    from quant_gru import QuantGRU
+
+    model = QuantGRU(4, 8, batch_first=True).cuda()
+    value = torch.randn(2, 3, 4, device="cuda", requires_grad=True)
+    output, hidden = model(value)
+    (output.square().mean() + hidden.square().mean()).backward()
+    torch.cuda.synchronize()
+    assert value.grad is not None
+    print("GPU", torch.cuda.get_device_name(0), "QuantGRU forward/backward OK")
+
+print("image verification passed", torch.__version__, torch.version.cuda)
+PY
+    docker run --rm "${image}" python3 -m pip check
+done
+
+log "全部目标验证通过"

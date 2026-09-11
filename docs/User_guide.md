@@ -6,16 +6,16 @@
 | 项目 | 内容 |
 |------|------|
 | 文档名称 | rx-met 用户使用指南（快速上手） |
-| 文档版本 | 2026.09-r1 |
-| 适用软件版本 | 以发布包 `README.md` 中的组件版本和软件包 `vYYMMDD` 为准 |
+| 文档版本 | 2026.09-r2 |
+| 适用软件版本 | `rx-met:1.0.0-cu118/cu126/cu130` |
 | 文档责任人 | （待填写） |
 | 最近更新 | 2026-09 |
 
 相关文档：
 
 - 量化配置详解：[`docs/Quant_config.md`](./Quant_config.md)
-- 客户安装包：[`release/README.md`](../release/README.md)
-- 安装包总览：[`README.md`](../README.md)
+- 镜像使用说明：[`release/README.md`](../release/README.md)
+- 项目总览：[`README.md`](../README.md)
 
 大模型量化不在本仓库。
 
@@ -23,11 +23,11 @@
 
 ## 1. rx-met 是什么
 
-rx-met 是面向 ADA200 的**小模型量化工具包**：定制 AIMET（`aimet_torch` / `aimet_onnx` / `aimet_common`）+ QuantGRU。客户交付物是预编译 wheel，装进已有的 `ada200_docker`，**不含 Docker 镜像**。
+rx-met 是面向 Linux x86_64 NVIDIA GPU 的**小模型量化工具包**：定制 AIMET（`aimet_torch` / `aimet_onnx` / `aimet_common`）+ QuantGRU。客户交付物是已经安装完整环境的独立 Docker 镜像。
 
 | 工作流 | 适用对象 | 底层引擎 | 入口 | 对应章节 |
 |--------|----------|----------|------|----------|
-| **普通模型量化** | CNN / RNN / KWS 等中小模型（PyTorch） | `aimet_torch` | `examples/quick_start.py` | [第 5 章](#5-使用方法一普通模型) |
+| **普通模型量化** | CNN / RNN / KWS 等中小模型（PyTorch） | `aimet_torch` | `examples/quick_start_kws.py` | [第 5 章](#5-使用方法一普通模型) |
 | **ONNX 直量化 PTQ** | 已有 ONNX、无 PyTorch 训练图 | `aimet_onnx` | `examples/onnx_ptq_quick_start.py` | [第 5.5 节](#55-已有-onnx-模型的-ptq) |
 
 选择原则：
@@ -39,48 +39,61 @@ rx-met 是面向 ADA200 的**小模型量化工具包**：定制 AIMET（`aimet_
 
 ## 2. 支持平台与版本要求
 
-官方客户包对齐 `ada200_docker`：
+三个镜像都是 Ubuntu 22.04、Linux x86_64、CPython 3.10，但 CUDA 和 Torch
+版本不同：
 
-| 项目 | 要求 |
-|------|------|
-| 操作系统 | Linux x86_64（Ubuntu 22.04） |
-| Python | CPython 3.10 |
-| PyTorch | `torch==2.8.0`，`torch.version.cuda == 12.8` |
-| CUDA | 宿主机 NVIDIA Driver + NVIDIA Container Toolkit；容器内不需要再装 CUDA Toolkit |
-| 核心依赖 | `numpy`、`scipy`、`onnx`、`onnxruntime`（镜像自带 CPU 版）、`pillow` |
+| 镜像变体 | CUDA | PyTorch | 严格最低 NVIDIA Driver |
+|------|------|------|------|
+| `cu118` | 11.8 | 2.7.1 | 520.61.05 |
+| `cu126` | 12.6 | 2.8.0 | 560.35.05 |
+| `cu130` | 13.0 | 2.10.0 | 580.126.20 |
 
-`QuantGRU` 随发布包以 `quant_gru-*.whl` 安装，Haste GRU 模型可直接 `import quant_gru`。源码构建见 [`quant-gru-pytorch/`](../quant-gru-pytorch/)。
+宿主机需要 Docker、NVIDIA Driver 和 NVIDIA Container Toolkit；宿主机不需要
+安装相同版本的 CUDA Toolkit。应按宿主机驱动和 GPU 计算能力选择变体，而不是
+只看宿主机 `nvcc --version`。`cu130` 才包含 `sm_120` 目标；`cu118` 不支持
+实验性 ExportedProgram API。
+
+`QuantGRU` 已安装在镜像中，可直接 `import quant_gru`。
 
 ---
 
-## 3. 安装
+## 3. 加载并启动镜像
 
-### 3.1 客户软件包（推荐）
-
-把发布包挂进 `ada200_docker` 后：
+以 `cu126` 为例，先校验制品并加载：
 
 ```bash
-cp -a /opt/rx-met /workspace/rx-met
-cd /workspace/rx-met
-./install.sh
+sha256sum --check --strict SHA256SUMS
+zstd -dc rx-met-v1.0.0-cu126-linux-amd64.tar.zst | docker load
 ```
 
-脚本会校验 CPython 3.10、`torch==2.8.0+cu128`，再离线安装 `wheels/`。
-详细步骤见 [`release/README.md`](../release/README.md)。
-
-验证安装成功：
+启动时挂载工作目录和数据集：
 
 ```bash
-python -c "import aimet_torch, aimet_onnx, quant_gru; print('rx-met OK')"
+docker run --gpus all --rm -it \
+  --ipc=host \
+  --user "$(id -u):$(id -g)" \
+  --group-add "$(stat -c '%g' /path/to/datasets)" \
+  -e HOME=/tmp \
+  -e USER="$(id -un)" \
+  -e LOGNAME="$(id -un)" \
+  -v /path/to/workspace:/workspace \
+  -v /path/to/datasets:/datasets:ro \
+  -w /workspace \
+  rx-met:1.0.0-cu126
 ```
 
-### 3.2 仅安装 wheel
+`--group-add` 让非 root 容器继承数据目录的只读组权限，适用于 CIFS/NFS
+共享盘；数据仍通过 `:ro` 挂载。`USER` 和 `LOGNAME` 用于兼容 PyTorch 的缓存
+目录初始化，不会在镜像中创建宿主机用户。
+
+验证环境：
 
 ```bash
-pip install --no-index --no-deps rx_met-*.whl quant_gru-*.whl
+python3 -c "import torch, aimet_torch, aimet_onnx, quant_gru; print(torch.__version__, torch.version.cuda)"
 ```
 
-开发侧完整构建见根目录 [`README.md`](../README.md) 与 [`docs/Release_packaging.md`](./Release_packaging.md)。
+镜像内依赖已完整安装，不需要运行额外安装脚本。开发侧构建见
+[`docs/Release_packaging.md`](./Release_packaging.md)。
 
 ---
 
@@ -92,14 +105,14 @@ pip install --no-index --no-deps rx_met-*.whl quant_gru-*.whl
 | `RX_MET_ONNX_PTQ_ROOT` | ONNX 示例数据集根目录，默认 `/datasets` | ONNX PTQ |
 | `RX_MET_ONNX_PTQ_EXAMPLE` | 示例名称，默认 `mobilenetv2` | ONNX PTQ |
 | `RX_MET_ONNX_PTQ_MODEL` / `RX_MET_ONNX_PTQ_CALIB` | 覆盖模型与校准目录 | ONNX PTQ |
-| `RX_MET_SKIP_ENV_CHECK` | `1` 时跳过 `install.sh` 环境检查 | 安装 |
-| 运行目录 | demo 须 `cd examples/` 后运行 | 两者 |
+| 镜像内示例目录 | `/opt/rx-met/examples` | 两者 |
+| 推荐输出目录 | volume 挂载的 `/workspace` | 两者 |
 
 ---
 
 ## 5. 使用方法（一）：普通模型
 
-本章基于 `examples/quick_start.py`（SpeechCommands + MRNN 关键词识别），演示 AIMET v2 的完整量化流程。该脚本的 `main()` 内联了所有标准 AIMET API，可直接照抄到自己的工程。
+本章基于 `examples/quick_start_kws.py`（SpeechCommands + QuantGRU 关键词识别），演示 AIMET v2 的完整量化流程。该脚本的 `main()` 内联了标准 AIMET API，可作为接入模板。
 
 ### 5.1 完整流程总览
 
@@ -115,9 +128,10 @@ FP 训练 → prepare_model → QuantizationSimModel + 混合精度位宽
 ### 5.2 运行示例脚本
 
 ```bash
-cd examples
+cp -a /opt/rx-met/examples /workspace/rx-met-examples
+cd /workspace/rx-met-examples
 export RX_MET_SPEECH_COMMANDS_ROOT=/datasets/speech_commands_v0.02
-python quick_start.py
+python3 quick_start_kws.py
 ```
 
 脚本会依次打印 8 个步骤的耗时与精度汇总（浮点 / PTQ / Po2 / QAT / 重载）。
@@ -226,7 +240,7 @@ load_quantizer_encodings(fresh_sim.model, load_path=enc_path)  # 2. 加载量化
 
 ### 5.5 已有 ONNX 模型的 PTQ
 
-手里已经是 ONNX、不需要 QAT 时，用 `examples/onnx_ptq_quick_start.py`。步骤编号与 `quick_start.py` 对齐，Po2/bias 走同一个 `apply_power_of_2_workflow`；其余步骤导入 `aimet_onnx.rx_ptq`，不复制量化规则。
+手里已经是 ONNX、不需要 QAT 时，用 `examples/onnx_ptq_quick_start.py`。步骤编号与 `quick_start_kws.py` 对齐，Po2/bias 走同一个 `apply_power_of_2_workflow`；其余步骤导入 `aimet_onnx.rx_ptq`，不复制量化规则。
 
 ```
 加载 ONNX + 真实校准样本
@@ -238,8 +252,9 @@ load_quantizer_encodings(fresh_sim.model, load_path=enc_path)  # 2. 加载量化
 ```
 
 ```bash
-cd examples
-python onnx_ptq_quick_start.py
+cp -a /opt/rx-met/examples /workspace/rx-met-examples
+cd /workspace/rx-met-examples
+python3 onnx_ptq_quick_start.py
 ```
 
 本示例使用 MobileNetV2。Zoo 模型是动态 batch，校准样本也不是 npy，需要先跑 `examples/prepare_onnx_ptq_data.py`（冻结 batch=1，按 ImageNet 预处理写出 calib/val npy）。数据根目录默认 `/datasets/mobilenetv2`。换自己的模型时，用 `RX_MET_ONNX_PTQ_MODEL` 和 `RX_MET_ONNX_PTQ_CALIB` 指向对应文件与校准目录。更细的编译器产物说明见 [`ONNX_PTQ_COMPILER.md`](./ONNX_PTQ_COMPILER.md)。
@@ -250,23 +265,19 @@ python onnx_ptq_quick_start.py
 
 | 现象 | 可能原因 | 处理 |
 |------|----------|------|
-| `import quant_gru` 失败 | 未安装发布包里的 QuantGRU wheel | 重新执行 `./install.sh`，或按 [`quant-gru-pytorch/`](../quant-gru-pytorch/) 从源码编译 |
+| `import quant_gru` 失败 | 使用的不是 rx-met 最终镜像，或镜像损坏 | 重新校验 `SHA256SUMS` 并加载正确的 `rx-met:<版本>-cu*` 镜像 |
 | 重载后精度与训练侧差异大 | 重建 sim 的配置/`stateless_modules_to_preserve` 与训练时不一致 | 保证两侧完全一致（见 5.3 一致性要点） |
 | `load_state_dict` 报缺失/多余键 | 量化模型含 quantizer 参数 | 使用 `load_state_dict(..., strict=False)` |
-| `libpymo` 找不到 `libcudart.so.12` | 未登记 pip 自带的 NVIDIA CUDA runtime | `source cuda_libs.env`（`install.sh` 会生成） |
-| `install.sh` 环境检查失败 | 不在 `ada200_docker`，或 torch 版本不对 | 使用官方镜像；临时跳过：`RX_MET_SKIP_ENV_CHECK=1 ./install.sh` |
+| `libpymo` 或 QuantGRU 报 CUDA 动态库缺失 | 镜像不完整，或绕过了镜像内 `ld.so` 配置 | 使用正式 rx-met 镜像并执行 `python3 -m pip check`；不要在容器里替换 Torch/CUDA wheel |
+| `torch.cuda.is_available()` 为 `False` | 启动时未传 `--gpus all`，或宿主机驱动/Container Toolkit 不可用 | 检查 `nvidia-smi` 和 NVIDIA Container Toolkit，并选择满足驱动下限的变体 |
 
 ---
 
 ## 7. 卸载与回滚
 
-- **卸载 Python 包**：
-
-```bash
-pip uninstall rx-met quant-gru
-```
-
-- **回滚到旧版本**：安装对应日期的软件包即可，例如 `ada200-rx-met-vYYMMDD-linux_x86_64.tar.gz`。
+镜像内环境是整体交付，不建议在容器中卸载或覆盖 Python 包。回滚时加载并运行
+上一个版本对应 CUDA 变体的 `tar.zst`，并切换完整镜像 tag。工作目录和数据通过
+volume 挂载，不随容器删除。
 
 ---
 
@@ -274,5 +285,6 @@ pip uninstall rx-met quant-gru
 
 | 版本 | 日期 | 变更项 | 责任人 |
 |------|------|--------|--------|
+| 2026.09-r2 | 2026-09 | 改为 rx-met 自有 cu118/cu126/cu130 三镜像交付 | （待填写） |
 | 2026.09-r1 | 2026-09 | 独立小模型仓：去掉大模型流程，对齐 ada200 wheel 交付 | （待填写） |
 | 2026.06-r1 | 2026-06 | 首次发布：普通模型快速上手 | （待填写） |

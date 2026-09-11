@@ -1,42 +1,272 @@
-# rx-met 打包 / 发布
+# rx-met Docker 构建与发布
 
-小模型软件包：预编译 wheel + examples，装进官方 `ada200_docker`。**客户包不含 Docker 镜像。**
+rx-met 自行维护 Linux x86_64 GPU 镜像，不再依赖 ADA200 通用 Docker。构建
+流程将稳定的第三方环境与频繁变化的项目源码分开，最终交付三个产品镜像。
 
-版本约定：
+## 1. 构建矩阵
 
-| 名称 | 来源 | 格式 | 例子 |
-| ---- | ---- | ---- | ---- |
-| 组件版本 | 仓库 `VERSION` | `MAJOR.MINOR.PATCH` | `1.0.0` |
-| wheel | 同上 | `MAJOR.MINOR.PATCH`（不能带 `v`） | `1.0.0` |
-| 共享盘目录 | 同上 | `vMAJOR.MINOR.PATCH` | `v1.0.0` |
-| 软件包文件名 | SDK 日期 | `vYYMMDD` | `v260902` |
+机器可读的唯一矩阵位于 `docker/docker-bake.hcl`：
 
-## 两套脚本
+| 变体 | NVIDIA devel/base | Torch 三件套 | CUDA 架构 | 严格最低驱动 |
+| --- | --- | --- | --- | --- |
+| `cu118` | 11.8.0 / Ubuntu 22.04 | 2.7.1 / 0.22.1 / 2.7.1 | 80、86、89、90 | 520.61.05 |
+| `cu126` | 12.6.3 / Ubuntu 22.04 | 2.8.0 / 0.23.0 / 2.8.0 | 80、86、89、90 | 560.35.05 |
+| `cu130` | 13.0.3 / Ubuntu 22.04 | 2.10.0 / 0.25.0 / 2.10.0 | 80、86、89、90、120 | 580.126.20 |
 
-| 脚本 | 作用 |
-| ---- | ---- |
-| `scripts/build_dev_image.sh` | 构建团队镜像 `ada200_docker:rx-met-dev` |
-| `scripts/release_build.sh` | 在该镜像里编 wheel，组装客户 `tar.gz` |
-| `scripts/verify_bundle.sh` | 在官方 `ada200_docker:latest` 里安装并 smoke |
+上述驱动值是 CUDA 发行版的严格下限。只在较新驱动上验收，不能证明镜像在
+声明的最低驱动上兼容。
 
-`build_dev_image.sh`：
+## 2. 模块边界
 
-1. 已有 `ada200_docker:latest`（或 `ada200_docker`）→ `docker/Dockerfile` 以它为底图，只加编译工具
-2. 没有统一 Docker → 先用 `docker/Dockerfile.ada200` 造运行时底图，再用同一份 `docker/Dockerfile` 加编译工具
-3. 只打 `ada200_docker:rx-met-dev`，**不会**覆盖官方 `ada200_docker:latest`
+构建分为三个独立生命周期：
 
-`release_build.sh` 若找不到 `ada200_docker:rx-met-dev`，会提示先运行 `./scripts/build_dev_image.sh`。
+```text
+Dockerfile.environment
+  NVIDIA devel -> build-env：工具链 + Torch + 全部第三方依赖
+  NVIDIA base  -> runtime-env：Python + Torch + 全部第三方运行依赖
 
-```bash
-# 官方统一 Docker 建议先导入
-# docker load -i /mnt/data2/reexen_release/ADA200/docker/v1.0.0/artifacts/ada200_docker_v1.tar.gz
-./scripts/build_dev_image.sh
-./scripts/release_build.sh
-./scripts/verify_bundle.sh
+Dockerfile
+  build-env   -> 编译当前 rx-met/QuantGRU wheel
+  runtime-env -> 安装项目 wheel、examples 和产品元数据 -> 最终镜像
 ```
 
-可用 `RX_MET_RELEASE_DATE=260902` 覆盖软件包日期标签。已发布的组件版本目录不可覆盖；升高版本时改 `VERSION`。
+对应脚本职责：
 
-产物：`.release/export/ada200-rx-met-vYYMMDD-linux_x86_64.tar.gz`
+| 脚本 | 职责 |
+| --- | --- |
+| `build_environment_images.sh` | 构建缺失的稳定环境镜像，直接运行时默认导出全部三个变体 |
+| `verify_environment_images.sh` | 验证环境身份、工具链、依赖版本和平台 |
+| `export_environment_images.sh` | 在本地生成可直接搬运的环境归档和校验文件 |
+| `load_environment_images.sh` | 校验归档 SHA-256 后加载并验证环境 |
+| `release_build.sh` | 解析环境、编译当前源码、组装和导出产品镜像 |
+| `verify_bundle.sh` | 验证最终产品镜像及可选 GPU 流程 |
+| `verify_kws_example.sh` | 使用真实 Speech Commands 数据完整运行 KWS/QAT 用例 |
+| `verify_onnx_ptq_example.sh` | 使用指定 ONNX 模型和校准数据完整运行 PTQ 用例 |
 
-`examples/` 按整目录拷贝（去掉 `__pycache__` / `output`）。当前入口是 `quick_start_kws.py` 和 `onnx_ptq_quick_start.py`。正式发布先落到 `tmp_test_data/`，再移到 `reexen_release/ADA200/rx-met/v1.0.0/`。
+公共运行依赖固定在 `docker/requirements/common.lock`。Torch、torchvision、
+torchaudio、Triton 和 NVIDIA CUDA wheel 按变体固定在 `cu118.txt`、
+`cu126.txt`、`cu130.txt`。环境版本默认是 `deps-v1`，与产品 `VERSION` 独立。
+
+## 3. 环境镜像
+
+首次准备并导出全部三个环境：
+
+```bash
+./scripts/build_environment_images.sh
+```
+
+不传参数时默认处理 `cu118`、`cu126`、`cu130`，构建本机缺失的镜像，验证后
+生成本地可搬运归档。已有完整一对时直接复用。强制刷新环境必须显式执行：
+
+```bash
+./scripts/build_environment_images.sh --force --no-export cu126
+```
+
+默认 tag：
+
+```text
+rx-met-build-env:deps-v1-cu118
+rx-met-runtime-env:deps-v1-cu118
+rx-met-build-env:deps-v1-cu126
+rx-met-runtime-env:deps-v1-cu126
+rx-met-build-env:deps-v1-cu130
+rx-met-runtime-env:deps-v1-cu130
+```
+
+只有 requirements、Torch、CUDA、Python、Ubuntu 或编译工具链发生变化时，
+才创建新的环境版本并重建。普通 AIMET、QuantGRU、examples 或产品版本变化不
+应使环境镜像失效。
+
+## 4. 本地导出和人工搬运
+
+环境构建脚本默认在本地生成完整、校验过、可直接复制的文件：
+
+```bash
+./scripts/build_environment_images.sh
+```
+
+只准备本机环境镜像、不生成归档时使用 `--no-export`。
+
+也可以对已存在的环境镜像单独执行：
+
+```bash
+./scripts/export_environment_images.sh cu118 cu126 cu130
+```
+
+默认输出到 `.release/environment-images/deps-v1/`。每个 CUDA 变体只有一个
+归档文件，其中包含对应的 build-env 和 runtime-env：
+
+```text
+rx-met-environment-deps-v1-cu118-linux-amd64.tar.zst
+rx-met-environment-deps-v1-cu126-linux-amd64.tar.zst
+rx-met-environment-deps-v1-cu130-linux-amd64.tar.zst
+environment-manifest.json
+README.md
+SHA256SUMS
+```
+
+导出脚本先在本地临时目录生成全部所选文件，通过 zstd 和 SHA-256 校验后再放入
+正式本地输出目录。它明确拒绝 `/mnt/data2` 输出路径，不负责共享盘发布。
+
+维护人检查本地结果后，人工复制或移动整个目录，并在目标位置再次校验：
+
+```bash
+cd /path/to/environment-images/deps-v1
+sha256sum --check --strict SHA256SUMS
+```
+
+上传共享盘时由人工使用 `.partial` 文件名，复制完成并核对 SHA-256 后再重命名
+为正式文件。不要在共享盘上直接执行 `docker save`、压缩或高频写入。
+
+加载环境：
+
+```bash
+./scripts/load_environment_images.sh \
+  --archive-dir /path/to/environment-images/deps-v1 \
+  cu118 cu126 cu130
+```
+
+也可以重复传入单文件：
+
+```bash
+./scripts/load_environment_images.sh \
+  --archive /path/to/rx-met-environment-deps-v1-cu126-linux-amd64.tar.zst \
+  cu126
+```
+
+加载器要求归档目录存在导出脚本生成的 `SHA256SUMS`。本机已有同名环境 tag 时默认
+拒绝覆盖，只有人工确认后才能使用 `--force`。
+
+## 5. 产品发布决策
+
+`release_build.sh` 对每个所选 CUDA 变体执行以下规则：
+
+1. build-env 和 runtime-env 都在本机：验证并直接复用。
+2. 两者都不在本机，且传入环境归档：校验、加载并验证。
+3. 两者都不在本机，也没有归档：自动调用 `build_environment_images.sh`。
+4. 只存在其中一个：立即退出，要求使用 `--rebuild-environment` 成对重建。
+5. 显式提供的归档缺失或校验失败：立即退出，不回退到公网构建。
+
+常用命令：
+
+```bash
+# 自动解析环境，构建全部产品镜像并导出
+./scripts/release_build.sh
+
+# 只构建 cu126，不导出 tar.zst
+./scripts/release_build.sh --no-export cu126
+
+# 从指定目录加载缺失的环境
+./scripts/release_build.sh \
+  --environment-dir /path/to/environment-images/deps-v1 \
+  cu118 cu126 cu130
+
+# 强制刷新环境后发布
+./scripts/release_build.sh --rebuild-environment cu126
+
+# 环境不存在时禁止自动联网构建
+./scripts/release_build.sh --no-auto-environment cu126
+```
+
+`--shared-cache` 是内部共享目录的便捷入口，等价于从以下目录加载：
+
+```text
+/mnt/data2/tmp_test_data/chengxing.zou.srv/rx-met/20260910-docker-cache/
+  environment-images/deps-v1/
+```
+
+```bash
+./scripts/release_build.sh --shared-cache cu118 cu126 cu130
+```
+
+共享盘现有 `base-images/` 和 `wheelhouse/` 是 2026-09-10 生成的旧版缓存格式，
+不会被新发布脚本读取。完成新环境归档前，`--shared-cache` 会明确报告环境归档
+缺失，不会退回旧流程或公网下载。
+
+## 6. 版本和配置
+
+产品版本来自仓库根目录 `VERSION`。环境版本和镜像仓库名可独立设置：
+
+| 变量 | 默认值 | 作用 |
+| --- | --- | --- |
+| `RX_MET_ENV_VERSION` | `deps-v1` | 稳定环境版本 |
+| `RX_MET_BUILD_ENV_REPOSITORY` | `rx-met-build-env` | 构建环境仓库名 |
+| `RX_MET_RUNTIME_ENV_REPOSITORY` | `rx-met-runtime-env` | 运行环境仓库名 |
+| `RX_MET_ENV_ARCHIVE_DIR` | 空 | 环境归档目录 |
+| `RX_MET_AUTO_BUILD_ENVIRONMENT` | `1` | 缺少环境且没有归档时自动构建 |
+| `RX_MET_IMAGE_REPOSITORY` | `rx-met` | 最终产品镜像仓库名 |
+| `RX_MET_EXPORT_DIR` | `.release/export` | 产品归档目录 |
+| `RX_MET_EXPORT_IMAGES` | `1` | `0` 时构建但不导出 |
+| `RX_MET_BUILDER` | 当前 builder | 显式选择 Buildx builder |
+| `RX_MET_ZSTD_THREADS` | `2` | 产品归档压缩线程数 |
+
+环境归档使用本机 Docker image store，因此环境构建、加载和产品发布均要求
+Buildx 使用 `docker` driver。隔离的 `docker-container`、remote 或 Kubernetes
+driver 当前不受支持，脚本会在构建前退出。
+
+## 7. 产品制品和验收
+
+以产品版本 `1.0.0` 为例：
+
+```text
+.release/export/
+|-- SHA256SUMS
+|-- README.md
+|-- ChangeLog.md
+|-- image-manifest.json
+|-- rx-met-v1.0.0-cu118-linux-amd64.tar.zst
+|-- rx-met-v1.0.0-cu126-linux-amd64.tar.zst
+`-- rx-met-v1.0.0-cu130-linux-amd64.tar.zst
+```
+
+构建脚本自动执行无 GPU 验收。发布前还必须在目标驱动环境执行：
+
+```bash
+./scripts/verify_bundle.sh --gpu cu118 cu126 cu130
+```
+
+GPU 验收检查 `torch.cuda.is_available()`，并运行 AIMET v2 和 QuantGRU CUDA
+forward/backward。这是快速冒烟检查，不替代真实数据的完整用例验证。
+
+KWS 完整流程在目标 GPU 上执行，默认只使用 GPU 0：
+
+```bash
+./scripts/verify_kws_example.sh \
+  --dataset-dir /path/to/speech_commands_v0.02 \
+  cu118 cu126 cu130
+```
+
+ONNX PTQ 完整流程需要显式传入相互匹配的模型和 NPY/NPZ 校准数据：
+
+```bash
+./scripts/verify_onnx_ptq_example.sh \
+  --model /path/to/model.onnx \
+  --dataset-dir /path/to/calib \
+  cu118 cu126 cu130
+```
+
+两个脚本的 `--output-dir` 都有默认值，并会再按 CUDA 变体创建子目录。ONNX 模型
+可以来自 `/home/zcx/CLionProjects/unisoc-model-example`，但该目录只用于 ONNX PTQ
+验证，不参与 KWS 用例。模型输入名、输入 shape 和校准文件必须一致。
+
+## 8. 代理和多人服务器
+
+只有首次构建或环境版本变化需要访问 NVIDIA、Ubuntu、PyTorch 和 PyPI。源码
+版本更新复用环境镜像时不需要下载第三方依赖。需要代理时只设置当前 shell：
+
+```bash
+export https_proxy=http://192.168.30.95:7897
+export http_proxy=http://192.168.30.95:7897
+export all_proxy=socks5://192.168.30.95:7897
+./scripts/build_environment_images.sh
+```
+
+脚本不会重启 Docker daemon，不会删除现有镜像，也不会清理公共 Docker/BuildKit
+缓存。多人共用 daemon 时，产品验证构建可设置个人
+`RX_MET_IMAGE_REPOSITORY`，避免覆盖同名产品 tag。
+
+共享路径属于临时目录，预计保留至 2026-10-10。到期前必须迁移到维护人批准并
+写入 `/mnt/data2/USAGE_RULES.md` 的长期缓存分类，或按共享盘规范清理。
+
+完整依赖与版本选择依据见
+`docs/research/cuda-torch-image-matrix.md`。

@@ -154,7 +154,7 @@ def load_quantizer_encodings(
         try:
             import sys
             from pathlib import Path
-            quant_gru_path = Path(__file__).parent.parent.parent.parent / "quant-gru-pytorch" / "pytorch"
+            quant_gru_path = Path(__file__).resolve().parents[1] / "quant-gru" / "pytorch"
             if quant_gru_path.exists():
                 sys.path.insert(0, str(quant_gru_path))
             from quant_gru import QuantGRU
@@ -1565,4 +1565,3 @@ def sync_adjacent_quantizers(
         print(f"   跳过存在中间阻断模块的路径: {stats['skipped_blocked_path']}")
 
     return stats
-

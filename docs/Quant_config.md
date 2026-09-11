@@ -912,7 +912,7 @@ print(f"变化: {(stage_accuracies['stage2'] - stage_accuracies['stage1'])*100:.
 ## 📚 参考资料
 
 ### 代码文件
-- **完整示例（标准 PyTorch GRU）**: `quick_start.py` 第 492-520 行
+- **完整示例（PyTorch QuantGRU）**: `quick_start_kws.py`
 - **完整示例（Haste GRU）**: `quick_start_zxc.py`
 - **Haste GRU 校准函数**: `quick_start_zxc.py` 第 518-650 行（`calibrate_quant_gru`）
 
@@ -925,4 +925,3 @@ print(f"变化: {(stage_accuracies['stage2'] - stage_accuracies['stage1'])*100:.
 ### 文档
 - **Haste GRU 用户手册**: `docs/QuantGRU_user_manual.md`
 - **ONNX 算子文档**: https://github.com/onnx/onnx/blob/main/docs/Operators.md
-

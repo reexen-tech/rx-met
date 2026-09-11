@@ -1,100 +1,90 @@
-# ADA200 rx-met @DATE_TAG@
+# rx-met Docker 镜像使用说明
 
-面向 ADA200 统一 Docker（`ada200_docker`）的小模型量化软件包。
-包内是预编译 wheel 和 examples，**不含 Docker 镜像**。
+rx-met 以三个独立的 Linux x86_64 GPU 镜像交付：
 
-```text
-@BUNDLE_NAME@/
-├── README.md
-├── ChangeLog.md
-├── install.sh
-├── wheels/
-└── examples/
+| 变体      | CUDA | PyTorch | 建议场景                       |
+| --------- | ---- | ------- | ------------------------------ |
+| `cu118` | 11.8 | 2.7.1   | 需要 CUDA 11.8 用户态运行库    |
+| `cu126` | 12.6 | 2.8.0   | 当前兼容性基线                 |
+| `cu130` | 13.0 | 2.10.0  | CUDA 13 和 Blackwell`sm_120` |
+
+宿主机必须安装 NVIDIA Driver、Docker 和 NVIDIA Container Toolkit。宿主机不
+需要安装与容器一致的 CUDA Toolkit。
+
+## 加载镜像
+
+先在制品目录校验完整性，再加载所需变体：
+
+```bash
+sha256sum --check --strict SHA256SUMS
+zstd -dc rx-met-v@VERSION@-cu126-linux-amd64.tar.zst | docker load
 ```
 
-软件包：`@BUNDLE_NAME@`。组件版本：`@SEMVER@`（wheel `@VERSION@`）。所属 ADA200 SDK：`@SDK_TAG@`。
-
-## 环境要求
-
-- 已导入的 `ada200_docker:latest`（Ubuntu 22.04，Python 3.10，`torch==2.8.0+cu128`）
-- 宿主机 NVIDIA Driver + NVIDIA Container Toolkit
-- 不需要再装 CUDA Toolkit / nvcc
-
-本包会覆盖镜像里的官方 `aimet-torch` / `aimet-onnx`，换成 rx-met 定制 AIMET 和 QuantGRU。
-ONNX Runtime 继续用镜像自带的 CPU 版。
-
-## 1. 启动统一 Docker
-
-把发布包和数据集挂进容器：
+## 启动容器
 
 ```bash
 docker run --gpus all --rm -it \
+  --ipc=host \
   --user "$(id -u):$(id -g)" \
+  --group-add "$(stat -c '%g' /path/to/datasets)" \
   -e HOME=/tmp \
-  -v /path/to/@BUNDLE_NAME@:/opt/rx-met:ro \
+  -e USER="$(id -un)" \
+  -e LOGNAME="$(id -un)" \
   -v /path/to/workspace:/workspace \
   -v /path/to/datasets:/datasets:ro \
   -w /workspace \
-  ada200_docker:latest \
-  bash
+  rx-met:@VERSION@-cu126
 ```
 
-`install.sh` 会改系统 Python，若容器用户没有写 `site-packages` 的权限，请去掉 `--user` 用镜像默认用户安装。
+如果程序需要多进程 DataLoader，可保留 `--ipc=host`，或改用明确的
+`--shm-size`。`--group-add` 用于 CIFS/NFS 等仅允许所属组读取的共享数据目录；
+`:ro` 仍保证容器不能修改数据。
 
-## 2. 安装
+## KWS 示例
 
-```bash
-cp -a /opt/rx-met /workspace/rx-met
-cd /workspace/rx-met
-./install.sh
-```
-
-脚本会校验 CPython 3.10、Linux x86_64、`torch==2.8.0` 且 `torch.version.cuda == 12.8`，
-然后离线安装 `wheels/`。临时跳过检查：`RX_MET_SKIP_ENV_CHECK=1 ./install.sh`。
-
-## 3. PyTorch 模型示例（kws_streaming att_mh_rnn / QuantGRU）
-
-将 Speech Commands v0.02 放到宿主机数据集目录（容器内是
-`/datasets/speech_commands_v0.02`）：
+Speech Commands v0.02 在容器内挂载为
+`/datasets/speech_commands_v0.02` 后执行：
 
 ```bash
-mkdir -p /path/to/datasets/speech_commands_v0.02
-wget -O speech_commands_v0.02.tar.gz \
-  https://storage.googleapis.com/download.tensorflow.org/data/speech_commands_v0.02.tar.gz
-tar -xf speech_commands_v0.02.tar.gz -C /path/to/datasets/speech_commands_v0.02
-```
-
-```bash
-cd /workspace/rx-met/examples
-# ada200_docker 若未登记 CUDA runtime，先: source /workspace/rx-met/cuda_libs.env
+cp -a /opt/rx-met/examples /workspace/rx-met-examples
+cd /workspace/rx-met-examples
 export RX_MET_SPEECH_COMMANDS_ROOT=/datasets/speech_commands_v0.02
 python3 quick_start_kws.py
 ```
 
-输出写在 `examples/output/quick_start_kws/`。量化 JSON 见 `examples/config/README.md`。
+输出默认写入 `/workspace/rx-met-examples/output/quick_start_kws/`。
 
-## 4. ONNX 直量化示例
+## ONNX PTQ 示例
 
-本示例使用 MobileNetV2。先在能访问 `hf-mirror.com` 的机器上准备数据：
+模型和校准数据默认位于 `/datasets/mobilenetv2/`：
 
 ```bash
-wget -O mobilenetv2-12.onnx \
-  https://hf-mirror.com/onnxmodelzoo/mobilenetv2-12/resolve/main/mobilenetv2-12.onnx
-wget -O imagenette2-320.parquet \
-  https://hf-mirror.com/datasets/johnowhitaker/imagenette2-320/resolve/main/data/train-00000-of-00001.parquet
+cp -a /opt/rx-met/examples /workspace/rx-met-examples
+cd /workspace/rx-met-examples
 python3 prepare_onnx_ptq_data.py \
-  --onnx mobilenetv2-12.onnx \
-  --parquet imagenette2-320.parquet \
-  --out-root /datasets/mobilenetv2
-```
-
-脚本会写出静态 batch=1 的 ONNX，以及不重叠的 `calib/`、`val/` npy。然后：
-
-```bash
-cd /workspace/rx-met/examples
+  --onnx /workspace/mobilenetv2-12.onnx \
+  --parquet /workspace/imagenette2-320.parquet \
+  --out-root /workspace/datasets/mobilenetv2
+export RX_MET_ONNX_PTQ_ROOT=/workspace/datasets
 python3 onnx_ptq_quick_start.py
 ```
 
-模型和校准目录默认是 `/datasets/mobilenetv2/`。换自己的模型时，用 `RX_MET_ONNX_PTQ_MODEL` 和 `RX_MET_ONNX_PTQ_CALIB` 指向对应文件与校准 npy 目录。
+该路径默认使用 CPU ONNX Runtime。数据集、模型和输出不应打入镜像层，应通过
+volume 挂载或写入 `/workspace`。
 
-这条路径使用 CPU ONNX Runtime，与 example 默认 `USE_CPU = True` 一致。
+## 环境检查
+
+```bash
+python3 - <<'PY'
+import torch
+import aimet_torch
+import aimet_onnx
+import quant_gru
+
+print("torch", torch.__version__, "CUDA", torch.version.cuda)
+print("GPU", torch.cuda.get_device_name(0))
+print("rx-met import OK")
+PY
+```
+
+镜像构建版本和完整 Python 包清单位于 `/opt/rx-met/metadata/`。

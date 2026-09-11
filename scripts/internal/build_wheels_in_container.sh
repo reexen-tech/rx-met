@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Run inside ada200_docker:rx-met-dev. Copies the mounted source and builds wheels.
+# 在 NVIDIA CUDA devel builder 中构建 rx-met 和 QuantGRU wheel。
 set -euo pipefail
 
 SRC="${RX_MET_SRC:-/opt/rx-met-src}"
@@ -10,6 +10,16 @@ log() { printf '[build_wheels] %s\n' "$*"; }
 
 [[ -d "${SRC}" ]] || { log "ERROR: source not mounted: ${SRC}"; exit 1; }
 [[ -n "${RX_MET_VERSION:-}" ]] || { log "ERROR: RX_MET_VERSION is required"; exit 1; }
+[[ -n "${CUDA_VARIANT:-}" ]] || { log "ERROR: CUDA_VARIANT is required"; exit 1; }
+for required in \
+    pyproject.toml \
+    native/aimet/CMakeLists.txt \
+    quant-gru/CMakeLists.txt \
+    quant-gru/pytorch/_version.py
+do
+    [[ -f "${SRC}/${required}" ]] \
+        || { log "ERROR: source file missing: ${SRC}/${required}"; exit 1; }
+done
 
 rm -rf "${WORKDIR}"
 mkdir -p "${WORKDIR}" "${OUT}"
@@ -21,7 +31,10 @@ tar -C "${SRC}" \
     -cf - . | tar -C "${WORKDIR}" -xf -
 
 cd "${WORKDIR}"
-python3 scripts/prepare_packaging.py --root "${WORKDIR}" --version "${RX_MET_VERSION}"
+python3 scripts/internal/prepare_packaging.py \
+    --root "${WORKDIR}" \
+    --version "${RX_MET_VERSION}" \
+    --cuda-variant "${CUDA_VARIANT}"
 
 export RX_MET_ENABLE_CUDA=1
 export RX_MET_PYTHON="${RX_MET_PYTHON:-python3}"
@@ -29,9 +42,14 @@ export RX_MET_WHEEL_OUT="${OUT}"
 export RX_MET_AIMET_BUILD_DIR="${RX_MET_AIMET_BUILD_DIR:-/tmp/rx-met-aimet-build}"
 export RX_MET_QUANT_GRU_BUILD_DIR="${RX_MET_QUANT_GRU_BUILD_DIR:-/tmp/rx-met-quant-gru-build}"
 
-./scripts/build_wheel.sh
-./scripts/build_quant_gru_wheel.sh
-./scripts/download_extra_wheels.sh "${OUT}"
+rm -f "${OUT}"/rx_met-*.whl "${OUT}"/rx-met-*.whl \
+    "${OUT}"/aimet_rx-*.whl "${OUT}"/aimet-rx-*.whl
+log "build AIMET native runtime from repository source"
+./scripts/build_aimet_native.sh
+log "build rx-met wheel -> ${OUT}"
+"${RX_MET_PYTHON}" -m pip wheel "${WORKDIR}" \
+    -w "${OUT}" --no-deps --no-build-isolation
+./scripts/internal/build_quant_gru_wheel.sh
 
 python3 - <<PY
 from pathlib import Path
@@ -40,13 +58,10 @@ import zipfile
 out = Path("${OUT}")
 wheels = list(out.glob("rx_met-*.whl"))
 assert len(wheels) == 1, wheels
+assert wheels[0].name.endswith("-cp310-cp310-linux_x86_64.whl"), wheels[0]
 names = zipfile.ZipFile(wheels[0]).namelist()
 assert not any(name.startswith("rx_met_llm") for name in names), "rx_met_llm leaked into wheel"
 print("wheel ok", wheels[0].name)
 assert list(out.glob("quant_gru-*.whl")), "missing quant_gru wheel"
-assert list(out.glob("torchaudio-*.whl")), "missing torchaudio wheel"
-assert list(out.glob("librosa-*.whl")), "missing librosa wheel"
-assert list(out.glob("onnxsim-*.whl")), "missing onnxsim wheel"
-assert list(out.glob("tqdm-*.whl")), "missing tqdm wheel"
 print("artifact wheels", sorted(p.name for p in out.glob("*.whl")))
 PY

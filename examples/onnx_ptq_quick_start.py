@@ -1,17 +1,17 @@
 """
 RX-MET ONNX PTQ 演示 — 标准用法
 
-对应 examples/quick_start.py 的 Torch QAT 入口。流程对齐，接口尽量复用：
+对应 examples/quick_start_kws.py 的 Torch QAT 入口。流程对齐，接口尽量复用：
 
     加载 ONNX + 真实校准样本
         → create_onnx_ptq_sim（JSON 1 + IO quantizer + percentile）
-        → apply_mixed_precision_bitwidth（JSON 2，与 quick_start.py 同一份）
+        → apply_mixed_precision_bitwidth（JSON 2，与 quick_start_kws.py 同一份）
         → sim.compute_encodings 校准 (PTQ)
         → apply_power_of_2_workflow（RX cover_range + Sb=Sx*Sw，算法在 aimet_common）
         → export_onnx_compiler_artifacts（clean ONNX + compiler encodings）
         → 重建 clean ONNX session，对比 FP32
 
-ONNX 没有 PyTorch 权重可训，因此没有 QAT 微调；其余步骤与 quick_start.py 对应。
+ONNX 没有 PyTorch 权重可训，因此没有 QAT 微调；其余步骤与 quick_start_kws.py 对应。
 main() 只编排已有模块，不复制量化规则。
 
 运行（先进入 examples/）：
@@ -19,7 +19,9 @@ main() 只编排已有模块，不复制量化规则。
     python onnx_ptq_quick_start.py
 
 跑 MobileNetV2 示例。先用 `prepare_onnx_ptq_data.py` 从 ImageNette
-parquet 生成 calib/val npy。模型和校准目录可用环境变量覆盖。
+parquet 生成 calib/val npy。模型、校准目录和输出目录可分别用
+`RX_MET_ONNX_PTQ_MODEL`、`RX_MET_ONNX_PTQ_CALIB` 和
+`RX_MET_ONNX_PTQ_OUTPUT_DIR` 覆盖。
 """
 
 from __future__ import annotations
@@ -74,10 +76,15 @@ PO2_TOLERANCE = 0.02
 ALIGN_BIAS_SCALE = True
 BIAS_BITWIDTH = 32
 
-# 与 examples/quick_start.py 同一对 JSON：QuantSim 基础配置 + 混合精度。
+# 与 examples/quick_start_kws.py 同一对 JSON：QuantSim 基础配置 + 混合精度。
 CONFIG_FILE = _HERE / "config" / "mrnn_quantsim_config_custom_mixed_precision_v2.json"
 BITWIDTH_CONFIG_FILE = _HERE / "config" / "quick_start_full_quant.json"
-OUTPUT_DIR = _HERE / "output" / "onnx_ptq_quick_start"
+OUTPUT_DIR = Path(
+    os.environ.get(
+        "RX_MET_ONNX_PTQ_OUTPUT_DIR",
+        str(_HERE / "output" / "onnx_ptq_quick_start"),
+    )
+)
 USE_CPU = True
 CALIB_LIMIT = None
 
@@ -97,7 +104,7 @@ def choose_providers() -> tuple[str, ...]:
 
 @contextlib.contextmanager
 def stage(name: str, timings: dict | None = None):
-    """与 quick_start.py 相同的阶段计时，不折叠业务调用。"""
+    """与 quick_start_kws.py 相同的阶段计时，不折叠业务调用。"""
     print("\n" + "=" * 70)
     print(name)
     print("=" * 70)
@@ -142,7 +149,7 @@ def print_stage_timings(timings: dict) -> None:
 
 
 # ============================================================================
-# 主流程：与 quick_start.py 对齐的步骤编号
+# 主流程：与 quick_start_kws.py 对齐的步骤编号
 # ============================================================================
 def main() -> None:
     if EXAMPLE not in EXAMPLES:
@@ -196,7 +203,7 @@ def main() -> None:
     # ------------------------------------------------------------------
     # 步骤 3: 创建 QuantizationSimModel
     #   对应 prepare_model + QuantizationSimModel + set_percentile_value
-    #   + apply_mixed_precision_bitwidth。两份 JSON 与 quick_start.py 相同。
+    #   + apply_mixed_precision_bitwidth。两份 JSON 与 quick_start_kws.py 相同。
     # ------------------------------------------------------------------
     with stage("步骤 3: 创建 sim", timings):
         OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
@@ -256,7 +263,7 @@ def main() -> None:
     # ------------------------------------------------------------------
     # 步骤 6: QAT 微调
     #   直量化 ONNX 没有可训练的 PyTorch 权重，这一步跳过。
-    #   若后续要微调，应走 quick_start.py 的 Torch QAT 路径。
+    #   若后续要微调，应走 quick_start_kws.py 的 Torch QAT 路径。
     # ------------------------------------------------------------------
     with stage("步骤 6: QAT 微调", timings):
         print("ONNX 直量化路径没有 QAT，跳过 freeze_quantizer_parameters / finetune")
@@ -271,7 +278,7 @@ def main() -> None:
         )
         print(f"ONNX:              {artifacts['onnx']}")
         print(f"compiler encodings:{artifacts['encodings']}")
-        print(f"RX-MET encodings:   {artifacts['rxmet_encodings']}")
+        print(f"RX-MET encodings:   {artifacts['aimet_encodings']}")
         print(
             "coverage: "
             f"{artifacts['coverage']['mapped_quantizers']}/"
@@ -314,7 +321,7 @@ def main() -> None:
             "clean_onnx_vs_fp32": reload_report,
             "onnx": str(artifacts["onnx"]),
             "compiler_encodings": str(artifacts["encodings"]),
-            "rxmet_encodings": str(artifacts["rxmet_encodings"]),
+            "aimet_encodings": str(artifacts["aimet_encodings"]),
         },
     )
     print_stage_timings(timings)

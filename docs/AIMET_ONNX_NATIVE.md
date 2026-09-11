@@ -75,6 +75,7 @@ are:
 - `RX_MET_ONNXRUNTIME_ROOT`: deliberate override for testing another ONNX
   Runtime header tree.
 
-`scripts/build_wheel.sh` invokes this native build automatically. The resulting
-wheel is platform-specific (`cp310-cp310-linux_x86_64`) and the wheel build
-fails if any required native output is absent.
+`scripts/internal/build_wheels_in_container.sh` invokes this native build before
+building the rx-met wheel. The resulting wheel is platform-specific
+(`cp310-cp310-linux_x86_64`) and the wheel build fails if any required native
+output is absent.

@@ -1,65 +1,82 @@
 # rx-met
 
-面向 ADA200 的小模型量化工具包：定制 AIMET（`aimet_torch` / `aimet_onnx` / `aimet_common`）+ QuantGRU。
+rx-met 是面向 Linux x86_64 NVIDIA GPU 的小模型量化工具包，包含定制 AIMET
+（`aimet_torch`、`aimet_onnx`、`aimet_common`）和 QuantGRU。大模型量化不在
+本仓库。
 
-大模型量化不在本仓库。交付物是预编译 wheel 软件包，装进已有的 `ada200_docker`，**不含 Docker 镜像**。
+项目自行产出三个独立运行镜像，不再依赖 ADA200 通用 Docker：
 
-## 核心能力
+| 镜像变体 | CUDA | PyTorch | torchvision | torchaudio |
+| --- | --- | --- | --- | --- |
+| `cu118` | 11.8 | 2.7.1 | 0.22.1 | 2.7.1 |
+| `cu126` | 12.6 | 2.8.0 | 0.23.0 | 2.8.0 |
+| `cu130` | 13.0 | 2.10.0 | 0.25.0 | 2.10.0 |
 
-- PyTorch PTQ / QAT、混合精度、Po2 scale
-- QuantGRU 与 ONNX 直量化 PTQ
-- ONNX + encodings 导出
+每个 CUDA 变体维护一对版本化环境镜像：`build-env` 固化编译工具链和第三方
+依赖，`runtime-env` 固化运行依赖。产品发布只编译当前 AIMET/QuantGRU 源码并
+将项目 wheel 安装到对应 `runtime-env`，不重复准备环境。
 
-## 使用入口
+## 快速运行
 
-- 客户软件包：[release/README.md](release/README.md)
-- 小模型示例：`examples/quick_start_kws.py`
-- ONNX PTQ 示例：`examples/onnx_ptq_quick_start.py`
-- 量化配置：[examples/config/README.md](examples/config/README.md)
+以版本 `1.0.0` 的 CUDA 12.6 变体为例：
+
+```bash
+docker run --gpus all --rm -it \
+  --ipc=host \
+  -v /path/to/workspace:/workspace \
+  -v /path/to/datasets:/datasets:ro \
+  rx-met:1.0.0-cu126
+```
+
+容器内示例位于 `/opt/rx-met/examples`：
+
+```bash
+cd /opt/rx-met/examples
+export RX_MET_SPEECH_COMMANDS_ROOT=/datasets/speech_commands_v0.02
+python3 quick_start_kws.py
+```
+
+详细使用方法见 [docs/User_guide.md](docs/User_guide.md)。
+
+## 构建与发布
+
+```bash
+# 默认构建 cu118、cu126、cu130，并导出三个 tar.zst
+./scripts/release_build.sh
+
+# 只构建一个变体，不导出归档
+./scripts/release_build.sh --no-export cu126
+
+# 使用共享盘中已校验的成对环境镜像归档
+./scripts/release_build.sh --shared-cache
+
+# 在 GPU 机器上执行发布验收
+./scripts/verify_bundle.sh --gpu cu126
+
+# 使用真实数据完整运行两个 example（路径按实际环境填写）
+./scripts/verify_kws_example.sh --dataset-dir /path/to/speech_commands_v0.02 cu126
+./scripts/verify_onnx_ptq_example.sh \
+  --model /path/to/model.onnx --dataset-dir /path/to/calib cu126
+```
+
+默认制品目录为 `.release/export/`。完整构建、验收流程和可配置环境变量见
+[docs/Release_packaging.md](docs/Release_packaging.md)，各脚本的职责和调用关系见
+[scripts/README.md](scripts/README.md)。
 
 ## 主要目录
 
-- `aimet_common/`、`aimet_onnx/`、`aimet_torch/`：AIMET 定制组件
-- `quant-gru-pytorch/`：QuantGRU 源码与 CUDA 扩展
-- `native/aimet/`：AIMET native 源码
-- `examples/`：客户示例与配置
-- `docker/`：团队开发 / 打包镜像（不替代官方 `ada200_docker:latest`）
-- `scripts/`：native / wheel / Release 构建
-- `release/`：客户安装脚本与说明
-
-## 团队开发与打包镜像
-
-官方运行时仍是 `ada200_docker:latest`。团队内部用派生镜像 `ada200_docker:rx-met-dev`（统一 Docker + 编译工具）：
-
-```bash
-./scripts/build_dev_image.sh
-```
-
-- `docker/Dockerfile`：在运行时底图上加编译工具，产出 `ada200_docker:rx-met-dev`
-- `docker/Dockerfile.ada200`：本机没有官方镜像时，按同一契约造运行时底图（Ubuntu 22.04、Python 3.10、`torch==2.8.0+cu128`）
-
-有 `ada200_docker:latest` 就直接用它当底图。最终只打 `ada200_docker:rx-met-dev`，**不会**覆盖官方 `ada200_docker:latest`。
-
-## 构建离线 Release
-
-组件版本写在仓库根目录 `VERSION`（当前 `1.0.0`），用于 wheel 和共享盘目录。
-软件包文件名用 SDK 日期标签 `vYYMMDD`（`RX_MET_RELEASE_DATE`，默认当天）。
-
-```bash
-./scripts/build_dev_image.sh
-./scripts/release_build.sh
-./scripts/verify_bundle.sh
-```
-
-`release_build.sh` 检测到没有 `ada200_docker:rx-met-dev` 时会退出并提示先跑构建脚本。客户包仍装进官方 `ada200_docker:latest`。
-
-制品默认在 `.release/export/`：
-
-```text
-ada200-rx-met-vYYMMDD-linux_x86_64.tar.gz
-```
-
-源码基线：`aimet_rx` tag `qwen35-reexen-fullstack-v0.1.0`；打包流程对齐该仓 `zcx` 分支的小模型拆分。
+- `docker/Dockerfile.environment`：稳定 build-env/runtime-env 构建
+- `docker/Dockerfile`：基于稳定环境编译源码并组装产品镜像
+- `docker/docker-bake.hcl`：三个 CUDA 变体的唯一构建矩阵
+- `docker/requirements/`：公共依赖锁和三份 PyTorch/CUDA 锁
+- `scripts/build_environment_images.sh`：按需构建稳定环境镜像，默认产出三个 CUDA 变体的本地归档
+- `scripts/export_environment_images.sh`：在本地生成可人工搬运的环境文件
+- `scripts/load_environment_images.sh`：校验并加载环境归档
+- `scripts/release_build.sh`：环境解析、产品构建、验收和导出
+- `scripts/verify_bundle.sh`：最终镜像静态或 GPU 验收
+- `scripts/verify_kws_example.sh`：使用真实 Speech Commands 数据运行完整 KWS 用例
+- `scripts/verify_onnx_ptq_example.sh`：使用指定模型和校准数据运行完整 ONNX PTQ 用例
+- `examples/`：KWS 和 ONNX PTQ 快速示例
 
 ## 许可证
 
