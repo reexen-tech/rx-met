@@ -4,7 +4,7 @@ rx-met 是面向 Linux x86_64 NVIDIA GPU 的小模型量化工具包，包含定
 （`aimet_torch`、`aimet_onnx`、`aimet_common`）和 QuantGRU。大模型量化不在
 本仓库。
 
-项目自行产出三个独立运行镜像，不再依赖 ADA200 通用 Docker：
+项目自行产出三个独立运行镜像：
 
 | 镜像变体 | CUDA | PyTorch | torchvision | torchaudio |
 | --- | --- | --- | --- | --- |
