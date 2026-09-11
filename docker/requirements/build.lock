@@ -1,0 +1,5 @@
+# Docker builder 使用的 Python 构建工具。与运行时依赖分开固定。
+pip==25.2
+setuptools==70.2.0
+wheel==0.45.1
+pybind11==2.13.6

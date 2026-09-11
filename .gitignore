@@ -39,8 +39,8 @@ htmlcov/
 .ruff_cache/
 
 # ===== 本地编译 =====
-quant-gru-pytorch/build*/
-quant-gru-pytorch/pytorch/build/
+quant-gru/build*/
+quant-gru/pytorch/build/
 native/**/build*/
 
 # ===== 模型权重 / 量化产物 =====

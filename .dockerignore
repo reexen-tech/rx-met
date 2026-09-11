@@ -4,12 +4,6 @@ tmp
 tests
 doc
 docs
-examples
-release
-
-scripts/release_build.sh
-scripts/verify_bundle.sh
-scripts/ptq_onnx_compiler.py
 
 **/__pycache__
 **/*.py[cod]
@@ -18,9 +12,9 @@ scripts/ptq_onnx_compiler.py
 **/.mypy_cache
 **/.ruff_cache
 
-quant-gru-pytorch/build*
-quant-gru-pytorch/pytorch/build
-quant-gru-pytorch/pytorch/lib/*.so
+quant-gru/build*
+quant-gru/pytorch/build
+quant-gru/pytorch/lib/*.so
 
 *.pt
 *.pth

@@ -7,6 +7,18 @@
 
 ## [Unreleased]
 
+### 变更
+
+- 交付方式从 ADA200 通用镜像上的 wheel 软件包改为 rx-met 自有 Docker 镜像。
+- 将 Docker 流程拆分为稳定环境与产品发布：每个 CUDA 变体分别维护可复用的
+  `build-env` 和 `runtime-env`，源码更新只重编项目 wheel 和最终产品镜像。
+- 新增独立的环境构建、验证、加载和本地导出脚本；脚本只生成可搬运文件且禁止
+  写 `/mnt/data2`，共享盘复制或移动由维护人手工执行。
+- `release_build.sh` 优先复用本机环境镜像，也可读取指定环境归档；两者都没有时
+  自动调用环境构建脚本，显式提供归档但校验失败时不会回退公网。
+- 最终镜像内置运行依赖、AIMET native、QuantGRU、examples 和版本元数据。
+- 修复 ONNX PTQ quick start 使用错误 `rxmet_encodings` 字段的问题。
+
 ## [1.0.0] - 2026-09-02
 
 首个对外版本。
@@ -68,7 +80,7 @@
 - **ONNX 输入 PTQ**
   （`aimet_onnx/`、`aimet_common/power_of_2.py`、`aimet_onnx/rx_ptq/`）
   - 直接读取已有 ONNX，校准后输出 clean ONNX 与 compiler-native encodings（`schema_version: 3`），不经过 `aimet_torch` 导出链
-  - 入口：`scripts/ptq_onnx_compiler.py`、`examples/onnx_ptq_quick_start.py`
+  - 示例入口：`examples/onnx_ptq_quick_start.py`
   - 与 PyTorch 示例共用 JSON 1 / JSON 2；图里没有的 `Quantized*` 与 `GRU_config` 忽略
   - `aimet_onnx` 补 `set_percentile_value`：必须在 `compute_encodings` 前设置；native 默认 100 等于 min-max。默认 `percentile=99.99`
   - RX 量化原文抽到 `aimet_common/power_of_2.py`，供 Torch / ONNX 共用，不改写算法：

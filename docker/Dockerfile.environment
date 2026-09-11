@@ -1,0 +1,218 @@
+ARG DEVEL_IMAGE=nvcr.io/nvidia/cuda:12.6.3-devel-ubuntu22.04
+ARG BASE_IMAGE=nvcr.io/nvidia/cuda:12.6.3-base-ubuntu22.04
+
+FROM ${DEVEL_IMAGE} AS build-env
+
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+
+ARG DEBIAN_FRONTEND=noninteractive
+ARG CUDA_VARIANT=cu126
+ARG RX_MET_CUDA_VERSION=12.6
+ARG RX_MET_CUDA_ARCHITECTURES=80;86;89;90
+ARG TORCH_CUDA_ARCH_LIST=8.0;8.6;8.9;9.0
+ARG TORCH_VERSION=2.8.0
+ARG TORCHVISION_VERSION=0.23.0
+ARG TORCHAUDIO_VERSION=2.8.0
+ARG ENV_VERSION=deps-v1
+
+ENV CUDA_HOME=/usr/local/cuda \
+    PATH=/usr/local/cuda/bin:${PATH} \
+    LIBRARY_PATH=/usr/local/cuda/lib64/stubs \
+    RX_MET_ENABLE_CUDA=1 \
+    RX_MET_PYTHON=python3 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DEFAULT_TIMEOUT=120 \
+    PIP_RETRIES=10
+
+WORKDIR /opt/rx-met-env
+
+RUN apt-get -o Acquire::Retries=5 update \
+    && apt-get -o Acquire::Retries=5 install -y --no-install-recommends \
+        build-essential \
+        ca-certificates \
+        cmake \
+        diffutils \
+        libeigen3-dev \
+        libgomp1 \
+        ninja-build \
+        python3-dev \
+        python3-pip \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN case "${CUDA_VARIANT}:${RX_MET_CUDA_VERSION}:${RX_MET_CUDA_ARCHITECTURES}:${TORCH_CUDA_ARCH_LIST}" in \
+        "cu118:11.8:80;86;89;90:8.0;8.6;8.9;9.0"|\
+        "cu126:12.6:80;86;89;90:8.0;8.6;8.9;9.0"|\
+        "cu130:13.0:80;86;89;90;120:8.0;8.6;8.9;9.0;12.0") ;; \
+        *) echo "无效的 CUDA/架构环境组合" >&2; exit 1 ;; \
+    esac
+
+COPY docker/requirements /opt/rx-met-env/docker/requirements
+COPY scripts/internal/download_runtime_wheels.sh /opt/rx-met-env/scripts/internal/download_runtime_wheels.sh
+COPY scripts/internal/verify_dependency_wheelhouse.py /opt/rx-met-env/scripts/internal/verify_dependency_wheelhouse.py
+
+RUN mkdir -p /opt/rx-met-env/wheelhouse \
+    && ./scripts/internal/download_runtime_wheels.sh \
+        /opt/rx-met-env/wheelhouse "${CUDA_VARIANT}" \
+    && cd /opt/rx-met-env/wheelhouse \
+    && sha256sum --check --strict SHA256SUMS \
+    && python3 -m pip install \
+        --no-index \
+        --find-links=/opt/rx-met-env/wheelhouse \
+        -r /opt/rx-met-env/docker/requirements/build.lock \
+    && python3 -m pip install \
+        --no-index \
+        --find-links=/opt/rx-met-env/wheelhouse \
+        -r /opt/rx-met-env/docker/requirements/common.lock \
+        -r "/opt/rx-met-env/docker/requirements/${CUDA_VARIANT}.txt" \
+    && python3 -m pip check
+
+# AIMET ONNX Runtime headers include cudnn.h. Use the headers from the exact
+# cuDNN wheel selected by the PyTorch dependency lock.
+RUN python3 - <<'PY'
+from pathlib import Path
+
+source = Path("/usr/local/lib/python3.10/dist-packages/nvidia/cudnn/include")
+target = Path("/usr/local/cuda/include")
+headers = sorted(source.glob("cudnn*.h"))
+if not headers:
+    raise SystemExit(f"没有找到 PyTorch cuDNN headers: {source}")
+if not target.is_dir():
+    raise SystemExit(f"CUDA include 目录不存在: {target}")
+for header in headers:
+    destination = target / header.name
+    if destination.exists() or destination.is_symlink():
+        destination.unlink()
+    destination.symlink_to(header)
+print(f"已注册 {len(headers)} 个 cuDNN headers")
+PY
+
+RUN EXPECTED_TORCH="${TORCH_VERSION}" \
+    EXPECTED_TORCHVISION="${TORCHVISION_VERSION}" \
+    EXPECTED_TORCHAUDIO="${TORCHAUDIO_VERSION}" \
+    EXPECTED_CUDA="${RX_MET_CUDA_VERSION}" \
+    python3 - <<'PY'
+import importlib.metadata
+import os
+import torch
+
+for package, expected in {
+    "torch": os.environ["EXPECTED_TORCH"],
+    "torchvision": os.environ["EXPECTED_TORCHVISION"],
+    "torchaudio": os.environ["EXPECTED_TORCHAUDIO"],
+}.items():
+    actual = importlib.metadata.version(package).split("+", 1)[0]
+    assert actual == expected, (package, actual, expected)
+assert torch.version.cuda == os.environ["EXPECTED_CUDA"], torch.version.cuda
+PY
+
+RUN printf '%s\n' \
+        "environment_role=build" \
+        "environment_version=${ENV_VERSION}" \
+        "cuda_variant=${CUDA_VARIANT}" \
+        "cuda_version=${RX_MET_CUDA_VERSION}" \
+        "torch_version=${TORCH_VERSION}" \
+        > /opt/rx-met-env/environment.env
+
+LABEL org.opencontainers.image.vendor="Reexen" \
+      org.opencontainers.image.description="rx-met stable build environment" \
+      com.reexen.rx-met.environment.role="build" \
+      com.reexen.rx-met.environment.version="${ENV_VERSION}" \
+      com.reexen.rx-met.cuda.variant="${CUDA_VARIANT}" \
+      com.reexen.rx-met.cuda.version="${RX_MET_CUDA_VERSION}" \
+      com.reexen.rx-met.torch.version="${TORCH_VERSION}"
+
+
+FROM ${BASE_IMAGE} AS runtime-env
+
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+
+ARG DEBIAN_FRONTEND=noninteractive
+ARG CUDA_VARIANT=cu126
+ARG RX_MET_CUDA_VERSION=12.6
+ARG TORCH_VERSION=2.8.0
+ARG TORCHVISION_VERSION=0.23.0
+ARG TORCHAUDIO_VERSION=2.8.0
+ARG ENV_VERSION=deps-v1
+
+ENV CUDA_VARIANT=${CUDA_VARIANT} \
+    RX_MET_CUDA_VERSION=${RX_MET_CUDA_VERSION} \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    NVIDIA_VISIBLE_DEVICES=all \
+    NVIDIA_DRIVER_CAPABILITIES=compute,utility
+
+WORKDIR /workspace
+
+RUN apt-get -o Acquire::Retries=5 update \
+    && apt-get -o Acquire::Retries=5 install -y --no-install-recommends \
+        ca-certificates \
+        libgomp1 \
+        python3 \
+        python3-pip \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=build-env /opt/rx-met-env/wheelhouse /tmp/wheelhouse
+COPY --from=build-env /opt/rx-met-env/docker/requirements /opt/rx-met-env/requirements
+
+RUN cd /tmp/wheelhouse \
+    && sha256sum --check --strict SHA256SUMS \
+    && python3 -m pip install \
+        --no-cache-dir \
+        --no-index \
+        --no-deps \
+        /tmp/wheelhouse/*.whl \
+    && python3 -m pip check \
+    && rm -rf /tmp/wheelhouse
+
+RUN python3 - <<'PY' > /etc/ld.so.conf.d/rx-met-python-cuda.conf
+from pathlib import Path
+
+roots = sorted(Path("/usr/local/lib/python3.10/dist-packages").glob("nvidia/*/lib"))
+torch_lib = Path("/usr/local/lib/python3.10/dist-packages/torch/lib")
+if torch_lib.is_dir():
+    roots.append(torch_lib)
+for root in roots:
+    if root.is_dir():
+        print(root)
+PY
+RUN ldconfig
+
+RUN EXPECTED_TORCH="${TORCH_VERSION}" \
+    EXPECTED_TORCHVISION="${TORCHVISION_VERSION}" \
+    EXPECTED_TORCHAUDIO="${TORCHAUDIO_VERSION}" \
+    EXPECTED_CUDA="${RX_MET_CUDA_VERSION}" \
+    python3 - <<'PY'
+import importlib.metadata
+import os
+import torch
+
+for package, expected in {
+    "torch": os.environ["EXPECTED_TORCH"],
+    "torchvision": os.environ["EXPECTED_TORCHVISION"],
+    "torchaudio": os.environ["EXPECTED_TORCHAUDIO"],
+}.items():
+    actual = importlib.metadata.version(package).split("+", 1)[0]
+    assert actual == expected, (package, actual, expected)
+assert torch.version.cuda == os.environ["EXPECTED_CUDA"], torch.version.cuda
+PY
+
+RUN mkdir -p /opt/rx-met-env \
+    && printf '%s\n' \
+        "environment_role=runtime" \
+        "environment_version=${ENV_VERSION}" \
+        "cuda_variant=${CUDA_VARIANT}" \
+        "cuda_version=${RX_MET_CUDA_VERSION}" \
+        "torch_version=${TORCH_VERSION}" \
+        > /opt/rx-met-env/environment.env \
+    && python3 -m pip freeze --all > /opt/rx-met-env/pip-freeze.txt \
+    && dpkg-query --show > /opt/rx-met-env/dpkg-packages.txt
+
+LABEL org.opencontainers.image.vendor="Reexen" \
+      org.opencontainers.image.description="rx-met stable runtime environment" \
+      com.reexen.rx-met.environment.role="runtime" \
+      com.reexen.rx-met.environment.version="${ENV_VERSION}" \
+      com.reexen.rx-met.cuda.variant="${CUDA_VARIANT}" \
+      com.reexen.rx-met.cuda.version="${RX_MET_CUDA_VERSION}" \
+      com.reexen.rx-met.torch.version="${TORCH_VERSION}"
+
+CMD ["bash"]

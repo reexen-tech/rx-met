@@ -1,4 +1,4 @@
-# ONNX PTQ compiler artifacts
+# ONNX PTQ 编译器产物
 
 这条流程直接读取已有 ONNX，不经过 `aimet_torch` 或
 `aimet_torch.rx_export.export_onnx_json`。
@@ -6,11 +6,11 @@
 名词（Clean ONNX / raw AIMET encodings / compiler encodings）见
 [`docs/onnx-ptq-context.md`](../docs/onnx-ptq-context.md)。
 
-照抄入口与 `examples/quick_start.py` 对应：
+照抄入口与 `examples/quick_start_kws.py` 对应：
 
 ```bash
 cd examples
-python onnx_ptq_quick_start.py
+python3 onnx_ptq_quick_start.py
 ```
 
 ## 运行前提
@@ -22,18 +22,18 @@ python onnx_ptq_quick_start.py
 
 ## MobileNetV2
 
-先用 `examples/prepare_onnx_ptq_data.py` 生成静态 batch=1 的 ONNX 和 calib npy：
+先用 `examples/prepare_onnx_ptq_data.py` 生成静态 batch=1 的 ONNX 和 calib npy，
+再通过环境变量指定模型和校准目录运行标准示例：
 
 ```bash
-python3 scripts/ptq_onnx_compiler.py \
-  --model /datasets/mobilenetv2/mobilenetv2-12.onnx \
-  --calib-dir /datasets/mobilenetv2/calib \
-  --output-dir /datasets/mobilenetv2/output \
-  --prefix mobilenetv2_ptq \
-  --cpu
+cd examples
+RX_MET_ONNX_PTQ_MODEL=/datasets/mobilenetv2/mobilenetv2-12.onnx \
+RX_MET_ONNX_PTQ_CALIB=/datasets/mobilenetv2/calib \
+python3 onnx_ptq_quick_start.py
 ```
 
 输入名从 ONNX 图自动读取。多输入模型可用同一 sample 前缀的 npy，或改用 npz。
+产物默认写入 `examples/output/onnx_ptq_quick_start/`。
 
 ## 输出
 
@@ -52,7 +52,7 @@ python3 scripts/ptq_onnx_compiler.py \
 - Power-of-2 使用与 `aimet_torch/power_of_2_quantization.py` 相同的 `cover_range`（容差 2%）
 - 权重默认 per-channel；Gemm 保持 per-channel；无 Conv+Relu supergroup
 
-配置与 `examples/quick_start.py` 相同：
+配置与 `examples/quick_start_kws.py` 相同：
 
 - JSON 1：`examples/config/mrnn_quantsim_config_custom_mixed_precision_v2.json`
 - JSON 2：`examples/config/quick_start_full_quant.json`（`Quantized*` / `GRU_config` 在当前 ONNX 图里没有则忽略）

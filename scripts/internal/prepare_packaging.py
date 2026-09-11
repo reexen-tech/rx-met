@@ -1,15 +1,18 @@
 #!/usr/bin/env python3
-"""Prepare the rx-met wheel tree inside the builder image.
-
-Writes VERSION and ada200-aligned requirements.txt. Also rejects any leftover
-LLM packaging if a fullstack pyproject is copied in by mistake.
-"""
+"""在产品 builder 中准备指定 CUDA 变体的 rx-met wheel 源码树。"""
 
 from __future__ import annotations
 
 import argparse
 import re
 from pathlib import Path
+
+
+_VARIANTS = {
+    "cu118": ("2.7.1+cu118", "0.22.1+cu118", "2.7.1+cu118"),
+    "cu126": ("2.8.0+cu126", "0.23.0+cu126", "2.8.0+cu126"),
+    "cu130": ("2.10.0+cu130", "0.25.0+cu130", "2.10.0+cu130"),
+}
 
 
 def _strip_pyproject(text: str) -> str:
@@ -45,6 +48,7 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--root", type=Path, required=True)
     parser.add_argument("--version", required=True)
+    parser.add_argument("--cuda-variant", choices=sorted(_VARIANTS), required=True)
     args = parser.parse_args()
 
     root: Path = args.root
@@ -53,26 +57,41 @@ def main() -> None:
     if not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", version):
         raise SystemExit(f"invalid wheel version, expected MAJOR.MINOR.PATCH: {version}")
 
+    variant = args.cuda_variant
+    wheel_version = f"{version}+{variant}"
     pyproject = root / "pyproject.toml"
     pyproject.write_text(_strip_pyproject(pyproject.read_text(encoding="utf-8")), encoding="utf-8")
-    (root / "VERSION").write_text(f"{version}\n", encoding="utf-8")
-    # Align declared deps with ada200_docker. Extra wheels are installed separately.
-    (root / "requirements.txt").write_text(
-        "\n".join(
-            [
-                "numpy>=1.20.0,<3",
-                "scipy>=1.7.0",
-                "onnx>=1.11.0",
-                "onnxruntime>=1.23.1",
-                "torch>=2.8.0",
-                "torchvision>=0.23.0",
-                "pillow>=8.0.0",
-                "",
-            ]
-        ),
-        encoding="utf-8",
+    (root / "VERSION").write_text(f"{wheel_version}\n", encoding="utf-8")
+
+    common_in = root / "docker" / "requirements" / "common.in"
+    direct = [
+        line.strip()
+        for line in common_in.read_text(encoding="utf-8").splitlines()
+        if line.strip() and not line.lstrip().startswith("#")
+    ]
+    torch, torchvision, torchaudio = _VARIANTS[variant]
+    direct.extend(
+        [
+            f"torch=={torch}",
+            f"torchvision=={torchvision}",
+            f"torchaudio=={torchaudio}",
+        ]
     )
-    print(f"prepared rx-met packaging at {root} version={version}")
+    (root / "requirements.txt").write_text("\n".join(direct) + "\n", encoding="utf-8")
+
+    quant_version = root / "quant-gru" / "pytorch" / "_version.py"
+    quant_text = quant_version.read_text(encoding="utf-8")
+    quant_text, count = re.subn(
+        r'^__version__ = "([0-9]+\.[0-9]+\.[0-9]+)(?:\+[^\"]+)?"$',
+        rf'__version__ = "\1+{variant}"',
+        quant_text,
+        count=1,
+        flags=re.M,
+    )
+    if count != 1:
+        raise SystemExit(f"failed to set QuantGRU CUDA variant in {quant_version}")
+    quant_version.write_text(quant_text, encoding="utf-8")
+    print(f"prepared rx-met packaging at {root} version={wheel_version}")
 
 
 if __name__ == "__main__":

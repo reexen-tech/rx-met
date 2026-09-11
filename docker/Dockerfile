@@ -1,97 +1,134 @@
-# 团队开发 / 打包图 ada200_docker:rx-met-dev。
-# 只在运行时底图上加编译工具，不安装、不替换 torch。
-ARG BASE_IMAGE=ada200_docker:latest
-FROM ${BASE_IMAGE}
+ARG BUILD_ENV_IMAGE=rx-met-build-env:deps-v1-cu126
+ARG RUNTIME_ENV_IMAGE=rx-met-runtime-env:deps-v1-cu126
 
-ARG DEBIAN_FRONTEND=noninteractive
-ARG CUDA_MAJOR=12
-ARG CUDA_MINOR=8
+FROM ${BUILD_ENV_IMAGE} AS project-builder
 
-USER root
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+
+ARG CUDA_VARIANT=cu126
+ARG RX_MET_CUDA_VERSION=12.6
+ARG RX_MET_CUDA_ARCHITECTURES=80;86;89;90
+ARG TORCH_CUDA_ARCH_LIST=8.0;8.6;8.9;9.0
+ARG RX_MET_VERSION=1.0.0
+ARG ENV_VERSION=deps-v1
+
+WORKDIR /opt/rx-met-src
+COPY . /opt/rx-met-src
+
+RUN grep -Fx "environment_role=build" /opt/rx-met-env/environment.env \
+    && grep -Fx "environment_version=${ENV_VERSION}" /opt/rx-met-env/environment.env \
+    && grep -Fx "cuda_variant=${CUDA_VARIANT}" /opt/rx-met-env/environment.env \
+    && grep -Fx "cuda_version=${RX_MET_CUDA_VERSION}" /opt/rx-met-env/environment.env \
+    && [[ "${RX_MET_VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+
+RUN CUDA_VARIANT="${CUDA_VARIANT}" \
+    RX_MET_VERSION="${RX_MET_VERSION}" \
+    RX_MET_CUDA_ARCHITECTURES="${RX_MET_CUDA_ARCHITECTURES}" \
+    TORCH_CUDA_ARCH_LIST="${TORCH_CUDA_ARCH_LIST}" \
+    RX_MET_WHEEL_OUT=/opt/project-wheels \
+    RX_MET_BUILD_COPY=/tmp/rx-met-build \
+    ./scripts/internal/build_wheels_in_container.sh \
+    && cd /opt/project-wheels \
+    && sha256sum ./*.whl | sort -k2 > SHA256SUMS
+
+
+FROM ${RUNTIME_ENV_IMAGE} AS runtime
+
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+
+ARG CUDA_VARIANT=cu126
+ARG RX_MET_CUDA_VERSION=12.6
+ARG RX_MET_VERSION=1.0.0
+ARG ENV_VERSION=deps-v1
+ARG TORCH_VERSION=2.8.0
+ARG TORCHVISION_VERSION=0.23.0
+ARG TORCHAUDIO_VERSION=2.8.0
+ARG MIN_DRIVER_VERSION=560.35.05
+ARG SOURCE_REVISION=unknown
+
+ENV CUDA_VARIANT=${CUDA_VARIANT} \
+    RX_MET_CUDA_VERSION=${RX_MET_CUDA_VERSION} \
+    RX_MET_HOME=/opt/rx-met \
+    RX_MET_VERSION=${RX_MET_VERSION} \
+    PYTHONUNBUFFERED=1 \
+    NVIDIA_VISIBLE_DEVICES=all \
+    NVIDIA_DRIVER_CAPABILITIES=compute,utility
+
 WORKDIR /workspace
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
-        build-essential \
-        ca-certificates \
-        cmake \
-        ninja-build \
-        python3-dev \
-        python3-pip \
-        libgomp1 \
-        libeigen3-dev \
-        wget \
-    && rm -rf /var/lib/apt/lists/*
+RUN grep -Fx "environment_role=runtime" /opt/rx-met-env/environment.env \
+    && grep -Fx "environment_version=${ENV_VERSION}" /opt/rx-met-env/environment.env \
+    && grep -Fx "cuda_variant=${CUDA_VARIANT}" /opt/rx-met-env/environment.env \
+    && grep -Fx "cuda_version=${RX_MET_CUDA_VERSION}" /opt/rx-met-env/environment.env
 
-RUN if command -v nvcc >/dev/null 2>&1; then \
-        echo "nvcc already present: $(nvcc --version | tail -1)"; \
-    else \
-        wget -q -O /tmp/cuda-keyring.deb \
-            https://developer.download.nvidia.cn/compute/cuda/repos/ubuntu2204/x86_64/cuda-keyring_1.1-1_all.deb \
-        || wget -q -O /tmp/cuda-keyring.deb \
-            https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2204/x86_64/cuda-keyring_1.1-1_all.deb; \
-        dpkg -i /tmp/cuda-keyring.deb; \
-        rm -f /tmp/cuda-keyring.deb; \
-        apt-get update && apt-get install -y --no-install-recommends \
-            cuda-nvcc-${CUDA_MAJOR}-${CUDA_MINOR} \
-            cuda-cudart-dev-${CUDA_MAJOR}-${CUDA_MINOR} \
-            cuda-compiler-${CUDA_MAJOR}-${CUDA_MINOR} \
-            cuda-cccl-${CUDA_MAJOR}-${CUDA_MINOR} \
-            libcublas-dev-${CUDA_MAJOR}-${CUDA_MINOR} \
-            libcusparse-dev-${CUDA_MAJOR}-${CUDA_MINOR} \
-        && rm -rf /var/lib/apt/lists/*; \
-        ln -sfn /usr/local/cuda-${CUDA_MAJOR}.${CUDA_MINOR} /usr/local/cuda; \
-    fi
+COPY --from=project-builder /opt/project-wheels /tmp/project-wheels
+COPY --from=project-builder /opt/rx-met-src/docker/requirements /opt/rx-met/requirements
+COPY --from=project-builder /opt/rx-met-src/examples /opt/rx-met/examples
+COPY --from=project-builder /opt/rx-met-src/release/README.md /opt/rx-met/README.md
+COPY --from=project-builder /opt/rx-met-src/release/ChangeLog.md /opt/rx-met/ChangeLog.md
 
-# Official runtime ships matching headers via torch nvidia.* wheels, but nvcc
-# only searches the CUDA toolkit include tree. Expose curand/cudnn there.
-RUN python3 - <<'PY'
-from pathlib import Path
+RUN sed -i "s/@VERSION@/${RX_MET_VERSION}/g" \
+        /opt/rx-met/README.md /opt/rx-met/ChangeLog.md \
+    && cd /tmp/project-wheels \
+    && sha256sum --check --strict SHA256SUMS \
+    && mkdir -p /opt/rx-met/metadata \
+    && cp SHA256SUMS /opt/rx-met/metadata/project-wheel-SHA256SUMS \
+    && python3 -m pip install \
+        --no-cache-dir \
+        --no-index \
+        --no-deps \
+        /tmp/project-wheels/*.whl \
+    && python3 -m pip check \
+    && rm -rf /tmp/project-wheels
 
-import nvidia
+RUN EXPECTED_TORCH="${TORCH_VERSION}" \
+    EXPECTED_TORCHVISION="${TORCHVISION_VERSION}" \
+    EXPECTED_TORCHAUDIO="${TORCHAUDIO_VERSION}" \
+    EXPECTED_CUDA="${RX_MET_CUDA_VERSION}" \
+    python3 - <<'PY'
+import importlib.metadata
+import os
+import runpy
 
-root = Path(nvidia.__path__[0])
-cuda_incs = [
-    Path("/usr/local/cuda/targets/x86_64-linux/include"),
-    Path("/usr/local/cuda/include"),
-]
-targets = [path for path in cuda_incs if path.is_dir()]
-if not targets:
-    raise SystemExit("CUDA include directory not found")
+import aimet_onnx
+import aimet_torch
+import quant_gru
+import torch
 
-for name in ("cudnn", "curand"):
-    src = root / name / "include"
-    if not src.is_dir():
-        raise SystemExit(f"missing torch nvidia header dir: {src}")
-    headers = [path for path in src.iterdir() if path.suffix == ".h"]
-    if not headers:
-        raise SystemExit(f"no .h files in {src}")
-    for dest_dir in targets:
-        for header in headers:
-            dest = dest_dir / header.name
-            if dest.exists() or dest.is_symlink():
-                continue
-            dest.symlink_to(header.resolve())
-    print(f"exposed {len(headers)} {name} headers")
+for package, expected in {
+    "torch": os.environ["EXPECTED_TORCH"],
+    "torchvision": os.environ["EXPECTED_TORCHVISION"],
+    "torchaudio": os.environ["EXPECTED_TORCHAUDIO"],
+}.items():
+    actual = importlib.metadata.version(package).split("+", 1)[0]
+    assert actual == expected, (package, actual, expected)
+assert torch.version.cuda == os.environ["EXPECTED_CUDA"], torch.version.cuda
+runpy.run_path("/opt/rx-met/examples/quick_start_kws.py", run_name="verify_rx_met")
+runpy.run_path("/opt/rx-met/examples/onnx_ptq_quick_start.py", run_name="verify_rx_met")
+print("rx-met runtime import check passed", torch.__version__, torch.version.cuda)
 PY
 
-RUN if [ -e /usr/local/cuda/lib64/stubs/libcuda.so ] && [ ! -e /usr/local/cuda/lib64/stubs/libcuda.so.1 ]; then \
-        ln -sf libcuda.so /usr/local/cuda/lib64/stubs/libcuda.so.1; \
-    fi
+RUN printf '%s\n' \
+        "rx_met_version=${RX_MET_VERSION}" \
+        "environment_version=${ENV_VERSION}" \
+        "cuda_variant=${CUDA_VARIANT}" \
+        "cuda_version=${RX_MET_CUDA_VERSION}" \
+        "torch_version=${TORCH_VERSION}" \
+        "torchvision_version=${TORCHVISION_VERSION}" \
+        "torchaudio_version=${TORCHAUDIO_VERSION}" \
+        "minimum_driver_version=${MIN_DRIVER_VERSION}" \
+        "source_revision=${SOURCE_REVISION}" \
+        > /opt/rx-met/metadata/image.env \
+    && python3 -m pip freeze --all > /opt/rx-met/metadata/pip-freeze.txt \
+    && dpkg-query --show > /opt/rx-met/metadata/dpkg-packages.txt
 
-RUN python3 -m pip install --no-cache-dir \
-        setuptools==70.2.0 \
-        wheel==0.45.1 \
-        pybind11==2.13.6
+LABEL org.opencontainers.image.vendor="Reexen" \
+      org.opencontainers.image.description="rx-met 小模型量化运行环境" \
+      org.opencontainers.image.version="${RX_MET_VERSION}" \
+      com.reexen.rx-met.environment.version="${ENV_VERSION}" \
+      com.reexen.rx-met.cuda.variant="${CUDA_VARIANT}" \
+      com.reexen.rx-met.cuda.version="${RX_MET_CUDA_VERSION}" \
+      com.reexen.rx-met.driver.minimum="${MIN_DRIVER_VERSION}" \
+      com.reexen.rx-met.torch.version="${TORCH_VERSION}"
 
-ENV CUDA_HOME=/usr/local/cuda
-ENV PATH=/usr/local/cuda/bin:${PATH}
-ENV LIBRARY_PATH=/usr/local/cuda/lib64/stubs${LIBRARY_PATH:+:${LIBRARY_PATH}}
-ENV LD_LIBRARY_PATH=/usr/local/cuda/lib64/stubs:/usr/local/cuda/lib64${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}
-ENV RX_MET_ENABLE_CUDA=1
-ENV RX_MET_CUDA_VERSION=12.8
-ENV RX_MET_CUDA_ARCHITECTURES=80;86;89;90;120
-ENV TORCH_CUDA_ARCH_LIST=8.0;8.6;8.9;9.0;12.0
-ENV RX_MET_PYTHON=python3
-
-LABEL rx.met.role="dev-builder" \
-      rx.met.runtime="ada200_docker"
+CMD ["bash"]

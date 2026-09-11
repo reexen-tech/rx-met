@@ -26,6 +26,7 @@ RX-MET 量化演示 — kws_streaming att_mh_rnn + QuantGRU
 运行（先进入 examples/）：
 
     export RX_MET_SPEECH_COMMANDS_ROOT=/datasets/speech_commands_v0.02
+    export RX_MET_KWS_OUTPUT_DIR=/workspace/output/quick_start_kws
     python quick_start_kws.py
 """
 
@@ -128,8 +129,14 @@ MAX_CALIB_BATCHES = 100
 
 CONFIG_FILE = _HERE / "config" / "mrnn_quantsim_config_custom_mixed_precision_v2.json"
 BITWIDTH_CONFIG_FILE = _HERE / "config" / "quick_start_full_quant.json"
-OUTPUT_DIR = _HERE / "output" / "quick_start_kws"
-FP_MODEL_PATH = _HERE / "model_fp_kws.pth"
+OUTPUT_DIR = Path(
+    os.environ.get(
+        "RX_MET_KWS_OUTPUT_DIR", str(_HERE / "output" / "quick_start_kws")
+    )
+)
+FP_MODEL_PATH = Path(
+    os.environ.get("RX_MET_KWS_FP_MODEL", str(OUTPUT_DIR / "model_fp_kws.pth"))
+)
 
 
 # ============================================================================
@@ -727,6 +734,8 @@ def stage(name: str, timings: dict | None = None):
 def train_floating_point(model, train_loader, test_loader, device,
                          epochs: int = FP_EPOCHS, lr: float = FP_LR,
                          save_path=FP_MODEL_PATH) -> float:
+    save_path = Path(save_path)
+    save_path.parent.mkdir(parents=True, exist_ok=True)
     loss_fn = nn.CrossEntropyLoss()
     optim = torch.optim.Adam(model.parameters(), lr=lr, eps=1e-8)
 

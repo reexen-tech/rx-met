@@ -2,8 +2,8 @@
 # Build the CUDA-backed quant_gru wheel for the runtime Python ABI.
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-SOURCE="${ROOT}/quant-gru-pytorch"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+SOURCE="${ROOT}/quant-gru"
 PYTHON="${RX_MET_PYTHON:-python3.10}"
 BUILD_DIR="${RX_MET_QUANT_GRU_BUILD_DIR:-${SOURCE}/build_release}"
 OUT_DIR="${RX_MET_WHEEL_OUT:-${ROOT}/.release/wheels}"
@@ -11,7 +11,7 @@ OUT_DIR="${RX_MET_WHEEL_OUT:-${ROOT}/.release/wheels}"
 log() { printf '[build_quant_gru_wheel] %s\n' "$*"; }
 
 if [[ "${RX_MET_ENABLE_CUDA:-1}" != "1" ]]; then
-    log "SKIP: quant_gru requires CUDA (RX_MET_ENABLE_CUDA=${RX_MET_ENABLE_CUDA:-0}). Use the GPU release for QuantGRU / quick_start.py."
+    log "SKIP: quant_gru requires CUDA (RX_MET_ENABLE_CUDA=${RX_MET_ENABLE_CUDA:-0}). Use the GPU release for QuantGRU / quick_start_kws.py."
     exit 0
 fi
 
