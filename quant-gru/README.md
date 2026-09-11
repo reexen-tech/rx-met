@@ -1,4 +1,4 @@
-# Quant-GRU-PyTorch
+# Quant-GRU
 
 一个高性能的量化 GRU（门控循环单元）实现，基于 CUDA 和 PyTorch，支持训练和推理的量化感知计算。
 
@@ -217,7 +217,7 @@ config = gru.get_quant_config("update_gate_output")  # 不传参数则返回全�
 ## 🏗️ 项目结构
 
 ```
-quant-gru-pytorch/
+quant-gru/
 ├── include/ / src/          # C++/CUDA 核心实现
 ├── pytorch/                 # Python 绑定、配置、测试与示例
 │   ├── quant_gru.py
