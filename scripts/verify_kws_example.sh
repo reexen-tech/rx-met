@@ -112,6 +112,8 @@ for target in "${TARGETS[@]}"; do
         --user "${user_id}:${group_id}" \
         --group-add "${dataset_group_id}" \
         -e HOME=/tmp \
+        -e USER=rx-met-validator \
+        -e LOGNAME=rx-met-validator \
         -e "RX_MET_SPEECH_COMMANDS_ROOT=/datasets/speech_commands" \
         -e "RX_MET_KWS_OUTPUT_DIR=/output" \
         -e "RX_MET_KWS_FP_MODEL=/output/model_fp_kws.pth" \

@@ -85,7 +85,7 @@ OUTPUT_DIR = Path(
         str(_HERE / "output" / "onnx_ptq_quick_start"),
     )
 )
-USE_CPU = True
+DEVICE = os.environ.get("RX_MET_ONNX_PTQ_DEVICE", "cuda").strip().lower()
 CALIB_LIMIT = None
 
 
@@ -93,13 +93,31 @@ CALIB_LIMIT = None
 # 辅助：provider / 阶段计时 / 结果打印
 # ============================================================================
 def choose_providers() -> tuple[str, ...]:
-    if USE_CPU:
+    if DEVICE == "cpu":
         return ("CPUExecutionProvider",)
+    if DEVICE != "cuda":
+        raise ValueError("RX_MET_ONNX_PTQ_DEVICE 只能是 cuda 或 cpu")
     import onnxruntime as ort
 
-    if "CUDAExecutionProvider" in ort.get_available_providers():
-        return ("CUDAExecutionProvider", "CPUExecutionProvider")
-    return ("CPUExecutionProvider",)
+    available = ort.get_available_providers()
+    if "CUDAExecutionProvider" not in available:
+        raise RuntimeError(
+            "当前 ONNX Runtime 不包含 CUDAExecutionProvider；"
+            f"可用 providers: {available}"
+        )
+    return ("CUDAExecutionProvider", "CPUExecutionProvider")
+
+
+def require_active_cuda_session(session) -> None:
+    """拒绝 CUDA provider 初始化失败后整条 session 静默回退到 CPU。"""
+    if DEVICE != "cuda":
+        return
+    active = session.get_providers()
+    if not active or active[0] != "CUDAExecutionProvider":
+        raise RuntimeError(
+            "ONNX Runtime session 未启用 CUDAExecutionProvider；"
+            f"实际 providers: {active}"
+        )
 
 
 @contextlib.contextmanager
@@ -220,6 +238,7 @@ def main() -> None:
             providers=providers,
             work_dir=OUTPUT_DIR / "_aimet_tmp",
         )
+        require_active_cuda_session(sim.session)
         apply_mixed_precision_bitwidth(
             sim, config_file=str(BITWIDTH_CONFIG_FILE), verbose=True
         )

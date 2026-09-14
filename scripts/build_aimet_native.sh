@@ -23,15 +23,27 @@ esac
 BUILD_DIR="${RX_MET_AIMET_BUILD_DIR:-${ROOT}/.release/build/aimet-${variant}}"
 
 runtime="$("${PYTHON}" -c 'import platform, sys; print(sys.implementation.name, sys.version_info.major, sys.version_info.minor, platform.system(), platform.machine())')"
-if [[ "${runtime}" != "cpython 3 10 Linux x86_64" ]]; then
-    fail "requires CPython 3.10 on Linux x86_64; found ${runtime}"
-fi
+case "${runtime}" in
+    "cpython 3 10 Linux x86_64"|"cpython 3 11 Linux x86_64"|\
+    "cpython 3 12 Linux x86_64") ;;
+    *) fail "requires CPython 3.10-3.12 on Linux x86_64; found ${runtime}" ;;
+esac
 
-log "verify vendored ONNX Runtime 1.23.2 headers"
-(
-    cd "${SOURCE_DIR}/third_party/onnxruntime"
-    sha256sum --check --strict --quiet SHA256SUMS
-)
+onnxruntime_root="${RX_MET_ONNXRUNTIME_ROOT:-${SOURCE_DIR}/third_party/onnxruntime}"
+[[ -f "${onnxruntime_root}/VERSION_NUMBER" ]] \
+    || fail "missing ONNX Runtime headers: ${onnxruntime_root}"
+if [[ -n "${RX_MET_ONNXRUNTIME_VERSION:-}" ]]; then
+    actual_onnxruntime_version="$(tr -d '[:space:]' < "${onnxruntime_root}/VERSION_NUMBER")"
+    [[ "${actual_onnxruntime_version}" == "${RX_MET_ONNXRUNTIME_VERSION}" ]] \
+        || fail "ONNX Runtime header version mismatch: ${actual_onnxruntime_version} != ${RX_MET_ONNXRUNTIME_VERSION}"
+fi
+if [[ "${onnxruntime_root}" == "${SOURCE_DIR}/third_party/onnxruntime" ]]; then
+    log "verify vendored ONNX Runtime headers"
+    (
+        cd "${onnxruntime_root}"
+        sha256sum --check --strict --quiet SHA256SUMS
+    )
+fi
 
 pybind11_dir="$("${PYTHON}" -m pybind11 --cmakedir)"
 cmake_args=(
@@ -45,9 +57,7 @@ cmake_args=(
     -DRX_MET_AIMET_ENABLE_CUDA="$([[ "${ENABLE_CUDA}" == "1" ]] && printf ON || printf OFF)"
 )
 
-if [[ -n "${RX_MET_ONNXRUNTIME_ROOT:-}" ]]; then
-    cmake_args+=("-DRX_MET_ONNXRUNTIME_ROOT=${RX_MET_ONNXRUNTIME_ROOT}")
-fi
+cmake_args+=("-DRX_MET_ONNXRUNTIME_ROOT=${onnxruntime_root}")
 if [[ "${ENABLE_CUDA}" == "1" && -n "${RX_MET_CUDA_ARCHITECTURES:-}" ]]; then
     cmake_args+=("-DCMAKE_CUDA_ARCHITECTURES=${RX_MET_CUDA_ARCHITECTURES}")
 fi
@@ -59,9 +69,10 @@ cmake --build "${BUILD_DIR}" --parallel "${JOBS:-$(nproc)}"
 log "install -> ${INSTALL_DIR}"
 cmake --install "${BUILD_DIR}"
 
+extension_suffix="$("${PYTHON}" -c 'import sysconfig; print(sysconfig.get_config_var("EXT_SUFFIX"))')"
 native_files=(
-    "${INSTALL_DIR}/_libpymo.cpython-310-x86_64-linux-gnu.so"
-    "${INSTALL_DIR}/libquant_info.cpython-310-x86_64-linux-gnu.so"
+    "${INSTALL_DIR}/_libpymo${extension_suffix}"
+    "${INSTALL_DIR}/libquant_info${extension_suffix}"
     "${INSTALL_DIR}/libaimet_onnxrt_ops.so"
 )
 for native_file in "${native_files[@]}"; do

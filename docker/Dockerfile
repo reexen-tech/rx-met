@@ -43,6 +43,8 @@ ARG ENV_VERSION=deps-v1
 ARG TORCH_VERSION=2.8.0
 ARG TORCHVISION_VERSION=0.23.0
 ARG TORCHAUDIO_VERSION=2.8.0
+ARG ONNXRUNTIME_VERSION=1.23.2
+ARG PYTHON_VERSION=3.10
 ARG MIN_DRIVER_VERSION=560.35.05
 ARG SOURCE_REVISION=unknown
 
@@ -84,14 +86,18 @@ RUN sed -i "s/@VERSION@/${RX_MET_VERSION}/g" \
 RUN EXPECTED_TORCH="${TORCH_VERSION}" \
     EXPECTED_TORCHVISION="${TORCHVISION_VERSION}" \
     EXPECTED_TORCHAUDIO="${TORCHAUDIO_VERSION}" \
+    EXPECTED_ONNXRUNTIME="${ONNXRUNTIME_VERSION}" \
     EXPECTED_CUDA="${RX_MET_CUDA_VERSION}" \
+    EXPECTED_PYTHON="${PYTHON_VERSION}" \
     python3 - <<'PY'
 import importlib.metadata
 import os
 import runpy
+import sys
 
 import aimet_onnx
 import aimet_torch
+import onnxruntime
 import quant_gru
 import torch
 
@@ -103,6 +109,9 @@ for package, expected in {
     actual = importlib.metadata.version(package).split("+", 1)[0]
     assert actual == expected, (package, actual, expected)
 assert torch.version.cuda == os.environ["EXPECTED_CUDA"], torch.version.cuda
+assert importlib.metadata.version("onnxruntime-gpu") == os.environ["EXPECTED_ONNXRUNTIME"]
+assert "CUDAExecutionProvider" in onnxruntime.get_available_providers()
+assert f"{sys.version_info.major}.{sys.version_info.minor}" == os.environ["EXPECTED_PYTHON"]
 runpy.run_path("/opt/rx-met/examples/quick_start_kws.py", run_name="verify_rx_met")
 runpy.run_path("/opt/rx-met/examples/onnx_ptq_quick_start.py", run_name="verify_rx_met")
 print("rx-met runtime import check passed", torch.__version__, torch.version.cuda)
@@ -116,6 +125,8 @@ RUN printf '%s\n' \
         "torch_version=${TORCH_VERSION}" \
         "torchvision_version=${TORCHVISION_VERSION}" \
         "torchaudio_version=${TORCHAUDIO_VERSION}" \
+        "onnxruntime_version=${ONNXRUNTIME_VERSION}" \
+        "python_version=${PYTHON_VERSION}" \
         "minimum_driver_version=${MIN_DRIVER_VERSION}" \
         "source_revision=${SOURCE_REVISION}" \
         > /opt/rx-met/metadata/image.env \
@@ -129,6 +140,8 @@ LABEL org.opencontainers.image.vendor="Reexen" \
       com.reexen.rx-met.cuda.variant="${CUDA_VARIANT}" \
       com.reexen.rx-met.cuda.version="${RX_MET_CUDA_VERSION}" \
       com.reexen.rx-met.driver.minimum="${MIN_DRIVER_VERSION}" \
-      com.reexen.rx-met.torch.version="${TORCH_VERSION}"
+      com.reexen.rx-met.torch.version="${TORCH_VERSION}" \
+      com.reexen.rx-met.onnxruntime.version="${ONNXRUNTIME_VERSION}" \
+      com.reexen.rx-met.python.version="${PYTHON_VERSION}"
 
 CMD ["bash"]

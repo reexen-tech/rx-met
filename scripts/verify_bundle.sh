@@ -7,6 +7,7 @@ BAKE_FILE="${ROOT}/docker/docker-bake.hcl"
 VERSION="$(tr -d '[:space:]' < "${ROOT}/VERSION")"
 IMAGE_REPOSITORY="${RX_MET_IMAGE_REPOSITORY:-rx-met}"
 VERIFY_GPU="${RX_MET_VERIFY_GPU:-0}"
+GPU_DEVICE="${RX_MET_VERIFY_GPU_DEVICE:-0}"
 TARGETS=()
 
 log() { printf '[verify_bundle] %s\n' "$*"; }
@@ -16,8 +17,13 @@ while (($#)); do
     case "$1" in
         --gpu) VERIFY_GPU=1 ;;
         --no-gpu) VERIFY_GPU=0 ;;
+        --gpu-device)
+            (($# >= 2)) || die "--gpu-device 缺少参数"
+            GPU_DEVICE="$2"
+            shift
+            ;;
         -h|--help)
-            printf '用法: ./scripts/verify_bundle.sh [--gpu|--no-gpu] [cu118|cu126|cu130 ...]\n'
+            printf '用法: ./scripts/verify_bundle.sh [--gpu|--no-gpu] [--gpu-device ID] [cu118|cu126|cu130 ...]\n'
             exit 0
             ;;
         cu118|cu126|cu130) TARGETS+=("$1") ;;
@@ -35,6 +41,7 @@ for target in "${TARGETS[@]}"; do
 done
 [[ "${VERIFY_GPU}" == "0" || "${VERIFY_GPU}" == "1" ]] \
     || die "RX_MET_VERIFY_GPU 必须是 0 或 1"
+[[ -n "${GPU_DEVICE}" ]] || die "--gpu-device 不能为空"
 [[ "${IMAGE_REPOSITORY}" =~ ^[A-Za-z0-9._/-]+$ ]] \
     || die "无效的镜像仓库名: ${IMAGE_REPOSITORY}"
 for command in docker git python3; do
@@ -64,18 +71,21 @@ print(
             args["TORCH_VERSION"],
             args["TORCHVISION_VERSION"],
             args["TORCHAUDIO_VERSION"],
+            args["ONNXRUNTIME_VERSION"],
+            args["PYTHON_VERSION"],
         ]
     )
 )
 PY
 )"
-    IFS=$'\t' read -r image variant cuda_version torch_version vision_version audio_version <<< "${values}"
+    IFS=$'\t' read -r image variant cuda_version torch_version vision_version \
+        audio_version onnxruntime_version python_version <<< "${values}"
     docker image inspect "${image}" >/dev/null 2>&1 || die "本地镜像不存在: ${image}"
-    log "验证 ${image}（GPU=${VERIFY_GPU}）"
+    log "验证 ${image}（GPU=${VERIFY_GPU}，设备=${GPU_DEVICE}）"
 
     docker_args=(-i --rm)
     if ((VERIFY_GPU)); then
-        docker_args+=(--gpus all)
+        docker_args+=(--gpus "device=${GPU_DEVICE}")
     fi
     docker_args+=(
         -e "EXPECTED_VARIANT=${variant}"
@@ -83,6 +93,8 @@ PY
         -e "EXPECTED_TORCH=${torch_version}"
         -e "EXPECTED_TORCHVISION=${vision_version}"
         -e "EXPECTED_TORCHAUDIO=${audio_version}"
+        -e "EXPECTED_ONNXRUNTIME=${onnxruntime_version}"
+        -e "EXPECTED_PYTHON=${python_version}"
         -e "VERIFY_GPU=${VERIFY_GPU}"
     )
 
@@ -91,7 +103,9 @@ import importlib.metadata
 import os
 import runpy
 import subprocess
+import sys
 from pathlib import Path
+import site
 
 import aimet_onnx
 import aimet_torch
@@ -113,12 +127,14 @@ for package, version in expected.items():
     assert actual == version, (package, actual, version)
 assert torch.version.cuda == os.environ["EXPECTED_CUDA"], torch.version.cuda
 assert os.environ["CUDA_VARIANT"] == os.environ["EXPECTED_VARIANT"]
+assert importlib.metadata.version("onnxruntime-gpu") == os.environ["EXPECTED_ONNXRUNTIME"]
+assert "CUDAExecutionProvider" in onnxruntime.get_available_providers()
+assert f"{sys.version_info.major}.{sys.version_info.minor}" == os.environ["EXPECTED_PYTHON"]
 
 runpy.run_path("/opt/rx-met/examples/quick_start_kws.py", run_name="verify_rx_met")
 runpy.run_path("/opt/rx-met/examples/onnx_ptq_quick_start.py", run_name="verify_rx_met")
-assert "CPUExecutionProvider" in onnxruntime.get_available_providers()
 
-# 使用真实 AIMET ONNX custom op 跑一个最小 CPU 校准和推理。
+# 使用真实 AIMET ONNX custom op 跑一个最小校准和推理。
 input_info = onnx.helper.make_tensor_value_info(
     "input", onnx.TensorProto.FLOAT, [1, 4]
 )
@@ -135,25 +151,33 @@ model = onnx.helper.make_model(
     graph, opset_imports=[onnx.helper.make_opsetid("", 13)]
 )
 model.ir_version = 8
+# QuantizationSimModel 会原地插入 custom op；普通 CUDA session 使用原始模型。
+plain_model_bytes = model.SerializeToString()
 feed = {"input": np.array([[-1.0, 0.0, 1.0, 2.0]], dtype=np.float32)}
+onnx_provider = (
+    "CUDAExecutionProvider" if os.environ["VERIFY_GPU"] == "1"
+    else "CPUExecutionProvider"
+)
 onnx_sim = aimet_onnx.QuantizationSimModel(
-    model, dummy_input=feed, providers=["CPUExecutionProvider"]
+    model, dummy_input=feed, providers=[onnx_provider]
 )
 onnx_sim.compute_encodings([feed])
 assert onnx_sim.session.run(None, feed)[0].shape == (1, 4)
+assert onnx_sim.session.get_providers()[0] == onnx_provider
 
-site = Path("/usr/local/lib/python3.10/dist-packages")
+site_roots = [Path(value) for value in site.getsitepackages()]
 patterns = [
-    site / "aimet_common" / "_libpymo*.so",
-    site / "aimet_common" / "libquant_info*.so",
-    site / "aimet_common" / "libaimet_onnxrt_ops.so",
-    site / "gru_interface_binding*.so",
-    site / "lib" / "libgru_quant_shared.so",
+    (site_roots, "aimet_common/_libpymo*.so"),
+    (site_roots, "aimet_common/libquant_info*.so"),
+    (site_roots, "aimet_common/libaimet_onnxrt_ops.so"),
+    (site_roots, "onnxruntime/capi/libonnxruntime_providers_cuda.so"),
+    (site_roots, "gru_interface_binding*.so"),
+    (site_roots, "lib/libgru_quant_shared.so"),
 ]
 libraries = []
-for pattern in patterns:
-    matches = list(pattern.parent.glob(pattern.name))
-    assert matches, f"缺少原生库: {pattern}"
+for roots, relative_pattern in patterns:
+    matches = [match for root in roots for match in root.glob(relative_pattern)]
+    assert matches, f"缺少原生库: {relative_pattern}"
     libraries.extend(matches)
 for library in libraries:
     output = subprocess.run(
@@ -168,6 +192,15 @@ for library in libraries:
 
 if os.environ["VERIFY_GPU"] == "1":
     assert torch.cuda.is_available(), "容器内不可见 CUDA GPU"
+    session_options = onnxruntime.SessionOptions()
+    session_options.add_session_config_entry("session.disable_cpu_ep_fallback", "1")
+    cuda_session = onnxruntime.InferenceSession(
+        plain_model_bytes,
+        sess_options=session_options,
+        providers=["CUDAExecutionProvider"],
+    )
+    assert cuda_session.get_providers()[0] == "CUDAExecutionProvider"
+    assert cuda_session.run(None, feed)[0].shape == (1, 4)
     import torch.nn as nn
     import aimet_torch.v2 as aimet_v2
 

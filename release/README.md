@@ -2,11 +2,11 @@
 
 rx-met 以三个独立的 Linux x86_64 GPU 镜像交付：
 
-| 变体      | CUDA | PyTorch | 建议场景                       |
-| --------- | ---- | ------- | ------------------------------ |
-| `cu118` | 11.8 | 2.7.1   | 需要 CUDA 11.8 用户态运行库    |
-| `cu126` | 12.6 | 2.8.0   | 当前兼容性基线                 |
-| `cu130` | 13.0 | 2.10.0  | CUDA 13 和 Blackwell`sm_120` |
+| 变体 | CUDA | Python | PyTorch | ONNX Runtime GPU | 建议场景 |
+| --- | --- | --- | --- | --- | --- |
+| `cu118` | 11.8 | 3.10 | 2.7.1 | 1.20.1 | 需要 CUDA 11.8 用户态运行库 |
+| `cu126` | 12.6 | 3.10 | 2.8.0 | 1.23.2 | 当前兼容性基线 |
+| `cu130` | 13.0 | 3.12 | 2.10.0 | 1.27.0 | CUDA 13 和 Blackwell `sm_120` |
 
 宿主机必须安装 NVIDIA Driver、Docker 和 NVIDIA Container Toolkit。宿主机不
 需要安装与容器一致的 CUDA Toolkit。
@@ -69,8 +69,9 @@ export RX_MET_ONNX_PTQ_ROOT=/workspace/datasets
 python3 onnx_ptq_quick_start.py
 ```
 
-该路径默认使用 CPU ONNX Runtime。数据集、模型和输出不应打入镜像层，应通过
-volume 挂载或写入 `/workspace`。
+该路径默认使用 ONNX Runtime `CUDAExecutionProvider`，provider 缺失时直接报错。
+只有 CPU 调试时才显式设置 `RX_MET_ONNX_PTQ_DEVICE=cpu`。数据集、模型和输出不应
+打入镜像层，应通过 volume 挂载或写入 `/workspace`。
 
 ## 环境检查
 
@@ -79,10 +80,13 @@ python3 - <<'PY'
 import torch
 import aimet_torch
 import aimet_onnx
+import onnxruntime
 import quant_gru
 
 print("torch", torch.__version__, "CUDA", torch.version.cuda)
 print("GPU", torch.cuda.get_device_name(0))
+print("ONNX Runtime", onnxruntime.__version__, onnxruntime.get_available_providers())
+assert "CUDAExecutionProvider" in onnxruntime.get_available_providers()
 print("rx-met import OK")
 PY
 ```

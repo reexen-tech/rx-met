@@ -9,9 +9,9 @@ from pathlib import Path
 
 
 _VARIANTS = {
-    "cu118": ("2.7.1+cu118", "0.22.1+cu118", "2.7.1+cu118"),
-    "cu126": ("2.8.0+cu126", "0.23.0+cu126", "2.8.0+cu126"),
-    "cu130": ("2.10.0+cu130", "0.25.0+cu130", "2.10.0+cu130"),
+    "cu118": ("2.7.1+cu118", "0.22.1+cu118", "2.7.1+cu118", "1.20.1"),
+    "cu126": ("2.8.0+cu126", "0.23.0+cu126", "2.8.0+cu126", "1.23.2"),
+    "cu130": ("2.10.0+cu130", "0.25.0+cu130", "2.10.0+cu130", "1.27.0"),
 }
 
 
@@ -69,12 +69,13 @@ def main() -> None:
         for line in common_in.read_text(encoding="utf-8").splitlines()
         if line.strip() and not line.lstrip().startswith("#")
     ]
-    torch, torchvision, torchaudio = _VARIANTS[variant]
+    torch, torchvision, torchaudio, onnxruntime = _VARIANTS[variant]
     direct.extend(
         [
             f"torch=={torch}",
             f"torchvision=={torchvision}",
             f"torchaudio=={torchaudio}",
+            f"onnxruntime-gpu=={onnxruntime}",
         ]
     )
     (root / "requirements.txt").write_text("\n".join(direct) + "\n", encoding="utf-8")

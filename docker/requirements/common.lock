@@ -1,4 +1,4 @@
-# 由 CPython 3.10 / Linux x86_64 环境解析并固定。
+# 由 CPython 3.10/3.12、Linux x86_64 环境共同验证并固定。
 # 更新 common.in 后必须重新解析本文件，并完成三个镜像的 pip check。
 attrs==26.1.0
 bokeh==3.8.2
@@ -23,7 +23,6 @@ networkx==3.4.2
 numpy==1.26.4
 onnx==1.17.0
 onnx-ir==1.0.0
-onnxruntime==1.23.2
 onnxscript==0.7.0
 onnxsim==0.7.0
 packaging==25.0

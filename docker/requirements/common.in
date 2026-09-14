@@ -1,9 +1,9 @@
-# rx-met、两个 quick start 及 prepare_onnx_ptq_data.py 的直接依赖。
+# rx-met、两个 quick start 及 prepare_onnx_ptq_data.py 的公共直接依赖。
+# ONNX Runtime GPU 按 CUDA 变体分别锁定在 onnxruntime-cu*.txt。
 # librosa 和 soundfile 不在当前受支持入口的导入链中，因此不安装。
 numpy==1.26.4
 scipy==1.15.3
 onnx==1.17.0
-onnxruntime==1.23.2
 onnxsim==0.7.0
 onnxscript==0.7.0
 pillow==11.3.0

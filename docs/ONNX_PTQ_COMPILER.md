@@ -15,8 +15,10 @@ python3 onnx_ptq_quick_start.py
 
 ## 运行前提
 
-- CPython 3.10、Linux x86_64；
-- 已安装 ONNX Runtime 1.23.2；
+- Linux x86_64，CPython 3.10（cu118/cu126）或 3.12（cu130）；
+- 已安装与 CUDA 变体匹配的 ONNX Runtime GPU；
+- 默认使用 `CUDAExecutionProvider`，需要 CPU 调试时显式设置
+  `RX_MET_ONNX_PTQ_DEVICE=cpu`；
 - 已构建 rx-met 的 ONNX native runtime；
 - 校准目录使用真实数据，不使用随机数据生成正式产物。
 

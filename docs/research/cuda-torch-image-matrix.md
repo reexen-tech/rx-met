@@ -1,17 +1,17 @@
 # CUDA / PyTorch 镜像兼容性矩阵
 
-调研日期：2026-09-09
+调研日期：2026-09-09；ONNX Runtime GPU 修订：2026-09-11
 
 实施状态：本文的推荐矩阵已在 `docker/docker-bake.hcl`、一份参数化多阶段
-Dockerfile 和变体依赖锁中落地。基础镜像共享盘备份暂缓，尚未接入构建脚本；
+Dockerfile 和变体依赖锁中落地。ONNX Runtime 已按 CUDA 变体切换为 GPU wheel；
 完整三镜像构建、GPU 冒烟和最低驱动实机验收仍须在发布环境执行。
 
 ## 范围
 
 本文为 rx-met 自有 Docker 镜像选择第一版 Linux x86_64 构建矩阵，前提如下：
 
-- 操作系统使用 Ubuntu 22.04；
-- 使用 CPython 3.10，与 rx-met 当前强制要求的原生 wheel ABI 一致；
+- cu118/cu126 使用 Ubuntu 22.04 + CPython 3.10；
+- cu130 使用 Ubuntu 24.04 + CPython 3.12，以满足 CUDA 13 ORT wheel 的 Python 要求；
 - 宿主机安装 NVIDIA Container Toolkit；
 - 每个 CUDA 变体产出一个独立镜像，不在单个镜像中安装多套 CUDA；
 - 基础镜像使用 NVIDIA 官方 CUDA 镜像，PyTorch 使用官方 wheel。
@@ -22,14 +22,13 @@ Dockerfile 和变体依赖锁中落地。基础镜像共享盘备份暂缓，尚
 
 ## 推荐初始矩阵
 
-以下矩阵尽量保持与当前 rx-met Torch 2.8.0 / Python 3.10 基线接近，同时选择
-三个指定 CUDA 系列中可用的 NVIDIA 最终补丁版本。
+以下矩阵同时满足 PyTorch 与 ONNX Runtime GPU 的官方 CUDA 兼容范围。
 
-| 变体 | NVIDIA 构建镜像 | NVIDIA 最终基础镜像 | PyTorch 组合 | PyTorch CUDA 运行时 | PyTorch cuDNN | Linux 严格最低驱动 |
+| 变体 | NVIDIA 构建镜像 | NVIDIA 最终基础镜像 | Python | PyTorch 组合 | ONNX Runtime GPU | Linux 严格最低驱动 |
 | --- | --- | --- | --- | --- | --- | --- |
-| `cu118` | `nvcr.io/nvidia/cuda:11.8.0-devel-ubuntu22.04` | `nvcr.io/nvidia/cuda:11.8.0-base-ubuntu22.04` | `torch==2.7.1`、`torchvision==0.22.1`、`torchaudio==2.7.1` | `11.8.89` | `9.1.0.70` | `520.61.05` |
-| `cu126` | `nvcr.io/nvidia/cuda:12.6.3-devel-ubuntu22.04` | `nvcr.io/nvidia/cuda:12.6.3-base-ubuntu22.04` | `torch==2.8.0`、`torchvision==0.23.0`、`torchaudio==2.8.0` | `12.6.77` | `9.10.2.21` | `560.35.05` |
-| `cu130` | `nvcr.io/nvidia/cuda:13.0.3-devel-ubuntu22.04` | `nvcr.io/nvidia/cuda:13.0.3-base-ubuntu22.04` | `torch==2.10.0`、`torchvision==0.25.0`、`torchaudio==2.10.0` | `13.0.96` | `9.15.1.9` | `580.126.20` |
+| `cu118` | `11.8.0-cudnn8-devel-ubuntu22.04` | `11.8.0-cudnn8-runtime-ubuntu22.04` | 3.10 | 2.7.1 / 0.22.1 / 2.7.1 | 1.20.1（CUDA 11.8 / cuDNN 8） | `520.61.05` |
+| `cu126` | `12.6.3-devel-ubuntu22.04` | `12.6.3-base-ubuntu22.04` | 3.10 | 2.8.0 / 0.23.0 / 2.8.0 | 1.23.2（CUDA 12 / cuDNN 9） | `560.35.05` |
+| `cu130` | `13.0.3-devel-ubuntu24.04` | `13.0.3-base-ubuntu24.04` | 3.12 | 2.10.0 / 0.25.0 / 2.10.0 | 1.27.0（CUDA 13 / cuDNN 9） | `580.126.20` |
 
 上表驱动下限采用各 CUDA 发行版对应的严格版本，避免默认依赖 CUDA 小版本
 兼容模式。NVIDIA 还给出了系列级小版本兼容下限：CUDA 11.x 为驱动 450，
@@ -65,9 +64,8 @@ CUDA runtime 13.0.48，而 NVIDIA CUDA 13.0.3 镜像提供 13.0.96。应分别�
 
 ## NVIDIA 镜像内容
 
-NVIDIA 当前支持标签列表为三个选定 Toolkit 补丁版本都提供了 Ubuntu 22.04
-的 `base`、`runtime`、`devel`、`cudnn-runtime` 和 `cudnn-devel`
-变体。
+NVIDIA 支持标签中，CUDA 11.8/12.6 提供 Ubuntu 22.04 变体，CUDA 13.0 提供
+Ubuntu 24.04 变体；按需要选择 `base`、`runtime`、`devel` 或 `cudnn-*`。
 
 NVIDIA 官方 Dockerfile 中的重要软件版本如下：
 
@@ -77,16 +75,16 @@ NVIDIA 官方 Dockerfile 中的重要软件版本如下：
 | 12.6.3 | 12.6.77 | 12.6.4.1 | 12.5.4.2 | 2.23.4 | 9.5.1.17 |
 | 13.0.3 | 13.0.96 | 13.1.1.3 | 12.6.3.3 | 2.28.3 | 9.14.0.64 |
 
-使用官方 PyTorch wheel 并让 pip 正常解析依赖时，不建议使用 NVIDIA 的
-`cudnn-devel` 或 `cudnn-runtime` 镜像，因为它们的 cuDNN 版本与 PyTorch
-声明的依赖不同：
+PyTorch 与 ONNX Runtime 对 cuDNN 的要求并不完全相同：
 
 - CUDA 11.8 镜像为 cuDNN 8.9.6，Torch 2.7.1 依赖 cuDNN 9.1.0；
 - CUDA 12.6 镜像为 cuDNN 9.5.1，Torch 2.8.0 依赖 cuDNN 9.10.2；
 - CUDA 13.0 镜像为 cuDNN 9.14.0，Torch 2.10.0 依赖 cuDNN 9.15.1。
 
-因此建议 builder 使用普通 `devel` 镜像，最终镜像使用普通 `base` 镜像。
-pip 正常解析并安装所选 Torch wheel 声明的 CUDA 库。构建过程必须为安装后的
+cu126/cu130 的 builder 使用普通 `devel`，最终镜像使用普通 `base`，由 PyTorch
+wheel 提供 cuDNN 9。cu118 是例外：ORT 1.20.1 CUDA 11 wheel 要求 cuDNN 8，故
+使用 NVIDIA `cudnn8-devel/runtime`；PyTorch wheel 的 cuDNN 9 与系统 cuDNN 8
+通过不同 soname 共存。构建过程必须为安装后的
 `nvidia/*/lib` 目录设置稳定的动态库搜索路径；AIMET 编译需要的 `cudnn.h`
 来自同一 Torch 组合锁定的 cuDNN wheel，不能使用版本不同的镜像内 headers。
 最终通过 `ldd` 和真实 CUDA 冒烟测试进行验证。
@@ -106,30 +104,25 @@ rx-met 镜像。只有可变 tag 不能构成可复现的构建输入。
 
 | 软件 | 初始版本 |
 | --- | --- |
-| 操作系统 | Ubuntu 22.04 |
-| Python | CPython 3.10 |
-| CMake | Ubuntu 22.04 软件包，至少 3.19 |
-| Ninja | Ubuntu 22.04 软件包 |
-| GCC/G++ | Ubuntu 22.04 默认工具链 |
-| Eigen | Ubuntu 22.04 `libeigen3-dev` |
+| 操作系统 | cu118/cu126 为 Ubuntu 22.04；cu130 为 Ubuntu 24.04 |
+| Python | cu118/cu126 为 CPython 3.10；cu130 为 CPython 3.12 |
+| CMake / Ninja / GCC / Eigen | 对应 Ubuntu 官方软件包 |
 | setuptools | 70.2.0 |
 | wheel | 0.45.1 |
 | pybind11 | 2.13.6 |
 | NumPy | 1.26.4 |
 | SciPy | 1.15.3 |
 | ONNX | 1.17.0 |
-| ONNX Runtime | 建议 1.23.2 |
+| ONNX Runtime GPU | cu118=1.20.1；cu126=1.23.2；cu130=1.27.0 |
 | Pillow | 11.3.0 |
 | onnxsim | 0.7.0 |
 | tqdm | 4.67.1 |
 
-实施前仓库校验的是 vendored ONNX Runtime 1.23.2 headers，但允许或使用的
-运行时是 1.23.1。自有镜像现已把运行时固定为 1.23.2，使 headers 和运行时
-契约一致。
-
-第一版建议继续使用 CPU 版 ONNX Runtime，因为发布的 ONNX quick start 默认
-选择 CPU provider。引入 ONNX Runtime GPU 会增加另一套 CUDA/cuDNN 兼容性
-矩阵。
+ONNX Runtime GPU 必须按 CUDA 主版本分别锁定。cu118 从 Microsoft CUDA 11 专用
+feed 获取 1.20.1；cu126 从 PyPI 获取 1.23.2；cu130 从 PyPI 获取 1.27.0。
+AIMET custom-op 也必须用对应 ORT C API 头文件编译，不能让 1.20 runtime 加载按
+1.23 API 编译的库。官方源码归档按 SHA-256 固定，cu126 复用仓库内 vendored
+1.23.2 头文件。
 
 以上版本只是第一版锁定候选，不是完整依赖集合。旧发布流程还固定了
 `librosa==0.11.0` 和 `soundfile==0.13.1`，但当前两个 quick start 都没有
@@ -148,12 +141,12 @@ rx-met 镜像。只有可变 tag 不能构成可复现的构建输入。
 
 | 范围 | 依赖要求 | 代码证据 |
 | --- | --- | --- |
-| Python ABI | 仅 CPython 3.10 | `pyproject.toml:10`、`setup.py:25-33` |
+| Python ABI | Linux x86_64 上的 CPython 3.10 / 3.12 | `pyproject.toml`、`setup.py` |
 | Wheel 构建后端 | setuptools、wheel | `pyproject.toml:1-3` |
-| AIMET 原生构建 | CMake >=3.19、C++17 编译器、Python 3.10 开发 headers、pybind11、Eigen3；启用 CUDA 时还需要 CUDA Toolkit | `native/aimet/CMakeLists.txt:1-19` |
+| AIMET 原生构建 | CMake >=3.19、C++17 编译器、目标 Python 开发 headers、pybind11、Eigen3；启用 CUDA 时还需要 CUDA Toolkit | `native/aimet/CMakeLists.txt:1-19` |
 | QuantGRU 原生构建 | CMake、CUDA Toolkit/nvcc、OpenMP、cuBLAS、cudart | `quant-gru/CMakeLists.txt:39-40,108-109` |
 | QuantGRU Python 扩展 | 构建扩展之前必须安装 CUDA 版 Torch | `quant-gru/pytorch/pyproject.toml:1-6`、`quant-gru/pytorch/setup.py:9-59` |
-| Wheel 平台 | Linux x86_64、CPython 3.10 | `setup.py:25-33` |
+| Wheel 平台 | Linux x86_64、CPython 3.10 / 3.12 | `setup.py` |
 
 编译器、headers、CMake、Ninja、pybind11 和 Python 开发包只应保留在 builder
 阶段。最终镜像只需要 CPython、锁定后的 Python 环境、rx-met 和 QuantGRU
@@ -204,9 +197,8 @@ ONNX Runtime、packaging、tqdm、jsonschema，以及原生
 `_libpymo`、`libquant_info`、`libaimet_onnxrt_ops` 动态库。pipeline
 在 `aimet_onnx/rx_ptq/pipeline.py:159-172` 中创建 ONNX Runtime session。
 
-发布示例默认使用 `CPUExecutionProvider`
-（`examples/onnx_ptq_quick_start.py:81,88-95`），这是第一版继续选择 CPU
-版 ONNX Runtime 的原因。
+发布示例默认要求 `CUDAExecutionProvider`；只有显式设置
+`RX_MET_ONNX_PTQ_DEVICE=cpu` 时才使用 CPU。provider 缺失会直接报错，不静默回退。
 
 导入 `aimet_onnx.rx_ptq` 时会先执行 `aimet_onnx/__init__.py`。当前
 initializer 会提前导入 QuantSim、Adaround、Sequential MSE 和 QuantAnalyzer
@@ -297,56 +289,49 @@ wrapper 也拒绝 `dynamo=True`（`aimet_torch/onnx.py:297-300`）。
 真实存在的 CUDA/Torch 差异。每个变体都应单独执行依赖解析，最终镜像必须通过
 `pip check`。
 
-## 共享盘环境镜像归档与复用
+## 环境镜像归档与复用
 
 NVIDIA 基础镜像体积较大，正式构建不应每次从公网重复拉取。构建流程应增加
-“本地 Docker、共享盘归档、官方 registry”三级查找机制：
+“本地 Docker、环境镜像归档、官方 registry”三级查找机制：
 
 1. 先检查本地 Docker 中是否已有 manifest 指定的镜像 ID 和上游 digest；
-2. 本地不存在时，从共享盘读取归档，先验证 SHA-256，再执行 `docker load`；
-3. 共享盘也不存在时，才从 NVIDIA 官方 registry 拉取；
-4. 首次拉取并验证后，在本地临时盘生成归档和清单，再按共享盘发布流程上传；
+2. 本地不存在时，从调用方提供的归档目录读取，先验证 SHA-256，再执行
+   `docker load`；
+3. 未提供归档时，才从 NVIDIA 官方 registry 拉取并构建环境镜像；
+4. 首次拉取并验证后，在本地磁盘生成归档和清单，再按部署规范上传；
 5. 后续构建设置 `--pull=false`，使用已经验证的本地镜像。
 
-共享盘流程必须遵守 `/mnt/data2/USAGE_RULES.md`，尤其是以下约束：
+环境归档的维护应遵守部署环境的存储规范，建议至少满足以下约束：
 
-- 禁止在共享盘上直接执行 Docker 构建、解压镜像或高频写入；
+- 避免在共享存储上直接执行 Docker 构建、解压镜像或高频写入；
 - 所有归档先在本地磁盘生成并校验，再一次性上传；
 - 上传阶段使用 `.partial` 后缀，同一目录只允许一个写入者；
 - 校验成功后再原子重命名，消费者不得读取上传中的文件；
 - 文件名只能使用 ASCII 字母、数字、点、下划线和连字符；
-- 共享盘不是唯一备份，正式构建输入还需保留内部镜像仓库或其他可恢复副本；
+- 共享存储不是唯一备份，正式构建输入还需保留镜像仓库或其他可恢复副本；
 - 归档第三方 NVIDIA 镜像前，必须确认其许可证允许团队内部存储和使用。
 
 ### 稳定环境镜像归档
 
-2026-09-10 生成的第一版共享缓存分别保存 NVIDIA 基础镜像和第三方 wheelhouse。
-该格式完成了来源验证，但日常发布仍需要重新执行环境安装步骤。后续流程改为直接
-固化六个稳定环境 tag：每个 CUDA 变体一个 build-env 和一个 runtime-env。
+首套稳定 GPU 环境版本为 `deps-v1`。环境与产品使用独立版本轴：requirements、
+Torch、CUDA、Python、Ubuntu 或工具链发生变化时才递增环境版本；普通 AIMET、
+QuantGRU 和产品 `VERSION` 变化不触发环境重建。
 
-环境与产品使用独立版本轴。`deps-v1` 只在 requirements、Torch、CUDA、Python、
-Ubuntu 或编译工具链变化时更新；AIMET、QuantGRU 和产品 `VERSION` 变化不会触发
-环境重建。
-
-共享盘仍使用以下临时根目录：
+共享存储中的归档目录可以按以下结构组织：
 
 ```text
-/mnt/data2/tmp_test_data/chengxing.zou.srv/rx-met/20260910-docker-cache/
-|-- base-images/                 旧版缓存，保留但新流程不读取
-|-- wheelhouse/                  旧版缓存，保留但新流程不读取
-|-- manifests/                   旧版缓存元数据
-`-- environment-images/
-    `-- deps-v1/
-        |-- rx-met-environment-deps-v1-cu118-linux-amd64.tar.zst
-        |-- rx-met-environment-deps-v1-cu126-linux-amd64.tar.zst
-        |-- rx-met-environment-deps-v1-cu130-linux-amd64.tar.zst
-        |-- environment-manifest.json
-        |-- README.md
-        `-- SHA256SUMS
+/path/to/environment-images/
+`-- deps-v1/
+    |-- rx-met-environment-deps-v1-cu118-linux-amd64.tar.zst
+    |-- rx-met-environment-deps-v1-cu126-linux-amd64.tar.zst
+    |-- rx-met-environment-deps-v1-cu130-linux-amd64.tar.zst
+    |-- environment-manifest.json
+    |-- README.md
+    `-- SHA256SUMS
 ```
 
 每个新归档包含同一 CUDA 变体的 build-env 和 runtime-env 两个 tag。逻辑上仍是
-六个环境镜像，但共享盘只有三个归档文件，且同一 Docker archive 可以复用公共
+六个环境镜像，但归档目录只有三个镜像文件，且同一 Docker archive 可以复用公共
 layer。产品镜像不进入环境归档。
 
 ### 发布时的环境解析
@@ -354,20 +339,15 @@ layer。产品镜像不进入环境归档。
 `release_build.sh` 不再负责安装第三方环境，只执行以下决策：
 
 - 本机已有完整环境对时直接验证并复用；
-- 通过 `--environment-dir`、重复的 `--environment-archive` 或 `--shared-cache`
-  提供归档时，调用独立加载器验证 SHA-256 并执行 `docker load`；
+- 通过 `--environment-dir` 或重复的 `--environment-archive` 提供归档时，调用独立
+  加载器验证 SHA-256 并执行 `docker load`；
 - 本机和归档都没有时，默认调用 `build_environment_images.sh`；
 - 只存在 build/runtime 其中一个时拒绝继续，防止环境版本错配；
 - 显式归档损坏或缺失时不回退公网构建。
 
-环境构建、验证、加载和本地导出分别由独立脚本负责。导出脚本只在本地生成
-`docker save`、zstd 压缩和 SHA-256 校验后的可搬运文件，并拒绝写
-`/mnt/data2`。共享盘复制或移动由维护人手工执行；发布脚本不拥有共享目录写入
-职责。
-
-内部构建文档可以记录 `/mnt/data2` 路径，但面向客户的 README、manifest 和
-交付包不得引用内部共享路径。临时目录预计保留至 2026-10-10，到期前必须迁移到
-维护人批准并登记在 `/mnt/data2/USAGE_RULES.md` 中的长期缓存分类，或按规范清理。
+环境构建、验证、加载和导出分别由独立脚本负责。导出脚本生成经过 `docker save`、
+zstd 压缩和 SHA-256 校验的可搬运文件，但不自动上传；归档的复制或移动由维护人
+手工执行，发布脚本不拥有共享目录写入职责。
 
 ## Dockerfile 结构决策
 
@@ -378,7 +358,6 @@ layer。产品镜像不进入环境归档。
 
 以下内容在三个 CUDA 变体中保持一致：
 
-- Ubuntu 版本和 CPython ABI；
 - APT 软件包和 builder 工具链；
 - AIMET 和 QuantGRU 原生构建流程；
 - Torch CUDA 组合以外的 Python 依赖；
@@ -388,8 +367,10 @@ layer。产品镜像不进入环境归档。
 
 | 参数 | cu118 | cu126 | cu130 |
 | --- | --- | --- | --- |
-| NVIDIA devel/base 镜像和 digest | 11.8.0 | 12.6.3 | 13.0.3 |
+| NVIDIA devel/runtime 镜像 | 11.8.0 cuDNN 8 / Ubuntu 22.04 | 12.6.3 / Ubuntu 22.04 | 13.0.3 / Ubuntu 24.04 |
+| Python | 3.10 | 3.10 | 3.12 |
 | Torch/vision/audio 锁定版本 | 2.7.1 / 0.22.1 / 2.7.1 | 2.8.0 / 0.23.0 / 2.8.0 | 2.10.0 / 0.25.0 / 2.10.0 |
+| ONNX Runtime GPU | 1.20.1 | 1.23.2 | 1.27.0 |
 | CMake CUDA 架构 | `80;86;89;90` | `80;86;89;90` | `80;86;89;90;120` |
 | Torch CUDA 架构列表 | `8.0;8.6;8.9;9.0` | `8.0;8.6;8.9;9.0` | `8.0;8.6;8.9;9.0;12.0` |
 | 发布时声明的严格最低驱动 | 520.61.05 | 560.35.05 | 580.126.20 |
@@ -413,8 +394,8 @@ CUDA 13 已移除 Maxwell、Pascal 和 Volta 的离线编译器及库支持，�
 - 固定架构列表前，需要确认具体支持的 GPU 型号，而不能只确认 CUDA 版本。
 - cu130 第一版选择 Torch 2.10.0；仍需通过 GPU 实机测试确认，再决定是否回退
   到 2.9.1。
-- 旧版基础镜像和 wheelhouse 已完成共享盘归档；新流程改为归档稳定环境镜像对。
-  两种格式不混用，环境归档生成后再由另一台服务器验证加载与发布流程。
+- 旧版基础镜像和 wheelhouse 缓存格式不与稳定环境镜像归档混用；环境归档生成后
+  应在另一台服务器验证加载与发布流程。
 - 对外声明使用严格发行版驱动下限；若要采用 CUDA 系列兼容下限，必须另行测试。
 - `prepare_onnx_ptq_data.py` 已放入运行镜像，encoding 字段不一致已修复。
 
@@ -430,7 +411,7 @@ CUDA 13 已移除 Maxwell、Pascal 和 Volta 的离线编译器及库支持，�
    `gru_interface_binding` 和 `libgru_quant_shared` 执行 `ldd`，拒绝
    存在未解析库或跨 CUDA 主版本链接。
 4. 运行真实的 CUDA QuantGRU forward/backward 冒烟测试，不能只验证 import。
-5. 运行最小 AIMET CUDA 量化操作和现有 ONNX CPU 冒烟流程。
+5. 运行最小 AIMET CUDA 量化操作和禁止 CPU 回退的 ONNX Runtime CUDA 推理。
 6. 执行 `pip check`，并确认镜像中只安装目标 CUDA 主版本的软件包。
 7. 在发布声明的最低驱动宿主机上验证镜像。只在现代 r580+ 驱动上测试三个
    镜像，不能证明较旧驱动兼容性声明成立。
@@ -443,8 +424,11 @@ CUDA 13 已移除 Maxwell、Pascal 和 Volta 的离线编译器及库支持，�
 - [PyTorch 官方 cu130 wheel 索引](https://download.pytorch.org/whl/cu130/torch/)
 - [Torch 2.7.1 cu118 CPython 3.10 wheel metadata](https://download-r2.pytorch.org/whl/cu118/torch-2.7.1%2Bcu118-cp310-cp310-manylinux_2_28_x86_64.whl.metadata)
 - [Torch 2.8.0 cu126 CPython 3.10 wheel metadata](https://download-r2.pytorch.org/whl/cu126/torch-2.8.0%2Bcu126-cp310-cp310-manylinux_2_28_x86_64.whl.metadata)
-- [Torch 2.10.0 cu130 CPython 3.10 wheel metadata](https://download-r2.pytorch.org/whl/cu130/torch-2.10.0%2Bcu130-cp310-cp310-manylinux_2_28_x86_64.whl.metadata)
-- [ONNX Runtime 1.23.2 软件包信息和 CPython 3.10 wheel](https://pypi.org/project/onnxruntime/1.23.2/)
+- [Torch 2.10.0 cu130 CPython 3.12 wheel metadata](https://download-r2.pytorch.org/whl/cu130/torch-2.10.0%2Bcu130-cp312-cp312-manylinux_2_28_x86_64.whl.metadata)
+- [ONNX Runtime CUDA Execution Provider 兼容矩阵](https://onnxruntime.ai/docs/execution-providers/CUDA-ExecutionProvider.html)
+- [ONNX Runtime CUDA 11 官方 Python feed](https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/onnxruntime-cuda-11/pypi/simple/)
+- [ONNX Runtime GPU 1.23.2](https://pypi.org/project/onnxruntime-gpu/1.23.2/)
+- [ONNX Runtime GPU 1.27.0](https://pypi.org/project/onnxruntime-gpu/1.27.0/)
 - [NVIDIA CUDA 容器支持标签](https://gitlab.com/nvidia/container-images/cuda/-/blob/master/doc/supported-tags.md)
 - [NVIDIA CUDA 容器源码](https://gitlab.com/nvidia/container-images/cuda)
 - [NVIDIA CUDA 小版本兼容性](https://docs.nvidia.com/deploy/cuda-compatibility/minor-version-compatibility.html)

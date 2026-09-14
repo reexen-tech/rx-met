@@ -7,11 +7,11 @@ rx-met 自行维护 Linux x86_64 GPU 镜像，不再依赖 ADA200 通用 Docker�
 
 机器可读的唯一矩阵位于 `docker/docker-bake.hcl`：
 
-| 变体 | NVIDIA devel/base | Torch 三件套 | CUDA 架构 | 严格最低驱动 |
-| --- | --- | --- | --- | --- |
-| `cu118` | 11.8.0 / Ubuntu 22.04 | 2.7.1 / 0.22.1 / 2.7.1 | 80、86、89、90 | 520.61.05 |
-| `cu126` | 12.6.3 / Ubuntu 22.04 | 2.8.0 / 0.23.0 / 2.8.0 | 80、86、89、90 | 560.35.05 |
-| `cu130` | 13.0.3 / Ubuntu 22.04 | 2.10.0 / 0.25.0 / 2.10.0 | 80、86、89、90、120 | 580.126.20 |
+| 变体 | NVIDIA devel/runtime | Python | Torch 三件套 | ONNX Runtime GPU | CUDA 架构 | 严格最低驱动 |
+| --- | --- | --- | --- | --- | --- | --- |
+| `cu118` | 11.8.0 cuDNN 8 / Ubuntu 22.04 | 3.10 | 2.7.1 / 0.22.1 / 2.7.1 | 1.20.1 | 80、86、89、90 | 520.61.05 |
+| `cu126` | 12.6.3 / Ubuntu 22.04 | 3.10 | 2.8.0 / 0.23.0 / 2.8.0 | 1.23.2 | 80、86、89、90 | 560.35.05 |
+| `cu130` | 13.0.3 / Ubuntu 24.04 | 3.12 | 2.10.0 / 0.25.0 / 2.10.0 | 1.27.0 | 80、86、89、90、120 | 580.126.20 |
 
 上述驱动值是 CUDA 发行版的严格下限。只在较新驱动上验收，不能证明镜像在
 声明的最低驱动上兼容。
@@ -23,7 +23,7 @@ rx-met 自行维护 Linux x86_64 GPU 镜像，不再依赖 ADA200 通用 Docker�
 ```text
 Dockerfile.environment
   NVIDIA devel -> build-env：工具链 + Torch + 全部第三方依赖
-  NVIDIA base  -> runtime-env：Python + Torch + 全部第三方运行依赖
+  NVIDIA runtime/base -> runtime-env：Python + Torch + 全部第三方运行依赖
 
 Dockerfile
   build-env   -> 编译当前 rx-met/QuantGRU wheel
@@ -45,7 +45,9 @@ Dockerfile
 
 公共运行依赖固定在 `docker/requirements/common.lock`。Torch、torchvision、
 torchaudio、Triton 和 NVIDIA CUDA wheel 按变体固定在 `cu118.txt`、
-`cu126.txt`、`cu130.txt`。环境版本默认是 `deps-v1`，与产品 `VERSION` 独立。
+`cu126.txt`、`cu130.txt`。ONNX Runtime GPU 另按变体固定在
+`onnxruntime-cu118.txt`、`onnxruntime-cu126.txt`、`onnxruntime-cu130.txt`。
+环境版本默认是 `deps-v1`，与产品 `VERSION` 独立。
 
 ## 3. 环境镜像
 
@@ -105,8 +107,8 @@ README.md
 SHA256SUMS
 ```
 
-导出脚本先在本地临时目录生成全部所选文件，通过 zstd 和 SHA-256 校验后再放入
-正式本地输出目录。它明确拒绝 `/mnt/data2` 输出路径，不负责共享盘发布。
+导出脚本先在输出目录的临时子目录生成全部所选文件，通过 zstd 和 SHA-256 校验
+后再替换正式文件。它不负责上传到远端或共享存储。
 
 维护人检查本地结果后，人工复制或移动整个目录，并在目标位置再次校验：
 
@@ -115,8 +117,8 @@ cd /path/to/environment-images/deps-v1
 sha256sum --check --strict SHA256SUMS
 ```
 
-上传共享盘时由人工使用 `.partial` 文件名，复制完成并核对 SHA-256 后再重命名
-为正式文件。不要在共享盘上直接执行 `docker save`、压缩或高频写入。
+上传共享存储时建议由人工使用 `.partial` 文件名，复制完成并核对 SHA-256 后再
+重命名为正式文件。是否允许直接生成归档，应遵守目标存储的使用规范。
 
 加载环境：
 
@@ -168,20 +170,25 @@ sha256sum --check --strict SHA256SUMS
 ./scripts/release_build.sh --no-auto-environment cu126
 ```
 
-`--shared-cache` 是内部共享目录的便捷入口，等价于从以下目录加载：
+环境归档目录由调用方提供，并直接指向具体的环境版本目录：
 
 ```text
-/mnt/data2/tmp_test_data/chengxing.zou.srv/rx-met/20260910-docker-cache/
-  environment-images/deps-v1/
+/path/to/environment-images/deps-v1/
 ```
 
 ```bash
-./scripts/release_build.sh --shared-cache cu118 cu126 cu130
+./scripts/release_build.sh \
+  --environment-dir /path/to/environment-images/deps-v1 \
+  cu118 cu126 cu130
+
+# 也可以通过环境变量指定同一目录
+RX_MET_ENV_ARCHIVE_DIR=/path/to/environment-images/deps-v1 \
+  ./scripts/release_build.sh cu118 cu126 cu130
 ```
 
-共享盘现有 `base-images/` 和 `wheelhouse/` 是 2026-09-10 生成的旧版缓存格式，
-不会被新发布脚本读取。完成新环境归档前，`--shared-cache` 会明确报告环境归档
-缺失，不会退回旧流程或公网下载。
+该目录可以位于本地磁盘或已挂载的共享存储。目录必须包含当前环境版本的完整归档、
+manifest 和 SHA-256 校验文件。首次构建可直接运行 `build_environment_images.sh`，
+生成的新归档由维护人按部署环境的存储规范放入归档目录。
 
 ## 6. 版本和配置
 
@@ -222,11 +229,12 @@ driver 当前不受支持，脚本会在构建前退出。
 构建脚本自动执行无 GPU 验收。发布前还必须在目标驱动环境执行：
 
 ```bash
-./scripts/verify_bundle.sh --gpu cu118 cu126 cu130
+./scripts/verify_bundle.sh --gpu --gpu-device 0 cu118 cu126 cu130
 ```
 
-GPU 验收检查 `torch.cuda.is_available()`，并运行 AIMET v2 和 QuantGRU CUDA
-forward/backward。这是快速冒烟检查，不替代真实数据的完整用例验证。
+GPU 验收检查 `torch.cuda.is_available()`，运行禁止 CPU 回退的 ONNX Runtime CUDA
+session，并运行 AIMET v2 和 QuantGRU CUDA forward/backward。这是快速冒烟检查，
+不替代真实数据的完整用例验证。
 
 KWS 完整流程在目标 GPU 上执行，默认只使用 GPU 0：
 
@@ -246,8 +254,8 @@ ONNX PTQ 完整流程需要显式传入相互匹配的模型和 NPY/NPZ 校准�
 ```
 
 两个脚本的 `--output-dir` 都有默认值，并会再按 CUDA 变体创建子目录。ONNX 模型
-可以来自 `/home/zcx/CLionProjects/unisoc-model-example`，但该目录只用于 ONNX PTQ
-验证，不参与 KWS 用例。模型输入名、输入 shape 和校准文件必须一致。
+可以来自任意外部模型仓库，该仓库只作为 ONNX PTQ 的只读输入，不参与 KWS 用例。
+模型输入名、输入 shape 和校准文件必须一致。
 
 ## 8. 代理和多人服务器
 
@@ -255,9 +263,9 @@ ONNX PTQ 完整流程需要显式传入相互匹配的模型和 NPY/NPZ 校准�
 版本更新复用环境镜像时不需要下载第三方依赖。需要代理时只设置当前 shell：
 
 ```bash
-export https_proxy=http://192.168.30.95:7897
-export http_proxy=http://192.168.30.95:7897
-export all_proxy=socks5://192.168.30.95:7897
+export HTTPS_PROXY=http://proxy.example.com:8080
+export HTTP_PROXY=http://proxy.example.com:8080
+export ALL_PROXY=socks5://proxy.example.com:1080
 ./scripts/build_environment_images.sh
 ```
 
@@ -265,8 +273,7 @@ export all_proxy=socks5://192.168.30.95:7897
 缓存。多人共用 daemon 时，产品验证构建可设置个人
 `RX_MET_IMAGE_REPOSITORY`，避免覆盖同名产品 tag。
 
-共享路径属于临时目录，预计保留至 2026-10-10。到期前必须迁移到维护人批准并
-写入 `/mnt/data2/USAGE_RULES.md` 的长期缓存分类，或按共享盘规范清理。
+共享目录的复制、替换和清理由维护人按部署环境的存储规范人工执行。
 
 完整依赖与版本选择依据见
 `docs/research/cuda-torch-image-matrix.md`。

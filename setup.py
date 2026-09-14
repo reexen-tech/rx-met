@@ -2,15 +2,17 @@
 
 import platform
 import sys
+import sysconfig
 from pathlib import Path
 
 from setuptools import Distribution, setup
 from setuptools.command.build_py import build_py as _build_py
 
 
+_EXT_SUFFIX = sysconfig.get_config_var("EXT_SUFFIX")
 _NATIVE_FILES = (
-    "_libpymo.cpython-310-x86_64-linux-gnu.so",
-    "libquant_info.cpython-310-x86_64-linux-gnu.so",
+    f"_libpymo{_EXT_SUFFIX}",
+    f"libquant_info{_EXT_SUFFIX}",
     "libaimet_onnxrt_ops.so",
 )
 
@@ -24,12 +26,12 @@ class _BuildPyWithAimetNative(_build_py):
     def run(self):
         if (
             sys.implementation.name != "cpython"
-            or sys.version_info[:2] != (3, 10)
+            or sys.version_info[:2] not in {(3, 10), (3, 11), (3, 12)}
             or platform.system() != "Linux"
             or platform.machine() != "x86_64"
         ):
             raise RuntimeError(
-                "rx-met native wheels require CPython 3.10 on Linux x86_64"
+                "rx-met native wheels require CPython 3.10-3.12 on Linux x86_64"
             )
 
         super().run()

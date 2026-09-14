@@ -1,13 +1,12 @@
-# ONNX Runtime headers
+# ONNX Runtime 头文件
 
-The headers in this directory come from ONNX Runtime `1.23.2`. Public headers
-were extracted from the official `onnxruntime-linux-x64-1.23.2` release archive.
-The CUDA provider headers come from tag `v1.23.2`:
+本目录头文件来自 ONNX Runtime `1.23.2`。公共头文件从官方
+`onnxruntime-linux-x64-1.23.2` 发布归档提取，CUDA provider 头文件来自
+`v1.23.2` tag：
 
 - `include/core/providers/cuda/cuda_context.h`
 - `include/core/providers/cuda/cuda_resource.h`
 
-The files are vendored so CPU and CUDA native builds require no network access.
-They are external, immutable build inputs and are checked by `SHA256SUMS` before
-compilation. ONNX Runtime is licensed under the MIT license in `LICENSE`; its
-notices are retained in `ThirdPartyNotices.txt`.
+这些文件归档在仓库中，使 CPU/CUDA 原生独立构建不需要访问网络。它们是外部、
+不可变的构建输入，编译前必须通过 `SHA256SUMS` 校验。ONNX Runtime 使用
+`LICENSE` 中的 MIT 许可证，第三方声明保留在 `ThirdPartyNotices.txt`。

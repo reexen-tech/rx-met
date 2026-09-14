@@ -14,8 +14,6 @@ ZSTD_THREADS="${RX_MET_ZSTD_THREADS:-2}"
 BUILDER="${RX_MET_BUILDER:-}"
 AUTO_ENVIRONMENT="${RX_MET_AUTO_BUILD_ENVIRONMENT:-1}"
 REBUILD_ENVIRONMENT=0
-USE_SHARED_CACHE="${RX_MET_USE_SHARED_CACHE:-0}"
-SHARED_CACHE_DIR="${RX_MET_SHARED_CACHE_DIR:-/mnt/data2/tmp_test_data/chengxing.zou.srv/rx-met/20260910-docker-cache}"
 ENV_ARCHIVE_DIR="${RX_MET_ENV_ARCHIVE_DIR:-}"
 ENV_ARCHIVES=()
 TARGETS=()
@@ -36,10 +34,6 @@ usage() {
                       构建前强制成对重建所选环境镜像
   --no-auto-environment
                       环境镜像缺失且未提供归档时直接退出
-  --shared-cache      从默认共享目录的 environment-images/<环境版本> 加载
-  --shared-cache-dir DIR
-                      覆盖共享缓存根目录，并自动启用共享缓存
-  --no-shared-cache   禁用共享缓存（默认）
 
 产品选项：
   --no-export         构建并验收，但不导出产品镜像 tar.zst
@@ -64,14 +58,6 @@ while (($#)); do
         --rebuild-environment) REBUILD_ENVIRONMENT=1 ;;
         --no-auto-environment) AUTO_ENVIRONMENT=0 ;;
         --no-export) EXPORT_IMAGES=0 ;;
-        --shared-cache) USE_SHARED_CACHE=1 ;;
-        --no-shared-cache) USE_SHARED_CACHE=0 ;;
-        --shared-cache-dir)
-            (($# >= 2)) || die "--shared-cache-dir 缺少参数"
-            SHARED_CACHE_DIR="$2"
-            USE_SHARED_CACHE=1
-            shift
-            ;;
         -h|--help) usage; exit 0 ;;
         cu118|cu126|cu130) TARGETS+=("$1") ;;
         *) die "未知参数: $1" ;;
@@ -94,8 +80,6 @@ rx_met_validate_environment_config || die "环境镜像名称或版本无效"
     || die "RX_MET_EXPORT_IMAGES 必须是 0 或 1"
 [[ "${AUTO_ENVIRONMENT}" == "0" || "${AUTO_ENVIRONMENT}" == "1" ]] \
     || die "RX_MET_AUTO_BUILD_ENVIRONMENT 必须是 0 或 1"
-[[ "${USE_SHARED_CACHE}" == "0" || "${USE_SHARED_CACHE}" == "1" ]] \
-    || die "RX_MET_USE_SHARED_CACHE 必须是 0 或 1"
 [[ "${ZSTD_THREADS}" =~ ^[1-8]$ ]] \
     || die "RX_MET_ZSTD_THREADS 必须是 1 到 8"
 for command in docker git; do
@@ -122,10 +106,6 @@ export RUNTIME_ENV_REPOSITORY="${RX_MET_RUNTIME_ENV_REPOSITORY}"
 
 log "产品版本: ${VERSION}，环境版本: ${RX_MET_ENV_VERSION}"
 log "构建目标: ${TARGETS[*]}"
-
-if ((USE_SHARED_CACHE)) && [[ -z "${ENV_ARCHIVE_DIR}" ]]; then
-    ENV_ARCHIVE_DIR="${SHARED_CACHE_DIR}/environment-images/${RX_MET_ENV_VERSION}"
-fi
 
 missing_targets=()
 for target in "${TARGETS[@]}"; do

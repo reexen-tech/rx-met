@@ -6,11 +6,11 @@ rx-met 是面向 Linux x86_64 NVIDIA GPU 的小模型量化工具包，包含定
 
 项目自行产出三个独立运行镜像，不再依赖 ADA200 通用 Docker：
 
-| 镜像变体 | CUDA | PyTorch | torchvision | torchaudio |
+| 镜像变体 | CUDA | Python | PyTorch | ONNX Runtime GPU |
 | --- | --- | --- | --- | --- |
-| `cu118` | 11.8 | 2.7.1 | 0.22.1 | 2.7.1 |
-| `cu126` | 12.6 | 2.8.0 | 0.23.0 | 2.8.0 |
-| `cu130` | 13.0 | 2.10.0 | 0.25.0 | 2.10.0 |
+| `cu118` | 11.8 | 3.10 | 2.7.1 | 1.20.1（CUDA 11 / cuDNN 8） |
+| `cu126` | 12.6 | 3.10 | 2.8.0 | 1.23.2（CUDA 12 / cuDNN 9） |
+| `cu130` | 13.0 | 3.12 | 2.10.0 | 1.27.0（CUDA 13 / cuDNN 9） |
 
 每个 CUDA 变体维护一对版本化环境镜像：`build-env` 固化编译工具链和第三方
 依赖，`runtime-env` 固化运行依赖。产品发布只编译当前 AIMET/QuantGRU 源码并
@@ -47,11 +47,11 @@ python3 quick_start_kws.py
 # 只构建一个变体，不导出归档
 ./scripts/release_build.sh --no-export cu126
 
-# 使用共享盘中已校验的成对环境镜像归档
-./scripts/release_build.sh --shared-cache
+# 使用指定目录中已校验的成对环境镜像归档
+./scripts/release_build.sh --environment-dir /path/to/environment-images/deps-v1
 
 # 在 GPU 机器上执行发布验收
-./scripts/verify_bundle.sh --gpu cu126
+./scripts/verify_bundle.sh --gpu --gpu-device 0 cu126
 
 # 使用真实数据完整运行两个 example（路径按实际环境填写）
 ./scripts/verify_kws_example.sh --dataset-dir /path/to/speech_commands_v0.02 cu126
@@ -68,7 +68,7 @@ python3 quick_start_kws.py
 - `docker/Dockerfile.environment`：稳定 build-env/runtime-env 构建
 - `docker/Dockerfile`：基于稳定环境编译源码并组装产品镜像
 - `docker/docker-bake.hcl`：三个 CUDA 变体的唯一构建矩阵
-- `docker/requirements/`：公共依赖锁和三份 PyTorch/CUDA 锁
+- `docker/requirements/`：公共依赖锁、三份 PyTorch/CUDA 锁和三份 ONNX Runtime GPU 锁
 - `scripts/build_environment_images.sh`：按需构建稳定环境镜像，默认产出三个 CUDA 变体的本地归档
 - `scripts/export_environment_images.sh`：在本地生成可人工搬运的环境文件
 - `scripts/load_environment_images.sh`：校验并加载环境归档

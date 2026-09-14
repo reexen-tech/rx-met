@@ -53,12 +53,16 @@ log "build rx-met wheel -> ${OUT}"
 
 python3 - <<PY
 from pathlib import Path
+import sys
 import zipfile
 
 out = Path("${OUT}")
 wheels = list(out.glob("rx_met-*.whl"))
 assert len(wheels) == 1, wheels
-assert wheels[0].name.endswith("-cp310-cp310-linux_x86_64.whl"), wheels[0]
+python_tag = f"cp{sys.version_info.major}{sys.version_info.minor}"
+assert wheels[0].name.endswith(
+    f"-{python_tag}-{python_tag}-linux_x86_64.whl"
+), wheels[0]
 names = zipfile.ZipFile(wheels[0]).namelist()
 assert not any(name.startswith("rx_met_llm") for name in names), "rx_met_llm leaked into wheel"
 print("wheel ok", wheels[0].name)

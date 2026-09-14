@@ -13,6 +13,8 @@ ARG TORCH_CUDA_ARCH_LIST=8.0;8.6;8.9;9.0
 ARG TORCH_VERSION=2.8.0
 ARG TORCHVISION_VERSION=0.23.0
 ARG TORCHAUDIO_VERSION=2.8.0
+ARG ONNXRUNTIME_VERSION=1.23.2
+ARG PYTHON_VERSION=3.10
 ARG ENV_VERSION=deps-v1
 
 ENV CUDA_HOME=/usr/local/cuda \
@@ -20,6 +22,9 @@ ENV CUDA_HOME=/usr/local/cuda \
     LIBRARY_PATH=/usr/local/cuda/lib64/stubs \
     RX_MET_ENABLE_CUDA=1 \
     RX_MET_PYTHON=python3 \
+    RX_MET_ONNXRUNTIME_VERSION=${ONNXRUNTIME_VERSION} \
+    RX_MET_ONNXRUNTIME_ROOT=/opt/rx-met-env/onnxruntime \
+    PIP_BREAK_SYSTEM_PACKAGES=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
     PIP_NO_CACHE_DIR=1 \
     PIP_DEFAULT_TIMEOUT=120 \
@@ -32,6 +37,7 @@ RUN apt-get -o Acquire::Retries=5 update \
         build-essential \
         ca-certificates \
         cmake \
+        curl \
         diffutils \
         libeigen3-dev \
         libgomp1 \
@@ -50,6 +56,11 @@ RUN case "${CUDA_VARIANT}:${RX_MET_CUDA_VERSION}:${RX_MET_CUDA_ARCHITECTURES}:${
 COPY docker/requirements /opt/rx-met-env/docker/requirements
 COPY scripts/internal/download_runtime_wheels.sh /opt/rx-met-env/scripts/internal/download_runtime_wheels.sh
 COPY scripts/internal/verify_dependency_wheelhouse.py /opt/rx-met-env/scripts/internal/verify_dependency_wheelhouse.py
+COPY scripts/internal/prepare_onnxruntime_headers.sh /opt/rx-met-env/scripts/internal/prepare_onnxruntime_headers.sh
+COPY native/aimet/third_party/onnxruntime /opt/rx-met-env/native/aimet/third_party/onnxruntime
+
+RUN ./scripts/internal/prepare_onnxruntime_headers.sh \
+        "${ONNXRUNTIME_VERSION}" "${RX_MET_ONNXRUNTIME_ROOT}"
 
 RUN mkdir -p /opt/rx-met-env/wheelhouse \
     && ./scripts/internal/download_runtime_wheels.sh \
@@ -57,6 +68,7 @@ RUN mkdir -p /opt/rx-met-env/wheelhouse \
     && cd /opt/rx-met-env/wheelhouse \
     && sha256sum --check --strict SHA256SUMS \
     && python3 -m pip install \
+        --ignore-installed \
         --no-index \
         --find-links=/opt/rx-met-env/wheelhouse \
         -r /opt/rx-met-env/docker/requirements/build.lock \
@@ -64,6 +76,7 @@ RUN mkdir -p /opt/rx-met-env/wheelhouse \
         --no-index \
         --find-links=/opt/rx-met-env/wheelhouse \
         -r /opt/rx-met-env/docker/requirements/common.lock \
+        -r "/opt/rx-met-env/docker/requirements/onnxruntime-${CUDA_VARIANT}.txt" \
         -r "/opt/rx-met-env/docker/requirements/${CUDA_VARIANT}.txt" \
     && python3 -m pip check
 
@@ -71,12 +84,17 @@ RUN mkdir -p /opt/rx-met-env/wheelhouse \
 # cuDNN wheel selected by the PyTorch dependency lock.
 RUN python3 - <<'PY'
 from pathlib import Path
+import site
 
-source = Path("/usr/local/lib/python3.10/dist-packages/nvidia/cudnn/include")
 target = Path("/usr/local/cuda/include")
-headers = sorted(source.glob("cudnn*.h"))
+roots = [Path(value) for value in site.getsitepackages()]
+headers = sorted(
+    header
+    for root in roots
+    for header in (root / "nvidia" / "cudnn" / "include").glob("cudnn*.h")
+)
 if not headers:
-    raise SystemExit(f"没有找到 PyTorch cuDNN headers: {source}")
+    raise SystemExit(f"没有找到 PyTorch cuDNN headers: {roots}")
 if not target.is_dir():
     raise SystemExit(f"CUDA include 目录不存在: {target}")
 for header in headers:
@@ -90,10 +108,14 @@ PY
 RUN EXPECTED_TORCH="${TORCH_VERSION}" \
     EXPECTED_TORCHVISION="${TORCHVISION_VERSION}" \
     EXPECTED_TORCHAUDIO="${TORCHAUDIO_VERSION}" \
+    EXPECTED_ONNXRUNTIME="${ONNXRUNTIME_VERSION}" \
     EXPECTED_CUDA="${RX_MET_CUDA_VERSION}" \
+    EXPECTED_PYTHON="${PYTHON_VERSION}" \
     python3 - <<'PY'
 import importlib.metadata
 import os
+import sys
+import onnxruntime
 import torch
 
 for package, expected in {
@@ -104,6 +126,9 @@ for package, expected in {
     actual = importlib.metadata.version(package).split("+", 1)[0]
     assert actual == expected, (package, actual, expected)
 assert torch.version.cuda == os.environ["EXPECTED_CUDA"], torch.version.cuda
+assert importlib.metadata.version("onnxruntime-gpu") == os.environ["EXPECTED_ONNXRUNTIME"]
+assert "CUDAExecutionProvider" in onnxruntime.get_available_providers()
+assert f"{sys.version_info.major}.{sys.version_info.minor}" == os.environ["EXPECTED_PYTHON"]
 PY
 
 RUN printf '%s\n' \
@@ -112,6 +137,8 @@ RUN printf '%s\n' \
         "cuda_variant=${CUDA_VARIANT}" \
         "cuda_version=${RX_MET_CUDA_VERSION}" \
         "torch_version=${TORCH_VERSION}" \
+        "onnxruntime_version=${ONNXRUNTIME_VERSION}" \
+        "python_version=${PYTHON_VERSION}" \
         > /opt/rx-met-env/environment.env
 
 LABEL org.opencontainers.image.vendor="Reexen" \
@@ -120,7 +147,9 @@ LABEL org.opencontainers.image.vendor="Reexen" \
       com.reexen.rx-met.environment.version="${ENV_VERSION}" \
       com.reexen.rx-met.cuda.variant="${CUDA_VARIANT}" \
       com.reexen.rx-met.cuda.version="${RX_MET_CUDA_VERSION}" \
-      com.reexen.rx-met.torch.version="${TORCH_VERSION}"
+      com.reexen.rx-met.torch.version="${TORCH_VERSION}" \
+      com.reexen.rx-met.onnxruntime.version="${ONNXRUNTIME_VERSION}" \
+      com.reexen.rx-met.python.version="${PYTHON_VERSION}"
 
 
 FROM ${BASE_IMAGE} AS runtime-env
@@ -133,10 +162,13 @@ ARG RX_MET_CUDA_VERSION=12.6
 ARG TORCH_VERSION=2.8.0
 ARG TORCHVISION_VERSION=0.23.0
 ARG TORCHAUDIO_VERSION=2.8.0
+ARG ONNXRUNTIME_VERSION=1.23.2
+ARG PYTHON_VERSION=3.10
 ARG ENV_VERSION=deps-v1
 
 ENV CUDA_VARIANT=${CUDA_VARIANT} \
     RX_MET_CUDA_VERSION=${RX_MET_CUDA_VERSION} \
+    PIP_BREAK_SYSTEM_PACKAGES=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
     NVIDIA_VISIBLE_DEVICES=all \
     NVIDIA_DRIVER_CAPABILITIES=compute,utility
@@ -158,6 +190,7 @@ RUN cd /tmp/wheelhouse \
     && sha256sum --check --strict SHA256SUMS \
     && python3 -m pip install \
         --no-cache-dir \
+        --ignore-installed \
         --no-index \
         --no-deps \
         /tmp/wheelhouse/*.whl \
@@ -166,12 +199,16 @@ RUN cd /tmp/wheelhouse \
 
 RUN python3 - <<'PY' > /etc/ld.so.conf.d/rx-met-python-cuda.conf
 from pathlib import Path
+import site
 
-roots = sorted(Path("/usr/local/lib/python3.10/dist-packages").glob("nvidia/*/lib"))
-torch_lib = Path("/usr/local/lib/python3.10/dist-packages/torch/lib")
-if torch_lib.is_dir():
-    roots.append(torch_lib)
-for root in roots:
+site_roots = [Path(value) for value in site.getsitepackages()]
+library_roots = sorted(
+    root
+    for site_root in site_roots
+    for root in (site_root / "nvidia").glob("*/lib")
+)
+library_roots.extend(site_root / "torch" / "lib" for site_root in site_roots)
+for root in library_roots:
     if root.is_dir():
         print(root)
 PY
@@ -180,10 +217,14 @@ RUN ldconfig
 RUN EXPECTED_TORCH="${TORCH_VERSION}" \
     EXPECTED_TORCHVISION="${TORCHVISION_VERSION}" \
     EXPECTED_TORCHAUDIO="${TORCHAUDIO_VERSION}" \
+    EXPECTED_ONNXRUNTIME="${ONNXRUNTIME_VERSION}" \
     EXPECTED_CUDA="${RX_MET_CUDA_VERSION}" \
+    EXPECTED_PYTHON="${PYTHON_VERSION}" \
     python3 - <<'PY'
 import importlib.metadata
 import os
+import sys
+import onnxruntime
 import torch
 
 for package, expected in {
@@ -194,6 +235,9 @@ for package, expected in {
     actual = importlib.metadata.version(package).split("+", 1)[0]
     assert actual == expected, (package, actual, expected)
 assert torch.version.cuda == os.environ["EXPECTED_CUDA"], torch.version.cuda
+assert importlib.metadata.version("onnxruntime-gpu") == os.environ["EXPECTED_ONNXRUNTIME"]
+assert "CUDAExecutionProvider" in onnxruntime.get_available_providers()
+assert f"{sys.version_info.major}.{sys.version_info.minor}" == os.environ["EXPECTED_PYTHON"]
 PY
 
 RUN mkdir -p /opt/rx-met-env \
@@ -203,6 +247,8 @@ RUN mkdir -p /opt/rx-met-env \
         "cuda_variant=${CUDA_VARIANT}" \
         "cuda_version=${RX_MET_CUDA_VERSION}" \
         "torch_version=${TORCH_VERSION}" \
+        "onnxruntime_version=${ONNXRUNTIME_VERSION}" \
+        "python_version=${PYTHON_VERSION}" \
         > /opt/rx-met-env/environment.env \
     && python3 -m pip freeze --all > /opt/rx-met-env/pip-freeze.txt \
     && dpkg-query --show > /opt/rx-met-env/dpkg-packages.txt
@@ -213,6 +259,8 @@ LABEL org.opencontainers.image.vendor="Reexen" \
       com.reexen.rx-met.environment.version="${ENV_VERSION}" \
       com.reexen.rx-met.cuda.variant="${CUDA_VARIANT}" \
       com.reexen.rx-met.cuda.version="${RX_MET_CUDA_VERSION}" \
-      com.reexen.rx-met.torch.version="${TORCH_VERSION}"
+      com.reexen.rx-met.torch.version="${TORCH_VERSION}" \
+      com.reexen.rx-met.onnxruntime.version="${ONNXRUNTIME_VERSION}" \
+      com.reexen.rx-met.python.version="${PYTHON_VERSION}"
 
 CMD ["bash"]

@@ -1,0 +1,2 @@
+# PyPI 官方 CUDA 13 wheel；CUDA 13.x + cuDNN 9，要求 Python >= 3.11。
+onnxruntime-gpu==1.27.0
