@@ -17,9 +17,21 @@ REBUILD_ENVIRONMENT=0
 ENV_ARCHIVE_DIR="${RX_MET_ENV_ARCHIVE_DIR:-}"
 ENV_ARCHIVES=()
 TARGETS=()
+EXAMPLES_CONTAINER=""
+EXAMPLES_STAGING=""
 
 log() { printf '[release_build] %s\n' "$*"; }
 die() { printf '[release_build] ERROR: %s\n' "$*" >&2; exit 1; }
+
+cleanup() {
+    if [[ -n "${EXAMPLES_CONTAINER}" ]]; then
+        docker rm -f "${EXAMPLES_CONTAINER}" >/dev/null 2>&1 || true
+    fi
+    if [[ -n "${EXAMPLES_STAGING}" ]]; then
+        rm -rf -- "${EXAMPLES_STAGING}"
+    fi
+}
+trap cleanup EXIT
 
 usage() {
     cat <<'EOF'
@@ -194,6 +206,27 @@ mkdir -p "${EXPORT_DIR}"
 archives=()
 images=()
 for target in "${TARGETS[@]}"; do
+    images+=("${IMAGE_REPOSITORY}:${VERSION}-${target}")
+done
+
+examples_output="${EXPORT_DIR}/examples"
+EXAMPLES_STAGING="$(mktemp -d "${EXPORT_DIR}/.rx-met-examples.XXXXXX")"
+EXAMPLES_CONTAINER="$(docker create "${images[0]}")"
+docker cp "${EXAMPLES_CONTAINER}:/opt/rx-met/examples/." "${EXAMPLES_STAGING}"
+docker rm "${EXAMPLES_CONTAINER}" >/dev/null
+EXAMPLES_CONTAINER=""
+for required_example in README.md quick_start_kws.py onnx_ptq_quick_start.py \
+    prepare_onnx_ptq_data.py config/mrnn_quantsim_config_custom_mixed_precision_v2.json \
+    config/quick_start_full_quant.json; do
+    [[ -f "${EXAMPLES_STAGING}/${required_example}" ]] \
+        || die "产品镜像缺少示例文件: ${required_example}"
+done
+rm -rf -- "${examples_output}"
+mv -- "${EXAMPLES_STAGING}" "${examples_output}"
+EXAMPLES_STAGING=""
+log "导出示例源码: ${examples_output}"
+
+for target in "${TARGETS[@]}"; do
     image="${IMAGE_REPOSITORY}:${VERSION}-${target}"
     archive="rx-met-v${VERSION}-${target}-linux-amd64.tar.zst"
     output="${EXPORT_DIR}/${archive}"
@@ -202,7 +235,6 @@ for target in "${TARGETS[@]}"; do
         | zstd -T"${ZSTD_THREADS}" -10 -o "${output}.partial"
     mv -f -- "${output}.partial" "${output}"
     archives+=("${archive}")
-    images+=("${image}")
 done
 
 manifest="${EXPORT_DIR}/image-manifest.json"
@@ -216,6 +248,9 @@ sed -i "s/@VERSION@/${VERSION}/g" \
     cd "${EXPORT_DIR}"
     checksum_args=("ChangeLog.md" "README.md" "image-manifest.json")
     checksum_args+=("${archives[@]}")
+    mapfile -d '' -t example_files < <(find examples -type f -print0 | sort -z)
+    ((${#example_files[@]} > 0)) || die "导出的 examples 目录为空"
+    checksum_args+=("${example_files[@]}")
     sha256sum "${checksum_args[@]}" | sort -k2 > SHA256SUMS.partial
     mv -f SHA256SUMS.partial SHA256SUMS
 )

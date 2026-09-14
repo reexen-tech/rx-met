@@ -43,6 +43,18 @@ docker run --gpus device=0 --rm -it \
 改用明确的 `--shm-size`。`--group-add` 用于 CIFS/NFS 等仅允许所属组读取的共享
 数据目录；`:ro` 仍保证容器不能修改数据。
 
+## 示例源码
+
+交付目录中的 `examples/` 是可直接浏览的示例源码，与产品镜像内
+`/opt/rx-met/examples` 的内容一致。源码目录不包含模型、数据集和运行环境；实际
+执行时应使用同一批次交付的产品镜像。两个入口分别是：
+
+- `examples/quick_start_kws.py`：KWS 浮点训练、PTQ、Power-of-2、QAT 和导出；
+- `examples/onnx_ptq_quick_start.py`：ONNX PTQ、Power-of-2 和 compiler encodings
+  导出。
+
+更详细的源码结构和环境变量见 `examples/README.md`。
+
 ## KWS 示例
 
 Speech Commands v0.02 在容器内挂载为

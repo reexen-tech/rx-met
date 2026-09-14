@@ -1,6 +1,6 @@
 # rx-met Docker 构建与发布
 
-rx-met 自行维护 Linux x86_64 GPU 镜像，不再依赖 ADA200 通用 Docker。构建
+rx-met 自行维护 Linux x86_64 GPU 镜像，不再依赖旧通用 Docker。构建
 流程将稳定的第三方环境与频繁变化的项目源码分开，最终交付三个产品镜像。
 
 ## 1. 构建矩阵
@@ -221,10 +221,20 @@ driver 当前不受支持，脚本会在构建前退出。
 |-- README.md
 |-- ChangeLog.md
 |-- image-manifest.json
+|-- examples/
+|   |-- README.md
+|   |-- quick_start_kws.py
+|   |-- onnx_ptq_quick_start.py
+|   |-- prepare_onnx_ptq_data.py
+|   `-- config/
 |-- rx-met-v1.0.0-cu118-linux-amd64.tar.zst
 |-- rx-met-v1.0.0-cu126-linux-amd64.tar.zst
 `-- rx-met-v1.0.0-cu130-linux-amd64.tar.zst
 ```
+
+`examples/` 从本次构建的产品镜像中提取，供用户在加载镜像前直接审阅使用方法；
+其内容与镜像内 `/opt/rx-met/examples` 一致。所有示例源码和配置文件都加入顶层
+`SHA256SUMS`，模型、数据集、缓存和运行输出不进入交付目录。
 
 构建脚本自动执行无 GPU 验收。发布前还必须在目标驱动环境执行：
 

@@ -22,7 +22,8 @@ cd /path/to/rx-met
 3. 使用 `build-env` 编译当前源码中的 rx-met、AIMET native 和 QuantGRU。
 4. 将项目 wheel 安装到 `runtime-env`，生成最终产品镜像。
 5. 执行不使用 GPU 的镜像验收。
-6. 导出三个产品镜像归档、说明文件、镜像清单和 `SHA256SUMS`。
+6. 导出三个产品镜像归档、镜像内同版本的示例源码、说明文件、镜像清单和
+   `SHA256SUMS`。
 
 默认产品 tag：
 
@@ -42,8 +43,17 @@ rx-met:1.0.0-cu130
 |-- image-manifest.json
 |-- README.md
 |-- ChangeLog.md
+|-- examples/
+|   |-- README.md
+|   |-- quick_start_kws.py
+|   |-- onnx_ptq_quick_start.py
+|   |-- prepare_onnx_ptq_data.py
+|   `-- config/
 `-- SHA256SUMS
 ```
+
+`examples/` 从本次构建的产品镜像中提取，保证可浏览源码与镜像内实际运行的版本
+一致。目录中的每个文件都记录在顶层 `SHA256SUMS` 中。
 
 只构建某个变体：
 

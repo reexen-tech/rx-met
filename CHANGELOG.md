@@ -9,7 +9,7 @@
 
 ### 变更
 
-- 交付方式从 ADA200 通用镜像上的 wheel 软件包改为 rx-met 自有 Docker 镜像。
+- 交付方式从旧通用镜像上的 wheel 软件包改为 rx-met 自有 Docker 镜像。
 - 将 Docker 流程拆分为稳定环境与产品发布：每个 CUDA 变体分别维护可复用的
   `build-env` 和 `runtime-env`，源码更新只重编项目 wheel 和最终产品镜像。
 - 新增独立的环境构建、验证、加载和导出脚本；脚本只生成可搬运文件，不自动上传
@@ -27,7 +27,8 @@
 
 ### 🔄 变更
 
-- 仓库改为独立小模型仓；大模型量化不在本仓库。客户交付改为 `ada200_docker` 上的 wheel 软件包（`vYYMMDD`）。
+- 仓库改为独立小模型仓；大模型量化不在本仓库。客户交付改为旧通用镜像上的
+  wheel 软件包（`vYYMMDD`）。
 - 示例入口改为 `quick_start_kws.py`（PyTorch）和 `onnx_ptq_quick_start.py`（ONNX）。ONNX 示例使用公开 MobileNetV2，由 `prepare_onnx_ptq_data.py` 生成静态 batch 与校准 npy。
 - **重组 ONNX 导出与 PTQ 模块路径**
   - PyTorch sim → ONNX + encodings（含 GRU 导出/后处理）迁至 `aimet_torch/rx_export/`

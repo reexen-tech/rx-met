@@ -59,7 +59,8 @@ python3 quick_start_kws.py
   --model /path/to/model.onnx --dataset-dir /path/to/calib cu126
 ```
 
-默认制品目录为 `.release/export/`。完整构建、验收流程和可配置环境变量见
+默认制品目录为 `.release/export/`，其中同时包含产品镜像归档和可直接浏览的
+`examples/` 示例源码。完整构建、验收流程和可配置环境变量见
 [docs/Release_packaging.md](docs/Release_packaging.md)，各脚本的职责和调用关系见
 [scripts/README.md](scripts/README.md)。
 

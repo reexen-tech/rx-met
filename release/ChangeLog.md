@@ -8,4 +8,5 @@
   和公共 Python 依赖。
 - 产品镜像基于版本化 runtime-env 组装，项目源码与第三方依赖环境独立更新。
 - 镜像内置定制 AIMET、QuantGRU、KWS quick start 和 ONNX PTQ quick start。
+- 交付目录提供与镜像内容一致、可直接浏览的 `examples/` 示例源码。
 - 修复 ONNX quick start 对导出 encoding 字段名的错误读取。

@@ -131,9 +131,9 @@ AIMET custom-op 也必须用对应 ORT C API 头文件编译，不能让 1.20 ru
 
 ## 仓库依赖清单
 
-实施前的 `requirements.txt` 是面向 ADA200 的 wheel 依赖声明，不是干净镜像的
+实施前的 `requirements.txt` 是面向旧通用容器的 wheel 依赖声明，不是干净镜像的
 完整环境定义。原文件注释明确指出 Docker 构建会重写依赖以匹配
-`ada200_docker`（`requirements.txt:1-9`、
+旧通用容器（`requirements.txt:1-9`、
 `scripts/internal/prepare_packaging.py:59-69`）。rx-met 开始自行维护镜像后，应从
 正式支持的入口反推依赖并进行完整锁定。
 
@@ -229,7 +229,7 @@ OpenCV 只是在 Pillow 不可用时的备选方案
 
 ### 可选的 vendored AIMET 功能
 
-提交 `719fa371` 在对齐 ADA200 时从 `requirements.txt` 删除了 Jinja2、
+提交 `719fa371` 在对齐旧通用容器时从 `requirements.txt` 删除了 Jinja2、
 PyYAML、hvplot、onnx2torch、osqp、pandas、psutil、scikit-learn、tqdm、
 Bokeh 和 jsonschema。不能不加区分地把它们全部放回镜像：
 
@@ -247,10 +247,10 @@ vendored AIMET API。必须使用干净环境递归导入测试，才能把上�
 
 ## Torch 2.8 是否是全局要求
 
-不是。仓库历史表明，全局版本下限是为了对齐 ADA200，而不是因为所有受支持
+不是。仓库历史表明，全局版本下限是为了对齐旧通用容器，而不是因为所有受支持
 rx-met 路径同时开始使用 Torch 2.8 API。提交 `719fa371` 将根依赖声明从
 `torch>=1.13.0` 改为 `torch>=2.8.0`，并在
-`scripts/internal/prepare_packaging.py:59-69` 中加入 ADA200 专用依赖重写。
+`scripts/internal/prepare_packaging.py:59-69` 中加入旧通用容器专用依赖重写。
 
 源码中唯一明确的 2.8 检查位于实验性 ExportedProgram API：
 `aimet_torch/v2/experimental/export/__init__.py:22-26`。
