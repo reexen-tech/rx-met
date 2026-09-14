@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 将环境镜像导出到本地目录；复制或移动到共享盘由维护人手工完成。
+# 将环境镜像导出成可搬运文件；复制或上传由维护人手工完成。
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -23,11 +23,11 @@ usage() {
 用法: ./scripts/export_environment_images.sh [选项] [cu118|cu126|cu130 ...]
 
 选项：
-  --output-dir DIR    本地输出目录，默认 .release/environment-images/<环境版本>
-  --force             全部新文件生成并校验后，替换本地同名文件
+  --output-dir DIR    输出目录，默认 .release/environment-images/<环境版本>
+  --force             全部新文件生成并校验后，替换同名文件
   -h, --help          显示帮助
 
-脚本只生成可搬运文件，不写 /mnt/data2。共享盘复制或移动由维护人手工执行。
+脚本只生成可搬运文件，不负责上传到远端或共享存储。
 EOF
 }
 
@@ -55,11 +55,6 @@ for command in docker realpath sha256sum zstd; do
     command -v "${command}" >/dev/null 2>&1 || die "缺少命令: ${command}"
 done
 OUTPUT_DIR="$(realpath -m -- "${OUTPUT_DIR}")"
-case "${OUTPUT_DIR}" in
-    /mnt/data2|/mnt/data2/*)
-        die "导出脚本禁止写共享盘，请先输出到本地再人工复制: ${OUTPUT_DIR}"
-        ;;
-esac
 mkdir -p "${OUTPUT_DIR}"
 [[ -w "${OUTPUT_DIR}" ]] || die "输出目录不可写: ${OUTPUT_DIR}"
 

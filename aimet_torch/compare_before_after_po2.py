@@ -1,10 +1,6 @@
 """
 对比power-of-2转换前后的量化器参数
 """
-import sys
-sys.path.append(r'/home/sdong/Program/aimet/TrainingExtensions/torch/src/python')
-sys.path.append(r'/home/sdong/Program/aimet/TrainingExtensions/common/src/python')
-
 import torch
 
 def collect_quantizer_info(model):
@@ -330,4 +326,3 @@ def compare_quantizers(before_list, after_list):
     print(f"Qmax不变: {qmax_unchanged} ({qmax_unchanged/total*100:.1f}%)")
     
     return issues
-

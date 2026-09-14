@@ -9,6 +9,7 @@ PYTHON="${RX_MET_PYTHON:-python3}"
 COMMON_LOCK="${ROOT}/docker/requirements/common.lock"
 BUILD_LOCK="${ROOT}/docker/requirements/build.lock"
 VARIANT_LOCK="${ROOT}/docker/requirements/${CUDA_VARIANT}.txt"
+ONNXRUNTIME_LOCK="${ROOT}/docker/requirements/onnxruntime-${CUDA_VARIANT}.txt"
 VERIFY_SCRIPT="${ROOT}/scripts/internal/verify_dependency_wheelhouse.py"
 
 log() { printf '[download_runtime_wheels] %s\n' "$*"; }
@@ -21,13 +22,24 @@ esac
 [[ -f "${COMMON_LOCK}" ]] || die "缺少公共锁文件: ${COMMON_LOCK}"
 [[ -f "${BUILD_LOCK}" ]] || die "缺少构建工具锁文件: ${BUILD_LOCK}"
 [[ -f "${VARIANT_LOCK}" ]] || die "缺少变体锁文件: ${VARIANT_LOCK}"
+[[ -f "${ONNXRUNTIME_LOCK}" ]] || die "缺少 ONNX Runtime 锁文件: ${ONNXRUNTIME_LOCK}"
 [[ -f "${VERIFY_SCRIPT}" ]] || die "缺少 wheelhouse 校验器: ${VERIFY_SCRIPT}"
+
+case "${CUDA_VARIANT}" in
+    cu118)
+        ONNXRUNTIME_INDEX="https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/onnxruntime-cuda-11/pypi/simple/"
+        ;;
+    cu126|cu130)
+        ONNXRUNTIME_INDEX="https://pypi.org/simple"
+        ;;
+esac
 
 mkdir -p "${OUT_DIR}"
 
 verify_offline_wheelhouse() {
     "${PYTHON}" "${VERIFY_SCRIPT}" \
-        "${OUT_DIR}" "${BUILD_LOCK}" "${COMMON_LOCK}" "${VARIANT_LOCK}"
+        "${OUT_DIR}" "${BUILD_LOCK}" "${COMMON_LOCK}" \
+        "${VARIANT_LOCK}" "${ONNXRUNTIME_LOCK}"
 }
 
 if compgen -G "${OUT_DIR}/*.whl" >/dev/null \
@@ -38,6 +50,10 @@ if compgen -G "${OUT_DIR}/*.whl" >/dev/null \
         sha256sum ./*.whl | sort -k2 > SHA256SUMS
     )
     exit 0
+fi
+if compgen -G "${OUT_DIR}/*.whl" >/dev/null; then
+    log "现有 wheelhouse 与当前锁文件不一致，清理后重新下载"
+    rm -f -- "${OUT_DIR}"/*.whl "${OUT_DIR}/SHA256SUMS"
 fi
 
 log "下载 Python 构建工具"
@@ -53,6 +69,14 @@ log "下载公共依赖"
     --only-binary=:all: \
     --no-deps \
     -r "${COMMON_LOCK}"
+
+log "下载 ${CUDA_VARIANT} 的 ONNX Runtime GPU"
+"${PYTHON}" -m pip download \
+    --dest "${OUT_DIR}" \
+    --only-binary=:all: \
+    --no-deps \
+    --index-url "${ONNXRUNTIME_INDEX}" \
+    -r "${ONNXRUNTIME_LOCK}"
 
 log "下载 ${CUDA_VARIANT} 的 PyTorch/CUDA 依赖"
 "${PYTHON}" -m pip download \

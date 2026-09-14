@@ -41,13 +41,15 @@ target "variant-cu118" {
   args = {
     CUDA_VARIANT              = "cu118"
     RX_MET_CUDA_VERSION       = "11.8"
-    DEVEL_IMAGE               = "nvcr.io/nvidia/cuda:11.8.0-devel-ubuntu22.04"
-    BASE_IMAGE                = "nvcr.io/nvidia/cuda:11.8.0-base-ubuntu22.04"
+    DEVEL_IMAGE               = "nvcr.io/nvidia/cuda:11.8.0-cudnn8-devel-ubuntu22.04"
+    BASE_IMAGE                = "nvcr.io/nvidia/cuda:11.8.0-cudnn8-runtime-ubuntu22.04"
     RX_MET_CUDA_ARCHITECTURES = "80;86;89;90"
     TORCH_CUDA_ARCH_LIST      = "8.0;8.6;8.9;9.0"
     TORCH_VERSION             = "2.7.1"
     TORCHVISION_VERSION       = "0.22.1"
     TORCHAUDIO_VERSION        = "2.7.1"
+    ONNXRUNTIME_VERSION       = "1.20.1"
+    PYTHON_VERSION            = "3.10"
     MIN_DRIVER_VERSION        = "520.61.05"
   }
 }
@@ -63,6 +65,8 @@ target "variant-cu126" {
     TORCH_VERSION             = "2.8.0"
     TORCHVISION_VERSION       = "0.23.0"
     TORCHAUDIO_VERSION        = "2.8.0"
+    ONNXRUNTIME_VERSION       = "1.23.2"
+    PYTHON_VERSION            = "3.10"
     MIN_DRIVER_VERSION        = "560.35.05"
   }
 }
@@ -71,13 +75,15 @@ target "variant-cu130" {
   args = {
     CUDA_VARIANT              = "cu130"
     RX_MET_CUDA_VERSION       = "13.0"
-    DEVEL_IMAGE               = "nvcr.io/nvidia/cuda:13.0.3-devel-ubuntu22.04"
-    BASE_IMAGE                = "nvcr.io/nvidia/cuda:13.0.3-base-ubuntu22.04"
+    DEVEL_IMAGE               = "nvcr.io/nvidia/cuda:13.0.3-devel-ubuntu24.04"
+    BASE_IMAGE                = "nvcr.io/nvidia/cuda:13.0.3-base-ubuntu24.04"
     RX_MET_CUDA_ARCHITECTURES = "80;86;89;90;120"
     TORCH_CUDA_ARCH_LIST      = "8.0;8.6;8.9;9.0;12.0"
     TORCH_VERSION             = "2.10.0"
     TORCHVISION_VERSION       = "0.25.0"
     TORCHAUDIO_VERSION        = "2.10.0"
+    ONNXRUNTIME_VERSION       = "1.27.0"
+    PYTHON_VERSION            = "3.12"
     MIN_DRIVER_VERSION        = "580.126.20"
   }
 }

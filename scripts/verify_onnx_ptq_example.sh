@@ -8,6 +8,7 @@ IMAGE_REPOSITORY="${RX_MET_IMAGE_REPOSITORY:-rx-met}"
 MODEL_PATH=""
 DATASET_DIR=""
 OUTPUT_ROOT="${RX_MET_ONNX_PTQ_VALIDATION_OUTPUT:-${ROOT}/.release/example-validation/v${VERSION}/onnx_ptq}"
+GPU_DEVICE="${RX_MET_VERIFY_GPU_DEVICE:-0}"
 TARGETS=()
 
 log() { printf '[verify_onnx_ptq_example] %s\n' "$*"; }
@@ -25,11 +26,12 @@ usage() {
 可选参数:
   --output-dir DIR       输出根目录
                          默认: ${OUTPUT_ROOT}
+  --gpu-device ID        仅向容器开放指定 GPU，默认: ${GPU_DEVICE}
   -h, --help             显示帮助
 
 不指定 CUDA 变体时依次验证 cu118、cu126、cu130。每个变体的产物和日志写入
-输出根目录下对应的 cu118、cu126 或 cu130 子目录。当前 ONNX Runtime 为 CPU
-版本，因此此示例不占用 GPU；KWS 脚本负责验证真实 CUDA 执行。
+输出根目录下对应的 cu118、cu126 或 cu130 子目录。该验证要求 NVIDIA GPU，
+并使用 ONNX Runtime CUDAExecutionProvider 实际完成 PTQ 和推理。
 EOF
 }
 
@@ -54,6 +56,10 @@ while (($#)); do
             OUTPUT_ROOT="$(require_value "$1" "${2:-}")"
             shift 2
             ;;
+        --gpu-device)
+            GPU_DEVICE="$(require_value "$1" "${2:-}")"
+            shift 2
+            ;;
         -h|--help)
             usage
             exit 0
@@ -68,6 +74,7 @@ done
 
 [[ -n "${MODEL_PATH}" ]] || die "必须传入 --model"
 [[ -n "${DATASET_DIR}" ]] || die "必须传入 --dataset-dir"
+[[ -n "${GPU_DEVICE}" ]] || die "--gpu-device 不能为空"
 [[ "${IMAGE_REPOSITORY}" =~ ^[A-Za-z0-9._/-]+$ ]] \
     || die "无效的镜像仓库名: ${IMAGE_REPOSITORY}"
 for command in docker realpath stat tee; do
@@ -111,18 +118,22 @@ for target in "${TARGETS[@]}"; do
     target_output="${OUTPUT_ROOT}/${target}"
     mkdir -p -- "${target_output}"
     [[ -w "${target_output}" ]] || die "输出目录不可写: ${target_output}"
-    log "运行 ${image}（ONNX Runtime CPUExecutionProvider）"
+    log "运行 ${image}（ONNX Runtime CUDAExecutionProvider），GPU=${GPU_DEVICE}"
     log "输出目录: ${target_output}"
 
     docker run --rm \
+        --gpus "device=${GPU_DEVICE}" \
         --shm-size=2g \
         --user "${user_id}:${group_id}" \
         --group-add "${model_group_id}" \
         --group-add "${dataset_group_id}" \
         -e HOME=/tmp \
+        -e USER=rx-met-validator \
+        -e LOGNAME=rx-met-validator \
         -e "RX_MET_ONNX_PTQ_MODEL=/model/${model_name}" \
         -e "RX_MET_ONNX_PTQ_CALIB=/datasets/calib" \
         -e "RX_MET_ONNX_PTQ_OUTPUT_DIR=/output" \
+        -e "RX_MET_ONNX_PTQ_DEVICE=cuda" \
         -v "${model_dir}:/model:ro" \
         -v "${DATASET_DIR}:/datasets/calib:ro" \
         -v "${target_output}:/output" \

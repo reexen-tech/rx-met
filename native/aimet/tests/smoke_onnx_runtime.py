@@ -55,11 +55,13 @@ def _make_model() -> onnx.ModelProto:
 def main(provider: str) -> None:
     if (
         sys.implementation.name != "cpython"
-        or sys.version_info[:2] != (3, 10)
+        or sys.version_info[:2] not in {(3, 10), (3, 11), (3, 12)}
         or platform.system() != "Linux"
         or platform.machine() != "x86_64"
     ):
-        raise RuntimeError("AIMET ONNX native smoke requires CPython 3.10 on Linux x86_64")
+        raise RuntimeError(
+            "AIMET ONNX native smoke requires CPython 3.10-3.12 on Linux x86_64"
+        )
 
     available_providers = ort.get_available_providers()
     if provider not in available_providers:

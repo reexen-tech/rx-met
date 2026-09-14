@@ -4,7 +4,7 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 SOURCE="${ROOT}/quant-gru"
-PYTHON="${RX_MET_PYTHON:-python3.10}"
+PYTHON="${RX_MET_PYTHON:-python3}"
 BUILD_DIR="${RX_MET_QUANT_GRU_BUILD_DIR:-${SOURCE}/build_release}"
 OUT_DIR="${RX_MET_WHEEL_OUT:-${ROOT}/.release/wheels}"
 
@@ -16,13 +16,13 @@ if [[ "${RX_MET_ENABLE_CUDA:-1}" != "1" ]]; then
 fi
 
 if ! command -v "${PYTHON}" >/dev/null 2>&1; then
-    log "ERROR: ${PYTHON} is required (runtime image uses Python 3.10)"
+    log "ERROR: ${PYTHON} is required"
     exit 1
 fi
-if [[ "$("${PYTHON}" -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')" != "3.10" ]]; then
-    log "ERROR: quant_gru wheel must be built for Python 3.10"
-    exit 1
-fi
+case "$("${PYTHON}" -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')" in
+    3.10|3.11|3.12) ;;
+    *) log "ERROR: quant_gru wheel requires Python 3.10-3.12"; exit 1 ;;
+esac
 if ! command -v nvcc >/dev/null 2>&1; then
     log "ERROR: CUDA Toolkit/nvcc is required to build quant_gru"
     exit 1

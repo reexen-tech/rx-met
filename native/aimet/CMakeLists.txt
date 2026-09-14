@@ -10,7 +10,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS ON)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
-find_package(Python3 3.10 EXACT COMPONENTS Interpreter Development.Module REQUIRED)
+find_package(Python3 3.10 COMPONENTS Interpreter Development.Module REQUIRED)
 find_package(pybind11 CONFIG REQUIRED)
 find_package(Eigen3 REQUIRED NO_MODULE)
 

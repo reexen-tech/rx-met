@@ -39,21 +39,22 @@ rx-met 是面向 Linux x86_64 NVIDIA GPU 的**小模型量化工具包**：定�
 
 ## 2. 支持平台与版本要求
 
-三个镜像都是 Ubuntu 22.04、Linux x86_64、CPython 3.10，但 CUDA 和 Torch
+三个镜像都是 Linux x86_64 GPU 镜像，但 CUDA、Python、Torch 和 ONNX Runtime
 版本不同：
 
-| 镜像变体 | CUDA | PyTorch | 严格最低 NVIDIA Driver |
-|------|------|------|------|
-| `cu118` | 11.8 | 2.7.1 | 520.61.05 |
-| `cu126` | 12.6 | 2.8.0 | 560.35.05 |
-| `cu130` | 13.0 | 2.10.0 | 580.126.20 |
+| 镜像变体 | 系统 / Python | CUDA | PyTorch | ONNX Runtime GPU | 严格最低 NVIDIA Driver |
+|------|------|------|------|------|------|
+| `cu118` | Ubuntu 22.04 / 3.10 | 11.8 | 2.7.1 | 1.20.1 | 520.61.05 |
+| `cu126` | Ubuntu 22.04 / 3.10 | 12.6 | 2.8.0 | 1.23.2 | 560.35.05 |
+| `cu130` | Ubuntu 24.04 / 3.12 | 13.0 | 2.10.0 | 1.27.0 | 580.126.20 |
 
 宿主机需要 Docker、NVIDIA Driver 和 NVIDIA Container Toolkit；宿主机不需要
 安装相同版本的 CUDA Toolkit。应按宿主机驱动和 GPU 计算能力选择变体，而不是
 只看宿主机 `nvcc --version`。`cu130` 才包含 `sm_120` 目标；`cu118` 不支持
 实验性 ExportedProgram API。
 
-`QuantGRU` 已安装在镜像中，可直接 `import quant_gru`。
+`QuantGRU` 和 CUDA 版 ONNX Runtime 已安装在镜像中，可直接导入。ONNX PTQ
+默认要求 `CUDAExecutionProvider`，不会在 provider 缺失时静默回退 CPU。
 
 ---
 
@@ -105,6 +106,7 @@ python3 -c "import torch, aimet_torch, aimet_onnx, quant_gru; print(torch.__vers
 | `RX_MET_ONNX_PTQ_ROOT` | ONNX 示例数据集根目录，默认 `/datasets` | ONNX PTQ |
 | `RX_MET_ONNX_PTQ_EXAMPLE` | 示例名称，默认 `mobilenetv2` | ONNX PTQ |
 | `RX_MET_ONNX_PTQ_MODEL` / `RX_MET_ONNX_PTQ_CALIB` | 覆盖模型与校准目录 | ONNX PTQ |
+| `RX_MET_ONNX_PTQ_DEVICE` | `cuda`（默认）或显式设置为 `cpu` | ONNX PTQ |
 | 镜像内示例目录 | `/opt/rx-met/examples` | 两者 |
 | 推荐输出目录 | volume 挂载的 `/workspace` | 两者 |
 
@@ -286,5 +288,5 @@ volume 挂载，不随容器删除。
 | 版本 | 日期 | 变更项 | 责任人 |
 |------|------|--------|--------|
 | 2026.09-r2 | 2026-09 | 改为 rx-met 自有 cu118/cu126/cu130 三镜像交付 | （待填写） |
-| 2026.09-r1 | 2026-09 | 独立小模型仓：去掉大模型流程，对齐 ada200 wheel 交付 | （待填写） |
+| 2026.09-r1 | 2026-09 | 独立小模型仓：去掉大模型流程，对齐旧版 wheel 交付 | （待填写） |
 | 2026.06-r1 | 2026-06 | 首次发布：普通模型快速上手 | （待填写） |

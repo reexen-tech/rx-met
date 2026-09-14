@@ -1,41 +1,38 @@
-# AIMET native runtime
+# AIMET 原生运行库
 
-This directory contains the AIMET native implementation maintained by rx-met.
-It is organized by runtime responsibility rather than by the layout of the
-original AIMET repository.
+本目录包含由 rx-met 维护的 AIMET 原生实现。目录按运行职责组织，不继续复制上游
+AIMET 仓库布局。
 
-## Source origin
+## 源码来源
 
-The initial C++ and CUDA implementation was imported without content changes
-from Qualcomm AIMET tag `2.17.0`, commit:
+最初的 C++ 和 CUDA 实现来自 Qualcomm AIMET `2.17.0` tag，导入时未修改内容，
+对应 commit：
 
 ```text
 0e679b705818df7f408971e34693b8098f0971a9
 ```
 
-The imported source came from these AIMET modules:
+导入的上游模块包括：
 
 - `ModelOptimizations/DlQuantization`
 - `ModelOptimizations/PyModelOptimizations`
 - `TrainingExtensions/onnx/src`
 
-After import, these files are owned and maintained as rx-met source. They may be
-changed directly when rx-met behavior requires it; synchronization with the
-original AIMET repository is not an interface or maintenance requirement.
+导入后，这些文件作为 rx-met 源码直接维护。rx-met 可以按自身行为要求修改它们；
+与原始 AIMET 仓库同步不属于接口或维护契约。
 
-## Layout
+## 目录结构
 
-- `common/`: shared quantization implementation and the `_libpymo` binding.
-- `onnx/`: `libquant_info` and the ONNX Runtime custom-op implementation.
-- `third_party/onnxruntime/`: immutable ONNX Runtime headers and license files.
-- `tests/`: smoke tests for the installed native runtime interface.
+- `common/`：公共量化实现和 `_libpymo` binding；
+- `onnx/`：`libquant_info` 和 ONNX Runtime custom-op 实现；
+- `third_party/onnxruntime/`：不可变的 ONNX Runtime 头文件和许可证；
+- `tests/`：已安装原生运行接口的冒烟测试。
 
-The build installs these files into the `aimet_common` Python package:
+构建会向 `aimet_common` Python 包安装：
 
-- `_libpymo.cpython-310-x86_64-linux-gnu.so`
-- `libquant_info.cpython-310-x86_64-linux-gnu.so`
+- `_libpymo<EXT_SUFFIX>`
+- `libquant_info<EXT_SUFFIX>`
 - `libaimet_onnxrt_ops.so`
 
-Use `scripts/build_aimet_native.sh` as the build interface. The supported ABI is
-CPython 3.10 on Linux x86_64, with CPU and CUDA implementations selected through
-`RX_MET_ENABLE_CUDA`.
+统一使用 `scripts/build_aimet_native.sh` 作为构建入口。支持 Linux x86_64 上的
+CPython 3.10-3.12；通过 `RX_MET_ENABLE_CUDA` 选择 CPU 或 CUDA 实现。

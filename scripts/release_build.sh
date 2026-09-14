@@ -14,14 +14,24 @@ ZSTD_THREADS="${RX_MET_ZSTD_THREADS:-2}"
 BUILDER="${RX_MET_BUILDER:-}"
 AUTO_ENVIRONMENT="${RX_MET_AUTO_BUILD_ENVIRONMENT:-1}"
 REBUILD_ENVIRONMENT=0
-USE_SHARED_CACHE="${RX_MET_USE_SHARED_CACHE:-0}"
-SHARED_CACHE_DIR="${RX_MET_SHARED_CACHE_DIR:-/mnt/data2/tmp_test_data/chengxing.zou.srv/rx-met/20260910-docker-cache}"
 ENV_ARCHIVE_DIR="${RX_MET_ENV_ARCHIVE_DIR:-}"
 ENV_ARCHIVES=()
 TARGETS=()
+EXAMPLES_CONTAINER=""
+EXAMPLES_STAGING=""
 
 log() { printf '[release_build] %s\n' "$*"; }
 die() { printf '[release_build] ERROR: %s\n' "$*" >&2; exit 1; }
+
+cleanup() {
+    if [[ -n "${EXAMPLES_CONTAINER}" ]]; then
+        docker rm -f "${EXAMPLES_CONTAINER}" >/dev/null 2>&1 || true
+    fi
+    if [[ -n "${EXAMPLES_STAGING}" ]]; then
+        rm -rf -- "${EXAMPLES_STAGING}"
+    fi
+}
+trap cleanup EXIT
 
 usage() {
     cat <<'EOF'
@@ -36,10 +46,6 @@ usage() {
                       构建前强制成对重建所选环境镜像
   --no-auto-environment
                       环境镜像缺失且未提供归档时直接退出
-  --shared-cache      从默认共享目录的 environment-images/<环境版本> 加载
-  --shared-cache-dir DIR
-                      覆盖共享缓存根目录，并自动启用共享缓存
-  --no-shared-cache   禁用共享缓存（默认）
 
 产品选项：
   --no-export         构建并验收，但不导出产品镜像 tar.zst
@@ -64,14 +70,6 @@ while (($#)); do
         --rebuild-environment) REBUILD_ENVIRONMENT=1 ;;
         --no-auto-environment) AUTO_ENVIRONMENT=0 ;;
         --no-export) EXPORT_IMAGES=0 ;;
-        --shared-cache) USE_SHARED_CACHE=1 ;;
-        --no-shared-cache) USE_SHARED_CACHE=0 ;;
-        --shared-cache-dir)
-            (($# >= 2)) || die "--shared-cache-dir 缺少参数"
-            SHARED_CACHE_DIR="$2"
-            USE_SHARED_CACHE=1
-            shift
-            ;;
         -h|--help) usage; exit 0 ;;
         cu118|cu126|cu130) TARGETS+=("$1") ;;
         *) die "未知参数: $1" ;;
@@ -94,8 +92,6 @@ rx_met_validate_environment_config || die "环境镜像名称或版本无效"
     || die "RX_MET_EXPORT_IMAGES 必须是 0 或 1"
 [[ "${AUTO_ENVIRONMENT}" == "0" || "${AUTO_ENVIRONMENT}" == "1" ]] \
     || die "RX_MET_AUTO_BUILD_ENVIRONMENT 必须是 0 或 1"
-[[ "${USE_SHARED_CACHE}" == "0" || "${USE_SHARED_CACHE}" == "1" ]] \
-    || die "RX_MET_USE_SHARED_CACHE 必须是 0 或 1"
 [[ "${ZSTD_THREADS}" =~ ^[1-8]$ ]] \
     || die "RX_MET_ZSTD_THREADS 必须是 1 到 8"
 for command in docker git; do
@@ -122,10 +118,6 @@ export RUNTIME_ENV_REPOSITORY="${RX_MET_RUNTIME_ENV_REPOSITORY}"
 
 log "产品版本: ${VERSION}，环境版本: ${RX_MET_ENV_VERSION}"
 log "构建目标: ${TARGETS[*]}"
-
-if ((USE_SHARED_CACHE)) && [[ -z "${ENV_ARCHIVE_DIR}" ]]; then
-    ENV_ARCHIVE_DIR="${SHARED_CACHE_DIR}/environment-images/${RX_MET_ENV_VERSION}"
-fi
 
 missing_targets=()
 for target in "${TARGETS[@]}"; do
@@ -214,6 +206,27 @@ mkdir -p "${EXPORT_DIR}"
 archives=()
 images=()
 for target in "${TARGETS[@]}"; do
+    images+=("${IMAGE_REPOSITORY}:${VERSION}-${target}")
+done
+
+examples_output="${EXPORT_DIR}/examples"
+EXAMPLES_STAGING="$(mktemp -d "${EXPORT_DIR}/.rx-met-examples.XXXXXX")"
+EXAMPLES_CONTAINER="$(docker create "${images[0]}")"
+docker cp "${EXAMPLES_CONTAINER}:/opt/rx-met/examples/." "${EXAMPLES_STAGING}"
+docker rm "${EXAMPLES_CONTAINER}" >/dev/null
+EXAMPLES_CONTAINER=""
+for required_example in README.md quick_start_kws.py onnx_ptq_quick_start.py \
+    prepare_onnx_ptq_data.py config/mrnn_quantsim_config_custom_mixed_precision_v2.json \
+    config/quick_start_full_quant.json; do
+    [[ -f "${EXAMPLES_STAGING}/${required_example}" ]] \
+        || die "产品镜像缺少示例文件: ${required_example}"
+done
+rm -rf -- "${examples_output}"
+mv -- "${EXAMPLES_STAGING}" "${examples_output}"
+EXAMPLES_STAGING=""
+log "导出示例源码: ${examples_output}"
+
+for target in "${TARGETS[@]}"; do
     image="${IMAGE_REPOSITORY}:${VERSION}-${target}"
     archive="rx-met-v${VERSION}-${target}-linux-amd64.tar.zst"
     output="${EXPORT_DIR}/${archive}"
@@ -222,7 +235,6 @@ for target in "${TARGETS[@]}"; do
         | zstd -T"${ZSTD_THREADS}" -10 -o "${output}.partial"
     mv -f -- "${output}.partial" "${output}"
     archives+=("${archive}")
-    images+=("${image}")
 done
 
 manifest="${EXPORT_DIR}/image-manifest.json"
@@ -236,6 +248,9 @@ sed -i "s/@VERSION@/${VERSION}/g" \
     cd "${EXPORT_DIR}"
     checksum_args=("ChangeLog.md" "README.md" "image-manifest.json")
     checksum_args+=("${archives[@]}")
+    mapfile -d '' -t example_files < <(find examples -type f -print0 | sort -z)
+    ((${#example_files[@]} > 0)) || die "导出的 examples 目录为空"
+    checksum_args+=("${example_files[@]}")
     sha256sum "${checksum_args[@]}" | sort -k2 > SHA256SUMS.partial
     mv -f SHA256SUMS.partial SHA256SUMS
 )
