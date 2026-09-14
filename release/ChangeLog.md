@@ -2,7 +2,7 @@
 
 ## @VERSION@
 
-- 交付方式改为 rx-met 自有 Docker 镜像，不再依赖 ADA200 通用镜像。
+- 交付方式改为项目自行维护的多 CUDA Docker 镜像。
 - 新增 `cu118`、`cu126`、`cu130` 三个独立运行变体。
 - 固定各变体的 Python、PyTorch 三件套、ONNX Runtime GPU、NVIDIA CUDA wheel
   和公共 Python 依赖。
