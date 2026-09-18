@@ -68,6 +68,7 @@ docker run --gpus all --rm \
 | 镜像加载、PyTorch 和 ONNX 使用流程   | [用户使用指南](docs/User_guide.md)                  |
 | QuantSim、混合精度和 QuantGRU 配置 | [量化配置](docs/Quant_config.md)                  |
 | ONNX PTQ 制品和编译器 encodings  | [ONNX PTQ 编译器制品](docs/ONNX_PTQ_COMPILER.md)   |
+| 系统模块、量化数据流和发布架构            | [系统架构](docs/architecture.md)                   |
 | KWS 和 ONNX PTQ 可运行示例       | [示例说明](examples/README.md)                    |
 | QuantGRU 接口和构建             | [QuantGRU](operators/quant-gru/README.md)     |
 | AIMET 原生运行库来源和构建           | [AIMET ONNX 原生运行库](docs/AIMET_ONNX_NATIVE.md) |
