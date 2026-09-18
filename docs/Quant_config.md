@@ -161,16 +161,13 @@ from aimet_torch.utils_rx import apply_power_of_2_workflow
 
 apply_power_of_2_workflow(
     sim.model,
-    method="round",
-    tolerance=0.02,
     align_bias_scale=True,
     verbose=True,
 )
 ```
 
-`method="round"` 使用最近的 Power-of-2 scale。`method="cover_range"` 会在原范围
-与 Power-of-2 的差异超过 `tolerance` 时扩大 scale，以覆盖原范围。模式选择由目标
-编译器和精度验证结果决定。
+`apply_power_of_2_workflow()` 默认使用 `cover_range`。该策略在原范围与最近的
+Power-of-2 差异超过默认 2% 容差时扩大 scale，以覆盖校准范围。
 
 ## QAT 和重新加载
 
