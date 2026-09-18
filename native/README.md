@@ -1,38 +1,25 @@
 # AIMET 原生运行库
 
-本目录包含由 rx-met 维护的 AIMET 原生实现。目录按运行职责组织，不继续复制上游
-AIMET 仓库布局。
+本目录保存 rx-met 维护的 AIMET C++ 和 CUDA 实现。源码最初来自 Qualcomm AIMET
+`2.17.0` tag，对应 commit `0e679b705818df7f408971e34693b8098f0971a9`。
 
-## 源码来源
+## 目录说明
 
-最初的 C++ 和 CUDA 实现来自 Qualcomm AIMET `2.17.0` tag，导入时未修改内容，
-对应 commit：
+- `common/` 保存公共量化实现和 `_libpymo` Python binding。
+- `onnx/` 保存 `libquant_info` 和 ONNX Runtime custom op。
+- `third_party/onnxruntime/` 保存固定版本的 ONNX Runtime 头文件和许可证。
+- `tests/` 保存已安装原生运行接口的冒烟测试。
 
-```text
-0e679b705818df7f408971e34693b8098f0971a9
+## 文件说明
+
+- `CMakeLists.txt` 统一编排 common 和 ONNX 原生库构建。
+- `LICENSE` 保留上游 AIMET 许可证。
+
+构建结果会安装到 `src/aimet_common/`，包括 `_libpymo`、
+`libquant_info` 和 `libaimet_onnxrt_ops.so`。统一构建入口为：
+
+```bash
+./scripts/build_aimet_native.sh
 ```
 
-导入的上游模块包括：
-
-- `ModelOptimizations/DlQuantization`
-- `ModelOptimizations/PyModelOptimizations`
-- `TrainingExtensions/onnx/src`
-
-导入后，这些文件作为 rx-met 源码直接维护。rx-met 可以按自身行为要求修改它们；
-与原始 AIMET 仓库同步不属于接口或维护契约。
-
-## 目录结构
-
-- `common/`：公共量化实现和 `_libpymo` binding；
-- `onnx/`：`libquant_info` 和 ONNX Runtime custom-op 实现；
-- `third_party/onnxruntime/`：不可变的 ONNX Runtime 头文件和许可证；
-- `tests/`：已安装原生运行接口的冒烟测试。
-
-构建会向 `aimet_common` Python 包安装：
-
-- `_libpymo<EXT_SUFFIX>`
-- `libquant_info<EXT_SUFFIX>`
-- `libaimet_onnxrt_ops.so`
-
-统一使用 `scripts/build_aimet_native.sh` 作为构建入口。支持 Linux x86_64 上的
-CPython 3.10-3.12；通过 `RX_MET_ENABLE_CUDA` 选择 CPU 或 CUDA 实现。
+本目录按 rx-met 的运行职责维护，不继续镜像上游 AIMET 的完整目录结构。

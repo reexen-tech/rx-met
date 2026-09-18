@@ -1,16 +1,13 @@
-# Quantized operators
+# 量化算子
 
-This directory contains first-party operators that replace framework modules
-during an rx-met quantization workflow.
+本目录保存 rx-met 自行维护的量化算子。量化流程使用这些算子替换框架中的原始网络层。
 
-Each operator owns its native implementation, Python binding, build metadata,
-tests, and operator-specific documentation. Model discovery and replacement
-remain in `src/aimet_torch`; operator execution and quantization internals stay
-behind the operator's Python interface in this directory.
+## 目录说明
 
-Current operators:
+- `quant-gru/` 实现 QuantGRU 的 C++、CUDA、Python binding、配置、测试和文档。
 
-- `quant-gru/`: replacement implementation for PyTorch GRU modules.
+模型识别和替换逻辑位于 `src/aimet_torch/`。算子的计算和量化实现保留在本目录，
+通过各自的 Python 接口提供能力。
 
-Future recurrent operators, such as QuantLSTM, should use a sibling directory
-and share implementation only when the shared code has a stable interface.
+未来的 QuantLSTM 应作为同级目录加入。GRU 和 LSTM 只有在共享实现形成稳定接口后，
+才提取公共代码。
