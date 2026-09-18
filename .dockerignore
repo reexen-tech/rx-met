@@ -12,9 +12,9 @@ docs
 **/.mypy_cache
 **/.ruff_cache
 
-quant-gru/build*
-quant-gru/pytorch/build
-quant-gru/pytorch/lib/*.so
+operators/quant-gru/build*
+operators/quant-gru/pytorch/build
+operators/quant-gru/pytorch/lib/*.so
 
 *.pt
 *.pth

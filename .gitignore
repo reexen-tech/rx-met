@@ -39,8 +39,8 @@ htmlcov/
 .ruff_cache/
 
 # ===== 本地编译 =====
-quant-gru/build*/
-quant-gru/pytorch/build/
+operators/quant-gru/build*/
+operators/quant-gru/pytorch/build/
 native/**/build*/
 
 # ===== 模型权重 / 量化产物 =====
@@ -58,8 +58,8 @@ native/**/build*/
 logs/
 examples/output/
 examples/**/output/
-aimet_torch/rx_export/**/output/
-aimet_onnx/rx_ptq/**/output/
+src/aimet_torch/rx_export/**/output/
+src/aimet_onnx/rx_ptq/**/output/
 
 # ===== 大压缩包 =====
 *.h5

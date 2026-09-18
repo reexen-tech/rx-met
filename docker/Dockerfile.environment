@@ -1,21 +1,22 @@
-ARG DEVEL_IMAGE=nvcr.io/nvidia/cuda:12.6.3-devel-ubuntu22.04
-ARG BASE_IMAGE=nvcr.io/nvidia/cuda:12.6.3-base-ubuntu22.04
+ARG DEVEL_IMAGE=scratch
+ARG BASE_IMAGE=scratch
 
 FROM ${DEVEL_IMAGE} AS build-env
 
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
 ARG DEBIAN_FRONTEND=noninteractive
-ARG CUDA_VARIANT=cu126
-ARG RX_MET_CUDA_VERSION=12.6
-ARG RX_MET_CUDA_ARCHITECTURES=80;86;89;90
-ARG TORCH_CUDA_ARCH_LIST=8.0;8.6;8.9;9.0
-ARG TORCH_VERSION=2.8.0
-ARG TORCHVISION_VERSION=0.23.0
-ARG TORCHAUDIO_VERSION=2.8.0
-ARG ONNXRUNTIME_VERSION=1.23.2
-ARG PYTHON_VERSION=3.10
-ARG ENV_VERSION=deps-v1
+ARG CUDA_VARIANT
+ARG RX_MET_CUDA_VERSION
+ARG RX_MET_CUDA_ARCHITECTURES
+ARG TORCH_CUDA_ARCH_LIST
+ARG TORCH_VERSION
+ARG TORCHVISION_VERSION
+ARG TORCHAUDIO_VERSION
+ARG ONNXRUNTIME_VERSION
+ARG ONNXRUNTIME_SOURCE_SHA256
+ARG PYTHON_VERSION
+ARG ENV_VERSION
 
 ENV CUDA_HOME=/usr/local/cuda \
     PATH=/usr/local/cuda/bin:${PATH} \
@@ -46,25 +47,30 @@ RUN apt-get -o Acquire::Retries=5 update \
         python3-pip \
     && rm -rf /var/lib/apt/lists/*
 
-RUN case "${CUDA_VARIANT}:${RX_MET_CUDA_VERSION}:${RX_MET_CUDA_ARCHITECTURES}:${TORCH_CUDA_ARCH_LIST}" in \
-        "cu118:11.8:80;86;89;90:8.0;8.6;8.9;9.0"|\
-        "cu126:12.6:80;86;89;90:8.0;8.6;8.9;9.0"|\
-        "cu130:13.0:80;86;89;90;120:8.0;8.6;8.9;9.0;12.0") ;; \
-        *) echo "无效的 CUDA/架构环境组合" >&2; exit 1 ;; \
-    esac
+RUN [[ "${CUDA_VARIANT}" =~ ^cu(118|126|130)$ ]] \
+    && [[ -n "${RX_MET_CUDA_VERSION}" ]] \
+    && [[ -n "${RX_MET_CUDA_ARCHITECTURES}" ]] \
+    && [[ -n "${TORCH_CUDA_ARCH_LIST}" ]] \
+    && [[ -n "${ONNXRUNTIME_SOURCE_SHA256}" ]]
 
 COPY docker/requirements /opt/rx-met-env/docker/requirements
-COPY scripts/internal/download_runtime_wheels.sh /opt/rx-met-env/scripts/internal/download_runtime_wheels.sh
+COPY docker/variants.json docker/docker-bake.hcl /opt/rx-met-env/docker/
+COPY VERSION pyproject.toml /opt/rx-met-env/
+COPY scripts/dependencies.py /opt/rx-met-env/scripts/dependencies.py
 COPY scripts/internal/verify_dependency_wheelhouse.py /opt/rx-met-env/scripts/internal/verify_dependency_wheelhouse.py
 COPY scripts/internal/prepare_onnxruntime_headers.sh /opt/rx-met-env/scripts/internal/prepare_onnxruntime_headers.sh
-COPY native/aimet/third_party/onnxruntime /opt/rx-met-env/native/aimet/third_party/onnxruntime
+COPY native/third_party/onnxruntime /opt/rx-met-env/native/third_party/onnxruntime
+
+RUN python3 scripts/dependencies.py check
 
 RUN ./scripts/internal/prepare_onnxruntime_headers.sh \
-        "${ONNXRUNTIME_VERSION}" "${RX_MET_ONNXRUNTIME_ROOT}"
+        "${ONNXRUNTIME_VERSION}" "${RX_MET_ONNXRUNTIME_ROOT}" \
+        "${ONNXRUNTIME_SOURCE_SHA256}"
 
 RUN mkdir -p /opt/rx-met-env/wheelhouse \
-    && ./scripts/internal/download_runtime_wheels.sh \
-        /opt/rx-met-env/wheelhouse "${CUDA_VARIANT}" \
+    && python3 scripts/dependencies.py download \
+        --variant "${CUDA_VARIANT}" \
+        --output /opt/rx-met-env/wheelhouse \
     && cd /opt/rx-met-env/wheelhouse \
     && sha256sum --check --strict SHA256SUMS \
     && python3 -m pip install \
@@ -75,9 +81,7 @@ RUN mkdir -p /opt/rx-met-env/wheelhouse \
     && python3 -m pip install \
         --no-index \
         --find-links=/opt/rx-met-env/wheelhouse \
-        -r /opt/rx-met-env/docker/requirements/common.lock \
-        -r "/opt/rx-met-env/docker/requirements/onnxruntime-${CUDA_VARIANT}.txt" \
-        -r "/opt/rx-met-env/docker/requirements/${CUDA_VARIANT}.txt" \
+        -r "/opt/rx-met-env/docker/requirements/${CUDA_VARIANT}-py${PYTHON_VERSION//./}.lock" \
     && python3 -m pip check
 
 # AIMET ONNX Runtime headers include cudnn.h. Use the headers from the exact
@@ -157,14 +161,14 @@ FROM ${BASE_IMAGE} AS runtime-env
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
 ARG DEBIAN_FRONTEND=noninteractive
-ARG CUDA_VARIANT=cu126
-ARG RX_MET_CUDA_VERSION=12.6
-ARG TORCH_VERSION=2.8.0
-ARG TORCHVISION_VERSION=0.23.0
-ARG TORCHAUDIO_VERSION=2.8.0
-ARG ONNXRUNTIME_VERSION=1.23.2
-ARG PYTHON_VERSION=3.10
-ARG ENV_VERSION=deps-v1
+ARG CUDA_VARIANT
+ARG RX_MET_CUDA_VERSION
+ARG TORCH_VERSION
+ARG TORCHVISION_VERSION
+ARG TORCHAUDIO_VERSION
+ARG ONNXRUNTIME_VERSION
+ARG PYTHON_VERSION
+ARG ENV_VERSION
 
 ENV CUDA_VARIANT=${CUDA_VARIANT} \
     RX_MET_CUDA_VERSION=${RX_MET_CUDA_VERSION} \

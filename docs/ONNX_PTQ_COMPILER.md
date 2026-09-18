@@ -51,7 +51,7 @@ python3 onnx_ptq_quick_start.py
 
 - 校准：`percentile=99.99`（必须在 `compute_encodings` 前设置，native 默认 100 等于 min-max）
 - 激活/权重对称量化；Conv/Gemm/MatMul 的 bias 不参与统计校准，校准后把 `Sb` 对齐到 `Sx * Sw`（默认 INT32）。AIMET ONNX 近零 bias 通道会得到 `scale=0`，校准期 fake-quant 会把后续激活打成 Inf/全 0。
-- Power-of-2 使用与 `aimet_torch/power_of_2_quantization.py` 相同的 `cover_range`（容差 2%）
+- Power-of-2 使用与 `src/aimet_torch/power_of_2_quantization.py` 相同的 `cover_range`（容差 2%）
 - 权重默认 per-channel；Gemm 保持 per-channel；无 Conv+Relu supergroup
 
 配置与 `examples/quick_start_kws.py` 相同：
@@ -59,4 +59,4 @@ python3 onnx_ptq_quick_start.py
 - JSON 1：`examples/config/mrnn_quantsim_config_custom_mixed_precision_v2.json`
 - JSON 2：`examples/config/quick_start_full_quant.json`（`Quantized*` / `GRU_config` 在当前 ONNX 图里没有则忽略）
 
-`aimet_common/quantsim_config/onnx_ptq_compiler_w8a8.json` 仍可作为 `--config` 覆盖项。
+`src/aimet_common/quantsim_config/onnx_ptq_compiler_w8a8.json` 仍可作为 `--config` 覆盖项。

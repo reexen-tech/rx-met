@@ -14,7 +14,7 @@
 相关文档：
 
 - 量化配置详解：[`docs/Quant_config.md`](./Quant_config.md)
-- 镜像使用说明：[`release/README.md`](../release/README.md)
+- 镜像使用说明模板：[`packaging/release-bundle/README.md.in`](../packaging/release-bundle/README.md.in)
 - 项目总览：[`README.md`](../README.md)
 
 大模型量化不在本仓库。

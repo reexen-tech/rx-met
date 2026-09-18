@@ -2,7 +2,7 @@
 
 <!-- Status: accepted -->
 
-已有 `aimet_torch/rx_export` 是面向 `aimet_torch` sim、单输入模型和 BSRNN/GRU 历史规则的导出链，不能作为已有 ONNX 模型的通用入口。因此 ONNX PTQ 使用独立的 `aimet_onnx/rx_ptq` adapter：保留原 ONNX 图契约，输出 clean ONNX 与 compiler encodings，并冻结当前 AIMET 2.17/native 基线；Torch 导出器和 native 版本暂不改造。
+已有 `src/aimet_torch/rx_export` 是面向 `aimet_torch` sim、单输入模型和 BSRNN/GRU 历史规则的导出链，不能作为已有 ONNX 模型的通用入口。因此 ONNX PTQ 使用独立的 `src/aimet_onnx/rx_ptq` adapter：保留原 ONNX 图契约，输出 clean ONNX 与 compiler encodings，并冻结当前 AIMET 2.17/native 基线；Torch 导出器和 native 版本暂不改造。
 
 ## Considered Options
 

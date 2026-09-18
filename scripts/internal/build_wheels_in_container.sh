@@ -13,9 +13,9 @@ log() { printf '[build_wheels] %s\n' "$*"; }
 [[ -n "${CUDA_VARIANT:-}" ]] || { log "ERROR: CUDA_VARIANT is required"; exit 1; }
 for required in \
     pyproject.toml \
-    native/aimet/CMakeLists.txt \
-    quant-gru/CMakeLists.txt \
-    quant-gru/pytorch/_version.py
+    native/CMakeLists.txt \
+    operators/quant-gru/CMakeLists.txt \
+    operators/quant-gru/pytorch/_version.py
 do
     [[ -f "${SRC}/${required}" ]] \
         || { log "ERROR: source file missing: ${SRC}/${required}"; exit 1; }

@@ -1,2 +1,0 @@
-# PyPI 官方 CUDA 12 wheel；CUDA 12.x + cuDNN 9。
-onnxruntime-gpu==1.23.2

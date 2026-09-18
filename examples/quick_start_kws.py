@@ -53,8 +53,9 @@ from tqdm import tqdm
 
 _HERE = Path(__file__).resolve().parent
 _ROOT = _HERE.parent
-if str(_ROOT) not in sys.path:
-    sys.path.insert(0, str(_ROOT))
+_SRC = _ROOT / "src"
+if str(_SRC) not in sys.path:
+    sys.path.insert(0, str(_SRC))
 
 import aimet_torch.v2 as aimet
 from aimet_torch import model_preparer

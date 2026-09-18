@@ -143,9 +143,9 @@ AIMET custom-op 也必须用对应 ORT C API 头文件编译，不能让 1.20 ru
 | --- | --- | --- |
 | Python ABI | Linux x86_64 上的 CPython 3.10 / 3.12 | `pyproject.toml`、`setup.py` |
 | Wheel 构建后端 | setuptools、wheel | `pyproject.toml:1-3` |
-| AIMET 原生构建 | CMake >=3.19、C++17 编译器、目标 Python 开发 headers、pybind11、Eigen3；启用 CUDA 时还需要 CUDA Toolkit | `native/aimet/CMakeLists.txt:1-19` |
-| QuantGRU 原生构建 | CMake、CUDA Toolkit/nvcc、OpenMP、cuBLAS、cudart | `quant-gru/CMakeLists.txt:39-40,108-109` |
-| QuantGRU Python 扩展 | 构建扩展之前必须安装 CUDA 版 Torch | `quant-gru/pytorch/pyproject.toml:1-6`、`quant-gru/pytorch/setup.py:9-59` |
+| AIMET 原生构建 | CMake >=3.19、C++17 编译器、目标 Python 开发 headers、pybind11、Eigen3；启用 CUDA 时还需要 CUDA Toolkit | `native/CMakeLists.txt:1-19` |
+| QuantGRU 原生构建 | CMake、CUDA Toolkit/nvcc、OpenMP、cuBLAS、cudart | `operators/quant-gru/CMakeLists.txt:39-40,108-109` |
+| QuantGRU Python 扩展 | 构建扩展之前必须安装 CUDA 版 Torch | `operators/quant-gru/pytorch/pyproject.toml:1-6`、`operators/quant-gru/pytorch/setup.py:9-59` |
 | Wheel 平台 | Linux x86_64、CPython 3.10 / 3.12 | `setup.py` |
 
 编译器、headers、CMake、Ninja、pybind11 和 Python 开发包只应保留在 builder
@@ -172,17 +172,17 @@ soundfile。
 递归导入 AIMET 后至少还会增加以下依赖：
 
 - `torchvision`：由 `aimet_torch.utils` 导入
-  （`aimet_torch/utils.py:73`）；
+  （`src/aimet_torch/utils.py:73`）；
 - `PyYAML` 和 `packaging`：由 `aimet_torch.onnx_utils` 导入
-  （`aimet_torch/onnx_utils.py:48-54`）；
+  （`src/aimet_torch/onnx_utils.py:48-54`）；
 - `safetensors`：由 QuantSim 基础实现导入
-  （`aimet_torch/_base/quantsim.py:64-68`）；
+  （`src/aimet_torch/_base/quantsim.py:64-68`）；
 - `tqdm` 和 `Bokeh`：在 `aimet_common.utils` 加载时导入
-  （`aimet_common/utils.py:53-60`）；
+  （`src/aimet_common/utils.py:53-60`）；
 - Bokeh 可视化模块：由 `aimet_torch.v2` 提前导入
-  （`aimet_torch/v2/__init__.py:37-43`）；
+  （`src/aimet_torch/v2/__init__.py:37-43`）；
 - `jsonschema`：QuantSim 量化配置 JSON 校验时使用
-  （`aimet_common/quantsim_config/json_config_importer.py:37-44`）。
+  （`src/aimet_common/quantsim_config/json_config_importer.py:37-44`）。
 
 因此，`packaging`、`PyYAML`、`safetensors`、`bokeh`、
 `jsonschema` 和 `tqdm` 都是当前 KWS 导入链的镜像依赖，尽管其中大部分
@@ -195,17 +195,17 @@ soundfile。
 （`examples/onnx_ptq_quick_start.py:38-49`）。核心执行依赖为 NumPy、ONNX、
 ONNX Runtime、packaging、tqdm、jsonschema，以及原生
 `_libpymo`、`libquant_info`、`libaimet_onnxrt_ops` 动态库。pipeline
-在 `aimet_onnx/rx_ptq/pipeline.py:159-172` 中创建 ONNX Runtime session。
+在 `src/aimet_onnx/rx_ptq/pipeline.py:159-172` 中创建 ONNX Runtime session。
 
 发布示例默认要求 `CUDAExecutionProvider`；只有显式设置
 `RX_MET_ONNX_PTQ_DEVICE=cpu` 时才使用 CPU。provider 缺失会直接报错，不静默回退。
 
-导入 `aimet_onnx.rx_ptq` 时会先执行 `aimet_onnx/__init__.py`。当前
+导入 `aimet_onnx.rx_ptq` 时会先执行 `src/aimet_onnx/__init__.py`。当前
 initializer 会提前导入 QuantSim、Adaround、Sequential MSE 和 QuantAnalyzer
-（`aimet_onnx/__init__.py:47-55`）。该导入链还会在加载阶段需要 Torch、
+（`src/aimet_onnx/__init__.py:47-55`）。该导入链还会在加载阶段需要 Torch、
 scikit-learn、psutil、Bokeh 和 tqdm，例如
-`aimet_onnx/quant_analyzer.py:45-52` 和
-`aimet_onnx/adaround/adaround_optimizer.py:43`。除非把 initializer 改为
+`src/aimet_onnx/quant_analyzer.py:45-52` 和
+`src/aimet_onnx/adaround/adaround_optimizer.py:43`。除非把 initializer 改为
 延迟导入，否则这些都应视为导入阶段的必需依赖。
 
 调研时还发现一个与 CUDA 矩阵无关的示例/API 字段不一致问题：pipeline 返回
@@ -253,11 +253,11 @@ rx-met 路径同时开始使用 Torch 2.8 API。提交 `719fa371` 将根依赖�
 `scripts/internal/prepare_packaging.py:59-69` 中加入旧通用容器专用依赖重写。
 
 源码中唯一明确的 2.8 检查位于实验性 ExportedProgram API：
-`aimet_torch/v2/experimental/export/__init__.py:22-26`。
+`src/aimet_torch/v2/experimental/export/__init__.py:22-26`。
 
 KWS 导出器使用 `dynamo=False` 的 legacy `torch.onnx.export`
-（`aimet_torch/rx_export/export_onnx_json.py:223-276`），现有 AIMET ONNX
-wrapper 也拒绝 `dynamo=True`（`aimet_torch/onnx.py:297-300`）。
+（`src/aimet_torch/rx_export/export_onnx_json.py:223-276`），现有 AIMET ONNX
+wrapper 也拒绝 `dynamo=True`（`src/aimet_torch/onnx.py:297-300`）。
 
 因此，Torch 2.7.1 是 cu118 镜像合理的候选版本，但尚未通过当前源码树的完整
 兼容性验证。cu118 的产品契约应明确不支持实验性 ExportedProgram，并重点验证
@@ -336,12 +336,12 @@ layer。产品镜像不进入环境归档。
 
 ### 发布时的环境解析
 
-`release_build.sh` 不再负责安装第三方环境，只执行以下决策：
+`release/build.sh` 不再负责安装第三方环境，只执行以下决策：
 
 - 本机已有完整环境对时直接验证并复用；
 - 通过 `--environment-dir` 或重复的 `--environment-archive` 提供归档时，调用独立
   加载器验证 SHA-256 并执行 `docker load`；
-- 本机和归档都没有时，默认调用 `build_environment_images.sh`；
+- 本机和归档都没有时，默认调用 `environment/build.sh`；
 - 只存在 build/runtime 其中一个时拒绝继续，防止环境版本错配；
 - 显式归档损坏或缺失时不回退公网构建。
 

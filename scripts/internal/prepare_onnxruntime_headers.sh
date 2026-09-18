@@ -3,19 +3,16 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-VERSION="${1:?用法: prepare_onnxruntime_headers.sh VERSION OUT_DIR}"
-OUT_DIR="${2:?用法: prepare_onnxruntime_headers.sh VERSION OUT_DIR}"
-VENDORED="${ROOT}/native/aimet/third_party/onnxruntime"
+VERSION="${1:?用法: prepare_onnxruntime_headers.sh VERSION OUT_DIR SHA256}"
+OUT_DIR="${2:?用法: prepare_onnxruntime_headers.sh VERSION OUT_DIR SHA256}"
+SHA256="${3:?用法: prepare_onnxruntime_headers.sh VERSION OUT_DIR SHA256}"
+VENDORED="${ROOT}/native/third_party/onnxruntime"
 
 log() { printf '[prepare_onnxruntime_headers] %s\n' "$*"; }
 die() { printf '[prepare_onnxruntime_headers] ERROR: %s\n' "$*" >&2; exit 1; }
 
-case "${VERSION}" in
-    1.20.1) SHA256="d4c005506a2bbf88a838b14f8d1578406b8be2fb64abb50beeff908fb272529e" ;;
-    1.23.2) SHA256="vendored" ;;
-    1.27.0) SHA256="b41d09905a3c2f3a25709d1dcce8ef3942a4c2799d1046f74be7b6bbebc45e6a" ;;
-    *) die "不支持的 ONNX Runtime 版本: ${VERSION}" ;;
-esac
+[[ "${SHA256}" == "vendored" || "${SHA256}" =~ ^[0-9a-f]{64}$ ]] \
+    || die "无效的源码 SHA-256: ${SHA256}"
 
 rm -rf -- "${OUT_DIR}"
 mkdir -p -- "${OUT_DIR}"
