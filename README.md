@@ -1,8 +1,8 @@
 # rx-met
 
 rx-met 是面向 Linux x86_64 NVIDIA GPU 的小模型量化工具包，包含定制 AIMET
-（`aimet_torch`、`aimet_onnx`、`aimet_common`）和 QuantGRU。大模型量化不在
-本仓库。
+（`aimet_torch`、`aimet_onnx`、`aimet_common`）和 QuantGRU。本仓库的功能范围是
+小模型量化。
 
 项目自行产出三个独立运行镜像：
 
@@ -13,8 +13,8 @@ rx-met 是面向 Linux x86_64 NVIDIA GPU 的小模型量化工具包，包含定
 | `cu130` | 13.0 | 3.12 | 2.10.0 | 1.27.0（CUDA 13 / cuDNN 9） |
 
 每个 CUDA 变体维护一对版本化环境镜像：`build-env` 固化编译工具链和第三方
-依赖，`runtime-env` 固化运行依赖。产品发布只编译当前 AIMET/QuantGRU 源码并
-将项目 wheel 安装到对应 `runtime-env`，不重复准备环境。
+依赖，`runtime-env` 固化运行依赖。产品发布复用环境镜像，编译当前 AIMET/QuantGRU
+源码，并将项目 wheel 安装到对应 `runtime-env`。
 
 ## 快速运行
 
@@ -44,7 +44,7 @@ python3 quick_start_kws.py
 # 默认构建 cu118、cu126、cu130，并导出三个 tar.zst
 ./scripts/release/build.sh
 
-# 只构建一个变体，不导出归档
+# 构建 cu126 并跳过归档导出
 ./scripts/release/build.sh --no-export cu126
 
 # 使用指定目录中已校验的成对环境镜像归档
@@ -64,6 +64,10 @@ python3 quick_start_kws.py
 [docs/Release_packaging.md](docs/Release_packaging.md)，各脚本的职责和调用关系见
 [scripts/README.md](scripts/README.md)。
 
+## 参与贡献
+
+开发环境、测试范围和提交要求见 [CONTRIBUTING.md](CONTRIBUTING.md)。
+
 ## 主要目录
 
 - `src/aimet_common/`：Torch 和 ONNX 共用的 AIMET Python 包
@@ -79,7 +83,7 @@ python3 quick_start_kws.py
 - `docker/requirements/`：构建工具锁和三份自包含运行环境锁
 - `scripts/dependencies.py`：生成、检查并下载锁定依赖
 - `scripts/environment/build.sh`：按需构建稳定环境镜像，默认产出三个 CUDA 变体的本地归档
-- `scripts/environment/export.sh`：在本地生成可人工搬运的环境文件
+- `scripts/environment/export.sh`：在本地生成可复制的环境文件
 - `scripts/environment/load.sh`：校验并加载环境归档
 - `scripts/environment/verify.sh`：验证环境镜像身份、工具链和运行依赖
 - `scripts/release/build.sh`：环境解析、产品构建、验收和导出
@@ -90,7 +94,7 @@ python3 quick_start_kws.py
 
 源码目录采用 Python `src` layout。安装后的公开 import 名保持为
 `aimet_common`、`aimet_onnx` 和 `aimet_torch`；`native/` 与
-`operators/` 是实现目录，不引入同名 Python namespace。
+`operators/` 作为 Python namespace 之外的实现目录。
 
 ## 许可证
 

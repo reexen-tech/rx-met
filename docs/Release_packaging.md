@@ -1,11 +1,12 @@
 # rx-met Docker 构建与发布
 
-rx-met 自行维护 Linux x86_64 GPU 镜像，不再依赖旧通用 Docker。构建
-流程将稳定的第三方环境与频繁变化的项目源码分开，最终交付三个产品镜像。
+rx-met 提供 Linux x86_64 GPU 镜像。构建流程将第三方运行环境与项目源码分开，
+生成三个 CUDA 变体的发布镜像。
 
 ## 1. 构建矩阵
 
-机器可读的唯一矩阵位于 `docker/docker-bake.hcl`：
+机器可读的源配置位于 `docker/variants.json`。`python3 scripts/dependencies.py lock`
+是 `docker/docker-bake.hcl` 和 `docker/requirements/*.lock` 的唯一维护入口。
 
 | 变体 | NVIDIA devel/runtime | Python | Torch 三件套 | ONNX Runtime GPU | CUDA 架构 | 严格最低驱动 |
 | --- | --- | --- | --- | --- | --- | --- |
@@ -13,8 +14,7 @@ rx-met 自行维护 Linux x86_64 GPU 镜像，不再依赖旧通用 Docker。构
 | `cu126` | 12.6.3 / Ubuntu 22.04 | 3.10 | 2.8.0 / 0.23.0 / 2.8.0 | 1.23.2 | 80、86、89、90 | 560.35.05 |
 | `cu130` | 13.0.3 / Ubuntu 24.04 | 3.12 | 2.10.0 / 0.25.0 / 2.10.0 | 1.27.0 | 80、86、89、90、120 | 580.126.20 |
 
-上述驱动值是 CUDA 发行版的严格下限。只在较新驱动上验收，不能证明镜像在
-声明的最低驱动上兼容。
+上述驱动值是 CUDA 发行版的严格下限。最低驱动兼容性需要在表中对应版本上完成验收。
 
 ## 2. 模块边界
 
@@ -34,14 +34,14 @@ Dockerfile
 
 | 脚本 | 职责 |
 | --- | --- |
-| `environment/build.sh` | 构建缺失的稳定环境镜像，直接运行时默认导出全部三个变体 |
-| `environment/verify.sh` | 验证环境身份、工具链、依赖版本和平台 |
-| `environment/export.sh` | 在本地生成可直接搬运的环境归档和校验文件 |
-| `environment/load.sh` | 校验归档 SHA-256 后加载并验证环境 |
-| `release/build.sh` | 解析环境、编译当前源码、组装和导出产品镜像 |
-| `release/verify_bundle.sh` | 验证最终产品镜像及可选 GPU 流程 |
-| `release/verify_kws_example.sh` | 使用真实 Speech Commands 数据完整运行 KWS/QAT 用例 |
-| `release/verify_onnx_ptq_example.sh` | 使用指定 ONNX 模型和校准数据完整运行 PTQ 用例 |
+| `scripts/environment/build.sh` | 构建缺失的稳定环境镜像，直接运行时默认导出全部三个变体 |
+| `scripts/environment/verify.sh` | 验证环境身份、工具链、依赖版本和平台 |
+| `scripts/environment/export.sh` | 在本地生成可复制的环境归档和校验文件 |
+| `scripts/environment/load.sh` | 校验归档 SHA-256 后加载并验证环境 |
+| `scripts/release/build.sh` | 解析环境、编译当前源码、组装和导出发布镜像 |
+| `scripts/release/verify_bundle.sh` | 验证发布镜像及可选 GPU 流程 |
+| `scripts/release/verify_kws_example.sh` | 使用真实 Speech Commands 数据完整运行 KWS/QAT 用例 |
+| `scripts/release/verify_onnx_ptq_example.sh` | 使用指定 ONNX 模型和校准数据完整运行 PTQ 用例 |
 
 Python 包兼容范围定义在 `pyproject.toml`。环境版本、基础镜像、CUDA/Torch/
 ONNX Runtime 组合和精确依赖定义在 `docker/variants.json`。执行
@@ -57,7 +57,7 @@ ONNX Runtime 组合和精确依赖定义在 `docker/variants.json`。执行
 ./scripts/environment/build.sh
 ```
 
-不传参数时默认处理 `cu118`、`cu126`、`cu130`，构建本机缺失的镜像，验证后
+无参数调用默认处理 `cu118`、`cu126`、`cu130`，构建本机缺失的镜像，验证后
 生成本地可搬运归档。已有完整一对时直接复用。强制刷新环境必须显式执行：
 
 ```bash
@@ -75,11 +75,10 @@ rx-met-build-env:deps-v1-cu130
 rx-met-runtime-env:deps-v1-cu130
 ```
 
-只有依赖矩阵、Torch、CUDA、Python、Ubuntu 或编译工具链发生变化时，
-才创建新的环境版本并重建。普通 AIMET、QuantGRU、examples 或产品版本变化不
-应使环境镜像失效。
+依赖矩阵、Torch、CUDA、Python、Ubuntu 或编译工具链变化时创建新的环境版本。
+AIMET、QuantGRU、examples 和产品版本变化继续复用现有环境镜像。
 
-## 4. 本地导出和人工搬运
+## 4. 本地导出和分发
 
 环境构建脚本默认在本地生成完整、校验过、可直接复制的文件：
 
@@ -87,7 +86,7 @@ rx-met-runtime-env:deps-v1-cu130
 ./scripts/environment/build.sh
 ```
 
-只准备本机环境镜像、不生成归档时使用 `--no-export`。
+`--no-export` 用于准备本机环境镜像并跳过归档导出。
 
 也可以对已存在的环境镜像单独执行：
 
@@ -108,17 +107,17 @@ SHA256SUMS
 ```
 
 导出脚本先在输出目录的临时子目录生成全部所选文件，通过 zstd 和 SHA-256 校验
-后再替换正式文件。它不负责上传到远端或共享存储。
+后再替换正式文件。独立的发布系统负责上传制品仓库或其他存储系统。
 
-维护人检查本地结果后，人工复制或移动整个目录，并在目标位置再次校验：
+复制或移动整个目录后，应在目标位置再次校验：
 
 ```bash
 cd /path/to/environment-images/deps-v1
 sha256sum --check --strict SHA256SUMS
 ```
 
-上传共享存储时建议由人工使用 `.partial` 文件名，复制完成并核对 SHA-256 后再
-重命名为正式文件。是否允许直接生成归档，应遵守目标存储的使用规范。
+使用非原子写入的存储系统时，先以 `.partial` 文件名上传，完成 SHA-256 校验后再
+重命名为正式文件。
 
 加载环境：
 
@@ -136,18 +135,18 @@ sha256sum --check --strict SHA256SUMS
   cu126
 ```
 
-加载器要求归档目录存在导出脚本生成的 `SHA256SUMS`。本机已有同名环境 tag 时默认
-拒绝覆盖，只有人工确认后才能使用 `--force`。
+加载器要求归档目录包含导出脚本生成的 `SHA256SUMS`。默认策略保护本机同名环境
+tag，`--force` 用于显式覆盖。
 
-## 5. 产品发布决策
+## 5. 构建环境解析
 
-`release/build.sh` 对每个所选 CUDA 变体执行以下规则：
+`scripts/release/build.sh` 对每个所选 CUDA 变体执行以下规则：
 
-1. build-env 和 runtime-env 都在本机：验证并直接复用。
-2. 两者都不在本机，且传入环境归档：校验、加载并验证。
-3. 两者都不在本机，也没有归档：自动调用 `environment/build.sh`。
-4. 只存在其中一个：立即退出，要求使用 `--rebuild-environment` 成对重建。
-5. 显式提供的归档缺失或校验失败：立即退出，不回退到公网构建。
+1. 本机存在完整的 build-env 和 runtime-env：验证并直接复用。
+2. 本机缺少两个环境镜像且提供环境归档：校验、加载并验证。
+3. 本机缺少两个环境镜像且省略环境归档：自动调用 `scripts/environment/build.sh`。
+4. 本机环境镜像缺少一个成员：立即退出，并提示使用 `--rebuild-environment` 成对重建。
+5. 显式归档缺失或校验失败：立即退出，并关闭公网构建回退。
 
 常用命令：
 
@@ -155,7 +154,7 @@ sha256sum --check --strict SHA256SUMS
 # 自动解析环境，构建全部产品镜像并导出
 ./scripts/release/build.sh
 
-# 只构建 cu126，不导出 tar.zst
+# 构建 cu126 并跳过 tar.zst 导出
 ./scripts/release/build.sh --no-export cu126
 
 # 从指定目录加载缺失的环境
@@ -166,7 +165,7 @@ sha256sum --check --strict SHA256SUMS
 # 强制刷新环境后发布
 ./scripts/release/build.sh --rebuild-environment cu126
 
-# 环境不存在时禁止自动联网构建
+# 关闭环境自动构建
 ./scripts/release/build.sh --no-auto-environment cu126
 ```
 
@@ -186,9 +185,9 @@ RX_MET_ENV_ARCHIVE_DIR=/path/to/environment-images/deps-v1 \
   ./scripts/release/build.sh cu118 cu126 cu130
 ```
 
-该目录可以位于本地磁盘或已挂载的共享存储。目录必须包含当前环境版本的完整归档、
-manifest 和 SHA-256 校验文件。首次构建可直接运行 `environment/build.sh`，
-生成的新归档由维护人按部署环境的存储规范放入归档目录。
+该目录可以位于本地磁盘或已挂载的远程存储。目录必须包含当前环境版本的完整归档、
+manifest 和 SHA-256 校验文件。首次构建可直接运行 `scripts/environment/build.sh`，
+再将生成的归档保存到所需位置。
 
 ## 6. 版本和配置
 
@@ -203,15 +202,15 @@ manifest 和 SHA-256 校验文件。首次构建可直接运行 `environment/bui
 | `RX_MET_AUTO_BUILD_ENVIRONMENT` | `1` | 缺少环境且没有归档时自动构建 |
 | `RX_MET_IMAGE_REPOSITORY` | `rx-met` | 最终产品镜像仓库名 |
 | `RX_MET_EXPORT_DIR` | `.release/export` | 产品归档目录 |
-| `RX_MET_EXPORT_IMAGES` | `1` | `0` 时构建但不导出 |
+| `RX_MET_EXPORT_IMAGES` | `1` | `0` 时跳过导出 |
 | `RX_MET_BUILDER` | 当前 builder | 显式选择 Buildx builder |
 | `RX_MET_ZSTD_THREADS` | `2` | 产品归档压缩线程数 |
 
 环境归档使用本机 Docker image store，因此环境构建、加载和产品发布均要求
-Buildx 使用 `docker` driver。隔离的 `docker-container`、remote 或 Kubernetes
-driver 当前不受支持，脚本会在构建前退出。
+Buildx 使用 `docker` driver。脚本在检测到 `docker-container`、remote 或 Kubernetes
+driver 时退出。
 
-## 7. 产品制品和验收
+## 7. 发布制品和验收
 
 以产品版本 `1.0.0` 为例：
 
@@ -233,8 +232,8 @@ driver 当前不受支持，脚本会在构建前退出。
 ```
 
 `examples/` 从本次构建的产品镜像中提取，供用户在加载镜像前直接审阅使用方法；
-其内容与镜像内 `/opt/rx-met/examples` 一致。所有示例源码和配置文件都加入顶层
-`SHA256SUMS`，模型、数据集、缓存和运行输出不进入交付目录。
+其内容与镜像内 `/opt/rx-met/examples` 一致。顶层 `SHA256SUMS` 覆盖所有示例源码和
+配置文件。模型、数据集、缓存和运行输出由用户单独管理。
 
 构建脚本自动执行无 GPU 验收。发布前还必须在目标驱动环境执行：
 
@@ -242,11 +241,11 @@ driver 当前不受支持，脚本会在构建前退出。
 ./scripts/release/verify_bundle.sh --gpu --gpu-device 0 cu118 cu126 cu130
 ```
 
-GPU 验收检查 `torch.cuda.is_available()`，运行禁止 CPU 回退的 ONNX Runtime CUDA
-session，并运行 AIMET v2 和 QuantGRU CUDA forward/backward。这是快速冒烟检查，
-不替代真实数据的完整用例验证。
+GPU 验收检查 `torch.cuda.is_available()`，运行关闭 CPU 回退的 ONNX Runtime CUDA
+session，并运行 AIMET v2 和 QuantGRU CUDA forward/backward。该步骤提供快速冒烟
+检查，完整发布验收还包括真实数据用例。
 
-KWS 完整流程在目标 GPU 上执行，默认只使用 GPU 0：
+KWS 完整流程在目标 GPU 上执行，默认使用 GPU 0：
 
 ```bash
 ./scripts/release/verify_kws_example.sh \
@@ -263,27 +262,6 @@ ONNX PTQ 完整流程需要显式传入相互匹配的模型和 NPY/NPZ 校准�
   cu118 cu126 cu130
 ```
 
-两个脚本的 `--output-dir` 都有默认值，并会再按 CUDA 变体创建子目录。ONNX 模型
-可以来自任意外部模型仓库，该仓库只作为 ONNX PTQ 的只读输入，不参与 KWS 用例。
-模型输入名、输入 shape 和校准文件必须一致。
-
-## 8. 代理和多人服务器
-
-只有首次构建或环境版本变化需要访问 NVIDIA、Ubuntu、PyTorch 和 PyPI。源码
-版本更新复用环境镜像时不需要下载第三方依赖。需要代理时只设置当前 shell：
-
-```bash
-export HTTPS_PROXY=http://proxy.example.com:8080
-export HTTP_PROXY=http://proxy.example.com:8080
-export ALL_PROXY=socks5://proxy.example.com:1080
-./scripts/environment/build.sh
-```
-
-脚本不会重启 Docker daemon，不会删除现有镜像，也不会清理公共 Docker/BuildKit
-缓存。多人共用 daemon 时，产品验证构建可设置个人
-`RX_MET_IMAGE_REPOSITORY`，避免覆盖同名产品 tag。
-
-共享目录的复制、替换和清理由维护人按部署环境的存储规范人工执行。
-
-完整依赖与版本选择依据见
-`docs/research/cuda-torch-image-matrix.md`。
+两个脚本的 `--output-dir` 都有默认值，并会再按 CUDA 变体创建子目录。ONNX PTQ
+以外部模型仓库作为只读输入，KWS 用例使用 Speech Commands 数据。模型输入名、输入
+shape 和校准文件必须一致。

@@ -61,6 +61,9 @@ examples/**/output/
 src/aimet_torch/rx_export/**/output/
 src/aimet_onnx/rx_ptq/**/output/
 
+# ===== 本地调研文档 =====
+docs/research/
+
 # ===== 大压缩包 =====
 *.h5
 *.hdf5

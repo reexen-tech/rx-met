@@ -1,14 +1,14 @@
 # AIMET ONNX 原生运行库
 
 rx-met 直接从仓库源码编译 `aimet_common` 和 `aimet_onnx` 所需的原生运行库。
-构建过程不会下载预编译 AIMET 动态库，也不会把仓库外的 AIMET 二进制文件放入
-wheel。
+wheel 中的 AIMET 动态库全部来自本次源码构建。
 
 ## 源码归属与基线
 
 `native` 下的实现由 rx-met 维护。最初的 C++/CUDA 源码来自与当前 Python
-代码基线一致的 Qualcomm AIMET `2.17.0` tag，commit 为
-`0e679b705818df7f408971e34693b8098f0971a9`，导入时未修改内容。
+代码基线一致的 Qualcomm AIMET [`2.17.0`](https://github.com/qualcomm/aimet/tree/0e679b705818df7f408971e34693b8098f0971a9)
+tag，commit 为 `0e679b705818df7f408971e34693b8098f0971a9`，导入时未修改内容。对应的
+BSD-3-Clause 许可证保存在 `native/LICENSE`。
 
 初始源码映射如下：
 
@@ -17,15 +17,13 @@ wheel。
   `native/common/bindings/python`；
 - `TrainingExtensions/onnx/src` -> `native/onnx/src`。
 
-该映射只记录来源，不表示后续同步契约。原生实现可以按 rx-met 需求直接修改，并按
-运行职责组织，而不继续镜像上游 AIMET 目录。所有改动均由 Git 跟踪，因此不再维护
-单独的 AIMET 源码清单。
+该映射记录初始源码来源。后续实现按 rx-met 的运行职责组织，所有变更由 Git 记录。
 
 `native/third_party/onnxruntime` 保存 ONNX Runtime 1.23.2 头文件，供本地独立
 构建使用，并保留许可证、第三方声明、版本和 `SHA256SUMS`。Docker 多 CUDA 构建会
 按变体准备与运行时一致的头文件：`cu118=1.20.1`、`cu126=1.23.2`、
-`cu130=1.27.0`。下载的官方源码归档必须通过固定 SHA-256 后才能用于编译，避免
-custom-op 请求比实际运行库更新的 ORT C API。
+`cu130=1.27.0`。下载的官方源码归档通过固定 SHA-256 校验后进入编译，确保 custom-op
+使用与实际运行库匹配的 ORT C API。
 
 ## 构建产物
 
@@ -59,8 +57,11 @@ python3 native/tests/smoke_onnx_runtime.py \
   --provider CUDAExecutionProvider
 ```
 
-直接运行 `build_aimet_native.sh` 默认使用仓库内已归档的 1.23.2 头文件，不访问
-网络。环境镜像构建由 `prepare_onnxruntime_headers.sh` 负责准备其他版本头文件。
+构建命令和冒烟测试均以退出码 0 结束，并成功创建对应 Execution Provider 的 ONNX
+Runtime session，即表示原生运行库通过基础验证。
+
+直接运行 `build_aimet_native.sh` 默认使用仓库内已归档的 1.23.2 头文件，可以离线
+完成构建。环境镜像构建由 `prepare_onnxruntime_headers.sh` 负责准备其他版本头文件。
 
 支持的环境变量：
 
