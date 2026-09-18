@@ -4,15 +4,9 @@
 from __future__ import annotations
 
 import argparse
+import json
 import re
 from pathlib import Path
-
-
-_VARIANTS = {
-    "cu118": ("2.7.1+cu118", "0.22.1+cu118", "2.7.1+cu118", "1.20.1"),
-    "cu126": ("2.8.0+cu126", "0.23.0+cu126", "2.8.0+cu126", "1.23.2"),
-    "cu130": ("2.10.0+cu130", "0.25.0+cu130", "2.10.0+cu130", "1.27.0"),
-}
 
 
 def _strip_pyproject(text: str) -> str:
@@ -48,10 +42,15 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--root", type=Path, required=True)
     parser.add_argument("--version", required=True)
-    parser.add_argument("--cuda-variant", choices=sorted(_VARIANTS), required=True)
+    parser.add_argument("--cuda-variant", required=True)
     args = parser.parse_args()
 
     root: Path = args.root
+    variants = json.loads(
+        (root / "docker" / "variants.json").read_text(encoding="utf-8")
+    )["variants"]
+    if args.cuda_variant not in variants:
+        raise SystemExit(f"unsupported CUDA variant: {args.cuda_variant}")
     version = args.version.strip()
     # Wheel / PEP 440 cannot start with "v". Use the component MAJOR.MINOR.PATCH.
     if not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", version):
@@ -62,23 +61,6 @@ def main() -> None:
     pyproject = root / "pyproject.toml"
     pyproject.write_text(_strip_pyproject(pyproject.read_text(encoding="utf-8")), encoding="utf-8")
     (root / "VERSION").write_text(f"{wheel_version}\n", encoding="utf-8")
-
-    common_in = root / "docker" / "requirements" / "common.in"
-    direct = [
-        line.strip()
-        for line in common_in.read_text(encoding="utf-8").splitlines()
-        if line.strip() and not line.lstrip().startswith("#")
-    ]
-    torch, torchvision, torchaudio, onnxruntime = _VARIANTS[variant]
-    direct.extend(
-        [
-            f"torch=={torch}",
-            f"torchvision=={torchvision}",
-            f"torchaudio=={torchaudio}",
-            f"onnxruntime-gpu=={onnxruntime}",
-        ]
-    )
-    (root / "requirements.txt").write_text("\n".join(direct) + "\n", encoding="utf-8")
 
     quant_version = root / "operators" / "quant-gru" / "pytorch" / "_version.py"
     quant_text = quant_version.read_text(encoding="utf-8")

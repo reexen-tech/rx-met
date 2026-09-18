@@ -209,10 +209,10 @@ scripts/
 |-- verify_onnx_ptq_example.sh
 |-- verify_environment_images.sh
 |-- build_aimet_native.sh
+|-- dependencies.py
 |-- internal/
 |   |-- build_wheels_in_container.sh
 |   |-- build_quant_gru_wheel.sh
-|   |-- download_runtime_wheels.sh
 |   |-- prepare_onnxruntime_headers.sh
 |   |-- prepare_packaging.py
 |   `-- verify_dependency_wheelhouse.py
@@ -232,7 +232,7 @@ scripts/
 build_environment_images.sh
   -> docker/docker-bake.hcl
   -> docker/Dockerfile.environment
-     -> internal/download_runtime_wheels.sh
+     -> dependencies.py download
         -> internal/verify_dependency_wheelhouse.py
      -> internal/prepare_onnxruntime_headers.sh
   -> verify_environment_images.sh
@@ -300,26 +300,29 @@ release_build.sh
 - 环境版本和镜像仓库名校验；
 - Buildx 必须使用 `docker` driver 的检查。
 
-## 5. 容器内部构建脚本
+## 5. 依赖与容器内部构建脚本
 
 下面这些脚本通常不需要维护人员直接运行，由 Dockerfile 在 build-env 中调用。
 
-### `internal/download_runtime_wheels.sh`
+### `dependencies.py`
 
-由 `Dockerfile.environment` 调用。根据以下锁文件下载完整离线 wheelhouse：
+依赖管理的统一入口：
 
-```text
-docker/requirements/build.lock
-docker/requirements/common.lock
-docker/requirements/cu118.txt
-docker/requirements/cu126.txt
-docker/requirements/cu130.txt
-docker/requirements/onnxruntime-cu118.txt
-docker/requirements/onnxruntime-cu126.txt
-docker/requirements/onnxruntime-cu130.txt
+```bash
+# 根据 docker/variants.json 生成 Bake 配置和所有锁
+python3 scripts/dependencies.py lock
+
+# 检查 pyproject 兼容范围、matrix、Bake 和锁是否一致
+python3 scripts/dependencies.py check
 ```
 
-如果输出目录已有完整、版本匹配且平台兼容的 wheel，会跳过网络下载。
+`Dockerfile.environment` 内部使用 `download` 子命令下载指定变体的完整离线
+wheelhouse；已有 wheel 全部匹配时会跳过网络下载。
+
+`docker/variants.json` 中的 `common_packages`、`torch.packages` 和
+`onnxruntime.packages` 是经审核的精确依赖闭包；`lock` 负责确定性渲染，不在
+本机隐式升级版本。新增或升级依赖后必须更新 manifest、重新生成，并通过镜像内
+`pip check`。
 
 ### `internal/prepare_onnxruntime_headers.sh`
 
@@ -332,7 +335,7 @@ SHA-256 校验仍不会跳过。
 
 ### `internal/verify_dependency_wheelhouse.py`
 
-由 `download_runtime_wheels.sh` 调用。它使用 Python 的 packaging/wheel 元数据进行
+由 `dependencies.py download` 调用。它使用 Python 的 packaging/wheel 元数据进行
 结构化校验，检查：
 
 - 所有 requirements 都使用精确的 `==` 版本；
@@ -353,13 +356,11 @@ SHA-256 校验仍不会跳过。
 
 - 校验产品版本为 `MAJOR.MINOR.PATCH`；
 - 将 wheel 版本设置为 `<产品版本>+cu118/cu126/cu130`；
-- 根据 CUDA 变体写入匹配的 Torch 三件套依赖；
-- 根据 CUDA 变体写入匹配的 ONNX Runtime GPU 依赖；
 - 设置 QuantGRU wheel 的 CUDA local version；
 - 从小模型发布 wheel 中排除 `rx_met_llm` 和对应命令行入口。
 
-不要直接对日常开发工作区运行该脚本，因为它会修改指定目录中的 `pyproject.toml`、
-`VERSION`、`requirements.txt` 和 QuantGRU `_version.py`。
+不要直接对日常开发工作区运行该脚本，因为它会修改指定目录中的
+`pyproject.toml`、`VERSION` 和 QuantGRU `_version.py`。
 
 ### `build_aimet_native.sh`
 

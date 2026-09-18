@@ -23,8 +23,29 @@ classifiers = [
     "Programming Language :: Python :: 3.12",
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
+dependencies = [
+    "numpy>=1.26.4,<2",
+    "scipy>=1.15.3,<1.16",
+    "onnx>=1.17.0,<1.18",
+    "onnxruntime-gpu>=1.20.1,<1.28",
+    "onnxsim>=0.7.0,<0.8",
+    "onnxscript>=0.7.0,<0.8",
+    "torch>=2.7.1,<2.11",
+    "torchvision>=0.22.1,<0.26",
+    "torchaudio>=2.7.1,<2.11",
+    "pillow>=11.3.0,<12",
+    "tqdm>=4.67.1,<5",
+    "packaging>=25.0,<26",
+    "PyYAML>=6.0.3,<7",
+    "safetensors>=0.7.0,<0.8",
+    "bokeh>=3.8.2,<3.9",
+    "jsonschema>=4.26.0,<5",
+    "psutil>=7.2.2,<8",
+    "scikit-learn>=1.7.2,<1.8",
+    "pyarrow>=25.0.1,<26",
+]
 
-dynamic = ["version", "dependencies"]
+dynamic = ["version"]
 
 [tool.setuptools]
 include-package-data = true
@@ -32,7 +53,6 @@ zip-safe = false
 
 [tool.setuptools.dynamic]
 version = { file = ["VERSION"] }
-dependencies = { file = ["requirements.txt"] }
 
 [tool.setuptools.packages.find]
 where = ["src"]

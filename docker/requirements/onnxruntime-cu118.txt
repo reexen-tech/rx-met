@@ -1,2 +1,0 @@
-# Microsoft 官方 CUDA 11 feed；CUDA 11.8 + cuDNN 8。
-onnxruntime-gpu==1.20.1

@@ -43,11 +43,11 @@ Dockerfile
 | `verify_kws_example.sh` | 使用真实 Speech Commands 数据完整运行 KWS/QAT 用例 |
 | `verify_onnx_ptq_example.sh` | 使用指定 ONNX 模型和校准数据完整运行 PTQ 用例 |
 
-公共运行依赖固定在 `docker/requirements/common.lock`。Torch、torchvision、
-torchaudio、Triton 和 NVIDIA CUDA wheel 按变体固定在 `cu118.txt`、
-`cu126.txt`、`cu130.txt`。ONNX Runtime GPU 另按变体固定在
-`onnxruntime-cu118.txt`、`onnxruntime-cu126.txt`、`onnxruntime-cu130.txt`。
-环境版本默认是 `deps-v1`，与产品 `VERSION` 独立。
+Python 包兼容范围定义在 `pyproject.toml`。环境版本、基础镜像、CUDA/Torch/
+ONNX Runtime 组合和精确依赖定义在 `docker/variants.json`。执行
+`python3 scripts/dependencies.py lock` 会生成 Bake 配置、构建工具锁，以及
+`cu118-py310.lock`、`cu126-py310.lock`、`cu130-py312.lock` 三份自包含
+运行环境锁。环境版本默认是 `deps-v1`，与产品 `VERSION` 独立。
 
 ## 3. 环境镜像
 
@@ -75,7 +75,7 @@ rx-met-build-env:deps-v1-cu130
 rx-met-runtime-env:deps-v1-cu130
 ```
 
-只有 requirements、Torch、CUDA、Python、Ubuntu 或编译工具链发生变化时，
+只有依赖矩阵、Torch、CUDA、Python、Ubuntu 或编译工具链发生变化时，
 才创建新的环境版本并重建。普通 AIMET、QuantGRU、examples 或产品版本变化不
 应使环境镜像失效。
 

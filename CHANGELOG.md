@@ -12,6 +12,9 @@
 - 将 AIMET Python 包整理到 `src/`，AIMET 原生实现保留在
   `native/`，QuantGRU 移至 `operators/quant-gru/`；安装后的 Python
   import 名和发布 wheel 名保持不变。
+- 将 Python 兼容范围收敛到 `pyproject.toml`，以
+  `docker/variants.json` 统一管理 CUDA 变体和精确依赖；Bake 配置及每个变体的
+  自包含 lock 由 `scripts/dependencies.py` 生成并校验。
 - 交付方式从旧通用镜像上的 wheel 软件包改为 rx-met 自有 Docker 镜像。
 - 将 Docker 流程拆分为稳定环境与产品发布：每个 CUDA 变体分别维护可复用的
   `build-env` 和 `runtime-env`，源码更新只重编项目 wheel 和最终产品镜像。

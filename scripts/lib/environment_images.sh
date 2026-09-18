@@ -1,6 +1,15 @@
 #!/usr/bin/env bash
 
-RX_MET_ENV_VERSION="${RX_MET_ENV_VERSION:-deps-v1}"
+if [[ -z "${RX_MET_ENV_VERSION:-}" ]]; then
+    RX_MET_ENV_VERSION="$(
+        python3 - "${ROOT}/docker/variants.json" <<'PY'
+import json
+import sys
+
+print(json.load(open(sys.argv[1], encoding="utf-8"))["environment_version"])
+PY
+    )"
+fi
 RX_MET_BUILD_ENV_REPOSITORY="${RX_MET_BUILD_ENV_REPOSITORY:-rx-met-build-env}"
 RX_MET_RUNTIME_ENV_REPOSITORY="${RX_MET_RUNTIME_ENV_REPOSITORY:-rx-met-runtime-env}"
 

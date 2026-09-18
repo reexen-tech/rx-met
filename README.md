@@ -73,8 +73,10 @@ python3 quick_start_kws.py
 - `operators/quant-gru/`：量化流程替换 GRU 时使用的 QuantGRU 算子
 - `docker/Dockerfile.environment`：稳定 build-env/runtime-env 构建
 - `docker/Dockerfile`：基于稳定环境编译源码并组装产品镜像
-- `docker/docker-bake.hcl`：三个 CUDA 变体的唯一构建矩阵
-- `docker/requirements/`：公共依赖锁、三份 PyTorch/CUDA 锁和三份 ONNX Runtime GPU 锁
+- `docker/variants.json`：三个 CUDA 变体和精确依赖的权威配置
+- `docker/docker-bake.hcl`：由依赖工具生成的 Buildx Bake 配置
+- `docker/requirements/`：构建工具锁和三份自包含运行环境锁
+- `scripts/dependencies.py`：生成、检查并下载锁定依赖
 - `scripts/build_environment_images.sh`：按需构建稳定环境镜像，默认产出三个 CUDA 变体的本地归档
 - `scripts/export_environment_images.sh`：在本地生成可人工搬运的环境文件
 - `scripts/load_environment_images.sh`：校验并加载环境归档
