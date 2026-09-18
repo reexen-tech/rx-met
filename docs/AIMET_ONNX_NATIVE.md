@@ -6,22 +6,22 @@ wheel。
 
 ## 源码归属与基线
 
-`native/aimet` 下的实现由 rx-met 维护。最初的 C++/CUDA 源码来自与当前 Python
+`native` 下的实现由 rx-met 维护。最初的 C++/CUDA 源码来自与当前 Python
 代码基线一致的 Qualcomm AIMET `2.17.0` tag，commit 为
 `0e679b705818df7f408971e34693b8098f0971a9`，导入时未修改内容。
 
 初始源码映射如下：
 
-- `ModelOptimizations/DlQuantization` -> `native/aimet/common`；
+- `ModelOptimizations/DlQuantization` -> `native/common`；
 - `ModelOptimizations/PyModelOptimizations` ->
-  `native/aimet/common/bindings/python`；
-- `TrainingExtensions/onnx/src` -> `native/aimet/onnx/src`。
+  `native/common/bindings/python`；
+- `TrainingExtensions/onnx/src` -> `native/onnx/src`。
 
 该映射只记录来源，不表示后续同步契约。原生实现可以按 rx-met 需求直接修改，并按
 运行职责组织，而不继续镜像上游 AIMET 目录。所有改动均由 Git 跟踪，因此不再维护
 单独的 AIMET 源码清单。
 
-`native/aimet/third_party/onnxruntime` 保存 ONNX Runtime 1.23.2 头文件，供本地独立
+`native/third_party/onnxruntime` 保存 ONNX Runtime 1.23.2 头文件，供本地独立
 构建使用，并保留许可证、第三方声明、版本和 `SHA256SUMS`。Docker 多 CUDA 构建会
 按变体准备与运行时一致的头文件：`cu118=1.20.1`、`cu126=1.23.2`、
 `cu130=1.27.0`。下载的官方源码归档必须通过固定 SHA-256 后才能用于编译，避免
@@ -45,7 +45,7 @@ CPU：
 
 ```bash
 RX_MET_ENABLE_CUDA=0 ./scripts/build_aimet_native.sh
-python3 native/aimet/tests/smoke_onnx_runtime.py \
+python3 native/tests/smoke_onnx_runtime.py \
   --provider CPUExecutionProvider
 ```
 
@@ -55,7 +55,7 @@ CUDA：
 RX_MET_ENABLE_CUDA=1 \
 RX_MET_CUDA_ARCHITECTURES='80;90' \
 ./scripts/build_aimet_native.sh
-python3 native/aimet/tests/smoke_onnx_runtime.py \
+python3 native/tests/smoke_onnx_runtime.py \
   --provider CUDAExecutionProvider
 ```
 
@@ -66,7 +66,7 @@ python3 native/aimet/tests/smoke_onnx_runtime.py \
 
 - `RX_MET_ENABLE_CUDA`：`0` 表示 CPU，`1` 表示 CUDA；
 - `RX_MET_AIMET_BUILD_DIR`：CMake 构建目录；
-- `RX_MET_AIMET_INSTALL_DIR`：安装目录，默认是仓库中的 `aimet_common`；
+- `RX_MET_AIMET_INSTALL_DIR`：安装目录，默认是仓库中的 `src/aimet_common`；
 - `RX_MET_PYTHON`：Python 解释器，默认 `python3`；
 - `RX_MET_CUDA_ARCHITECTURES`：CMake CUDA 架构列表；
 - `RX_MET_ONNXRUNTIME_ROOT`：指定 ONNX Runtime 头文件根目录；

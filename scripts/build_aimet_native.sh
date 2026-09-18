@@ -3,10 +3,10 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-SOURCE_DIR="${ROOT}/native/aimet"
+SOURCE_DIR="${ROOT}/native"
 PYTHON="${RX_MET_PYTHON:-python3}"
 ENABLE_CUDA="${RX_MET_ENABLE_CUDA:-0}"
-INSTALL_DIR="${RX_MET_AIMET_INSTALL_DIR:-${ROOT}/aimet_common}"
+INSTALL_DIR="${RX_MET_AIMET_INSTALL_DIR:-${ROOT}/src/aimet_common}"
 
 log() { printf '[build_aimet_native] %s\n' "$*"; }
 fail() {

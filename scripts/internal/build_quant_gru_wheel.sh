@@ -3,7 +3,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-SOURCE="${ROOT}/quant-gru"
+SOURCE="${ROOT}/operators/quant-gru"
 PYTHON="${RX_MET_PYTHON:-python3}"
 BUILD_DIR="${RX_MET_QUANT_GRU_BUILD_DIR:-${SOURCE}/build_release}"
 OUT_DIR="${RX_MET_WHEEL_OUT:-${ROOT}/.release/wheels}"

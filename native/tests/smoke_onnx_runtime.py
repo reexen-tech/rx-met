@@ -8,8 +8,9 @@ from pathlib import Path
 
 
 for _parent in Path(__file__).resolve().parents:
-    if (_parent / "aimet_common").is_dir() and (_parent / "aimet_onnx").is_dir():
-        sys.path.insert(0, str(_parent))
+    _src = _parent / "src"
+    if (_src / "aimet_common").is_dir() and (_src / "aimet_onnx").is_dir():
+        sys.path.insert(0, str(_src))
         break
 
 import numpy as np

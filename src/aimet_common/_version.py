@@ -38,7 +38,7 @@
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 
-_source_version = Path(__file__).resolve().parents[1] / "VERSION"
+_source_version = Path(__file__).resolve().parents[2] / "VERSION"
 if _source_version.is_file():
     __version__ = _source_version.read_text(encoding="utf-8").strip()
 else:
@@ -50,7 +50,6 @@ else:
 python_abi = None
 torch = None
 min_glibc = None
-
 
 
 

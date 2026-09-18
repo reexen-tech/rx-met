@@ -32,4 +32,4 @@ pip install -e . --no-deps --no-build-isolation
 echo "=== 运行测试 ==="
 export LD_LIBRARY_PATH="$PROJECT_ROOT/pytorch/lib:$LD_LIBRARY_PATH"
 cd "$PROJECT_ROOT/pytorch"
-python test_quant_gru.py
+python ../tests/test_quant_gru.py

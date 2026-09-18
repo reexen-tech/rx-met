@@ -154,7 +154,12 @@ def load_quantizer_encodings(
         try:
             import sys
             from pathlib import Path
-            quant_gru_path = Path(__file__).resolve().parents[1] / "quant-gru" / "pytorch"
+            quant_gru_path = (
+                Path(__file__).resolve().parents[2]
+                / "operators"
+                / "quant-gru"
+                / "pytorch"
+            )
             if quant_gru_path.exists():
                 sys.path.insert(0, str(quant_gru_path))
             from quant_gru import QuantGRU

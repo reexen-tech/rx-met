@@ -376,7 +376,8 @@ aimet_common/libaimet_onnxrt_ops.so
 
 ### `internal/build_quant_gru_wheel.sh`
 
-使用对应 CUDA Toolkit、CUDA 版 Torch 和目标 SM 架构编译 `quant-gru/`，然后生成
+使用对应 CUDA Toolkit、CUDA 版 Torch 和目标 SM 架构编译
+`operators/quant-gru/`，然后生成
 与目标镜像 Python ABI 匹配的 `quant_gru` wheel。没有 `nvcc` 或使用 CPU Torch 时
 会明确失败。
 

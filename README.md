@@ -66,6 +66,11 @@ python3 quick_start_kws.py
 
 ## 主要目录
 
+- `src/aimet_common/`：Torch 和 ONNX 共用的 AIMET Python 包
+- `src/aimet_onnx/`：ONNX 量化前端和 RX PTQ 流程
+- `src/aimet_torch/`：PyTorch 量化前端和 RX 导出流程
+- `native/`：AIMET C++/CUDA 运行库及 Python bindings
+- `operators/quant-gru/`：量化流程替换 GRU 时使用的 QuantGRU 算子
 - `docker/Dockerfile.environment`：稳定 build-env/runtime-env 构建
 - `docker/Dockerfile`：基于稳定环境编译源码并组装产品镜像
 - `docker/docker-bake.hcl`：三个 CUDA 变体的唯一构建矩阵
@@ -78,6 +83,10 @@ python3 quick_start_kws.py
 - `scripts/verify_kws_example.sh`：使用真实 Speech Commands 数据运行完整 KWS 用例
 - `scripts/verify_onnx_ptq_example.sh`：使用指定模型和校准数据运行完整 ONNX PTQ 用例
 - `examples/`：KWS 和 ONNX PTQ 快速示例
+
+源码目录采用 Python `src` layout。安装后的公开 import 名保持为
+`aimet_common`、`aimet_onnx` 和 `aimet_torch`；`native/` 与
+`operators/` 是实现目录，不引入同名 Python namespace。
 
 ## 许可证
 

@@ -5,7 +5,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 VERSION="${1:?用法: prepare_onnxruntime_headers.sh VERSION OUT_DIR}"
 OUT_DIR="${2:?用法: prepare_onnxruntime_headers.sh VERSION OUT_DIR}"
-VENDORED="${ROOT}/native/aimet/third_party/onnxruntime"
+VENDORED="${ROOT}/native/third_party/onnxruntime"
 
 log() { printf '[prepare_onnxruntime_headers] %s\n' "$*"; }
 die() { printf '[prepare_onnxruntime_headers] ERROR: %s\n' "$*" >&2; exit 1; }

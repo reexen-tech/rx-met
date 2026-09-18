@@ -57,7 +57,7 @@ COPY docker/requirements /opt/rx-met-env/docker/requirements
 COPY scripts/internal/download_runtime_wheels.sh /opt/rx-met-env/scripts/internal/download_runtime_wheels.sh
 COPY scripts/internal/verify_dependency_wheelhouse.py /opt/rx-met-env/scripts/internal/verify_dependency_wheelhouse.py
 COPY scripts/internal/prepare_onnxruntime_headers.sh /opt/rx-met-env/scripts/internal/prepare_onnxruntime_headers.sh
-COPY native/aimet/third_party/onnxruntime /opt/rx-met-env/native/aimet/third_party/onnxruntime
+COPY native/third_party/onnxruntime /opt/rx-met-env/native/third_party/onnxruntime
 
 RUN ./scripts/internal/prepare_onnxruntime_headers.sh \
         "${ONNXRUNTIME_VERSION}" "${RX_MET_ONNXRUNTIME_ROOT}"

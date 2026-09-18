@@ -80,7 +80,7 @@ def main() -> None:
     )
     (root / "requirements.txt").write_text("\n".join(direct) + "\n", encoding="utf-8")
 
-    quant_version = root / "quant-gru" / "pytorch" / "_version.py"
+    quant_version = root / "operators" / "quant-gru" / "pytorch" / "_version.py"
     quant_text = quant_version.read_text(encoding="utf-8")
     quant_text, count = re.subn(
         r'^__version__ = "([0-9]+\.[0-9]+\.[0-9]+)(?:\+[^\"]+)?"$',
