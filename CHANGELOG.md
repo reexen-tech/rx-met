@@ -12,6 +12,8 @@
 - 将 AIMET Python 包整理到 `src/`，AIMET 原生实现保留在
   `native/`，QuantGRU 移至 `operators/quant-gru/`；安装后的 Python
   import 名和发布 wheel 名保持不变。
+- 将产品交付文档模板从顶层 `release/` 迁至
+  `packaging/release-bundle/`，并使用 `.md.in` 标识待渲染输入。
 - 将 Python 兼容范围收敛到 `pyproject.toml`，以
   `docker/variants.json` 统一管理 CUDA 变体和精确依赖；Bake 配置及每个变体的
   自包含 lock 由 `scripts/dependencies.py` 生成并校验。

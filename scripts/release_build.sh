@@ -240,8 +240,8 @@ done
 manifest="${EXPORT_DIR}/image-manifest.json"
 docker image inspect "${images[@]}" > "${manifest}.partial"
 mv -f -- "${manifest}.partial" "${manifest}"
-cp "${ROOT}/release/README.md" "${EXPORT_DIR}/README.md"
-cp "${ROOT}/release/ChangeLog.md" "${EXPORT_DIR}/ChangeLog.md"
+cp "${ROOT}/packaging/release-bundle/README.md.in" "${EXPORT_DIR}/README.md"
+cp "${ROOT}/packaging/release-bundle/CHANGELOG.md.in" "${EXPORT_DIR}/ChangeLog.md"
 sed -i "s/@VERSION@/${VERSION}/g" \
     "${EXPORT_DIR}/README.md" "${EXPORT_DIR}/ChangeLog.md"
 (

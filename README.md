@@ -71,6 +71,7 @@ python3 quick_start_kws.py
 - `src/aimet_torch/`：PyTorch 量化前端和 RX 导出流程
 - `native/`：AIMET C++/CUDA 运行库及 Python bindings
 - `operators/quant-gru/`：量化流程替换 GRU 时使用的 QuantGRU 算子
+- `packaging/release-bundle/`：产品镜像和导出目录使用的文档模板
 - `docker/Dockerfile.environment`：稳定 build-env/runtime-env 构建
 - `docker/Dockerfile`：基于稳定环境编译源码并组装产品镜像
 - `docker/variants.json`：三个 CUDA 变体和精确依赖的权威配置

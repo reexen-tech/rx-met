@@ -66,8 +66,8 @@ RUN grep -Fx "environment_role=runtime" /opt/rx-met-env/environment.env \
 COPY --from=project-builder /opt/project-wheels /tmp/project-wheels
 COPY --from=project-builder /opt/rx-met-src/docker/requirements /opt/rx-met/requirements
 COPY --from=project-builder /opt/rx-met-src/examples /opt/rx-met/examples
-COPY --from=project-builder /opt/rx-met-src/release/README.md /opt/rx-met/README.md
-COPY --from=project-builder /opt/rx-met-src/release/ChangeLog.md /opt/rx-met/ChangeLog.md
+COPY --from=project-builder /opt/rx-met-src/packaging/release-bundle/README.md.in /opt/rx-met/README.md
+COPY --from=project-builder /opt/rx-met-src/packaging/release-bundle/CHANGELOG.md.in /opt/rx-met/ChangeLog.md
 
 RUN sed -i "s/@VERSION@/${RX_MET_VERSION}/g" \
         /opt/rx-met/README.md /opt/rx-met/ChangeLog.md \
