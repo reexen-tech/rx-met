@@ -1,7 +1,7 @@
 # Python 源码
 
 本目录采用 Python `src` layout，保存 rx-met wheel 安装的三个公开 import package。
-目录层级不改变安装后的包名。
+安装后的包名为 `aimet_common`、`aimet_onnx` 和 `aimet_torch`。
 
 ## 包说明
 
@@ -10,4 +10,4 @@
 - `aimet_torch/` 保存 PyTorch 模型准备、QuantSim、QAT、导出和 QuantGRU 集成逻辑。
 
 `native/` 构建的动态库会安装到 `aimet_common`。自定义循环算子的实现位于
-`operators/`，不属于本目录。
+`operators/`。

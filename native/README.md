@@ -1,7 +1,8 @@
 # AIMET 原生运行库
 
 本目录保存 rx-met 维护的 AIMET C++ 和 CUDA 实现。源码最初来自 Qualcomm AIMET
-`2.17.0` tag，对应 commit `0e679b705818df7f408971e34693b8098f0971a9`。
+[`2.17.0`](https://github.com/qualcomm/aimet/tree/0e679b705818df7f408971e34693b8098f0971a9)
+tag，对应 commit `0e679b705818df7f408971e34693b8098f0971a9`。
 
 ## 目录说明
 
@@ -22,4 +23,5 @@
 ./scripts/build_aimet_native.sh
 ```
 
-本目录按 rx-met 的运行职责维护，不继续镜像上游 AIMET 的完整目录结构。
+本目录按 rx-met 的运行职责维护。完整来源、ABI 和验证说明见
+[`docs/AIMET_ONNX_NATIVE.md`](../docs/AIMET_ONNX_NATIVE.md)。

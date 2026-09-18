@@ -1,12 +1,27 @@
-# rx-met 镜像变更记录
+# rx-met @VERSION@ 版本说明
 
-## @VERSION@
+## 发布内容
 
-- 交付方式改为项目自行维护的多 CUDA Docker 镜像。
-- 新增 `cu118`、`cu126`、`cu130` 三个独立运行变体。
-- 固定各变体的 Python、PyTorch 三件套、ONNX Runtime GPU、NVIDIA CUDA wheel
-  和公共 Python 依赖。
-- 产品镜像基于版本化 runtime-env 组装，项目源码与第三方依赖环境独立更新。
-- 镜像内置定制 AIMET、QuantGRU、KWS quick start 和 ONNX PTQ quick start。
-- 交付目录提供与镜像内容一致、可直接浏览的 `examples/` 示例源码。
-- 修复 ONNX quick start 对导出 encoding 字段名的错误读取。
+- 发布制品包含 `cu118`、`cu126` 和 `cu130` 三个 Linux x86_64 GPU 镜像。
+- 每个镜像包含对应版本的 Python、PyTorch、ONNX Runtime GPU、定制 AIMET 和
+  QuantGRU。
+- 发布目录包含镜像归档、`image-manifest.json`、`SHA256SUMS` 和与镜像一致的
+  `examples/` 示例源码。
+
+## 兼容性
+
+- CUDA、Python、PyTorch、ONNX Runtime 和最低驱动组合见同目录 `README.md`。
+- 镜像支持的 GPU 计算架构记录在 `image-manifest.json`。
+- KWS 和 ONNX PTQ 完整流程需要 NVIDIA GPU；CPU 模式用于 ONNX PTQ 调试。
+
+## 使用限制
+
+- 模型、数据集和校准样本由用户单独准备。
+- 发布验收需要在目标 GPU、驱动和数据环境中完成。
+- Clean ONNX 与编译器 encodings 按同次运行结果配套使用。
+
+## 可追溯性
+
+- `image-manifest.json` 记录镜像名称、版本和构建信息。
+- `SHA256SUMS` 校验发布目录中的镜像归档、元数据和示例文件。
+- 源码仓库的 `CHANGELOG.md` 记录各版本之间的功能和兼容性变化。

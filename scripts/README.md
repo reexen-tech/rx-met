@@ -1,7 +1,7 @@
 # 工具脚本
 
-本目录保存项目构建、环境管理、产品发布和验证命令。公开命令按职责分组，内部实现不
-作为稳定入口。
+本目录保存项目构建、环境管理、产品发布和验证命令。公开命令按职责分组，辅助实现
+位于 `internal/`。
 
 ## 产品发布
 
@@ -32,7 +32,7 @@
 - `dependencies.py` 生成、检查并下载变体依赖和 lock 文件。
 - `lib/environment_images.sh` 提供环境镜像命名和 Buildx 检查函数。
 
-## 内部实现
+## 辅助实现
 
 - `internal/build_wheels_in_container.sh` 在 builder 镜像中调度项目 wheel 构建。
 - `internal/build_quant_gru_wheel.sh` 构建 QuantGRU 原生库和 wheel。
@@ -40,4 +40,5 @@
 - `internal/prepare_packaging.py` 在临时源码副本中设置发布版本。
 - `internal/verify_dependency_wheelhouse.py` 校验离线 wheelhouse 的包名、版本和 ABI。
 
-完整发布参数和操作流程见 `docs/Release_packaging.md`。
+完整发布参数和操作流程见
+[`docs/Release_packaging.md`](../docs/Release_packaging.md)。

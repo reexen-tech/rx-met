@@ -7,6 +7,6 @@
 - `include/core/providers/cuda/cuda_context.h`
 - `include/core/providers/cuda/cuda_resource.h`
 
-这些文件归档在仓库中，使 CPU/CUDA 原生独立构建不需要访问网络。它们是外部、
-不可变的构建输入，编译前必须通过 `SHA256SUMS` 校验。ONNX Runtime 使用
-`LICENSE` 中的 MIT 许可证，第三方声明保留在 `ThirdPartyNotices.txt`。
+这些文件作为外部、不可变的构建输入归档在仓库中，支持 CPU/CUDA 原生库的离线
+构建。编译前通过 `SHA256SUMS` 校验文件完整性。ONNX Runtime 使用 `LICENSE` 中的
+MIT 许可证，第三方声明保留在 `ThirdPartyNotices.txt`。

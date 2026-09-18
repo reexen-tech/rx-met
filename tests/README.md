@@ -14,8 +14,8 @@
 - 缺失 Torch 必需包时配置校验会失败。
 - wheelhouse checksum 兼容标准的相对路径格式。
 
-该测试不访问网络，也不构建 Docker 镜像。修改依赖范围、变体矩阵、锁生成或
-wheelhouse 校验逻辑后应重复执行：
+该测试执行本地依赖配置一致性检查。网络下载和 Docker 镜像构建由对应发布验证流程
+覆盖。修改依赖范围、变体矩阵、锁生成或 wheelhouse 校验逻辑后执行：
 
 ```bash
 python3 -m unittest -v tests/test_dependencies.py
