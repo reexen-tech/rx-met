@@ -34,14 +34,14 @@ Dockerfile
 
 | 脚本 | 职责 |
 | --- | --- |
-| `build_environment_images.sh` | 构建缺失的稳定环境镜像，直接运行时默认导出全部三个变体 |
-| `verify_environment_images.sh` | 验证环境身份、工具链、依赖版本和平台 |
-| `export_environment_images.sh` | 在本地生成可直接搬运的环境归档和校验文件 |
-| `load_environment_images.sh` | 校验归档 SHA-256 后加载并验证环境 |
-| `release_build.sh` | 解析环境、编译当前源码、组装和导出产品镜像 |
-| `verify_bundle.sh` | 验证最终产品镜像及可选 GPU 流程 |
-| `verify_kws_example.sh` | 使用真实 Speech Commands 数据完整运行 KWS/QAT 用例 |
-| `verify_onnx_ptq_example.sh` | 使用指定 ONNX 模型和校准数据完整运行 PTQ 用例 |
+| `environment/build.sh` | 构建缺失的稳定环境镜像，直接运行时默认导出全部三个变体 |
+| `environment/verify.sh` | 验证环境身份、工具链、依赖版本和平台 |
+| `environment/export.sh` | 在本地生成可直接搬运的环境归档和校验文件 |
+| `environment/load.sh` | 校验归档 SHA-256 后加载并验证环境 |
+| `release/build.sh` | 解析环境、编译当前源码、组装和导出产品镜像 |
+| `release/verify_bundle.sh` | 验证最终产品镜像及可选 GPU 流程 |
+| `release/verify_kws_example.sh` | 使用真实 Speech Commands 数据完整运行 KWS/QAT 用例 |
+| `release/verify_onnx_ptq_example.sh` | 使用指定 ONNX 模型和校准数据完整运行 PTQ 用例 |
 
 Python 包兼容范围定义在 `pyproject.toml`。环境版本、基础镜像、CUDA/Torch/
 ONNX Runtime 组合和精确依赖定义在 `docker/variants.json`。执行
@@ -54,14 +54,14 @@ ONNX Runtime 组合和精确依赖定义在 `docker/variants.json`。执行
 首次准备并导出全部三个环境：
 
 ```bash
-./scripts/build_environment_images.sh
+./scripts/environment/build.sh
 ```
 
 不传参数时默认处理 `cu118`、`cu126`、`cu130`，构建本机缺失的镜像，验证后
 生成本地可搬运归档。已有完整一对时直接复用。强制刷新环境必须显式执行：
 
 ```bash
-./scripts/build_environment_images.sh --force --no-export cu126
+./scripts/environment/build.sh --force --no-export cu126
 ```
 
 默认 tag：
@@ -84,7 +84,7 @@ rx-met-runtime-env:deps-v1-cu130
 环境构建脚本默认在本地生成完整、校验过、可直接复制的文件：
 
 ```bash
-./scripts/build_environment_images.sh
+./scripts/environment/build.sh
 ```
 
 只准备本机环境镜像、不生成归档时使用 `--no-export`。
@@ -92,7 +92,7 @@ rx-met-runtime-env:deps-v1-cu130
 也可以对已存在的环境镜像单独执行：
 
 ```bash
-./scripts/export_environment_images.sh cu118 cu126 cu130
+./scripts/environment/export.sh cu118 cu126 cu130
 ```
 
 默认输出到 `.release/environment-images/deps-v1/`。每个 CUDA 变体只有一个
@@ -123,7 +123,7 @@ sha256sum --check --strict SHA256SUMS
 加载环境：
 
 ```bash
-./scripts/load_environment_images.sh \
+./scripts/environment/load.sh \
   --archive-dir /path/to/environment-images/deps-v1 \
   cu118 cu126 cu130
 ```
@@ -131,7 +131,7 @@ sha256sum --check --strict SHA256SUMS
 也可以重复传入单文件：
 
 ```bash
-./scripts/load_environment_images.sh \
+./scripts/environment/load.sh \
   --archive /path/to/rx-met-environment-deps-v1-cu126-linux-amd64.tar.zst \
   cu126
 ```
@@ -141,11 +141,11 @@ sha256sum --check --strict SHA256SUMS
 
 ## 5. 产品发布决策
 
-`release_build.sh` 对每个所选 CUDA 变体执行以下规则：
+`release/build.sh` 对每个所选 CUDA 变体执行以下规则：
 
 1. build-env 和 runtime-env 都在本机：验证并直接复用。
 2. 两者都不在本机，且传入环境归档：校验、加载并验证。
-3. 两者都不在本机，也没有归档：自动调用 `build_environment_images.sh`。
+3. 两者都不在本机，也没有归档：自动调用 `environment/build.sh`。
 4. 只存在其中一个：立即退出，要求使用 `--rebuild-environment` 成对重建。
 5. 显式提供的归档缺失或校验失败：立即退出，不回退到公网构建。
 
@@ -153,21 +153,21 @@ sha256sum --check --strict SHA256SUMS
 
 ```bash
 # 自动解析环境，构建全部产品镜像并导出
-./scripts/release_build.sh
+./scripts/release/build.sh
 
 # 只构建 cu126，不导出 tar.zst
-./scripts/release_build.sh --no-export cu126
+./scripts/release/build.sh --no-export cu126
 
 # 从指定目录加载缺失的环境
-./scripts/release_build.sh \
+./scripts/release/build.sh \
   --environment-dir /path/to/environment-images/deps-v1 \
   cu118 cu126 cu130
 
 # 强制刷新环境后发布
-./scripts/release_build.sh --rebuild-environment cu126
+./scripts/release/build.sh --rebuild-environment cu126
 
 # 环境不存在时禁止自动联网构建
-./scripts/release_build.sh --no-auto-environment cu126
+./scripts/release/build.sh --no-auto-environment cu126
 ```
 
 环境归档目录由调用方提供，并直接指向具体的环境版本目录：
@@ -177,17 +177,17 @@ sha256sum --check --strict SHA256SUMS
 ```
 
 ```bash
-./scripts/release_build.sh \
+./scripts/release/build.sh \
   --environment-dir /path/to/environment-images/deps-v1 \
   cu118 cu126 cu130
 
 # 也可以通过环境变量指定同一目录
 RX_MET_ENV_ARCHIVE_DIR=/path/to/environment-images/deps-v1 \
-  ./scripts/release_build.sh cu118 cu126 cu130
+  ./scripts/release/build.sh cu118 cu126 cu130
 ```
 
 该目录可以位于本地磁盘或已挂载的共享存储。目录必须包含当前环境版本的完整归档、
-manifest 和 SHA-256 校验文件。首次构建可直接运行 `build_environment_images.sh`，
+manifest 和 SHA-256 校验文件。首次构建可直接运行 `environment/build.sh`，
 生成的新归档由维护人按部署环境的存储规范放入归档目录。
 
 ## 6. 版本和配置
@@ -239,7 +239,7 @@ driver 当前不受支持，脚本会在构建前退出。
 构建脚本自动执行无 GPU 验收。发布前还必须在目标驱动环境执行：
 
 ```bash
-./scripts/verify_bundle.sh --gpu --gpu-device 0 cu118 cu126 cu130
+./scripts/release/verify_bundle.sh --gpu --gpu-device 0 cu118 cu126 cu130
 ```
 
 GPU 验收检查 `torch.cuda.is_available()`，运行禁止 CPU 回退的 ONNX Runtime CUDA
@@ -249,7 +249,7 @@ session，并运行 AIMET v2 和 QuantGRU CUDA forward/backward。这是快速�
 KWS 完整流程在目标 GPU 上执行，默认只使用 GPU 0：
 
 ```bash
-./scripts/verify_kws_example.sh \
+./scripts/release/verify_kws_example.sh \
   --dataset-dir /path/to/speech_commands_v0.02 \
   cu118 cu126 cu130
 ```
@@ -257,7 +257,7 @@ KWS 完整流程在目标 GPU 上执行，默认只使用 GPU 0：
 ONNX PTQ 完整流程需要显式传入相互匹配的模型和 NPY/NPZ 校准数据：
 
 ```bash
-./scripts/verify_onnx_ptq_example.sh \
+./scripts/release/verify_onnx_ptq_example.sh \
   --model /path/to/model.onnx \
   --dataset-dir /path/to/calib \
   cu118 cu126 cu130
@@ -276,7 +276,7 @@ ONNX PTQ 完整流程需要显式传入相互匹配的模型和 NPY/NPZ 校准�
 export HTTPS_PROXY=http://proxy.example.com:8080
 export HTTP_PROXY=http://proxy.example.com:8080
 export ALL_PROXY=socks5://proxy.example.com:1080
-./scripts/build_environment_images.sh
+./scripts/environment/build.sh
 ```
 
 脚本不会重启 Docker daemon，不会删除现有镜像，也不会清理公共 Docker/BuildKit

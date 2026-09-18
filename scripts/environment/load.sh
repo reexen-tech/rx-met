@@ -2,7 +2,7 @@
 # 校验环境归档并将 build-env/runtime-env 成对加载到本机 Docker image store。
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 source "${ROOT}/scripts/lib/environment_images.sh"
 ARCHIVE_DIR="${RX_MET_ENV_ARCHIVE_DIR:-}"
 FORCE=0
@@ -15,7 +15,7 @@ die() { printf '[load_environment_images] ERROR: %s\n' "$*" >&2; exit 1; }
 
 usage() {
     cat <<'EOF'
-用法: ./scripts/load_environment_images.sh [选项] [cu118|cu126|cu130 ...]
+用法: ./scripts/environment/load.sh [选项] [cu118|cu126|cu130 ...]
 
 选项：
   --archive-dir DIR   按标准文件名从 DIR 加载所选变体
@@ -125,6 +125,6 @@ for target in "${TARGETS[@]}"; do
 done
 
 if ((VERIFY)); then
-    "${ROOT}/scripts/verify_environment_images.sh" "${TARGETS[@]}"
+    "${ROOT}/scripts/environment/verify.sh" "${TARGETS[@]}"
 fi
 log "环境归档加载完成"

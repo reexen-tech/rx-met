@@ -336,12 +336,12 @@ layer。产品镜像不进入环境归档。
 
 ### 发布时的环境解析
 
-`release_build.sh` 不再负责安装第三方环境，只执行以下决策：
+`release/build.sh` 不再负责安装第三方环境，只执行以下决策：
 
 - 本机已有完整环境对时直接验证并复用；
 - 通过 `--environment-dir` 或重复的 `--environment-archive` 提供归档时，调用独立
   加载器验证 SHA-256 并执行 `docker load`；
-- 本机和归档都没有时，默认调用 `build_environment_images.sh`；
+- 本机和归档都没有时，默认调用 `environment/build.sh`；
 - 只存在 build/runtime 其中一个时拒绝继续，防止环境版本错配；
 - 显式归档损坏或缺失时不回退公网构建。
 

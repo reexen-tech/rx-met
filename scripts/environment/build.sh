@@ -2,7 +2,7 @@
 # 构建可跨多个 rx-met 产品版本复用的稳定 build-env/runtime-env。
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 BAKE_FILE="${ROOT}/docker/docker-bake.hcl"
 source "${ROOT}/scripts/lib/environment_images.sh"
 BUILDER="${RX_MET_BUILDER:-}"
@@ -17,7 +17,7 @@ die() { printf '[build_environment_images] ERROR: %s\n' "$*" >&2; exit 1; }
 
 usage() {
     cat <<'EOF'
-用法: ./scripts/build_environment_images.sh [选项] [cu118|cu126|cu130 ...]
+用法: ./scripts/environment/build.sh [选项] [cu118|cu126|cu130 ...]
 
 选项：
   --force             即使对应环境镜像已存在也重新构建
@@ -123,13 +123,13 @@ else
 fi
 
 if ((VERIFY)); then
-    "${ROOT}/scripts/verify_environment_images.sh" "${TARGETS[@]}"
+    "${ROOT}/scripts/environment/verify.sh" "${TARGETS[@]}"
 fi
 if ((EXPORT)); then
     export_args=()
     [[ -z "${EXPORT_DIR}" ]] || export_args+=(--output-dir "${EXPORT_DIR}")
     ((FORCE == 0)) || export_args+=(--force)
-    "${ROOT}/scripts/export_environment_images.sh" \
+    "${ROOT}/scripts/environment/export.sh" \
         "${export_args[@]}" "${TARGETS[@]}"
 fi
 log "环境镜像准备完成"

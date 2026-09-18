@@ -2,7 +2,7 @@
 # 验证最终 rx-met 镜像；--gpu 额外运行真实 CUDA/QuantGRU 冒烟测试。
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 BAKE_FILE="${ROOT}/docker/docker-bake.hcl"
 VERSION="$(tr -d '[:space:]' < "${ROOT}/VERSION")"
 IMAGE_REPOSITORY="${RX_MET_IMAGE_REPOSITORY:-rx-met}"
@@ -23,7 +23,7 @@ while (($#)); do
             shift
             ;;
         -h|--help)
-            printf '用法: ./scripts/verify_bundle.sh [--gpu|--no-gpu] [--gpu-device ID] [cu118|cu126|cu130 ...]\n'
+            printf '用法: ./scripts/release/verify_bundle.sh [--gpu|--no-gpu] [--gpu-device ID] [cu118|cu126|cu130 ...]\n'
             exit 0
             ;;
         cu118|cu126|cu130) TARGETS+=("$1") ;;

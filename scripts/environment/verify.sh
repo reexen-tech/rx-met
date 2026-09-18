@@ -2,7 +2,7 @@
 # 验证稳定 build-env/runtime-env 的身份、工具链和锁定依赖。
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 BAKE_FILE="${ROOT}/docker/docker-bake.hcl"
 source "${ROOT}/scripts/lib/environment_images.sh"
 TARGETS=()
@@ -14,7 +14,7 @@ die() { printf '[verify_environment_images] ERROR: %s\n' "$*" >&2; exit 1; }
 
 usage() {
     cat <<'EOF'
-用法: ./scripts/verify_environment_images.sh [--gpu|--no-gpu] [--gpu-device ID]
+用法: ./scripts/environment/verify.sh [--gpu|--no-gpu] [--gpu-device ID]
        [cu118|cu126|cu130 ...]
 
 默认验证全部三个 CUDA 变体。默认只检查 GPU provider 已安装；--gpu 会额外

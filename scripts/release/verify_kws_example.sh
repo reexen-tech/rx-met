@@ -1,27 +1,25 @@
 #!/usr/bin/env bash
-# 在最终产品镜像中使用指定 ONNX 模型和真实校准数据运行 ONNX PTQ 示例。
+# 在最终产品镜像中使用真实 Speech Commands 数据完整运行 KWS/QAT 示例。
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 VERSION="$(tr -d '[:space:]' < "${ROOT}/VERSION")"
 IMAGE_REPOSITORY="${RX_MET_IMAGE_REPOSITORY:-rx-met}"
-MODEL_PATH=""
 DATASET_DIR=""
-OUTPUT_ROOT="${RX_MET_ONNX_PTQ_VALIDATION_OUTPUT:-${ROOT}/.release/example-validation/v${VERSION}/onnx_ptq}"
+OUTPUT_ROOT="${RX_MET_KWS_VALIDATION_OUTPUT:-${ROOT}/.release/example-validation/v${VERSION}/quick_start_kws}"
 GPU_DEVICE="${RX_MET_VERIFY_GPU_DEVICE:-0}"
 TARGETS=()
 
-log() { printf '[verify_onnx_ptq_example] %s\n' "$*"; }
-die() { printf '[verify_onnx_ptq_example] ERROR: %s\n' "$*" >&2; exit 1; }
+log() { printf '[verify_kws_example] %s\n' "$*"; }
+die() { printf '[verify_kws_example] ERROR: %s\n' "$*" >&2; exit 1; }
 
 usage() {
     cat <<EOF
 用法:
-  ./scripts/verify_onnx_ptq_example.sh --model FILE --dataset-dir DIR [选项] [cu118|cu126|cu130 ...]
+  ./scripts/release/verify_kws_example.sh --dataset-dir DIR [选项] [cu118|cu126|cu130 ...]
 
 必填参数:
-  --model FILE           待量化的 ONNX 模型
-  --dataset-dir DIR      含 *.npy 或 *.npz 的校准数据目录
+  --dataset-dir DIR      Speech Commands v0.02 解压后的数据集目录
 
 可选参数:
   --output-dir DIR       输出根目录
@@ -30,8 +28,8 @@ usage() {
   -h, --help             显示帮助
 
 不指定 CUDA 变体时依次验证 cu118、cu126、cu130。每个变体的产物和日志写入
-输出根目录下对应的 cu118、cu126 或 cu130 子目录。该验证要求 NVIDIA GPU，
-并使用 ONNX Runtime CUDAExecutionProvider 实际完成 PTQ 和推理。
+输出根目录下对应的 cu118、cu126 或 cu130 子目录。KWS 示例会自行训练模型，
+不需要传入已有模型。
 EOF
 }
 
@@ -44,11 +42,7 @@ require_value() {
 
 while (($#)); do
     case "$1" in
-        --model|--model-path)
-            MODEL_PATH="$(require_value "$1" "${2:-}")"
-            shift 2
-            ;;
-        --dataset-dir|--calib-dir)
+        --dataset-dir|--speech-commands-dir)
             DATASET_DIR="$(require_value "$1" "${2:-}")"
             shift 2
             ;;
@@ -72,7 +66,6 @@ while (($#)); do
     esac
 done
 
-[[ -n "${MODEL_PATH}" ]] || die "必须传入 --model"
 [[ -n "${DATASET_DIR}" ]] || die "必须传入 --dataset-dir"
 [[ -n "${GPU_DEVICE}" ]] || die "--gpu-device 不能为空"
 [[ "${IMAGE_REPOSITORY}" =~ ^[A-Za-z0-9._/-]+$ ]] \
@@ -81,15 +74,10 @@ for command in docker realpath stat tee; do
     command -v "${command}" >/dev/null 2>&1 || die "缺少命令: ${command}"
 done
 
-MODEL_PATH="$(realpath -e -- "${MODEL_PATH}")"
 DATASET_DIR="$(realpath -e -- "${DATASET_DIR}")"
-[[ -f "${MODEL_PATH}" ]] || die "模型文件不存在: ${MODEL_PATH}"
-[[ -d "${DATASET_DIR}" ]] || die "校准数据目录不存在: ${DATASET_DIR}"
-shopt -s nullglob
-calibration_files=("${DATASET_DIR}"/*.npy "${DATASET_DIR}"/*.npz)
-shopt -u nullglob
-((${#calibration_files[@]} > 0)) \
-    || die "校准目录中没有 *.npy 或 *.npz: ${DATASET_DIR}"
+[[ -d "${DATASET_DIR}" ]] || die "数据集目录不存在: ${DATASET_DIR}"
+[[ -d "${DATASET_DIR}/_background_noise_" ]] \
+    || die "不是有效的 Speech Commands 数据目录（缺少 _background_noise_）: ${DATASET_DIR}"
 mkdir -p -- "${OUTPUT_ROOT}"
 OUTPUT_ROOT="$(realpath -- "${OUTPUT_ROOT}")"
 [[ -w "${OUTPUT_ROOT}" ]] || die "输出目录不可写: ${OUTPUT_ROOT}"
@@ -105,9 +93,6 @@ done
 
 user_id="$(id -u)"
 group_id="$(id -g)"
-model_dir="$(dirname "${MODEL_PATH}")"
-model_name="$(basename "${MODEL_PATH}")"
-model_group_id="$(stat -c '%g' "${MODEL_PATH}")"
 dataset_group_id="$(stat -c '%g' "${DATASET_DIR}")"
 
 for target in "${TARGETS[@]}"; do
@@ -118,28 +103,25 @@ for target in "${TARGETS[@]}"; do
     target_output="${OUTPUT_ROOT}/${target}"
     mkdir -p -- "${target_output}"
     [[ -w "${target_output}" ]] || die "输出目录不可写: ${target_output}"
-    log "运行 ${image}（ONNX Runtime CUDAExecutionProvider），GPU=${GPU_DEVICE}"
+    log "运行 ${image}，GPU=${GPU_DEVICE}"
     log "输出目录: ${target_output}"
 
     docker run --rm \
         --gpus "device=${GPU_DEVICE}" \
         --shm-size=2g \
         --user "${user_id}:${group_id}" \
-        --group-add "${model_group_id}" \
         --group-add "${dataset_group_id}" \
         -e HOME=/tmp \
         -e USER=rx-met-validator \
         -e LOGNAME=rx-met-validator \
-        -e "RX_MET_ONNX_PTQ_MODEL=/model/${model_name}" \
-        -e "RX_MET_ONNX_PTQ_CALIB=/datasets/calib" \
-        -e "RX_MET_ONNX_PTQ_OUTPUT_DIR=/output" \
-        -e "RX_MET_ONNX_PTQ_DEVICE=cuda" \
-        -v "${model_dir}:/model:ro" \
-        -v "${DATASET_DIR}:/datasets/calib:ro" \
+        -e "RX_MET_SPEECH_COMMANDS_ROOT=/datasets/speech_commands" \
+        -e "RX_MET_KWS_OUTPUT_DIR=/output" \
+        -e "RX_MET_KWS_FP_MODEL=/output/model_fp_kws.pth" \
+        -v "${DATASET_DIR}:/datasets/speech_commands:ro" \
         -v "${target_output}:/output" \
         "${image}" \
-        python3 /opt/rx-met/examples/onnx_ptq_quick_start.py \
+        python3 /opt/rx-met/examples/quick_start_kws.py \
         2>&1 | tee "${target_output}/verify.log"
 done
 
-log "全部 ONNX PTQ example 验证通过: ${OUTPUT_ROOT}"
+log "全部 KWS example 验证通过: ${OUTPUT_ROOT}"

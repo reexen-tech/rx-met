@@ -2,7 +2,7 @@
 # 复用稳定环境镜像，构建、验收并导出 rx-met 产品镜像。
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 BAKE_FILE="${ROOT}/docker/docker-bake.hcl"
 VERSION_FILE="${ROOT}/VERSION"
 source "${ROOT}/scripts/lib/environment_images.sh"
@@ -35,7 +35,7 @@ trap cleanup EXIT
 
 usage() {
     cat <<'EOF'
-用法: ./scripts/release_build.sh [选项] [cu118|cu126|cu130 ...]
+用法: ./scripts/release/build.sh [选项] [cu118|cu126|cu130 ...]
 
 环境镜像选项：
   --environment-dir DIR
@@ -141,7 +141,7 @@ done
 if ((REBUILD_ENVIRONMENT)); then
     environment_args=(--force --no-verify --no-export)
     [[ -z "${BUILDER}" ]] || environment_args+=(--builder "${BUILDER}")
-    "${ROOT}/scripts/build_environment_images.sh" \
+    "${ROOT}/scripts/environment/build.sh" \
         "${environment_args[@]}" "${TARGETS[@]}"
 elif ((${#missing_targets[@]})); then
     if [[ -n "${ENV_ARCHIVE_DIR}" || ${#ENV_ARCHIVES[@]} -gt 0 ]]; then
@@ -151,20 +151,20 @@ elif ((${#missing_targets[@]})); then
             load_args+=(--archive "${archive}")
         done
         log "从归档加载缺失环境: ${missing_targets[*]}"
-        "${ROOT}/scripts/load_environment_images.sh" \
+        "${ROOT}/scripts/environment/load.sh" \
             "${load_args[@]}" "${missing_targets[@]}"
     elif ((AUTO_ENVIRONMENT)); then
         environment_args=(--no-verify --no-export)
         [[ -z "${BUILDER}" ]] || environment_args+=(--builder "${BUILDER}")
         log "没有可用归档，自动构建缺失环境: ${missing_targets[*]}"
-        "${ROOT}/scripts/build_environment_images.sh" \
+        "${ROOT}/scripts/environment/build.sh" \
             "${environment_args[@]}" "${missing_targets[@]}"
     else
-        die "环境镜像缺失: ${missing_targets[*]}；请提供归档或运行 build_environment_images.sh"
+        die "环境镜像缺失: ${missing_targets[*]}；请提供归档或运行 scripts/environment/build.sh"
     fi
 fi
 
-"${ROOT}/scripts/verify_environment_images.sh" "${TARGETS[@]}"
+"${ROOT}/scripts/environment/verify.sh" "${TARGETS[@]}"
 
 buildx_args=()
 if [[ -n "${BUILDER}" ]]; then
@@ -195,7 +195,7 @@ for target in "${TARGETS[@]}"; do
 done
 
 log "执行产品镜像无 GPU 验收"
-RX_MET_VERIFY_GPU=0 "${ROOT}/scripts/verify_bundle.sh" "${TARGETS[@]}"
+RX_MET_VERIFY_GPU=0 "${ROOT}/scripts/release/verify_bundle.sh" "${TARGETS[@]}"
 
 if ((EXPORT_IMAGES == 0)); then
     log "已按要求跳过产品镜像归档"
@@ -256,4 +256,4 @@ sed -i "s/@VERSION@/${VERSION}/g" \
 )
 
 log "构建完成，产品镜像归档位于 ${EXPORT_DIR}"
-log "发布前必须在目标 GPU 执行: ./scripts/verify_bundle.sh --gpu ${TARGETS[*]}"
+log "发布前必须在目标 GPU 执行: ./scripts/release/verify_bundle.sh --gpu ${TARGETS[*]}"

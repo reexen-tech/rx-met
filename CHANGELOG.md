@@ -14,6 +14,8 @@
   import 名和发布 wheel 名保持不变。
 - 将产品交付文档模板从顶层 `release/` 迁至
   `packaging/release-bundle/`，并使用 `.md.in` 标识待渲染输入。
+- 将公开维护脚本按职责整理到 `scripts/release/` 和
+  `scripts/environment/`；跨流程的原生构建、依赖管理及内部实现位置不变。
 - 将 Python 兼容范围收敛到 `pyproject.toml`，以
   `docker/variants.json` 统一管理 CUDA 变体和精确依赖；Bake 配置及每个变体的
   自包含 lock 由 `scripts/dependencies.py` 生成并校验。

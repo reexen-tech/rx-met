@@ -42,20 +42,20 @@ python3 quick_start_kws.py
 
 ```bash
 # 默认构建 cu118、cu126、cu130，并导出三个 tar.zst
-./scripts/release_build.sh
+./scripts/release/build.sh
 
 # 只构建一个变体，不导出归档
-./scripts/release_build.sh --no-export cu126
+./scripts/release/build.sh --no-export cu126
 
 # 使用指定目录中已校验的成对环境镜像归档
-./scripts/release_build.sh --environment-dir /path/to/environment-images/deps-v1
+./scripts/release/build.sh --environment-dir /path/to/environment-images/deps-v1
 
 # 在 GPU 机器上执行发布验收
-./scripts/verify_bundle.sh --gpu --gpu-device 0 cu126
+./scripts/release/verify_bundle.sh --gpu --gpu-device 0 cu126
 
 # 使用真实数据完整运行两个 example（路径按实际环境填写）
-./scripts/verify_kws_example.sh --dataset-dir /path/to/speech_commands_v0.02 cu126
-./scripts/verify_onnx_ptq_example.sh \
+./scripts/release/verify_kws_example.sh --dataset-dir /path/to/speech_commands_v0.02 cu126
+./scripts/release/verify_onnx_ptq_example.sh \
   --model /path/to/model.onnx --dataset-dir /path/to/calib cu126
 ```
 
@@ -78,13 +78,14 @@ python3 quick_start_kws.py
 - `docker/docker-bake.hcl`：由依赖工具生成的 Buildx Bake 配置
 - `docker/requirements/`：构建工具锁和三份自包含运行环境锁
 - `scripts/dependencies.py`：生成、检查并下载锁定依赖
-- `scripts/build_environment_images.sh`：按需构建稳定环境镜像，默认产出三个 CUDA 变体的本地归档
-- `scripts/export_environment_images.sh`：在本地生成可人工搬运的环境文件
-- `scripts/load_environment_images.sh`：校验并加载环境归档
-- `scripts/release_build.sh`：环境解析、产品构建、验收和导出
-- `scripts/verify_bundle.sh`：最终镜像静态或 GPU 验收
-- `scripts/verify_kws_example.sh`：使用真实 Speech Commands 数据运行完整 KWS 用例
-- `scripts/verify_onnx_ptq_example.sh`：使用指定模型和校准数据运行完整 ONNX PTQ 用例
+- `scripts/environment/build.sh`：按需构建稳定环境镜像，默认产出三个 CUDA 变体的本地归档
+- `scripts/environment/export.sh`：在本地生成可人工搬运的环境文件
+- `scripts/environment/load.sh`：校验并加载环境归档
+- `scripts/environment/verify.sh`：验证环境镜像身份、工具链和运行依赖
+- `scripts/release/build.sh`：环境解析、产品构建、验收和导出
+- `scripts/release/verify_bundle.sh`：最终镜像静态或 GPU 验收
+- `scripts/release/verify_kws_example.sh`：使用真实 Speech Commands 数据运行完整 KWS 用例
+- `scripts/release/verify_onnx_ptq_example.sh`：使用指定模型和校准数据运行完整 ONNX PTQ 用例
 - `examples/`：KWS 和 ONNX PTQ 快速示例
 
 源码目录采用 Python `src` layout。安装后的公开 import 名保持为

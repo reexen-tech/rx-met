@@ -5,13 +5,13 @@
 
 ## 1. 最常用的脚本
 
-### 1.1 `release_build.sh`：产品发布主入口
+### 1.1 `release/build.sh`：产品发布主入口
 
 普通版本发布优先使用这个脚本：
 
 ```bash
 cd /path/to/rx-met
-./scripts/release_build.sh
+./scripts/release/build.sh
 ```
 
 不传 CUDA 参数时，默认依次构建 `cu118`、`cu126`、`cu130` 三个产品镜像。
@@ -58,22 +58,22 @@ rx-met:1.0.0-cu130
 只构建某个变体：
 
 ```bash
-./scripts/release_build.sh cu126
+./scripts/release/build.sh cu126
 ```
 
 只生成本机产品镜像，不导出 `.tar.zst`：
 
 ```bash
-./scripts/release_build.sh --no-export cu126
+./scripts/release/build.sh --no-export cu126
 ```
 
-### 1.2 `build_environment_images.sh`：稳定环境准备入口
+### 1.2 `environment/build.sh`：稳定环境准备入口
 
 只有首次准备环境，或者 CUDA、Torch、Python、Ubuntu、requirements、编译工具链
 发生变化时才需要直接运行：
 
 ```bash
-./scripts/build_environment_images.sh
+./scripts/environment/build.sh
 ```
 
 不传参数时默认处理全部三个 CUDA 变体。每个变体生成两个 Docker 镜像：
@@ -102,40 +102,40 @@ rx-met-runtime-env:deps-v1-cu130
 先试构建单个环境，但不压缩归档：
 
 ```bash
-./scripts/build_environment_images.sh --no-export cu126
+./scripts/environment/build.sh --no-export cu126
 ```
 
 已有完整的 build/runtime 环境对时会直接复用。环境只有一半时脚本会停止，必须
 人工确认后使用 `--force` 成对重建。
 
-### 1.3 `load_environment_images.sh`：在新机器加载稳定环境
+### 1.3 `environment/load.sh`：在新机器加载稳定环境
 
 环境归档被人工复制到另一台机器后，使用该脚本校验并加载：
 
 ```bash
-./scripts/load_environment_images.sh \
+./scripts/environment/load.sh \
   --archive-dir /path/to/environment-images/deps-v1 \
   cu118 cu126 cu130
 ```
 
 它会检查归档在 `SHA256SUMS` 中的记录，通过后执行 `zstd` 解压和 `docker load`，
-最后调用 `verify_environment_images.sh`。一个 CUDA 归档同时包含对应的 build-env
+最后调用 `environment/verify.sh`。一个 CUDA 归档同时包含对应的 build-env
 和 runtime-env。
 
 也可以让产品发布脚本在环境缺失时直接加载：
 
 ```bash
-./scripts/release_build.sh \
+./scripts/release/build.sh \
   --environment-dir /path/to/environment-images/deps-v1
 ```
 
-### 1.4 `verify_bundle.sh`：最终产品镜像验收
+### 1.4 `release/verify_bundle.sh`：最终产品镜像验收
 
-`release_build.sh` 已自动执行无 GPU 验收。产品发布前还需要在目标 GPU 服务器上
+`release/build.sh` 已自动执行无 GPU 验收。产品发布前还需要在目标 GPU 服务器上
 执行：
 
 ```bash
-./scripts/verify_bundle.sh --gpu --gpu-device 0 cu118 cu126 cu130
+./scripts/release/verify_bundle.sh --gpu --gpu-device 0 cu118 cu126 cu130
 ```
 
 该脚本检查：
@@ -151,13 +151,13 @@ rx-met-runtime-env:deps-v1-cu130
 这属于镜像冒烟验收，不会读取正式 Speech Commands 数据集，也不会运行外部模型
 仓库中的完整 ONNX PTQ example。完整数据集验证仍需在目标 GPU 服务器单独执行。
 
-### 1.5 `verify_kws_example.sh`：KWS 完整用例验证
+### 1.5 `release/verify_kws_example.sh`：KWS 完整用例验证
 
 在最终产品镜像中读取真实 Speech Commands 数据，完整执行 FP 训练、PTQ、Po2、
 QAT、导出和重新加载验证：
 
 ```bash
-./scripts/verify_kws_example.sh \
+./scripts/release/verify_kws_example.sh \
   --dataset-dir /path/to/speech_commands_v0.02 \
   --output-dir /path/to/output/kws \
   cu126
@@ -172,13 +172,13 @@ QAT、导出和重新加载验证：
 KWS 用例从数据集自行训练模型，因此没有模型输入参数。模型权重、ONNX、encodings
 和 `verify.log` 都保存在对应变体的输出目录。
 
-### 1.6 `verify_onnx_ptq_example.sh`：ONNX PTQ 完整用例验证
+### 1.6 `release/verify_onnx_ptq_example.sh`：ONNX PTQ 完整用例验证
 
 在最终产品镜像中读取指定 ONNX 和真实 NPY/NPZ 校准样本，完整执行 PTQ、Po2、
 产物导出和重新加载验证：
 
 ```bash
-./scripts/verify_onnx_ptq_example.sh \
+./scripts/release/verify_onnx_ptq_example.sh \
   --model /path/to/model.onnx \
   --dataset-dir /path/to/calib \
   --output-dir /path/to/output/onnx-ptq \
@@ -200,16 +200,18 @@ KWS 用例从数据集自行训练模型，因此没有模型输入参数。模�
 ```text
 scripts/
 |-- README.md
-|-- release_build.sh
-|-- build_environment_images.sh
-|-- load_environment_images.sh
-|-- export_environment_images.sh
-|-- verify_bundle.sh
-|-- verify_kws_example.sh
-|-- verify_onnx_ptq_example.sh
-|-- verify_environment_images.sh
 |-- build_aimet_native.sh
 |-- dependencies.py
+|-- release/
+|   |-- build.sh
+|   |-- verify_bundle.sh
+|   |-- verify_kws_example.sh
+|   `-- verify_onnx_ptq_example.sh
+|-- environment/
+|   |-- build.sh
+|   |-- load.sh
+|   |-- export.sh
+|   `-- verify.sh
 |-- internal/
 |   |-- build_wheels_in_container.sh
 |   |-- build_quant_gru_wheel.sh
@@ -220,7 +222,9 @@ scripts/
     `-- environment_images.sh
 ```
 
-- `scripts/` 根目录是维护人员或开发人员可以直接运行的稳定接口。
+- `scripts/release/` 是产品构建和最终验收的稳定接口。
+- `scripts/environment/` 是稳定环境镜像生命周期的稳定接口。
+- `scripts/` 根目录保留跨流程的原生构建和依赖管理入口。
 - `scripts/internal/` 是 Dockerfile 或其他脚本调用的内部实现，不作为日常命令。
 - `scripts/lib/` 只放通过 `source` 引入的函数库，不能作为命令单独运行。
 
@@ -229,14 +233,14 @@ scripts/
 ### 3.1 稳定环境流程
 
 ```text
-build_environment_images.sh
+environment/build.sh
   -> docker/docker-bake.hcl
   -> docker/Dockerfile.environment
      -> dependencies.py download
         -> internal/verify_dependency_wheelhouse.py
      -> internal/prepare_onnxruntime_headers.sh
-  -> verify_environment_images.sh
-  -> export_environment_images.sh
+  -> environment/verify.sh
+  -> environment/export.sh
 ```
 
 稳定环境只包含操作系统、CUDA、Torch、公共 Python 依赖和构建工具，不包含当前
@@ -245,8 +249,8 @@ build_environment_images.sh
 ### 3.2 产品发布流程
 
 ```text
-release_build.sh
-  -> 复用本机环境，或调用 load_environment_images.sh/build_environment_images.sh
+release/build.sh
+  -> 复用本机环境，或调用 environment/load.sh/environment/build.sh
   -> docker/docker-bake.hcl
   -> docker/Dockerfile
      -> internal/build_wheels_in_container.sh
@@ -254,7 +258,7 @@ release_build.sh
         -> build_aimet_native.sh
         -> 构建 rx-met wheel
         -> internal/build_quant_gru_wheel.sh
-  -> verify_bundle.sh
+  -> release/verify_bundle.sh
   -> 导出产品镜像归档
 ```
 
@@ -262,27 +266,27 @@ release_build.sh
 
 ## 4. 环境镜像脚本
 
-### `export_environment_images.sh`
+### `environment/export.sh`
 
 将本机已有的稳定环境镜像导出成可搬运文件。每个 CUDA 变体对应一个归档，归档
 中包含 build-env 和 runtime-env 两个 tag。
 
 ```bash
-./scripts/export_environment_images.sh cu126
+./scripts/environment/export.sh cu126
 ```
 
 脚本在输出目录的临时子目录执行 `docker save`、zstd 压缩和 SHA-256 校验，全部
 成功后才替换正式文件。脚本不自动上传；向共享存储或其他机器复制、移动文件由
 维护人员人工完成。
 
-### `verify_environment_images.sh`
+### `environment/verify.sh`
 
 验证稳定环境本身。默认检查 GPU provider 已安装但不访问 GPU；在 GPU 服务器上应
 增加 `--gpu`，实际创建 CUDA session：
 
 ```bash
-./scripts/verify_environment_images.sh cu126
-./scripts/verify_environment_images.sh --gpu --gpu-device 0 cu118 cu126 cu130
+./scripts/environment/verify.sh cu126
+./scripts/environment/verify.sh --gpu --gpu-device 0 cu118 cu126 cu130
 ```
 
 主要检查镜像平台、环境角色、环境版本、Python、CUDA/Torch、ONNX Runtime GPU
@@ -397,7 +401,7 @@ rx-met:1.0.0-cu126              # 当前产品
 新的环境版本，不要覆盖已经交付的版本。例如：
 
 ```bash
-RX_MET_ENV_VERSION=deps-v2 ./scripts/build_environment_images.sh
+RX_MET_ENV_VERSION=deps-v2 ./scripts/environment/build.sh
 ```
 
 ## 7. 环境归档和多人服务器约束

@@ -7,7 +7,7 @@
 下面的 rx-met 布局符合常见开源仓库的职责分离方式：
 
 ```text
-scripts/release_build.sh              # 维护者直接调用的发布入口
+scripts/release/build.sh              # 维护者直接调用的发布入口
 scripts/internal/                     # 发布流程的内部实现
 packaging/release-bundle/*.md.in      # 被复制或渲染进制品的输入模板
 .release/export/                      # Git 忽略的生成物
@@ -39,7 +39,7 @@ packaging/release-bundle/CHANGELOG.md.in
 比保留顶层 `release/` 更准确，因为这两个文件是制品输入模板，而不是发布命令、
 GitHub Release 配置或生成结果。`.in` 后缀也能明确它们还需要复制或变量替换。
 
-`scripts/release_build.sh` 应继续作为稳定、易发现的维护者入口；只有被它调用且不希望
+`scripts/release/build.sh` 应继续作为稳定、易发现的维护者入口；只有被它调用且不希望
 用户直接依赖的实现才放入 `scripts/internal/`。`.release/export/` 继续作为 Git 忽略的
 输出目录也合理。若未来希望采用更普遍的工具默认名，可把输出改成 `dist/`，但这不是
 本次结构合规性的必要条件。

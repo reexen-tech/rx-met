@@ -2,7 +2,7 @@
 # 将环境镜像导出成可搬运文件；复制或上传由维护人手工完成。
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 source "${ROOT}/scripts/lib/environment_images.sh"
 OUTPUT_DIR="${ROOT}/.release/environment-images/${RX_MET_ENV_VERSION}"
 ZSTD_THREADS="${RX_MET_CACHE_ZSTD_THREADS:-2}"
@@ -20,7 +20,7 @@ trap cleanup EXIT
 
 usage() {
     cat <<'EOF'
-用法: ./scripts/export_environment_images.sh [选项] [cu118|cu126|cu130 ...]
+用法: ./scripts/environment/export.sh [选项] [cu118|cu126|cu130 ...]
 
 选项：
   --output-dir DIR    输出目录，默认 .release/environment-images/<环境版本>
@@ -103,7 +103,7 @@ docker image inspect "${images[@]}" \
     printf -- '- 内容：每个 CUDA 变体一个文件，包含 build-env 和 runtime-env 两个 tag\n'
     printf -- '- 生成时间：`%s`\n\n' "$(date --iso-8601=seconds)"
     printf '把本目录全部文件人工复制到目标位置；消费者使用：\n\n```bash\n'
-    printf './scripts/load_environment_images.sh --archive-dir /path/to/%s cu118 cu126 cu130\n' \
+    printf './scripts/environment/load.sh --archive-dir /path/to/%s cu118 cu126 cu130\n' \
         "${RX_MET_ENV_VERSION}"
     printf '```\n'
 } > "${STAGING_DIR}/README.md"
