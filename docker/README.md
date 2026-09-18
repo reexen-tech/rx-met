@@ -12,4 +12,5 @@
 - `requirements/build.lock` 固定 Python 构建工具。
 - `requirements/cu*-py*.lock` 分别固定三个产品变体的完整运行依赖。
 
-`variants.json` 是变体和精确版本的权威来源。生成文件不应手工修改。
+`variants.json` 是变体和精确版本的权威来源。`scripts/dependencies.py lock` 是
+`docker-bake.hcl` 和 requirements lock 的维护入口。

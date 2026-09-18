@@ -1,6 +1,6 @@
 # rx-met Docker 镜像使用说明
 
-rx-met 以三个独立的 Linux x86_64 GPU 镜像交付：
+rx-met 发布三个独立的 Linux x86_64 GPU 镜像：
 
 | 变体 | CUDA | Python | PyTorch | ONNX Runtime GPU | 项目 CUDA 架构 | 最低 NVIDIA Driver | 建议场景 |
 | --- | --- | --- | --- | --- | --- | --- | --- |
@@ -8,10 +8,9 @@ rx-met 以三个独立的 Linux x86_64 GPU 镜像交付：
 | `cu126` | 12.6 | 3.10 | 2.8.0 | 1.23.2 | `sm_80/86/89/90` | 560.35.05 | 当前兼容性基线 |
 | `cu130` | 13.0 | 3.12 | 2.10.0 | 1.27.0 | `sm_80/86/89/90/120` | 580.126.20 | CUDA 13 和 Blackwell `sm_120` |
 
-宿主机必须安装 NVIDIA Driver、Docker 和 NVIDIA Container Toolkit。宿主机不
-需要安装与容器一致的 CUDA Toolkit。选择变体时必须同时满足最低驱动和 GPU
-计算能力要求；较新的驱动不能补足镜像中没有编译的 GPU 架构。H200 `sm_90` 可
-运行三个变体，RTX 5090 `sm_120` 只能运行 `cu130`。
+宿主机需要 NVIDIA Driver、Docker 和 NVIDIA Container Toolkit。容器包含对应版本的
+CUDA 运行环境。镜像变体由最低驱动和 GPU 计算能力共同决定；架构支持范围以表中的
+项目 CUDA 架构为准。H200 `sm_90` 适配三个变体，RTX 5090 `sm_120` 适配 `cu130`。
 
 ## 加载镜像
 
@@ -38,16 +37,15 @@ docker run --gpus device=0 --rm -it \
   rx-met:@VERSION@-cu126
 ```
 
-`device=0` 只向容器开放宿主机 GPU 0；多人共用服务器时应改成实际分配的设备号，
-不要使用 `--gpus all`。如果程序需要多进程 DataLoader，可保留 `--ipc=host`，或
-改用明确的 `--shm-size`。`--group-add` 用于 CIFS/NFS 等仅允许所属组读取的共享
-数据目录；`:ro` 仍保证容器不能修改数据。
+`device=0` 将宿主机 GPU 0 映射到容器。共享服务器使用实际分配的设备号，专用机器可
+使用 `--gpus all`。多进程 DataLoader 可以使用 `--ipc=host` 或明确的
+`--shm-size`。`--group-add` 为 CIFS/NFS 数据目录补充组权限，`:ro` 提供只读挂载。
 
 ## 示例源码
 
-交付目录中的 `examples/` 是可直接浏览的示例源码，与产品镜像内
-`/opt/rx-met/examples` 的内容一致。源码目录不包含模型、数据集和运行环境；实际
-执行时应使用同一批次交付的产品镜像。两个入口分别是：
+发布目录中的 `examples/` 是可直接浏览的示例源码，与产品镜像内
+`/opt/rx-met/examples` 的内容一致。模型和数据集通过 volume 提供，示例在同一版本的
+产品镜像中执行。两个入口分别是：
 
 - `examples/quick_start_kws.py`：KWS 浮点训练、PTQ、Power-of-2、QAT 和导出；
 - `examples/onnx_ptq_quick_start.py`：ONNX PTQ、Power-of-2 和 compiler encodings
@@ -68,11 +66,12 @@ python3 quick_start_kws.py
 ```
 
 输出默认写入 `/workspace/rx-met-examples/output/quick_start_kws/`。
+日志输出“量化流程完成（已通过加载验证）”并返回退出码 0，表示 KWS 示例完成。
 
 ## ONNX PTQ 示例
 
-该示例使用公开的 MobileNetV2 ONNX 模型和 ImageNette 数据。若尚未准备输入文件，
-先在宿主机下载到启动容器时挂载为 `/workspace` 的目录：
+该示例使用公开的 MobileNetV2 ONNX 模型和 ImageNette 数据。外部输入文件下载到
+启动容器时挂载为 `/workspace` 的目录：
 
 ```bash
 mkdir -p /path/to/workspace
@@ -82,11 +81,14 @@ curl -fL --retry 3 \
 curl -fL --retry 3 \
   -o /path/to/workspace/imagenette2-320.parquet \
   https://huggingface.co/datasets/johnowhitaker/imagenette2-320/resolve/main/data/train-00000-of-00001.parquet
+sha256sum /path/to/workspace/mobilenetv2-12.onnx \
+  /path/to/workspace/imagenette2-320.parquet \
+  > /path/to/workspace/EXTERNAL_INPUTS_SHA256SUMS
 ```
 
-网络受限环境可按部署策略配置代理或替换为可信的公开镜像源，但文件内容应与上述
-来源一致。进入容器后生成静态 batch=1 模型和互不重叠的校准/验证样本，再运行
-PTQ：
+外部输入由上游项目维护，`EXTERNAL_INPUTS_SHA256SUMS` 记录本次运行使用的文件身份。
+网络环境可以按部署策略使用代理或可信公开镜像源。进入容器后生成静态 batch=1 模型
+和互相独立的校准、验证样本，再运行 PTQ：
 
 ```bash
 cp -a /opt/rx-met/examples /workspace/rx-met-examples
@@ -99,9 +101,10 @@ export RX_MET_ONNX_PTQ_ROOT=/workspace/datasets
 python3 onnx_ptq_quick_start.py
 ```
 
-该路径默认使用 ONNX Runtime `CUDAExecutionProvider`，provider 缺失时直接报错。
-只有 CPU 调试时才显式设置 `RX_MET_ONNX_PTQ_DEVICE=cpu`。数据集、模型和输出不应
-打入镜像层，应通过 volume 挂载或写入 `/workspace`。
+日志输出“量化流程完成”及 metadata 路径并返回退出码 0，表示 ONNX PTQ 示例完成。
+该路径默认使用 ONNX Runtime `CUDAExecutionProvider`。CPU 调试通过
+`RX_MET_ONNX_PTQ_DEVICE=cpu` 启用。数据集、模型和输出通过 volume 挂载或写入
+`/workspace`。
 
 ## 环境检查
 

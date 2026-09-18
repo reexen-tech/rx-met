@@ -1,7 +1,7 @@
 # examples/config 配置说明（小模型）
 
-本目录 JSON 给 AIMET QuantSim / 混合精度用，字段和 ONNX 直量化共用。
-路径一律填容器内路径（例如 `/datasets/...`），不要填宿主机绝对路径。
+本目录 JSON 用于 AIMET QuantSim 和混合精度配置，Torch 与 ONNX 直量化流程共用。
+配置文件中的数据路径使用容器内路径，例如 `/datasets/...`。
 
 | 文件 | 用途 | 入口 |
 | --- | --- | --- |
@@ -12,20 +12,24 @@
 
 ## 1. 基础配置（QuantSim）
 
-控制是否量化、per-channel、对称性。计算类算子（Conv / Gemm / Add / Relu / BN）默认打开输入 + 输出量化。
-要关掉某个计算类，用下一节的 `disable_quantization`。`QuantGRU` 走 `GRU_config`。
+控制是否量化、per-channel 和对称性。计算类算子（Conv / Gemm / Add / Relu / BN）
+默认打开输入和输出量化。`disable_quantization` 控制指定计算类的量化开关，
+`GRU_config` 控制 QuantGRU。
 
 ## 2. 阶段配置（混合精度位宽）
 
 匹配优先级（高 → 低）：
 
 1. `layer_name_config` 精确名
-2. `layer_name_config` 通配符（`*`）
-3. `layer_type_config`（`type(module).__name__`，如 `QuantizedConv2d`）
+2. `layer_type_config`（`type(module).__name__`，如 `QuantizedConv2d`）
+3. `layer_name_config` 通配符（`*`）
 4. `default_bitwidth` / `default_config`
 
-`layer_type_config` 的 key 与 `sim.model` 中 `type(module).__name__` 对应。
+`layer_type_config` 的 key 与 `sim.model` 中 `type(module).__name__` 对应。通配符规则在
+模块缺少类型规则时生效。
 
 ## 3. `GRU_config`
 
 放在阶段配置里，控制 QuantGRU 内部算子：`bitwidth`、`is_symmetric`、`is_unsigned`、`quantization_granularity`（`PER_TENSOR` / `PER_GATE` / `PER_CHANNEL`）。
+
+完整字段说明见 [`docs/Quant_config.md`](../../docs/Quant_config.md)。
