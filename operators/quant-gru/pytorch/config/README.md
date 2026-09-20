@@ -1,371 +1,181 @@
-# GRU 量化位宽配置文件说明
+# QuantGRU 配置说明
 
-本文档介绍如何配置 `gru_quant_bitwidth_config.json` 文件来自定义 GRU 量化的位宽设置。
+本目录保存 [gru_quant_bitwidth_config.json](gru_quant_bitwidth_config.json)，用于
+`QuantGRU.load_bitwidth_config()`。完整使用流程见[模块 README](../../README.md)，
+算子计算与 scale 推导见[量化计算流程](../../docs/GRU量化计算流程.md)。
 
----
+## 配置层次
 
-## 设计原则
+`GRU_config.default_config` 控制量化开关和 scale 模式，
+`GRU_config.operator_config` 控制各算子的位宽、对称性和粒度。
 
-### 1. 配置字段说明
-
-| 字段 | 类型 | 默认值 | 说明 |
-|------|------|--------|------|
-| `bitwidth` | int | 8 | 位宽 (1-32) |
-| `is_symmetric` | bool | true | 是否对称量化 (true: zp=0, false: zp≠0) |
-| `is_unsigned` | bool | false | 是否无符号量化 (false: INT, true: UINT) |
-| `quantization_granularity` | string | "PER_CHANNEL" | 量化粒度（仅权重类算子支持：PER_TENSOR/PER_GATE/PER_CHANNEL） |
-
-### 2. is_unsigned 设计原则
-
-**只标记例外情况**：默认所有算子使用 INT（有符号），只有特殊算子需要显式标记 `is_unsigned: true`
-
-```json
-// 常见情况（INT）：无需配置 is_unsigned
-"new_gate_output": { "bitwidth": 8, "is_symmetric": false }
-
-// 特殊情况（UINT）：显式标记
-"update_gate_output": { "bitwidth": 8, "is_symmetric": false, "is_unsigned": true }
-```
-
-**UINT 适用场景**：
-- Sigmoid 输出 (`update_gate_output`, `reset_gate_output`)：范围 [0, 1]，使用 UINT 可充分利用量化范围
-
-### 3. is_symmetric 与 is_unsigned 解耦
-
-这两个配置**独立控制**不同方面：
-
-| 配置 | 控制内容 | 说明 |
-|------|----------|------|
-| `is_symmetric` | zero_point 计算 | true: zp=0, false: zp≠0 |
-| `is_unsigned` | 量化范围类型 | false: INT, true: UINT |
-
-**组合示例**（8bit）：
-
-| is_symmetric | is_unsigned | 量化范围 | 典型场景 |
-|--------------|-------------|----------|----------|
-| true | false | INT8: [-128, 127], zp=0 | 权重 |
-| false | false | INT8: [-128, 127], zp≠0 | 一般激活值 |
-| false | true | UINT8: [0, 255], zp≠0 | Sigmoid 输出 |
-| true | true | UINT8: [0, 255], zp=0 | 特殊场景 |
-
----
-
-## GRU 公式
-
-### 标准 GRU 计算流程
-
-```
-输入: x[t] (当前输入), h[t-1] (上一时刻隐藏状态)
-输出: h[t] (当前隐藏状态)
-
-z[t] = σ(W_z @ x[t] + R_z @ h[t-1] + bw_z + br_z)       # 更新门 (update gate)
-r[t] = σ(W_r @ x[t] + R_r @ h[t-1] + bw_r + br_r)       # 重置门 (reset gate)
-g[t] = tanh(W_g @ x[t] + bw_g + r[t] * (R_g @ h[t-1] + br_g))  # 候选状态 (candidate)
-h[t] = z[t] * h[t-1] + (1 - z[t]) * g[t]                # 最终输出
-```
-
-### 计算流程与配置变量对应（命名与 C++ quantize_ops_helper.h 对齐）
-
-```
-步骤1: Linear 层（GEMM+bias 融合）
-├─ weight_ih_linear = weight_ih @ input + bias_ih   → weight_ih_linear
-└─ weight_hh_linear = weight_hh @ output + bias_hh   → weight_hh_linear
-
-步骤2: 更新门 (update gate)
-├─ update_gate_input = weight_ih_linear_z + weight_hh_linear_z   → update_gate_input
-└─ update_gate_output = sigmoid(update_gate_input)               → update_gate_output [UINT]
-
-步骤3: 重置门 (reset gate)
-├─ reset_gate_input = weight_ih_linear_r + weight_hh_linear_r    → reset_gate_input
-└─ reset_gate_output = sigmoid(reset_gate_input)                 → reset_gate_output [UINT]
-
-步骤4: 候选状态 (new gate)
-├─ mul_reset_hidden = r * weight_hh_linear_n                     → mul_reset_hidden
-├─ new_gate_input = weight_ih_linear_n + mul_reset_hidden        → new_gate_input
-└─ new_gate_output = tanh(new_gate_input)                        → new_gate_output
-
-步骤5: 隐状态更新
-├─ one_minus_u = 1 - update_gate_output            → 复用 update_gate_output 的 scale
-├─ mul_old_contribution = u * output[t-1]          → mul_old_contribution
-├─ mul_new_contribution = (1-u) * new_gate_output  → mul_new_contribution
-└─ output[t] = mul_old_contribution + mul_new_contribution
-```
-
----
-
-## 配置文件结构
+以下片段展示配置结构，完整配置以同目录 JSON 为准：
 
 ```json
 {
-  "description": "配置文件描述",
-  "comment": "注释说明",
-  
   "GRU_config": {
-    "default_config": { ... },
-    "operator_config": { ... }
+    "default_config": {
+      "disable_quantization": false,
+      "use_pot2_scale": false
+    },
+    "operator_config": {
+      "input": {
+        "bitwidth": 8,
+        "is_symmetric": true,
+        "is_unsigned": false
+      },
+      "weight_ih": {
+        "bitwidth": 8,
+        "is_symmetric": true,
+        "is_unsigned": false,
+        "quantization_granularity": "PER_CHANNEL"
+      }
+    }
   }
 }
 ```
 
-### 1. default_config（全局配置）
+配置使用标准 JSON。`description` 和 `comment` 字段保存说明文字。
 
-```json
-"default_config": {
-  "disable_quantization": false
-}
+## 全局配置
+
+| 字段 | 配置值与行为 |
+| --- | --- |
+| `disable_quantization` | `false` 设置 `use_quantization=True`，`true` 设置 `use_quantization=False` |
+| `use_pot2_scale` | `false` 使用 affine scale，`true` 使用 Power-of-2 scale |
+
+新建 QuantGRU 的 `use_quantization` 和 `use_pot2_scale` 均为 `False`。
+配置文件省略全局字段时，对应属性沿用实例当前值。
+
+同目录完整 JSON 设置 `disable_quantization=false`、`use_pot2_scale=false`。
+需要 Po2 scale 的配置设置 `use_pot2_scale=true`。Po2 模式采用默认
+`CoverRange` 策略和 2% 容差。
+
+## 算子配置字段
+
+| 字段 | 含义 | 已列出算子省略属性时的取值 |
+| --- | --- | --- |
+| `bitwidth` | 整数量化位宽，范围为 1 至 32 | `8` |
+| `is_symmetric` | `true` 使用对称标定；`false` 按范围计算零点，零点可以为 0 | `true` |
+| `is_unsigned` | `true` 使用无符号范围，`false` 使用有符号范围 | 两个 sigmoid 门输出取 `true`，其余算子取 `false` |
+| `quantization_granularity` | 权重、偏置的 scale 粒度 | `PER_CHANNEL` |
+
+加载规则按配置层次执行：
+
+- 省略整个算子条目时，实例保留该算子的当前配置。
+- 算子条目存在时，加载器按上表补齐省略的属性。
+- 新建实例的初始配置来自 C++ `OperatorQuantConfig`，具体值见下一节。
+- 同目录完整 JSON 显式设置各算子的 `is_symmetric=true`，两个 sigmoid 门输出设置
+  `is_unsigned=true`。
+
+权重和偏置要求 `is_symmetric=true`。32 位量化使用 INT32 整数范围。校准和执行的
+有效范围还受存储类型、累加宽度和模型数值分布约束。
+
+## 算子名称与初始配置
+
+以下表格描述新建实例在加载 JSON 之前的配置。所有条目的初始位宽均为 8。
+
+| JSON 算子名称 | 用途 | `is_symmetric` | `is_unsigned` |
+| --- | --- | --- | --- |
+| `input` | 当前输入序列 | `false` | `false` |
+| `output` | 每个时间步的隐藏状态 | `false` | `false` |
+| `weight_ih`、`weight_hh` | 输入权重、循环权重 | `true` | `false` |
+| `bias_ih`、`bias_hh` | 输入偏置、循环偏置 | `true` | `false` |
+| `weight_ih_linear`、`weight_hh_linear` | 两路矩阵乘与偏置相加结果 | `false` | `false` |
+| `update_gate_input`、`reset_gate_input` | sigmoid 输入 | `false` | `false` |
+| `update_gate_output`、`reset_gate_output` | sigmoid 输出 | `false` | `true` |
+| `new_gate_input` | tanh 输入 | `false` | `false` |
+| `new_gate_output` | tanh 输出 | `true` | `false` |
+| `mul_reset_hidden` | 重置门与隐藏线性结果的乘积 | `false` | `false` |
+| `mul_old_contribution` | 更新门与旧隐藏状态的乘积 | `false` | `false` |
+| `mul_new_contribution` | 候选状态对新隐藏状态的贡献 | `false` | `false` |
+
+三个 `mul_*` 条目仍用于配置、校准与参数表示。执行内核将这些乘积直接对齐到目标
+量化空间，计算关系见[量化计算流程](../../docs/GRU量化计算流程.md)。
+
+`weight_ih`、`weight_hh`、`bias_ih` 和 `bias_hh` 支持以下粒度：
+
+| 粒度 | scale 共享范围 |
+| --- | --- |
+| `PER_TENSOR` | 整个参数张量 |
+| `PER_GATE` | 每个门，合计三个 scale |
+| `PER_CHANNEL` | 每个门的每个输出通道，合计 `3 * hidden_size` 个 scale |
+
+## Scale 与整数范围
+
+实数与量化整数的关系为：
+
+```text
+q = clamp(round(x / scale + zero_point), qmin, qmax)
+x_hat = scale * (q - zero_point)
 ```
 
-| 字段 | 类型 | 默认值 | 说明 |
-|------|------|--------|------|
-| `disable_quantization` | bool | `false` | 是否禁用量化。设为 `true` 时忽略所有量化配置，使用浮点计算 |
+affine 模式保存连续 scale，定点执行时将缩放比编码为乘子和移位。Po2 模式的 scale
+为 `2^-n`，按默认 `CoverRange` 规则生成。
 
-### 2. operator_config（算子配置）
+| 位宽 | 有符号范围 | 无符号范围 |
+| --- | --- | --- |
+| 1 至 31 | `[-2^(b-1), 2^(b-1)-1]` | `[0, 2^b-1]` |
+| 32 | `[-2147483648, 2147483647]` | 按 INT32 范围处理 |
 
-每个算子的配置格式：
+## 加载和调整
 
-```json
-"算子名称": {
-  "bitwidth": 8,                    // 位宽（1-32）
-  "is_symmetric": true,              // 是否对称量化
-  "is_unsigned": false,              // 是否无符号量化（可选，默认 false）
-  "quantization_granularity": "PER_CHANNEL",  // 量化粒度（仅权重类算子支持，可选）
-  "comment": "说明"                  // 注释（可选）
-}
-```
-
-**字段说明**：
-- `bitwidth`：位宽，范围 1-32
-- `is_symmetric`：是否对称量化（true: zp=0, false: zp≠0）
-- `is_unsigned`：是否无符号量化（false: INT, true: UINT，默认 false）
-- `quantization_granularity`：量化粒度（仅 `weight_ih`, `weight_hh`, `bias_ih`, `bias_hh` 支持）
-  - `"PER_TENSOR"`：整个 tensor 一个 scale
-  - `"PER_GATE"`：每个门（z/r/n）一个 scale
-  - `"PER_CHANNEL"`：每个输出通道一个 scale（默认）
-
-### 3. 算子列表
-
-#### 输入/输出类
-
-| 算子名 | 说明 | 推荐配置 |
-|--------|------|----------|
-| `input` | 输入序列 | `is_symmetric: false` |
-| `output` | 隐藏状态输出 | `is_symmetric: false` |
-
-#### 权重类（per-channel 量化）
-
-| 算子名 | 说明 | 推荐配置 |
-|--------|------|----------|
-| `weight_ih` | 输入权重矩阵 | `is_symmetric: true`, `quantization_granularity: "PER_CHANNEL"` |
-| `weight_hh` | 循环权重矩阵 | `is_symmetric: true`, `quantization_granularity: "PER_CHANNEL"` |
-| `bias_ih` | 输入偏置 | `is_symmetric: true`, `quantization_granularity: "PER_CHANNEL"` |
-| `bias_hh` | 循环偏置 | `is_symmetric: true`, `quantization_granularity: "PER_CHANNEL"` |
-
-**量化粒度说明**（仅权重类算子支持）：
-- `PER_TENSOR`：整个 tensor 使用一个 scale（所有通道共享）
-- `PER_GATE`：每个门（z/r/n）使用一个 scale（3 个不同的 scale）
-- `PER_CHANNEL`：每个输出通道使用一个 scale（默认，精度最高）
-
-#### Linear 层类（GEMM+bias 融合）
-
-| 算子名 | 说明 | 推荐配置 |
-|--------|------|----------|
-| `weight_ih_linear` | weight_ih*input + bias_ih 输出 | `is_symmetric: false` |
-| `weight_hh_linear` | weight_hh*output + bias_hh 输出 | `is_symmetric: false` |
-
-#### 门控类
-
-| 算子名 | 说明 | 量化类型 | 推荐配置 |
-|--------|------|----------|----------|
-| `update_gate_input` | 更新门 sigmoid 前 | INT | `is_symmetric: false` |
-| `update_gate_output` | 更新门 sigmoid 后 [0,1] | **UINT** | `is_symmetric: false, is_unsigned: true` |
-| `reset_gate_input` | 重置门 sigmoid 前 | INT | `is_symmetric: false` |
-| `reset_gate_output` | 重置门 sigmoid 后 [0,1] | **UINT** | `is_symmetric: false, is_unsigned: true` |
-| `new_gate_input` | 候选门 tanh 前 | INT | `is_symmetric: false` |
-| `new_gate_output` | 候选门 tanh 后 [-1,1] | INT | `is_symmetric: false` |
-
-#### 运算类
-
-| 算子名 | 说明 | 推荐配置 |
-|--------|------|----------|
-| `mul_reset_hidden` | r * weight_hh_linear 元素乘法 | `is_symmetric: false` |
-| `mul_old_contribution` | u * output 旧状态贡献 | `is_symmetric: false` |
-| `mul_new_contribution` | (1-u) * n 新状态贡献 | `is_symmetric: false` |
-
----
-
-## 使用方法
-
-### Python 端
+配置加载位于校准之前，已校准或已加载量化参数的实例会跳过
+`load_bitwidth_config()`。重新标定使用以下顺序：
 
 ```python
-from quant_gru import QuantGRU
+import torch
 
-# 1. 创建 GRU 并加载配置
-gru = QuantGRU(input_size=64, hidden_size=128)
-gru.load_bitwidth_config("config/gru_quant_bitwidth_config.json")
-
-# 2. 校准
+gru.set_quant_params_locked(False)
+gru.reset_calibration()
+gru.load_bitwidth_config(
+    "pytorch/config/gru_quant_bitwidth_config.json"
+)
 gru.calibrating = True
-for batch in calibration_loader:
-    gru(batch)
+with torch.no_grad():
+    for inputs in calibration_loader:
+        gru(inputs.to(device="cuda", dtype=torch.float32))
 gru.calibrating = False
 gru.finalize_calibration()
-
-# 3. 推理
-gru.use_quantization = True
-output, h_n = gru(input_data)
 ```
 
-**不使用 JSON 配置时**：
+以上片段从 QuantGRU 目录解析路径。`gru` 为已创建的 CUDA QuantGRU 实例，
+`calibration_loader` 返回与该实例输入布局一致的代表性张量。
+
+`set_all_bitwidth(bitwidth, is_symmetric=True)` 设置统一位宽和激活对称性，权重、
+偏置保持对称。已有标定参数可通过 `adjust_quant_config()` 显式设置
+`bitwidth`、`is_symmetric`、`scale` 和 `zero_point`。修改位宽后，调用方负责
+提供配套 scale 或重新标定，并验证输出变化。
+
+`get_quant_config()` 返回当前位宽和对称性。标定完成后，结果还包含可用的
+`scale` 和 `zero_point`。权重、偏置 scale 以逐通道数组表示：
 
 ```python
-gru = QuantGRU(input_size=64, hidden_size=128)
-
-# 设置位宽（可选，默认全部 8bit 对称量化）
-gru.set_all_bitwidth(8)                # 全部 8bit 对称量化
-# gru.set_all_bitwidth(16, False)      # 全部 16bit 非对称量化
-
-# 校准
-gru.calibrating = True
-for batch in calibration_loader:
-    gru(batch)
-gru.calibrating = False
-gru.finalize_calibration()
-
-# 开启量化并推理
-gru.use_quantization = True
-output, h_n = gru(input_data)
-```
-
-### 导出/导入量化参数
-
-```python
-# 导出量化参数
-gru.export_quant_params("quant_params.json")
-
-# 导入量化参数（无需重新校准）
-gru2 = QuantGRU(input_size=64, hidden_size=128)
-gru2.load_state_dict(gru.state_dict(), strict=False)  # 加载权重
-gru2.load_quant_params("quant_params.json")           # 加载量化参数
-
-# 调整单个算子配置
-gru.adjust_quant_config("update_gate_output", bitwidth=14)  # 修改位宽，自动调整 scale
-
-# 获取算子配置
 config = gru.get_quant_config("update_gate_output")
-print(config)  # {'bitwidth': 14, 'is_symmetric': False, 'shift': ..., ...}
+print(config["bitwidth"], config["is_symmetric"])
+print(config.get("scale"), config.get("zero_point"))
 ```
 
----
+## 校准与执行属性
 
-## 配置示例
+这些属性在 Python 实例上设置：
 
-### 示例 1: 完整配置（所有算子）
+| 属性 | 初始值 | 用途 |
+| --- | --- | --- |
+| `calibration_method` | `"minmax"` | MinMax 范围统计；`"sqnr"` 使用直方图误差搜索；`"percentile"` 使用百分位裁剪 |
+| `percentile_value` | `100.0` | Percentile 校准百分位 |
+| `quant_storage_dtype` | `"float32"` | 量化值以 float32 存储；`"int32"` 进入整数存储路径 |
+| `calibrating` | `False` | 收集校准数据 |
+| `export_mode` | `False` | ONNX 图导出 |
 
-```json
-{
-  "GRU_config": {
-    "default_config": { "disable_quantization": false },
-    "operator_config": {
-      "input":                 { "bitwidth": 8, "is_symmetric": false, "is_unsigned": false },
-      "output":                { "bitwidth": 8, "is_symmetric": false, "is_unsigned": false },
-      "weight_ih":             { "bitwidth": 8, "is_symmetric": true,  "is_unsigned": false, "quantization_granularity": "PER_CHANNEL" },
-      "weight_hh":             { "bitwidth": 8, "is_symmetric": true,  "is_unsigned": false, "quantization_granularity": "PER_CHANNEL" },
-      "bias_ih":               { "bitwidth": 8, "is_symmetric": true,  "is_unsigned": false, "quantization_granularity": "PER_CHANNEL" },
-      "bias_hh":               { "bitwidth": 8, "is_symmetric": true,  "is_unsigned": false, "quantization_granularity": "PER_CHANNEL" },
-      "weight_ih_linear":      { "bitwidth": 8, "is_symmetric": false, "is_unsigned": false },
-      "weight_hh_linear":      { "bitwidth": 8, "is_symmetric": false, "is_unsigned": false },
-      "update_gate_input":     { "bitwidth": 8, "is_symmetric": false, "is_unsigned": false },
-      "update_gate_output":    { "bitwidth": 8, "is_symmetric": false, "is_unsigned": true },
-      "reset_gate_input":      { "bitwidth": 8, "is_symmetric": false, "is_unsigned": false },
-      "reset_gate_output":     { "bitwidth": 8, "is_symmetric": false, "is_unsigned": true },
-      "new_gate_input":        { "bitwidth": 8, "is_symmetric": false, "is_unsigned": false },
-      "new_gate_output":       { "bitwidth": 8, "is_symmetric": false, "is_unsigned": false },
-      "mul_reset_hidden":      { "bitwidth": 8, "is_symmetric": false, "is_unsigned": false },
-      "mul_old_contribution":     { "bitwidth": 8, "is_symmetric": false, "is_unsigned": false },
-      "mul_new_contribution":   { "bitwidth": 8, "is_symmetric": false, "is_unsigned": false }
-    }
-  }
-}
-```
+## 错误与验证
 
-### 示例 2: 简洁配置（只标记例外）
+| 条件 | 结果与处理 |
+| --- | --- |
+| JSON 含未知算子名 | 加载器抛出 `ValueError`，并列出支持的名称 |
+| 位宽超出 1 至 32 | 加载器抛出 `ValueError` |
+| 权重或偏置采用非对称配置 | 校准接口报告配置错误；参数使用 `is_symmetric=true` |
+| 量化启用时缺少校准数据和量化参数 | 前向报告校准状态错误；先完成校准或加载导出参数 |
+| 配置或校准数据变化 | 参数更新后重新评估误差、范围覆盖和保存重载一致性 |
 
-```json
-{
-  "GRU_config": {
-    "operator_config": {
-      "update_gate_output": { "bitwidth": 8, "is_symmetric": false, "is_unsigned": true },
-      "reset_gate_output":  { "bitwidth": 8, "is_symmetric": false, "is_unsigned": true }
-    }
-  }
-}
-```
-
-> **说明**：未配置的算子使用 C++ 默认值（8bit INT）
-
-### 示例 3: 混合精度配置
-
-```json
-{
-  "GRU_config": {
-    "operator_config": {
-      "weight_ih":           { "bitwidth": 16, "is_symmetric": true,  "is_unsigned": false, "quantization_granularity": "PER_CHANNEL" },
-      "weight_hh":           { "bitwidth": 16, "is_symmetric": true,  "is_unsigned": false, "quantization_granularity": "PER_CHANNEL" },
-      "weight_ih_linear":   { "bitwidth": 16, "is_symmetric": false, "is_unsigned": false },
-      "weight_hh_linear":   { "bitwidth": 16, "is_symmetric": false, "is_unsigned": false },
-      "update_gate_output": { "bitwidth": 8,  "is_symmetric": false, "is_unsigned": true },
-      "reset_gate_output":  { "bitwidth": 8,  "is_symmetric": false, "is_unsigned": true }
-    }
-  }
-}
-```
-
----
-
-## 量化公式参考
-
-### 量化与反量化
-
-```
-量化：   int_value = round(float_value / scale) + zero_point
-反量化： float_value = scale × (int_value - zero_point)
-
-其中： scale = 2^(-shift)
-```
-
-### 量化范围
-
-| 类型 | is_unsigned | 8bit 范围 | 公式 |
-|------|-------------|-----------|------|
-| INT | false | [-128, 127] | [-2^(n-1), 2^(n-1)-1] |
-| UINT | true | [0, 255] | [0, 2^n-1] |
-
-### 对称 vs 非对称
-
-| 类型 | zero_point | 优点 | 缺点 |
-|------|------------|------|------|
-| 对称 | `zp = 0` | 计算简单高效 | 对非对称分布浪费量化范围 |
-| 非对称 | `zp ≠ 0` | 充分利用量化范围 | 需要额外处理零点偏移 |
-
----
-
-## 注意事项
-
-1. **sigmoid 输出**（`update_gate_output`, `reset_gate_output`）：
-   - 默认使用 UINT 类型（`is_unsigned: true`）
-   - 建议 `is_symmetric: false`（范围 [0,1] 不对称）
-
-2. **tanh 输出**（`new_gate_output`）：
-   - 范围 [-1,1] 理论上对称
-   - 使用 INT 类型（默认，无需配置 `is_unsigned`）
-
-3. **权重**：
-   - 建议 `is_symmetric: true`
-   - 权重分布通常接近对称，无需存储零点
-
-4. **位宽配置需在校准前加载**
-
-5. **高级用法**：可手动调用 `finalize_calibration(verbose=True)` 查看校准详情
-
----
+性能与精度结果记录模型、校准数据、位宽、scale 模式和执行后端。

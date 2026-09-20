@@ -2161,7 +2161,7 @@ class QuantGRU(nn.Module):
     #
     # 说明：以下方法供 aimet_torch.fixed_point.quantgru_adapter 黑盒调用。
     # adapter 通过检测 QuantGRU 类是否原生实现这些方法来决定走原生还是 stub。
-    # 契约文档：rxmet/doc/QuantGRU_INT16接入计划.md 第 1 章（已冻结 v1）。
+    # QuantGRU 纯定点输入输出契约 v1。
 
     # AIMET ExecutionMode 对应的 mode 字符串（须与 aimet_capabilities 一致）
     _AIMET_SUPPORTED_MODES = (

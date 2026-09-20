@@ -1878,8 +1878,8 @@ void updateGRUQuantizationRangesGPU(
     // 隐藏状态 h 的范围（跳过 h0，全局极值）
     // 前提：这里无条件跳过 h[0]（初始隐藏状态），假设 h0 恒为零（无状态 GRU）。
     //   - 当 h0=0/None 时跳过是正确且更优的：避免一堆 0 把 min_h_/max_h_ 拉向 0、
-    //     浪费量化分辨率。rxmet 实际接入路径（MRNN 等）正是这种情形——校准/推理
-    //     均只传 input，h0 走内部零初始化，且 h_n 被丢弃、不跨 step 传递。
+    //     浪费量化分辨率。当前无状态使用路径在校准和推理时只传 input，h0 走
+    //     内部零初始化，且 h_n 被丢弃、不跨 step 传递。
     //   - 已知限制：若未来出现有状态/流式 GRU，校准阶段会传入非零 h0，则 h0 的
     //     数值范围不会进入 min_h_/max_h_，而推理时 h0 仍按 scale_h/zp_h 量化，
     //     超出范围部分会被 clamp 造成精度损失。届时需改为「按需纳入 h0」：
@@ -1951,5 +1951,4 @@ void updateGRUQuantizationRangesGPU(
         quant_ranges.min_mul_old_contribution_, quant_ranges.max_mul_old_contribution_,
         stream);
 }
-
 

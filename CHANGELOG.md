@@ -13,6 +13,7 @@
 
 ### Changed
 
+- 更新 QuantGRU 使用、配置和计算流程文档，合并 PWL 说明并清理历史算法草稿。
 - 将 AIMET Python 包整理到 `src/`，将 AIMET 原生实现放在 `native/`，并将
   QuantGRU 放在 `operators/quant-gru/`。安装后继续沿用现有 Python import 名和
   wheel 名。
@@ -27,6 +28,7 @@
 
 ### Fixed
 
+- 修复 QuantGRU CPU 参考实现引用缺失测试源码导致的 CMake 配置失败。
 - 修复 ONNX PTQ 快速示例读取错误 `rxmet_encodings` 字段的问题。
 
 ## [1.0.0] - 2026-09-02
