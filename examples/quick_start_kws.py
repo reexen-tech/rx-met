@@ -889,8 +889,6 @@ def main():
     with stage("步骤 5: Power-of-2 量化", timings):
         apply_power_of_2_workflow(
             sim.model,
-            method="round",
-            tolerance=0.02,
             align_bias_scale=True,
             verbose=True,
         )

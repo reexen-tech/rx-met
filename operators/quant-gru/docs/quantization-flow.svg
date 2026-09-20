@@ -1,0 +1,100 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="960" height="920" viewBox="0 0 960 920">
+  <defs>
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto">
+      <path d="M0,0 L0,6 L9,3 z" fill="#334155"/>
+    </marker>
+    <style>
+      .title { font: 700 26px sans-serif; fill: #172033; }
+      .label { font: 600 16px sans-serif; fill: #172033; }
+      .small { font: 14px sans-serif; fill: #475569; }
+      .box { stroke: #334155; stroke-width: 2; rx: 6; }
+      .edge { fill: none; stroke: #334155; stroke-width: 2; marker-end: url(#arrow); }
+      .linear { fill: #dbeafe; }
+      .align { fill: #fef3c7; }
+      .activation { fill: #dcfce7; }
+      .multiply { fill: #ffedd5; }
+      .state { fill: #ede9fe; }
+    </style>
+  </defs>
+
+  <rect width="960" height="920" fill="#ffffff"/>
+  <text x="480" y="40" text-anchor="middle" class="title">QuantGRU 量化前向数据流</text>
+
+  <rect x="560" y="70" width="160" height="48" class="box state"/>
+  <text x="640" y="100" text-anchor="middle" class="label">x_t / input</text>
+  <rect x="120" y="70" width="180" height="48" class="box state"/>
+  <text x="210" y="100" text-anchor="middle" class="label">h_(t-1) / hidden</text>
+
+  <rect x="540" y="150" width="200" height="56" class="box linear"/>
+  <text x="640" y="175" text-anchor="middle" class="label">W x_t + b_ih</text>
+  <text x="640" y="195" text-anchor="middle" class="small">input linear: a_z, a_r, a_n</text>
+  <rect x="100" y="150" width="220" height="56" class="box linear"/>
+  <text x="210" y="175" text-anchor="middle" class="label">R h_(t-1) + b_hh</text>
+  <text x="210" y="195" text-anchor="middle" class="small">recurrent linear: b_z, b_r, b_n</text>
+
+  <path d="M640 118 L640 150" class="edge"/>
+  <path d="M210 118 L210 150" class="edge"/>
+
+  <rect x="120" y="270" width="180" height="52" class="box align"/>
+  <text x="210" y="301" text-anchor="middle" class="label">对齐并相加: r_pre</text>
+  <rect x="390" y="270" width="180" height="52" class="box align"/>
+  <text x="480" y="301" text-anchor="middle" class="label">对齐并相加: z_pre</text>
+
+  <path d="M210 206 L210 270" class="edge"/>
+  <path d="M640 206 L640 235 L270 235 L270 270" class="edge"/>
+  <path d="M210 206 L210 235 L430 235 L430 270" class="edge"/>
+  <path d="M640 206 L640 235 L530 235 L530 270" class="edge"/>
+
+  <rect x="140" y="350" width="140" height="52" class="box activation"/>
+  <text x="210" y="382" text-anchor="middle" class="label">sigmoid → r</text>
+  <rect x="410" y="350" width="140" height="52" class="box activation"/>
+  <text x="480" y="382" text-anchor="middle" class="label">sigmoid → z</text>
+
+  <path d="M210 322 L210 350" class="edge"/>
+  <path d="M480 322 L480 350" class="edge"/>
+
+  <rect x="600" y="350" width="190" height="52" class="box multiply"/>
+  <text x="695" y="382" text-anchor="middle" class="label">r × b_n</text>
+  <path d="M280 376 L600 376" class="edge"/>
+  <path d="M210 206 L210 230 L810 230 L810 376 L790 376" class="edge"/>
+
+  <rect x="590" y="455" width="210" height="52" class="box align"/>
+  <text x="695" y="486" text-anchor="middle" class="label">对齐并相加: n_pre</text>
+  <path d="M695 402 L695 455" class="edge"/>
+  <path d="M640 206 L640 455" class="edge"/>
+
+  <rect x="625" y="550" width="140" height="52" class="box activation"/>
+  <text x="695" y="582" text-anchor="middle" class="label">tanh → n</text>
+  <path d="M695 507 L695 550" class="edge"/>
+
+  <rect x="110" y="650" width="200" height="52" class="box multiply"/>
+  <text x="210" y="682" text-anchor="middle" class="label">z × h_(t-1)</text>
+  <path d="M480 402 L480 620 L270 620 L270 650" class="edge"/>
+  <path d="M210 118 L80 118 L80 676 L110 676" class="edge"/>
+
+  <rect x="390" y="530" width="180" height="52" class="box align"/>
+  <text x="480" y="562" text-anchor="middle" class="label">1 - z</text>
+  <path d="M480 402 L480 530" class="edge"/>
+
+  <rect x="520" y="650" width="200" height="52" class="box multiply"/>
+  <text x="620" y="682" text-anchor="middle" class="label">(1 - z) × n</text>
+  <path d="M480 582 L480 625 L570 625 L570 650" class="edge"/>
+  <path d="M695 602 L695 625 L670 625 L670 650" class="edge"/>
+
+  <rect x="315" y="760" width="240" height="58" class="box state"/>
+  <text x="435" y="787" text-anchor="middle" class="label">对齐并相加: h_t</text>
+  <text x="435" y="807" text-anchor="middle" class="small">输出并作为下一时间步隐藏状态</text>
+  <path d="M210 702 L210 735 L380 735 L380 760" class="edge"/>
+  <path d="M620 702 L620 735 L490 735 L490 760" class="edge"/>
+
+  <rect x="80" y="855" width="28" height="20" class="box linear"/>
+  <text x="120" y="870" class="small">线性变换</text>
+  <rect x="235" y="855" width="28" height="20" class="box align"/>
+  <text x="275" y="870" class="small">网格对齐/加法</text>
+  <rect x="430" y="855" width="28" height="20" class="box activation"/>
+  <text x="470" y="870" class="small">激活</text>
+  <rect x="555" y="855" width="28" height="20" class="box multiply"/>
+  <text x="595" y="870" class="small">乘法</text>
+  <rect x="680" y="855" width="28" height="20" class="box state"/>
+  <text x="720" y="870" class="small">输入/状态</text>
+</svg>
