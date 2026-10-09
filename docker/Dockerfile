@@ -115,7 +115,6 @@ assert "CUDAExecutionProvider" in onnxruntime.get_available_providers()
 assert f"{sys.version_info.major}.{sys.version_info.minor}" == os.environ["EXPECTED_PYTHON"]
 runpy.run_path("/opt/rx-met/examples/quick_start_kws.py", run_name="verify_rx_met")
 runpy.run_path("/opt/rx-met/examples/onnx_ptq_quick_start.py", run_name="verify_rx_met")
-runpy.run_path("/opt/rx-met/examples/quick_start_lstm.py", run_name="verify_rx_met")
 print("rx-met runtime import check passed", torch.__version__, torch.version.cuda)
 PY
 

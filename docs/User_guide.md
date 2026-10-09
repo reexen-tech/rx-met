@@ -112,7 +112,7 @@ python3 -c "import torch, aimet_torch, aimet_onnx, quant_gru, quant_lstm; print(
 
 ## 5. 量化流程
 
-本章基于 `examples/quick_start_kws.py`（SpeechCommands + QuantGRU 关键词识别），演示 AIMET v2 的完整量化流程。该脚本的 `main()` 内联了标准 AIMET API，可作为接入模板。
+本章基于 `examples/quick_start_kws.py`（Speech Commands + QuantGRU / QuantLSTM 关键词识别），演示 AIMET v2 的完整量化流程。该脚本的 `main()` 内联了标准 AIMET API，可作为接入模板。
 
 ### 5.1 完整流程总览
 
@@ -131,12 +131,18 @@ FP 训练 → prepare_model → QuantizationSimModel + 混合精度位宽
 cp -a /opt/rx-met/examples /workspace/rx-met-examples
 cd /workspace/rx-met-examples
 export RX_MET_SPEECH_COMMANDS_ROOT=/datasets/speech_commands_v0.02
-python3 quick_start_kws.py
+python3 quick_start_kws.py --rnn_type gru
+# 选择 LSTM 时使用同一套流程和配置文件
+python3 quick_start_kws.py --rnn_type lstm
 ```
 
 脚本会依次打印 8 个步骤的耗时与精度汇总（浮点 / PTQ / Po2 / QAT / 重载）。命令
 退出码为 0，并输出“量化流程完成（已通过加载验证）”，即表示示例成功。生成文件位于
-`RX_MET_KWS_OUTPUT_DIR`；未设置时使用 `examples/output/quick_start_kws/`。
+`RX_MET_KWS_OUTPUT_DIR` 指定的根目录下，再按 `gru/`、`lstm/` 分开；未设置时使用
+`examples/output/quick_start_kws/<gru|lstm>/`。也可使用 `--output-dir` 指定根目录。
+默认各训练 1 epoch，仅用于学习流程。校准使用无随机增强的训练集，测试集只用于评估。
+检查点记录网络类型，恢复时严格检查权重、同批样本输出与测试精度；失败返回非零退出码。
+可独立阅读并随包交付的完整说明见 [examples/README.md](../examples/README.md)。
 
 ### 5.3 配置和一致性
 
@@ -150,8 +156,9 @@ python3 quick_start_kws.py
 | **基础配置（JSON 1）** | 创建 `QuantizationSimModel` 时 | 是否量化、per-channel、对称性 | ONNX 算子名（如 `Conv`、`Gemm`、`Add`） |
 | **阶段配置（JSON 2）** | `apply_mixed_precision_bitwidth` 时 | 各层位宽、输入/输出对称性 | AIMET 量化后类名（如 `QuantizedConv2d`、`QuantizedLinear`） |
 
-`QuantGRU` 的位宽和内部算子配置位于阶段配置的 `GRU_config` 中。一次
-`compute_encodings` 前向过程同时完成 QuantGRU 和其他模块的校准。
+`QuantGRU` / `QuantLSTM` 的内部配置分别位于阶段配置的 `GRU_config` /
+`LSTM_config` 中，普通层共用 `layer_type_config`。两种循环层配置可同时存在，
+模型中的算子读取各自配置。一次 `compute_encodings` 前向同时完成循环层和普通层校准。
 重建 QuantSim 时，`prepare_model` 参数、两份配置、默认位宽和量化方案必须与训练侧
 一致；否则量化器名称或参数会错位。
 

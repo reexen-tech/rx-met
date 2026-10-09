@@ -43,7 +43,7 @@ docker run --gpus all --rm \
 
 命令退出码为 0，并打印与镜像变体匹配的 PyTorch 和 CUDA 版本，表示基础环境可用。
 
-完整 KWS 示例需要 Speech Commands v0.02 数据集：
+完整 KWS 示例需要 Speech Commands v0.02 数据集，默认使用 GRU：
 
 ```bash
 docker run --gpus all --rm \
@@ -58,7 +58,10 @@ docker run --gpus all --rm \
     python3 quick_start_kws.py'
 ```
 
-日志输出“量化流程完成（已通过加载验证）”，表示示例运行成功。
+将示例命令中的 `python3 quick_start_kws.py` 改为 `python3 quick_start_kws.py --rnn_type lstm` 即可运行 LSTM。
+两种模式共用量化配置，输出分别存放在 `output/quick_start_kws/gru/` 和 `lstm/`；
+字段说明和完整用法见 [示例说明](examples/README.md)。
+日志输出“量化流程完成（已通过加载验证）”且退出码为 0，表示示例运行成功。
 
 ## 文档与示例
 
@@ -66,7 +69,7 @@ docker run --gpus all --rm \
 | 内容                         | 文档                                            |
 | -------------------------- | --------------------------------------------- |
 | 镜像加载、PyTorch 和 ONNX 使用流程   | [用户使用指南](docs/User_guide.md)                  |
-| QuantSim、混合精度和 QuantGRU 配置 | [量化配置](docs/Quant_config.md)                  |
+| QuantSim、混合精度和 GRU / LSTM 配置 | [量化配置](docs/Quant_config.md)                  |
 | ONNX PTQ 制品和编译器 encodings  | [ONNX PTQ 编译器制品](docs/ONNX_PTQ_COMPILER.md)   |
 | 系统模块、量化数据流和发布架构            | [系统架构](docs/architecture.md)                   |
 | KWS 和 ONNX PTQ 可运行示例       | [示例说明](examples/README.md)                    |

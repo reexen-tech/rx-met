@@ -24,4 +24,4 @@
 
 用户可见行为发生变化时应更新对应指南。实现取舍发生变化时应补充或修订 ADR。
 
-- [QuantLSTM 接入与验证](QuantLSTM_integration.md)：GRU 接入点对照及 `quick_start_lstm.py` 流程。
+- [QuantLSTM 接入与验证](QuantLSTM_integration.md)：GRU 接入点对照及 KWS 的 `--rnn_type lstm` 用法。

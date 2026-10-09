@@ -50,14 +50,17 @@ QuantLSTM 的 `load_quant_config()`、`percentile_value`、量化参数锁和安
 ## 使用与配置
 
 支持单层、`dropout=0`、无 projection、CUDA float32，单向/双向及有/无 bias。
-示例 `examples/quick_start_lstm.py` 演示从 `nn.LSTM` 权重开始，完成 PTQ、一次 QAT、
-导出和回读；随机数据只验证流程，不代表量化精度。
+用户示例统一为 `examples/quick_start_kws.py`，使用真实 Speech Commands v0.02，
+通过 `--rnn_type gru|lstm` 选择循环层，完成浮点训练、PTQ、Po2、QAT、导出和恢复。
+默认每个训练阶段 1 epoch，用于学习流程；随机数据回归保留在 `tests/`。
+运行条件、配置和制品说明随发布包放在 [examples/README.md](../examples/README.md)。
 
 ```bash
-python3 examples/quick_start_lstm.py --bidirectional --output /tmp/lstm-example
+python3 examples/quick_start_kws.py --rnn_type lstm \
+  --data-dir /datasets/speech_commands_v0.02 --output-dir /workspace/output/kws
 ```
 
-阶段配置增加独立节点：
+两种模式共用 `examples/config/quick_start_full_quant.json`，LSTM 读取其中的独立节点：
 
 ```json
 {

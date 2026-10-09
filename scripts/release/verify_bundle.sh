@@ -135,7 +135,6 @@ assert f"{sys.version_info.major}.{sys.version_info.minor}" == os.environ["EXPEC
 
 runpy.run_path("/opt/rx-met/examples/quick_start_kws.py", run_name="verify_rx_met")
 runpy.run_path("/opt/rx-met/examples/onnx_ptq_quick_start.py", run_name="verify_rx_met")
-runpy.run_path("/opt/rx-met/examples/quick_start_lstm.py", run_name="verify_rx_met")
 
 # 使用真实 AIMET ONNX custom op 跑一个最小校准和推理。
 input_info = onnx.helper.make_tensor_value_info(
