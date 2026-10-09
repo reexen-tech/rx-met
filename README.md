@@ -71,6 +71,7 @@ docker run --gpus all --rm \
 | 系统模块、量化数据流和发布架构            | [系统架构](docs/architecture.md)                   |
 | KWS 和 ONNX PTQ 可运行示例       | [示例说明](examples/README.md)                    |
 | QuantGRU 接口和构建             | [QuantGRU](operators/quant-gru/README.md)     |
+| QuantLSTM 接口和独立构建       | [QuantLSTM](operators/quant-lstm/README.md)   |
 | AIMET 原生运行库来源和构建           | [AIMET ONNX 原生运行库](docs/AIMET_ONNX_NATIVE.md) |
 | Docker 构建、验证和发布            | [构建与发布](docs/Release_packaging.md)            |
 
@@ -95,7 +96,7 @@ docker run --gpus all --rm \
 | -------------------- | ---------------------------------------------------- |
 | `src/`               | `aimet_common`、`aimet_onnx` 和 `aimet_torch` Python 包 |
 | `native/`            | AIMET C++/CUDA 原生运行库和 ONNX Runtime custom op         |
-| `operators/`         | QuantGRU 及后续量化替换算子                                   |
+| `operators/`         | QuantGRU、QuantLSTM 量化替换算子                                   |
 | `examples/`          | PyTorch KWS 和 ONNX PTQ 示例                            |
 | `docker/`、`scripts/` | 环境镜像、依赖锁、构建和发布命令                                     |
 | `docs/`              | 用户指南、配置说明、维护者文档和架构决策                                 |

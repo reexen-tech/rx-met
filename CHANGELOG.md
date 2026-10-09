@@ -8,10 +8,16 @@
 
 ### Added
 
+- 在 `operators/quant-lstm/` 原样收录 QuantLSTM 源码、配置、构建脚本、测试和文档，
+  与 QuantGRU 同级维护并支持独立构建。
+
 - 增加独立的环境镜像构建、验证、加载和导出命令。
 - 增加 `CONTRIBUTING.md`，统一公开贡献、测试和文档更新要求。
 
 ### Changed
+
+- 同步 QuantLSTM 上游更新，默认构建 Release CUDA 库并关闭测试和示例，更新使用文档；
+  算子目录不再收录上游 `.github/`、`docker/` 和 `.dockerignore`。
 
 - 更新 QuantGRU 使用、配置和计算流程文档，合并 PWL 说明并清理历史算法草稿。
 - 将 AIMET Python 包整理到 `src/`，将 AIMET 原生实现放在 `native/`，并将
