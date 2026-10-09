@@ -94,10 +94,15 @@ class QuantLSTMIntegrationTest(unittest.TestCase):
                 clone = copy.deepcopy(sim.model)
                 torch.testing.assert_close(clone(self.x), sim.model(self.x))
                 sim.model.train()
+                optimizer = torch.optim.Adam(sim.model.parameters(), lr=1e-4)
+                optimizer.zero_grad()
+                before = sim.model.lstm.weight_ih_l0.detach().clone()
                 value = self.x.clone().requires_grad_()
                 sim.model(value).square().mean().backward()
                 self.assertTrue(torch.isfinite(value.grad).all())
                 self.assertIsNotNone(sim.model.lstm.weight_ih_l0.grad)
+                optimizer.step()
+                self.assertFalse(torch.equal(before, sim.model.lstm.weight_ih_l0))
                 self.assertEqual(document, sim.model.lstm.export_quant_params())
 
     def test_calibration_error_restores_mode(self):
