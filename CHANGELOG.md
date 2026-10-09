@@ -9,7 +9,7 @@
 ### Added
 
 - QuantLSTM 接入 FX/ConnectedGraph、AIMET v2 QuantSim、混合精度、共享校准、Po2、
-  参数锁和 ONNX 导出回读；提供随机数据示例与真实 CUDA 集成测试。
+  参数锁和 ONNX 导出回读；提供 KWS 用户示例与真实 CUDA 集成测试。
 - 发布镜像包含 QuantLSTM wheel，增加构建依赖并将环境版本更新为 `deps-v2`。
 
 - 在 `operators/quant-lstm/` 原样收录 QuantLSTM 源码、配置、构建脚本、测试和文档，
@@ -19,6 +19,9 @@
 - 增加 `CONTRIBUTING.md`，统一公开贡献、测试和文档更新要求。
 
 ### Changed
+
+- KWS 用户示例通过 `--rnn_type gru|lstm` 选择循环层，共用量化配置，输出按网络类型隔离。
+  随机 LSTM 流程检查归入测试，客户说明直接随 examples 交付；发布验收覆盖两种模式。
 
 - 同步 QuantLSTM 上游更新，默认构建 Release CUDA 库并关闭测试和示例，更新使用文档；
   算子目录不再收录上游 `.github/`、`docker/` 和 `.dockerignore`。
@@ -37,6 +40,8 @@
 - 文档按用户指南、配置说明、维护者文档和架构决策重新组织。
 
 ### Fixed
+
+- KWS 校准改用无随机增强的训练集；检查点记录网络类型并严格恢复，恢复验证失败时退出。
 
 - 分阶段检查点同时保存和恢复普通层输入编码，避免回读后重复校准改变模型结果。
 

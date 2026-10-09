@@ -245,7 +245,8 @@ GPU 验收检查 `torch.cuda.is_available()`，运行关闭 CPU 回退的 ONNX R
 session，并运行 AIMET v2 和 QuantGRU CUDA forward/backward。该步骤提供快速冒烟
 检查，完整发布验收还包括真实数据用例。
 
-KWS 完整流程在目标 GPU 上执行，默认使用 GPU 0：
+KWS 完整流程在目标 GPU 上执行，默认使用 GPU 0，并在每个 CUDA 变体中
+分别运行 GRU 和 LSTM。每次运行还检查 ONNX 循环节点及对应 encodings：
 
 ```bash
 ./scripts/release/verify_kws_example.sh \
@@ -262,7 +263,9 @@ ONNX PTQ 完整流程需要显式传入相互匹配的模型和 NPY/NPZ 校准�
   cu118 cu126 cu130
 ```
 
-两个脚本的 `--output-dir` 都有默认值，并会再按 CUDA 变体创建子目录。ONNX PTQ
+两个脚本的 `--output-dir` 都有默认值，并会再按 CUDA 变体创建子目录。
+KWS 在变体目录下继续按 `gru/`、`lstm/` 分隔输出和日志；可用 `--rnn-type gru`
+或 `--rnn-type lstm` 单独验证一种模式，默认 `both`。ONNX PTQ
 以外部模型仓库作为只读输入，KWS 用例使用 Speech Commands 数据。模型输入名、输入
 shape 和校准文件必须一致。
 
