@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 在 NVIDIA CUDA devel builder 中构建 rx-met 和 QuantGRU wheel。
+# 在 NVIDIA CUDA devel builder 中构建 rx-met、QuantGRU 和 QuantLSTM wheel。
 set -euo pipefail
 
 SRC="${RX_MET_SRC:-/opt/rx-met-src}"
@@ -15,7 +15,9 @@ for required in \
     pyproject.toml \
     native/CMakeLists.txt \
     operators/quant-gru/CMakeLists.txt \
-    operators/quant-gru/pytorch/_version.py
+    operators/quant-gru/pytorch/_version.py \
+    operators/quant-lstm/CMakeLists.txt \
+    operators/quant-lstm/pytorch/setup.py
 do
     [[ -f "${SRC}/${required}" ]] \
         || { log "ERROR: source file missing: ${SRC}/${required}"; exit 1; }
@@ -50,6 +52,7 @@ log "build rx-met wheel -> ${OUT}"
 "${RX_MET_PYTHON}" -m pip wheel "${WORKDIR}" \
     -w "${OUT}" --no-deps --no-build-isolation
 ./scripts/internal/build_quant_gru_wheel.sh
+./scripts/internal/build_quant_lstm_wheel.sh
 
 python3 - <<PY
 from pathlib import Path
@@ -67,5 +70,6 @@ names = zipfile.ZipFile(wheels[0]).namelist()
 assert not any(name.startswith("rx_met_llm") for name in names), "rx_met_llm leaked into wheel"
 print("wheel ok", wheels[0].name)
 assert list(out.glob("quant_gru-*.whl")), "missing quant_gru wheel"
+assert list(out.glob("quant_lstm-*.whl")), "missing quant_lstm wheel"
 print("artifact wheels", sorted(p.name for p in out.glob("*.whl")))
 PY

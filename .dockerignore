@@ -15,6 +15,9 @@ docs
 operators/quant-gru/build*
 operators/quant-gru/pytorch/build
 operators/quant-gru/pytorch/lib/*.so
+operators/quant-lstm/build*
+operators/quant-lstm/pytorch/build
+operators/quant-lstm/pytorch/*.so
 
 *.pt
 *.pth

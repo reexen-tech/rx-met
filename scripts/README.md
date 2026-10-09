@@ -42,3 +42,5 @@
 
 完整发布参数和操作流程见
 [`docs/Release_packaging.md`](../docs/Release_packaging.md)。
+
+- `internal/build_quant_lstm_wheel.sh` 构建 QuantLSTM CUDA 原生库和 wheel。

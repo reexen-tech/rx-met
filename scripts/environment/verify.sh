@@ -213,6 +213,7 @@ assert "CUDAExecutionProvider" in onnxruntime.get_available_providers()
 assert f"{sys.version_info.major}.{sys.version_info.minor}" == os.environ["EXPECTED_PYTHON"]
 assert importlib.util.find_spec("aimet_torch") is None
 assert importlib.util.find_spec("quant_gru") is None
+assert importlib.util.find_spec("quant_lstm") is None
 if os.environ["VERIFY_GPU"] == "1":
     input_info = onnx.helper.make_tensor_value_info("input", onnx.TensorProto.FLOAT, [1, 4])
     output_info = onnx.helper.make_tensor_value_info("output", onnx.TensorProto.FLOAT, [1, 4])

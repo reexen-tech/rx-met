@@ -113,6 +113,7 @@ import numpy as np
 import onnx
 import onnxruntime
 import quant_gru
+import quant_lstm
 import torch
 import torchaudio
 import torchvision
@@ -127,12 +128,14 @@ for package, version in expected.items():
     assert actual == version, (package, actual, version)
 assert torch.version.cuda == os.environ["EXPECTED_CUDA"], torch.version.cuda
 assert os.environ["CUDA_VARIANT"] == os.environ["EXPECTED_VARIANT"]
+assert importlib.metadata.version("quant-lstm").endswith("+" + os.environ["EXPECTED_VARIANT"])
 assert importlib.metadata.version("onnxruntime-gpu") == os.environ["EXPECTED_ONNXRUNTIME"]
 assert "CUDAExecutionProvider" in onnxruntime.get_available_providers()
 assert f"{sys.version_info.major}.{sys.version_info.minor}" == os.environ["EXPECTED_PYTHON"]
 
 runpy.run_path("/opt/rx-met/examples/quick_start_kws.py", run_name="verify_rx_met")
 runpy.run_path("/opt/rx-met/examples/onnx_ptq_quick_start.py", run_name="verify_rx_met")
+runpy.run_path("/opt/rx-met/examples/quick_start_lstm.py", run_name="verify_rx_met")
 
 # 使用真实 AIMET ONNX custom op 跑一个最小校准和推理。
 input_info = onnx.helper.make_tensor_value_info(
@@ -226,6 +229,35 @@ if os.environ["VERIFY_GPU"] == "1":
     torch.cuda.synchronize()
     assert value.grad is not None
     print("GPU", torch.cuda.get_device_name(0), "QuantGRU forward/backward OK")
+
+    from quant_lstm import QuantLSTM
+    from aimet_torch.model_preparer import prepare_model
+
+    class LstmSmoke(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.lstm = QuantLSTM(4, 8, batch_first=True, bidirectional=True)
+            self.head = torch.nn.Linear(16, 2)
+
+        def forward(self, value):
+            sequence, _ = self.lstm(value)
+            return self.head(sequence)
+
+    lstm_sim = aimet_v2.quantsim.QuantizationSimModel(
+        prepare_model(LstmSmoke().cuda()), value.detach(), quant_scheme="tf_enhanced",
+        config_file=(
+            "/opt/rx-met/examples/config/"
+            "mrnn_quantsim_config_custom_mixed_precision_v2.json"
+        ),
+    )
+    lstm_sim.model.lstm.use_quantization = True
+    with torch.no_grad(), aimet_v2.nn.compute_encodings(lstm_sim.model):
+        lstm_sim.model(value.detach())
+    assert lstm_sim.model.lstm.is_calibrated()
+    value = value.detach().requires_grad_()
+    lstm_sim.model(value).square().mean().backward()
+    assert value.grad is not None and torch.isfinite(value.grad).all()
+    print("QuantLSTM QuantSim calibration/forward/backward OK")
 
 print("image verification passed", torch.__version__, torch.version.cuda)
 PY

@@ -13,7 +13,7 @@ variable "SOURCE_REVISION" {
 }
 
 variable "ENV_VERSION" {
-  default = "deps-v1"
+  default = "deps-v2"
 }
 
 variable "BUILD_ENV_REPOSITORY" {

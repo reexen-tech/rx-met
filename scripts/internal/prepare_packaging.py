@@ -12,7 +12,7 @@ from pathlib import Path
 def _strip_pyproject(text: str) -> str:
     text = re.sub(
         r"^description = \".*\"\n",
-        'description = "Offline PyTorch / AIMET / QuantGRU quantization toolkit"\n',
+        'description = "Offline PyTorch / AIMET / QuantGRU / QuantLSTM quantization toolkit"\n',
         text,
         count=1,
         flags=re.M,
