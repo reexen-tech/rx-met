@@ -9,6 +9,12 @@ from typing import Dict, List, Any, Optional, Tuple, Set
 from pathlib import Path
 
 
+def _matches_layer_types(module, included=None, excluded=None):
+    names = {cls.__name__ for cls in type(module).mro()}
+    matches = lambda types: any(value in name for value in types for name in names)
+    return not (excluded and matches(excluded)) and (included is None or matches(included))
+
+
 def save_quantizer_encodings(
     sim_model,
     save_path: str,
@@ -62,17 +68,17 @@ def save_quantizer_encodings(
                         }
                         saved_count += 1
         
-        # 保存 output_quantizers (输出量化器)
-        if hasattr(module, 'output_quantizers'):
-            for idx, quantizer in enumerate(module.output_quantizers):
+        # Stage checkpoints must preserve both sides of adjacent ordinary layers.
+        for kind in ("input", "output"):
+            for idx, quantizer in enumerate(getattr(module, f"{kind}_quantizers", [])):
                 if quantizer is not None and quantizer.is_initialized():
                     encoding = quantizer.get_encodings()
                     if encoding is not None:
-                        key = f"{module_name}.output_quantizers.{idx}"
+                        key = f"{module_name}.{kind}_quantizers.{idx}"
                         encodings_dict[key] = {
                             'module_name': module_name,
                             'module_type': module_type,
-                            'quantizer_type': 'output',
+                            'quantizer_type': kind,
                             'quantizer_idx': idx,
                             'scale': _tensor_to_list(encoding.scale),
                             'offset': _tensor_to_list(encoding.offset),
@@ -85,6 +91,14 @@ def save_quantizer_encodings(
                         }
                         saved_count += 1
     
+    from aimet_torch.native_recurrent import named_native_recurrent
+    for name, module, _ in named_native_recurrent(sim_model):
+        if not _matches_layer_types(module, layer_types):
+            continue
+        if module.is_calibrated():
+            module.export_quant_params_to_aimet_format(encodings_dict, module_name=name, for_onnx=False)
+            saved_count += 1
+
     # 保存到文件
     os.makedirs(os.path.dirname(save_path) if os.path.dirname(save_path) else '.', exist_ok=True)
     with open(save_path, 'w', encoding='utf-8') as f:
@@ -147,76 +161,41 @@ def load_quantizer_encodings(
     skipped_count = 0
     loaded_types = set()
     
-    # 尝试导入 QuantGRU
-    try:
-        from quant_gru import QuantGRU
-    except ImportError:
-        try:
-            import sys
-            from pathlib import Path
-            quant_gru_path = (
-                Path(__file__).resolve().parents[2]
-                / "operators"
-                / "quant-gru"
-                / "pytorch"
-            )
-            if quant_gru_path.exists():
-                sys.path.insert(0, str(quant_gru_path))
-            from quant_gru import QuantGRU
-        except ImportError:
-            QuantGRU = None
-    
-    # 先处理 QuantGRU 模块（如果 encodings_dict 包含 activation_encodings）
-    if QuantGRU is not None and "activation_encodings" in encodings_dict:
-        if verbose:
-            print("\n📥 尝试从 AIMET encodings 加载 QuantGRU 量化参数...")
-        
-        for module_name, module in sim_model.named_modules():
-            if isinstance(module, QuantGRU):
-                target_name = getattr(module, 'aimet_onnx_name', None)
-                if not target_name:
-                    # 尝试从 encodings 文件中查找对应的键
-                    # 通常 encodings 中的键就是模块路径名称
-                    if module_name in encodings_dict.get("activation_encodings", {}):
-                        target_name = module_name
-                        # 设置 aimet_onnx_name 以便后续使用
-                        module.aimet_onnx_name = target_name
-                    else:
-                        # 如果找不到，使用模块路径名称作为后备
-                        target_name = module_name
-                        if verbose:
-                            print(f"  ⚠️ 警告：{module_name} 的 aimet_onnx_name 未设置，使用模块路径名称作为后备")
-                
-                loaded_ok = module.load_quant_params_from_aimet_format(
-                    encodings_dict,
-                    module_name=target_name,
-                    verbose=verbose
-                )
-                if loaded_ok:
-                    # QuantGRU 的加载接口只负责恢复量化参数；执行模式由
-                    # AIMET 适配层显式开启，避免底层库产生隐式状态变化。
-                    module.use_quantization = True
-                if loaded_ok and allow_overwrite is not None:
-                    module.set_quant_params_locked(not allow_overwrite)
+    from aimet_torch.native_recurrent import named_native_recurrent
+    recurrent_modules = list(named_native_recurrent(sim_model))
+    native_recurrent_names = {name for name, _, _ in recurrent_modules}
+    for name, module, op in recurrent_modules:
+        if not _matches_layer_types(module, layer_types, exclude_layer_types):
+            continue
+        target_name = getattr(module, 'aimet_onnx_name', None) or name
+        loaded_ok = module.load_quant_params_from_aimet_format(
+            encodings_dict, module_name=target_name, verbose=verbose)
+        if not loaded_ok:
+            if not skip_if_not_found:
+                raise KeyError(f"缺少 {op.module_type.__name__} 量化参数: {name}")
+            skipped_count += 1
+            continue
+        module.use_quantization = True
+        if allow_overwrite is not None:
+            module.set_quant_params_locked(not allow_overwrite)
+        loaded_count += 1
+        loaded_types.add(op.module_type.__name__)
 
-                if loaded_ok:
-                    loaded_count += 1
-                    loaded_types.add("QuantGRU")
-                    if verbose:
-                        print(f"  ✅ {module_name}: 成功加载 QuantGRU 量化参数")
-    
     # 检查 encodings 文件格式：AIMET 标准格式（activation_encodings + param_encodings）
     if "activation_encodings" in encodings_dict or "param_encodings" in encodings_dict:
         if verbose:
             print("\n📝 检测到 AIMET 标准格式 encodings")
-            print("   QuantGRU 参数已加载完成，正在加载 CONV 等 AIMET 量化器...")
+            print("   原生循环层参数已加载完成，正在加载 CONV 等 AIMET 量化器...")
         module_map = {name: m for name, m in sim_model.named_modules()}
         device = _get_model_device(sim_model)
         act = encodings_dict.get("activation_encodings", {})
         param_enc = encodings_dict.get("param_encodings", {})
         gru_module_names = _collect_gru_module_names_from_activation_encodings(act)
+        native_recurrent_names |= gru_module_names
         # 1) 非 GRU 的 activation_encodings：优先用 is_GRU 标记，无则用名字启发式
         for mod_name, enc in act.items():
+            if mod_name in native_recurrent_names:
+                continue
             if _is_gru_activation_by_encoding(enc):
                 continue
             if isinstance(enc, dict) and enc.get("is_GRU") is None and _is_gru_activation_key(mod_name):
@@ -228,6 +207,8 @@ def load_quantizer_encodings(
                 skipped_count += 1
                 continue
             if not isinstance(enc, dict):
+                continue
+            if not _matches_layer_types(module, layer_types, exclude_layer_types):
                 continue
             # input / output: 支持 list、index dict（{"0": {...}}）与旧版扁平 dict
             if hasattr(module, 'input_quantizers'):
@@ -273,7 +254,7 @@ def load_quantizer_encodings(
             if not isinstance(enc, dict):
                 continue
             # 标准做法：param key 形如 "module_name.param_name"，GRU 模块由 is_GRU 已收集
-            if any(key.startswith(g + ".") for g in gru_module_names):
+            if any(key.startswith(g + ".") for g in native_recurrent_names):
                 continue
             rmin = enc.get("real_min")
             rmax = enc.get("real_max")
@@ -285,6 +266,8 @@ def load_quantizer_encodings(
                 continue
             mod_name, param_name = parsed
             module = module_map[mod_name]
+            if not _matches_layer_types(module, layer_types, exclude_layer_types):
+                continue
             if param_name not in module.param_quantizers:
                 skipped_count += 1
                 continue
@@ -302,16 +285,13 @@ def load_quantizer_encodings(
                     raise ValueError(f"参数量化器 encoding 加载失败: {key}")
         if verbose:
             print(f"\n✅ AIMET 格式加载完成: 共加载 {loaded_count} 个量化器")
-        return {
-            'loaded': loaded_count,
-            'skipped': skipped_count,
-            'loaded_types': list(loaded_types)
-        }
-    
     # 创建模块映射
     module_map = {name: module for name, module in sim_model.named_modules()}
     
     for key, encoding_info in encodings_dict.items():
+        # Stage files may contain both operator-owned sections and flat quantizers.
+        if not isinstance(encoding_info, dict) or 'quantizer_type' not in encoding_info:
+            continue
         module_name = encoding_info['module_name']
         module_type = encoding_info.get('module_type', '')
         
@@ -359,10 +339,12 @@ def load_quantizer_encodings(
                 skipped_count += 1
         
         # 加载 output_quantizers
-        elif encoding_info['quantizer_type'] == 'output':
+        elif encoding_info['quantizer_type'] in ('input', 'output'):
+            kind = encoding_info['quantizer_type']
+            quantizers = getattr(module, f'{kind}_quantizers', [])
             quantizer_idx = encoding_info['quantizer_idx']
-            if hasattr(module, 'output_quantizers') and quantizer_idx < len(module.output_quantizers):
-                quantizer = module.output_quantizers[quantizer_idx]
+            if quantizer_idx < len(quantizers):
+                quantizer = quantizers[quantizer_idx]
                 if quantizer is not None:
                     _apply_encoding_to_quantizer(quantizer, encoding_info)
                     _set_quantizer_allow_overwrite(quantizer, allow_overwrite)
@@ -427,6 +409,9 @@ def disable_quantization_by_layer_types(
         if not any(layer_type in module_type for layer_type in layer_types):
             continue
         
+        if hasattr(module, "use_quantization"):
+            module.use_quantization = False
+
         # 禁用 param_quantizers
         if hasattr(module, 'param_quantizers'):
             for param_name, quantizer in module.param_quantizers.items():
@@ -783,7 +768,6 @@ _NON_TRANSPARENT_UNQUANTIZED_MODULE_TYPES = {
     "RNN",
     "RNNCell",
     "OptimizedQuantizableGRU",
-    "QuantGRU",
 }
 
 
@@ -802,7 +786,8 @@ def _is_transparent_call_module(module_name: str, module, transparent_prefixes: 
     if module_type_name in {"Concat", "QuantizedConcat", "FakeQuantizedConcat"}:
         # Concat 是真实的多输入汇聚边界，不能仅因量化器关闭就被当作透明节点穿透。
         return False
-    if module_type_name in _NON_TRANSPARENT_UNQUANTIZED_MODULE_TYPES:
+    from aimet_torch.native_recurrent import native_recurrent_types
+    if isinstance(module, native_recurrent_types()) or module_type_name in _NON_TRANSPARENT_UNQUANTIZED_MODULE_TYPES:
         # 循环层即使当前未挂量化器，也会显著改变张量分布，不能按透明节点穿透。
         return False
     return not _has_active_quantizers(module)

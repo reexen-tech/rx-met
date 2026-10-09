@@ -37,3 +37,5 @@ python3 onnx_ptq_quick_start.py
 命令输出“量化流程完成”及 metadata 路径并返回退出码 0，表示 ONNX PTQ 示例完成。
 详细环境变量和制品说明见 [`docs/User_guide.md`](../docs/User_guide.md) 与
 [`docs/ONNX_PTQ_COMPILER.md`](../docs/ONNX_PTQ_COMPILER.md)。
+
+- [QuantLSTM 接入与验证](../docs/QuantLSTM_integration.md)：GRU 接入点对照及 `quick_start_lstm.py` 流程。

@@ -204,6 +204,10 @@ else:
         torch.nn.PReLU: {("", "PRelu"): {1: "weight"}},
     }
 
+from aimet_torch.native_recurrent import recurrent_operators
+for _operator in recurrent_operators():
+    map_torch_types_to_onnx[_operator.module_type] = [_operator.onnx_type]
+
 onnx_subgraph_op_to_pytorch_module_param_name_index_based = {
     torch.nn.GroupNorm: {(7, "Mul"): {1: "weight"}, (8, "Add"): {1: "bias"}},
     torch.nn.Linear: {(0, "MatMul"): {1: "weight"}, (1, "Add"): {0: "bias"}},

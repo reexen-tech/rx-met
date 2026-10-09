@@ -33,3 +33,8 @@
 放在阶段配置里，控制 QuantGRU 内部算子：`bitwidth`、`is_symmetric`、`is_unsigned`、`quantization_granularity`（`PER_TENSOR` / `PER_GATE` / `PER_CHANNEL`）。
 
 完整字段说明见 [`docs/Quant_config.md`](../../docs/Quant_config.md)。
+
+## QuantLSTM 配置
+
+`LSTM_config` 独立控制 LSTM 量化开关和原生 `quant_config`，在校准前应用。
+示例为 `examples/config/lstm_quant.json`；格式、Po2 和参数锁见 [LSTM 接入说明](../../docs/QuantLSTM_integration.md)。

@@ -129,11 +129,13 @@ def is_compute_op(op_type: str) -> bool:
 def skips_generic_quantizers(module) -> bool:
     """True if the module owns encodings and must not get AIMET I/O/param defaults.
 
-    QuantGRU (and its ``QuantizedQuantGRU`` wrapper) keep encodings in
-    ``GRU_config``; generic QuantSim defaults must not re-enable them.
+    QuantGRU and QuantLSTM (including their Quantized wrappers) keep encodings in
+    ``GRU_config`` / ``LSTM_config``; generic QuantSim defaults must not re-enable them.
     """
     if module is None:
         return False
+    if getattr(module, "owns_quantization", False):
+        return True
     for klass in type(module).mro():
         name = getattr(klass, "__name__", "")
         if name in _SKIP_MODULE_TYPE_NAMES:

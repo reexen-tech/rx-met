@@ -185,6 +185,8 @@ def apply_onnx_mixed_precision_bitwidth(
         print(f"  配置文件: {config_file}")
         if ignored_types:
             print(f"  忽略当前图没有的类型: {ignored_types}")
+        if config.get("LSTM_config"):
+            print("  ONNX PTQ 不执行 QuantLSTM 内部校准，忽略 LSTM_config")
         if config.get("GRU_config"):
             print("  当前 ONNX 图没有 QuantGRU，忽略 GRU_config")
 

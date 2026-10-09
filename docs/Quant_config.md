@@ -216,3 +216,8 @@ load_quantizer_encodings(
 - QAT 前冻结量化参数和 BatchNorm。
 - 重建模型使用与训练侧相同的模型预处理和量化配置。
 - 性能或精度结论包含模型版本、数据集、配置和复现命令。
+
+## QuantLSTM 配置
+
+`LSTM_config` 独立控制 LSTM 量化开关和原生 `quant_config`，在校准前应用。
+示例为 `examples/config/lstm_quant.json`；格式、Po2 和参数锁见 [LSTM 接入说明](QuantLSTM_integration.md)。

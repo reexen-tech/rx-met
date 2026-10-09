@@ -60,25 +60,10 @@ def compute_encodings(model: torch.nn.Module):
         Encodings of the quantizers loaded with :ref:`QuantizationSimModel.load_encodings`
         with ``allow_overwrite=False`` will be kept unchanged.
     """
-    # 尝试导入 QuantGRU（如果已安装）
-    QuantGRU = None
-    try:
-        from quant_gru import QuantGRU
-    except ImportError:
-        pass
-    
-    # 收集所有 QuantGRU 模块（用于上下文管理）
-    quant_gru_modules = []
-    if QuantGRU is not None:
-        for module in model.modules():
-            if isinstance(module, QuantGRU):
-                quant_gru_modules.append(module)
-    
-    # 进入上下文：开启 QuantGRU 校准模式
-    for gru_module in quant_gru_modules:
-        gru_module.calibrating = True
-    
+    from aimet_torch.native_recurrent import calibrate_native_recurrent
+
     with (
+        calibrate_native_recurrent(model),
         _register_zero3_forward_hooks(model, use_dummy_params=False),
         contextlib.ExitStack() as stack,
     ):
@@ -88,20 +73,6 @@ def compute_encodings(model: torch.nn.Module):
                 stack.enter_context(ctx)
 
         yield
-    
-    # 退出上下文：关闭 QuantGRU 校准模式并完成校准
-    for gru_module in quant_gru_modules:
-        gru_module.calibrating = False
-        # 如果已收集校准数据，自动完成校准
-        if gru_module.quant_ranges is not None or (
-            hasattr(gru_module, 'hist_collectors') and 
-            gru_module.hist_collectors is not None and 
-            gru_module.hist_collectors.is_valid()
-        ):
-            try:
-                gru_module.finalize_calibration(verbose=False)
-            except Exception:
-                pass  # 静默失败，避免影响其他模块
 
 
 def compute_param_encodings(model: torch.nn.Module):

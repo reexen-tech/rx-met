@@ -1,0 +1,14 @@
+{
+  "LSTM_config": {
+    "use_quantization": true,
+    "quant_config": {
+      "schema_version": 1,
+      "scale_mode": "affine",
+      "operators": {
+        "cell_state": {"bitwidth": 16},
+        "weight_ih": {"bitwidth": 8, "granularity": "per_channel"},
+        "weight_hh": {"bitwidth": 8, "granularity": "per_channel"}
+      }
+    }
+  }
+}

@@ -81,6 +81,8 @@ ONNX 导出:
 import json
 import math
 import re
+from contextlib import contextmanager
+
 import torch
 import torch.nn as nn
 from typing import Optional, Tuple
@@ -1591,6 +1593,34 @@ class QuantGRU(nn.Module):
             sym_str = "对称" if is_symmetric else "非对称"
             print(f"\n[QuantGRU] 设置所有算子: {bitwidth}bit, 激活值{sym_str}量化, 权重/偏置对称量化")
 
+    owns_quantization = True
+
+    @contextmanager
+    def calibration_context(self):
+        """Manage one PTQ pass, preserving locked grids and restoring flags."""
+        if self._quant_params_locked or self.calibrating:
+            yield
+            return
+        previous = self.calibrating
+        self.reset_calibration()
+        self.calibrating = True
+        try:
+            yield
+            if self.quant_ranges is not None or (
+                self.hist_collectors is not None and self.hist_collectors.is_valid()
+            ):
+                self.finalize_calibration(verbose=False)
+        finally:
+            self.calibrating = previous
+
+    def enable_pot2(self, method="cover_range", tolerance=0.02):
+        """Select GRU's native POT2 encoding; it owns scale derivation."""
+        if self.use_pot2_scale:
+            return
+        if self._quant_params_locked:
+            raise RuntimeError("QuantGRU encodings are locked; cannot change scale mode")
+        self.use_pot2_scale = True
+
     def is_calibrated(self) -> bool:
         """检查是否已完成校准"""
         if self.bidirectional:
@@ -2510,7 +2540,8 @@ class QuantGRU(nn.Module):
         self,
         encodings_dict: dict,
         module_name: str = None,
-        verbose: bool = False
+        verbose: bool = False,
+        *, for_onnx: bool = True,
     ) -> dict:
         """
         将 QuantGRU 的量化参数导出为 AIMET encodings 格式并合并到 encodings_dict
@@ -2521,6 +2552,7 @@ class QuantGRU(nn.Module):
             encodings_dict: AIMET encodings 字典（会被修改）
             module_name: AIMET 分配的模块名称（如果为 None，使用 self._module_name）
             verbose: 是否打印详细信息
+            for_onnx: 统一循环算子接口；GRU 的阶段编码与 ONNX 编码共用格式
         
         Returns:
             更新后的 encodings_dict

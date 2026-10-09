@@ -187,3 +187,6 @@ CUDA 测试需要可用 GPU，真实网络测试还需要 Speech Commands v0.02 
 
 完整入口见[文档导航](docs/README.md)。
 
+rx-met 的 QuantSim、配置、校准和整模型导出流程见 [集成指南](../../docs/QuantLSTM_integration.md)。
+
+算子自身提供的通用接口见 [循环算子集成接口](docs/aimet_integration.md)。

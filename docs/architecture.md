@@ -135,8 +135,8 @@ QuantGRU 位于 [`operators/quant-gru`](../operators/quant-gru/)，通过
 调用 C++/CUDA 实现。量化参数导出与整模型导出通过 `src/aimet_torch/rx_export`
 汇合。
 
-后续量化循环算子以 `operators/` 下的同级模块加入。公共实现会在多个算子形成稳定
-共享接口后提取。
+QuantLSTM 现已通过相同链路接入，独立配置为 `LSTM_config`。
+完整接入点对照、h/c 状态和参数回读协议见 [QuantLSTM 集成](QuantLSTM_integration.md)。
 
 ## 7. AIMET 原生适配器
 
