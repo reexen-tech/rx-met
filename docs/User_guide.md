@@ -16,7 +16,7 @@
 ## 1. rx-met 是什么
 
 rx-met 是面向 Linux x86_64 NVIDIA GPU 的**小模型量化工具包**，包含定制
-AIMET（`aimet_torch`、`aimet_onnx`、`aimet_common`）和 QuantGRU。项目通过独立
+AIMET（`aimet_torch`、`aimet_onnx`、`aimet_common`）和 QuantGRU、QuantLSTM。项目通过独立
 Docker 镜像提供完整运行环境。
 
 | 工作流 | 适用对象 | 底层引擎 | 入口 | 对应章节 |
@@ -87,7 +87,7 @@ docker run --gpus all --rm -it \
 验证环境：
 
 ```bash
-python3 -c "import torch, aimet_torch, aimet_onnx, quant_gru; print(torch.__version__, torch.version.cuda)"
+python3 -c "import torch, aimet_torch, aimet_onnx, quant_gru, quant_lstm; print(torch.__version__, torch.version.cuda)"
 ```
 
 命令退出码为 0，并打印与所选镜像匹配的 PyTorch 和 CUDA 版本，即表示基础环境可用。

@@ -8,6 +8,10 @@
 
 ### Added
 
+- QuantLSTM 接入 FX/ConnectedGraph、AIMET v2 QuantSim、混合精度、共享校准、Po2、
+  参数锁和 ONNX 导出回读；提供随机数据示例与真实 CUDA 集成测试。
+- 发布镜像包含 QuantLSTM wheel，增加构建依赖并将环境版本更新为 `deps-v2`。
+
 - 在 `operators/quant-lstm/` 原样收录 QuantLSTM 源码、配置、构建脚本、测试和文档，
   与 QuantGRU 同级维护并支持独立构建。
 
@@ -33,6 +37,8 @@
 - 文档按用户指南、配置说明、维护者文档和架构决策重新组织。
 
 ### Fixed
+
+- 分阶段检查点同时保存和恢复普通层输入编码，避免回读后重复校准改变模型结果。
 
 - 修复 QuantGRU CPU 参考实现引用缺失测试源码导致的 CMake 配置失败。
 - 修复 ONNX PTQ 快速示例读取错误 `rxmet_encodings` 字段的问题。

@@ -1,14 +1,14 @@
 # rx-met
 
 rx-met 是面向 Linux x86_64 NVIDIA GPU 的小模型量化工具包，提供定制 AIMET、
-QuantGRU 和可复现的多 CUDA 运行环境。
+QuantGRU、QuantLSTM 和可复现的多 CUDA 运行环境。
 
 ## 核心能力
 
 - **PyTorch 量化**：支持 PTQ、QAT、混合精度、Power-of-2 scale 和 ONNX 导出。
 - **ONNX 量化**：直接读取已有 ONNX，输出 Clean ONNX、AIMET 原始 encodings、
 编译器 encodings 和运行元数据。
-- **量化循环算子**：QuantGRU 可替换 `num_layers=1`、`dropout=0` 的 PyTorch GRU，
+- **量化循环算子**：QuantGRU / QuantLSTM 可替换 `num_layers=1`、`dropout=0` 的 PyTorch GRU / LSTM，
 支持单向、双向、校准和 QAT。
 - **可复现环境**：发布 `cu118`、`cu126` 和 `cu130` 三个独立 Docker 镜像。
 
@@ -38,7 +38,7 @@ zstd -dc rx-met-v1.0.0-cu126-linux-amd64.tar.zst | docker load
 
 docker run --gpus all --rm \
   rx-met:1.0.0-cu126 \
-  python3 -c "import torch, aimet_torch, aimet_onnx, quant_gru; print(torch.__version__, torch.version.cuda)"
+  python3 -c "import torch, aimet_torch, aimet_onnx, quant_gru, quant_lstm; print(torch.__version__, torch.version.cuda)"
 ```
 
 命令退出码为 0，并打印与镜像变体匹配的 PyTorch 和 CUDA 版本，表示基础环境可用。
@@ -71,7 +71,8 @@ docker run --gpus all --rm \
 | 系统模块、量化数据流和发布架构            | [系统架构](docs/architecture.md)                   |
 | KWS 和 ONNX PTQ 可运行示例       | [示例说明](examples/README.md)                    |
 | QuantGRU 接口和构建             | [QuantGRU](operators/quant-gru/README.md)     |
-| QuantLSTM 接口和独立构建       | [QuantLSTM](operators/quant-lstm/README.md)   |
+| QuantLSTM 集成与示例           | [QuantLSTM 接入](docs/QuantLSTM_integration.md) |
+| QuantLSTM 接口和构建           | [QuantLSTM](operators/quant-lstm/README.md) |
 | AIMET 原生运行库来源和构建           | [AIMET ONNX 原生运行库](docs/AIMET_ONNX_NATIVE.md) |
 | Docker 构建、验证和发布            | [构建与发布](docs/Release_packaging.md)            |
 
