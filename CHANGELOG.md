@@ -41,6 +41,9 @@
 
 ### Fixed
 
+- QuantLSTM signed symmetric 校准保留 `max_abs/qmax` 和零点 0，CPU/CUDA 与 QAT
+  运行范围改为完整 INT8/INT16 区间，允许 `-128/-32768`；导出及回读范围与 GRU 一致。
+
 - LSTM 的 rx-met 导出及回读统一使用与 GRU 相同的公共编码字段，移除原生参数备份
   和执行元数据；算子独立的原生检查点格式保持分离。外层输入、输出各保存一条
   `PER_TENSOR` 编码，h/c 状态按方向保留在内部量化点，不再展开为 `PER_CHANNEL` 数组。

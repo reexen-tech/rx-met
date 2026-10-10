@@ -1,6 +1,7 @@
 """Real CUDA integration coverage; run in the rx-met build/runtime environment."""
 import copy
 import json
+import math
 import tempfile
 import unittest
 from pathlib import Path
@@ -36,6 +37,21 @@ def assert_public_encoding_document(test, document):
     test.assertEqual(document['schema_version'], 3)  # Existing QuantGRU schema.
 
 
+def assert_recurrent_encoding_bounds(test, record):
+    bits = record['bitwidth']
+    unsigned = record['dtype'].startswith('UINT')
+    qmin = 0 if unsigned else -(1 << (bits - 1))
+    qmax = (1 << (bits if unsigned else bits - 1)) - 1
+    def vector(key):
+        value = record[key]
+        return value if isinstance(value, list) else [value]
+    fields = [vector(key) for key in ('scale', 'zero_point', 'real_min', 'real_max')]
+    test.assertEqual(len({len(values) for values in fields}), 1)
+    for scale, zp, lo, hi in zip(*fields):
+        test.assertTrue(math.isclose(lo, (qmin - zp) * scale, rel_tol=1e-6, abs_tol=1e-9))
+        test.assertTrue(math.isclose(hi, (qmax - zp) * scale, rel_tol=1e-6, abs_tol=1e-9))
+
+
 def assert_recurrent_encoding_schema(test, layer):
     """One schema check applied to real QuantGRU and QuantLSTM exports."""
     fields = {'dtype', 'bitwidth', 'is_symmetric', 'enc_type',
@@ -52,6 +68,7 @@ def assert_recurrent_encoding_schema(test, layer):
             test.assertEqual(len(operation['output']), 1)
             records.extend(operation['output'])
     for record in records:
+        assert_recurrent_encoding_bounds(test, record)
         test.assertEqual(set(record), fields)
         test.assertIsInstance(record['bitwidth'], int)
         test.assertIn(record['is_symmetric'], ('True', 'False'))
@@ -203,6 +220,7 @@ class QuantLSTMIntegrationTest(unittest.TestCase):
         self.assertEqual(set(enc['activation_encodings']['gru']['input'][0]),
                          set(enc['activation_encodings']['lstm']['input'][0]))
         for record in enc['param_encodings'].values():
+            assert_recurrent_encoding_bounds(self, record)
             self.assertIn('bitwidth', record)
             self.assertIn('is_symmetric', record)
             self.assertNotIn('symmetric', record)

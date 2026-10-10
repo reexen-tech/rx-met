@@ -88,6 +88,13 @@ python3 examples/quick_start_kws.py --rnn_type lstm \
 原生加载器重新派生执行参数并做数值审计。锁定参数不能直接修改 Po2；如需 Po2，
 在保存并锁定参数之前执行转换，或在首次配置中指定 `scale_mode: "pot2"`。
 
+Signed symmetric 校准采用 `scale=max_abs/qmax`、`zero_point=0`，其中 8 位的
+`qmax=127`、16 位的 `qmax=32767`。运行时允许完整有符号范围：INT8 `[-128,127]`、
+INT16 `[-32768,32767]`；CPU/CUDA、QAT 饱和掩码和导出范围均遵循此约定。
+`real_min=(qmin-zero_point)*scale`、`real_max=(qmax-zero_point)*scale`，与 GRU 一致。
+旧版 LSTM 编码若使用窄范围下界，需保留 scale/zero_point 并按完整范围重新导出，
+同时更新算子库；仅替换 JSON 而沿用旧运行库会造成训练与部署语义不一致。
+
 ## 导出和恢复约定
 
 `export_onnx_json()` 输出无 Q/DQ 的标准 ONNX LSTM。ONNX 表达浮点运算，量化参数
