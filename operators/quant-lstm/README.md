@@ -74,20 +74,18 @@ print("QuantLSTM forward OK")
 
 ```python
 lstm.set_all_bitwidth(8)
-lstm.reset_calibration()
-lstm.calibrating = True
-with torch.no_grad():
+with torch.no_grad(), lstm.calibration_context():
     for inputs in calibration_loader:
         lstm(inputs.to(device="cuda", dtype=torch.float32))
-lstm.calibrating = False
-lstm.finalize_calibration()
 lstm.use_quantization = True
 ```
 
 默认配置使用 `scale_mode="affine"`，`scale_mode="pot2"` 将 scale 限制为 2 的整数
 次幂。构造函数的 `quant_config` 接受配置字典、JSON 文本或文件路径；逐量化点
 调整使用 `adjust_quant_config()`。配置字段、默认值与失效规则见
-[配置说明](docs/configuration.md)。
+[配置说明](docs/configuration.md)。已完成 affine 校准时，可在 QAT 和参数锁定前
+调用 `lstm.enable_pot2()` 转换已有网格；转换会同时重算非对称 zero point 和实数范围，
+见[Po2 转换约定](docs/aimet_integration.md#已校准参数的-po2-转换)。
 
 QAT 在 PTQ 评估后使用 `lstm.train()` 和常规 PyTorch 训练循环。
 **scale、zero point 和位宽沿用首次 PTQ 校准结果，不按 epoch 重新校准**；浮点主权重
@@ -97,7 +95,8 @@ QAT 在 PTQ 评估后使用 `lstm.train()` 和常规 PyTorch 训练循环。
 
 ## 保存与重载
 
-模型权重与量化参数共同确定推理结果。以下代码接续已校准的 `lstm`：
+模型权重与量化参数共同确定推理结果。以下代码保存算子自身的原生检查点，接续
+已校准的 `lstm`：
 
 ```python
 torch.save(lstm.state_dict(), "lstm_weights.pth")
@@ -112,7 +111,9 @@ restored.use_quantization = True
 ```
 
 重建实例沿用原模型的形状、方向和 bias 配置，并用相同输入比较保存前后的输出。
-模型权重与量化文件按同次导出结果配套使用。
+模型权重与量化文件按同次导出结果配套使用。这里的原生 JSON 保留模型与执行信息；
+rx-met 提供给编译器的文件由 `export_onnx_json()` 生成，使用与 QuantGRU 一致的
+公共 encoding 结构，格式区别见[集成接口](docs/aimet_integration.md#编码与-onnx)。
 
 ## ONNX 导出
 
@@ -145,16 +146,17 @@ finally:
 
 ## 接口与验证
 
-
-| 接口                                             | 用途                                 |
-| ---------------------------------------------- | ---------------------------------- |
-| `forward(input, hx=None)`                      | 按量化开关执行浮点或量化计算，`hx` 为 `(h_0, c_0)` |
-| `set_all_bitwidth()`                           | 将所有量化点设为 8-bit 或 16-bit            |
-| `get_quant_config()`、`adjust_quant_config()`   | 查询或调整量化点的配置                        |
-| `finalize_calibration()`、`reset_calibration()` | 生成并锁定量化参数，或清除校准状态                  |
-| `is_calibrated()`、`calibration_state()`        | 查询校准是否完成及会话状态                      |
-| `export_quant_params()`、`load_quant_params()`  | 导出或加载量化参数 JSON                     |
-
+| 接口 | 用途 |
+| --- | --- |
+| `forward(input, hx=None)` | 按量化开关执行浮点或量化计算，`hx` 为 `(h_0, c_0)` |
+| `set_all_bitwidth()` | 将所有量化点设为 8-bit 或 16-bit |
+| `get_quant_config()`、`adjust_quant_config()` | 查询或调整量化点的配置 |
+| `calibration_context()` | 管理一轮校准，成功退出时完成参数计算，异常时恢复模式 |
+| `finalize_calibration()`、`reset_calibration()` | 完成当前校准会话，或清除校准状态及参数锁 |
+| `enable_pot2()` | 转换已有网格的 scale、非对称 zero point 和实数范围 |
+| `set_quant_params_locked()` | 控制共享校准是否允许覆盖已有参数 |
+| `is_calibrated()`、`calibration_state()` | 查询校准是否完成及会话状态 |
+| `export_quant_params()`、`load_quant_params()` | 导出或加载算子独立的原生参数 JSON |
 
 [端到端测试](tools/run_end_to_end_test.sh) 覆盖 CUDA、PyTorch、QAT 和 ONNX；
 [CPU package 测试](tools/run_cpu_only_package_check.sh) 检查 reference、配置、安装和

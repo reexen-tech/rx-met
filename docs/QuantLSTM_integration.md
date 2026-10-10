@@ -43,8 +43,8 @@ GRU 内部补充 `calibration_context()`、`enable_pot2()` 和 `owns_quantizatio
 原生算子的 `owns_quantization=True` 使通用量化配置跳过这些模块，避免二次量化。
 
 QuantLSTM 的 `load_quant_config()`、`percentile_value`、量化参数锁和安全复制行为
-也在原仓库实现；复制模型保留已生成的参数 JSON，不复制 C++ 校准收集器，正在
-校准时禁止复制。接口详情见
+也在原仓库实现；复制模型保留已生成的参数 JSON 及 Po2 转换所需的校准范围，
+不复制 C++ 校准收集器，正在校准时禁止复制。接口详情见
 [算子集成文档](../operators/quant-lstm/docs/aimet_integration.md)。
 
 ## 使用与配置
@@ -84,10 +84,15 @@ python3 examples/quick_start_kws.py --rnn_type lstm \
 配置需在校准前应用；相同配置可重复应用，已校准后修改配置会报错，必须先显式
 `reset_calibration()`。量化参数按首次 PTQ 结果用于 QAT，不在训练循环中重新校准。
 
-`apply_power_of_2_workflow()` 转换 LSTM 已校准 scale，重新计算非对称 zero point，
-更新对应实数范围，再通过
-原生加载器重新派生执行参数并做数值审计。锁定参数不能直接修改 Po2；如需 Po2，
-在保存并锁定参数之前执行转换，或在首次配置中指定 `scale_mode: "pot2"`。
+`apply_power_of_2_workflow()` 对已启用量化的循环层调用算子的 `enable_pot2()`。
+LSTM 按新 scale 重算非对称 zero point，并更新 `real_min/real_max`，再通过原生
+加载器重新派生执行参数并做数值审计。校准后优先使用内存中保留的校准下界；
+从 encoding 文件加载后使用已有量化网格下界，文件中不增加校准诊断字段。
+具体公式和示例见[算子 Po2 转换约定](../operators/quant-lstm/docs/aimet_integration.md#已校准参数的-po2-转换)。
+
+锁定的 affine 参数不能直接转换为 Po2；如需 Po2，在保存并锁定参数之前执行转换，
+或在首次配置中指定 `scale_mode: "pot2"`。更新后的校准接口需要配套重建 QuantLSTM
+extension / wheel，并更新运行镜像，见[升级说明](../operators/quant-lstm/docs/installation.md#21-升级已有安装)。
 
 Signed symmetric 校准采用 `scale=max_abs/qmax`、`zero_point=0`，其中 8 位的
 `qmax=127`、16 位的 `qmax=32767`。运行时允许完整有符号范围：INT8 `[-128,127]`、
@@ -117,8 +122,9 @@ INT16 `[-32768,32767]`；CPU/CUDA、QAT 饱和掩码和导出范围均遵循此�
   `execution_metadata` 或原生区段内的 `schema_version: 1`。消费方需支持 LSTM 本身的
   内部量化点；公共编码容器与 GRU 一致。
 
-`load_quantizer_encodings(..., allow_overwrite=False)` 恢复参数并启用 LSTM 量化，
-后续共享校准跳过已锁定 LSTM。`reset_calibration()` 同时清除参数锁。
+`load_quantizer_encodings(..., allow_overwrite=False)` 成功加载当前层的有效 encoding
+后，启用该层量化并锁定参数；后续共享校准跳过已锁定层。
+`reset_calibration()` 同时清除参数锁和旧校准范围。
 `save_quantizer_encodings()` 也使用与 GRU 相同的公共参数布局，遵守相同的 bias 合并限制。
 回读从公共编码拆分正反向参数、还原 IFGO 门顺序；展开的参数按 per-channel 恢复。
 量化网格与数值输出保持一致，原始 per-tensor / per-gate 分组标签不作为部署元数据保存。
@@ -127,20 +133,25 @@ INT16 `[-32768,32767]`；CPU/CUDA、QAT 饱和掩码和导出范围均遵循此�
 该格式与 rx-met 面向编译器的导出明确分开。
 导出测试比较实际 GRU/LSTM 的顶层字段，检查所有嵌套层级均无原生元数据，核对一维
 参数数组与 ONNX W/R/B 尺寸，并直接从公共编码验证恢复输出。
-GRU/LSTM 关闭量化时，阶段文件与部署 encodings 均不写入该层的量化参数，
-ONNX 中仍保留对应浮点节点。恢复时先应用相同的阶段配置，再加载权重和 encodings；
+
+GRU/LSTM 关闭量化时，即使已完成校准，阶段文件与部署 encodings 均不写入该层的
+量化参数，ONNX 中仍保留对应浮点节点。恢复时先应用相同的阶段配置，再加载权重和 encodings；
 关闭量化的层允许没有 encoding，严格加载仍会检查已启用层是否缺少参数。
 显式加载文件中已有的有效 GRU/LSTM encoding 仍会启用该层量化。
 这些文件不保存模型权重，权重应与 encodings 配套保存和恢复。
+算子自身的显式 `export_quant_params_to_aimet_format()` 不负责开关筛选，
+`load_quant_params_from_aimet_format()` 不改变量化开关；阶段开关策略统一由 rx-met 实现。
 
 ## 验证
 
 ```bash
-python3 -m unittest -v tests/test_dependencies.py
-python3 -m unittest -v tests/test_quant_lstm_integration.py
+python3 -m unittest -v tests.test_dependencies
+python3 -m unittest -v tests.test_quant_lstm_integration tests.test_native_recurrent_state tests.test_kws_example
 bash operators/quant-lstm/tools/run_cpu_only_package_check.sh /tmp/quant-lstm-cpu
 ```
 
 GPU 测试使用真实的 QuantSim、CUDA 算子和 ONNX Runtime，覆盖 FX 叶节点、通用
 量化器隔离、混合精度、单/双向 PTQ/QAT、h/c 梯度、Percentile、Po2、失败清理、
-参数锁、阶段恢复和 ONNX 回读，以及 GRU/LSTM 同模型校准与导出。
+参数锁、阶段恢复和 ONNX 回读，以及 GRU/LSTM 同模型校准与导出。共享回归还覆盖
+关闭量化、校准后关闭量化、两种算子混合启用、严格加载缺失参数，以及 GRU 非对称
+Po2 与直接 Po2 校准的对照。

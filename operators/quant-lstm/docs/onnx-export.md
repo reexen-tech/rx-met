@@ -76,7 +76,7 @@ PY
 
 打印 `QuantLSTM ONNX export passed` 且进程退出码为 0，表示模型通过 ONNX checker
 并包含一个标准 domain 的 `LSTM` 节点。数值一致性仍需要使用 ONNX Runtime 比较
-`output/h_n/c_n`，由第 4 节测试完成。
+`output/h_n/c_n`，由第 5 节测试完成。
 
 ## 3. 参数映射
 
@@ -93,7 +93,22 @@ B_onnx = concat(bW_i, bW_o, bW_f, bW_g,
 最终 shape 为 `W=[D,4H,I]`、`R=[D,4H,H]`、`B=[D,8H]`。双向方向顺序固定为
 forward、reverse；`bias=False` 使用全零 B，不改变图结构。
 
-## 4. 验收
+## 4. rx-met 的配套编码
+
+上述独立导出示例生成浮点 ONNX。rx-met 用户使用工具包的 `export_onnx_json()`
+生成 ONNX 与 `.encodings` 配对文件：每个 QuantLSTM 仍对应一个标准 `LSTM` 节点，
+内部激活量化点放在 `activation_encodings`，W/R/B 对应编码放在 `param_encodings`。
+层名称、参数名称和 IOFC 门顺序由算子导出接口与工具包共同对齐。
+
+h0/h 使用各方向的 `output` 网格，c0/c 使用 `cell_state` 网格，均为 `PER_TENSOR`。
+关闭量化的模块保留浮点 ONNX 节点，其 activation / parameter encoding 不写入配套
+文件；即使模块此前已经校准，也按当前量化开关处理。
+
+算子独立的 `export_quant_params()` 生成原生参数检查点，包含模型和执行信息。
+编译器使用 rx-met 导出的公共 `.encodings`；具体字段、参数打包和回读规则见
+[循环算子集成接口](aimet_integration.md#编码与-onnx)。
+
+## 5. 验收
 
 `pytorch/tests/test_onnx_export.py` 覆盖单向/双向、bias 开关和两种布局。测试要求：
 
