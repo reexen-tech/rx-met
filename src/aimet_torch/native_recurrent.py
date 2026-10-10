@@ -115,7 +115,7 @@ def export_recurrent_encodings(model, onnx_path, encodings_path):
     for name, module, op in modules:
         if module.use_quantization and not module.is_calibrated():
             raise RuntimeError(f"{op.module_type.__name__} is not calibrated: {name}")
-        if module.is_calibrated():
+        if module.use_quantization:
             module.export_quant_params_to_aimet_format(encodings, module_name=name)
         registrations[op.package] = op
     with open(encodings_path, "w", encoding="utf-8") as stream:

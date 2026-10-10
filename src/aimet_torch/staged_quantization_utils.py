@@ -95,7 +95,7 @@ def save_quantizer_encodings(
     for name, module, _ in named_native_recurrent(sim_model):
         if not _matches_layer_types(module, layer_types):
             continue
-        if module.is_calibrated():
+        if module.use_quantization and module.is_calibrated():
             module.export_quant_params_to_aimet_format(encodings_dict, module_name=name, for_onnx=False)
             saved_count += 1
 
@@ -168,6 +168,11 @@ def load_quantizer_encodings(
         if not _matches_layer_types(module, layer_types, exclude_layer_types):
             continue
         target_name = getattr(module, 'aimet_onnx_name', None) or name
+        # Disabled native layers are intentionally absent from stage encodings.
+        # Existing entries still restore and enable quantization, as before.
+        if not module.use_quantization and target_name not in encodings_dict.get("activation_encodings", {}):
+            skipped_count += 1
+            continue
         loaded_ok = module.load_quant_params_from_aimet_format(
             encodings_dict, module_name=target_name, verbose=verbose)
         if not loaded_ok:
