@@ -84,7 +84,8 @@ python3 examples/quick_start_kws.py --rnn_type lstm \
 配置需在校准前应用；相同配置可重复应用，已校准后修改配置会报错，必须先显式
 `reset_calibration()`。量化参数按首次 PTQ 结果用于 QAT，不在训练循环中重新校准。
 
-`apply_power_of_2_workflow()` 转换 LSTM 已校准 scale，更新对应实数范围，再通过
+`apply_power_of_2_workflow()` 转换 LSTM 已校准 scale，重新计算非对称 zero point，
+更新对应实数范围，再通过
 原生加载器重新派生执行参数并做数值审计。锁定参数不能直接修改 Po2；如需 Po2，
 在保存并锁定参数之前执行转换，或在首次配置中指定 `scale_mode: "pot2"`。
 

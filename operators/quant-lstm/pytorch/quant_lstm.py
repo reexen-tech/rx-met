@@ -470,6 +470,7 @@ class _UnidirectionalQuantLSTM(LSTMAimetIntegration, nn.Module):
         )
         self._calibration_session = None
         self._quant_params_bundle_json: Optional[str] = None
+        self._calibration_ranges: dict[str, dict[str, tuple[float, float]]] = {}
         self._last_safety_report: Optional[dict[str, Any]] = None
         self._qat_saved_state: Optional[dict[str, Any]] = None
 
@@ -507,6 +508,7 @@ class _UnidirectionalQuantLSTM(LSTMAimetIntegration, nn.Module):
         self._quant_params_locked = False
         self._calibration_session = None
         self._quant_params_bundle_json = None
+        self._calibration_ranges = {}
         self._last_safety_report = None
         self._qat_saved_state = None
 
@@ -645,6 +647,7 @@ class _UnidirectionalQuantLSTM(LSTMAimetIntegration, nn.Module):
             self.require_exact_accumulation
         )
         self._quant_params_bundle_json = result["bundle_json"]
+        self._calibration_ranges = {"operators": result["activation_ranges"]}
         self._resolved_config_json = result["resolved_config_json"]
         self._last_safety_report = result["safety"]
         if self._last_safety_report["has_precision_risk"]:
@@ -804,6 +807,7 @@ class _UnidirectionalQuantLSTM(LSTMAimetIntegration, nn.Module):
         self._quant_params_bundle_json = audited["bundle_json"]
         self._resolved_config_json = audited["resolved_config_json"]
         self._override_config = _resolved_override(resolved)
+        self._calibration_ranges = {}
         self._last_safety_report = audited["safety"]
         self._calibration_session = None
         self._qat_saved_state = None
@@ -1021,6 +1025,7 @@ class QuantLSTM(_UnidirectionalQuantLSTM):
         if reverse_result["batch_count"] != forward_report["batch_count"]:
             raise RuntimeError("双向校准 batch 数不一致")
         self._reverse_quant_params_bundle_json = reverse_result["bundle_json"]
+        self._calibration_ranges["operators_reverse"] = reverse_result["activation_ranges"]
         self._reverse_safety_report = reverse_result["safety"]
         forward_safety = self._last_safety_report
         self._last_safety_report = {
@@ -1253,6 +1258,7 @@ class QuantLSTM(_UnidirectionalQuantLSTM):
         self._reverse_quant_params_bundle_json = audited[1]["bundle_json"]
         self._resolved_config_json = audited[0]["resolved_config_json"]
         self._override_config = _resolved_override(resolved)
+        self._calibration_ranges = {}
         self._calibration_session = None
         self._reverse_calibration_session = None
         self._reverse_safety_report = audited[1]["safety"]
