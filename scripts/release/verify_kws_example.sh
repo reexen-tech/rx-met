@@ -151,9 +151,24 @@ nodes = [node for node in model.graph.node if node.op_type in ("GRU", "LSTM")]
 assert len(nodes) == 2 and all(node.op_type == rnn_type.upper() for node in nodes)
 encodings = json.loads((output / "att_mh_rnn_kws.encodings").read_text())
 for node in nodes:
-    assert encodings["activation_encodings"][node.name]["is_" + rnn_type.upper()]
+    layer = encodings["activation_encodings"][node.name]
+    assert layer["is_" + rnn_type.upper()]
+    records = []
+    for kind in ("input", "output"):
+        assert len(layer[kind]) == 1
+        records.extend(layer[kind])
+    for kind in ("internal_ops", "internal_ops_reverse"):
+        for operation in layer.get(kind, {}).values():
+            assert len(operation["output"]) == 1
+            records.extend(operation["output"])
+    for record in records:
+        assert record["enc_type"] == "PER_TENSOR"
+        assert all(isinstance(record[field], (int, float))
+                   for field in ("scale", "zero_point", "real_min", "real_max"))
     if rnn_type == "lstm":
-        assert node.name in encodings["quant_lstm_encodings"]
+        assert "quant_lstm_encodings" not in encodings
+        assert layer["internal_ops"]["cell_state"]["output"][0]["dtype"] == "INT16"
+        assert "model_info" not in layer and "execution_metadata" not in layer
 assert (output / "att_mh_rnn_kws_qat.pth").is_file()
 print(f"KWS {rnn_type.upper()} 模型、编码及完整示例验证通过")
 PYTHON

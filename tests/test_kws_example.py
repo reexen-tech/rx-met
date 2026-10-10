@@ -13,6 +13,9 @@ from torch import nn
 from torch.utils.data import DataLoader, TensorDataset
 
 from examples import quick_start_kws as kws
+from tests.test_quant_lstm_integration import (
+    assert_public_encoding_document, assert_recurrent_encoding_schema,
+)
 
 
 class KwsExampleConfigurationTest(unittest.TestCase):
@@ -56,6 +59,7 @@ class KwsExampleWorkflowTest(unittest.TestCase):
             return kws.AttMHRNN(rnn_type=rnn_type, rnn_units=4, heads=1,
                                 dense_units=(4,), dropout=0).cuda()
         with tempfile.TemporaryDirectory() as directory:
+            gru_metadata = None
             for rnn_type in ('gru', 'lstm'):
                 with self.subTest(rnn_type=rnn_type), \
                      patch.object(kws, 'build_dataloaders', return_value=loaders), \
@@ -71,12 +75,22 @@ class KwsExampleWorkflowTest(unittest.TestCase):
                     nodes = [node for node in graph.graph.node if node.op_type in ('GRU', 'LSTM')]
                     self.assertEqual([node.op_type for node in nodes], [rnn_type.upper()] * 2)
                     encodings = json.loads((output / 'att_mh_rnn_kws.encodings').read_text())
+                    assert_public_encoding_document(self, encodings)
+                    metadata = (set(encodings), encodings['version'], encodings['schema_version'])
+                    if rnn_type == 'gru':
+                        gru_metadata = metadata
+                    else:
+                        self.assertEqual(metadata, gru_metadata)
                     for node in nodes:
                         self.assertTrue(encodings['activation_encodings'][node.name]['is_' + rnn_type.upper()])
+                        assert_recurrent_encoding_schema(self, encodings['activation_encodings'][node.name])
                         if rnn_type == 'lstm':
-                            document = encodings['quant_lstm_encodings'][node.name]
-                            self.assertEqual(document['operators']['cell_state']['dtype'], 'INT16')
-                            self.assertTrue(document['model_info']['use_pot2_scale'])
+                            layer = encodings['activation_encodings'][node.name]
+                            self.assertEqual(layer['internal_ops']['cell_state']['output'][0]['dtype'], 'INT16')
+                            for field in ('internal_ops', 'internal_ops_reverse'):
+                                for item in layer[field].values():
+                                    scales = torch.as_tensor(item['output'][0]['scale'])
+                                    torch.testing.assert_close(scales.log2(), scales.log2().round())
 
 
 if __name__ == '__main__':

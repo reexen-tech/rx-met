@@ -91,27 +91,34 @@ python3 examples/quick_start_kws.py --rnn_type lstm \
 ## 导出和恢复约定
 
 `export_onnx_json()` 输出无 Q/DQ 的标准 ONNX LSTM。ONNX 表达浮点运算，量化参数
-写入配套 `.encodings`，顶层采用与 GRU 相同的 `schema_version: 3`：
+写入配套 `.encodings`，顶层采用与既有 GRU 相同的 `schema_version: 3`；
+`version: "1.0.0"` 来自 AIMET 原有编码版本设置。LSTM 不新增专用顶层格式：
 
-- `activation_encodings[模块路径]` 标记 `is_LSTM: true`，包含输入、隐藏状态、cell
-  state 及内部算子。输入列表顺序为 x/h0/c0，输出列表顺序为 sequence/h/c；编码包含
-  `bitwidth` 和字符串 `is_symmetric`，与 GRU 相同。
+- `activation_encodings[模块路径]` 标记 `is_LSTM: true`。与 GRU 一致，外层 `input`
+  和 `output` 各保存一条正向 `PER_TENSOR` 标量编码，不枚举全部输入输出端口；
+  编码包含 `bitwidth` 和字符串 `is_symmetric`。
 - `internal_ops[量化点].output` 与 GRU 一样使用编码列表，反向量化点放在
   `internal_ops_reverse`；内部激活与参数编码分开。
-- 双向 h/c 网格可以不同，以 `PER_CHANNEL` 一维数组表示，先正向 H 项再反向 H 项，
-  不使用自定义 `forward` / `reverse` 字典。
+- h0/h 共用各方向的 `output` 量化点，c0/c 共用 `cell_state` 量化点，其编码分别保存在
+  `internal_ops` 和 `internal_ops_reverse`。每个方向内固定为 `PER_TENSOR` 标量，
+  正反向可使用不同的 scale；状态和激活不支持按隐藏通道独立量化，不展开成通道数组。
 - `param_encodings` 对齐实际 ONNX W/R/B initializer，四门由 PyTorch IFGO 重排到
   ONNX IOFC，原生 per-gate 参数已按行展开，仅 per-tensor 标量扩展至每行，按正向、反向顺序拼接为一维数组。
 - B 合并 bias_ih/bias_hh；两者 dtype 与对称性必须相同，否则导出显式报错。
-- `quant_lstm_encodings[模块路径]` 保存完整、未经重排的原生文档，作为参数回读依据。
-  消费方需支持此 LSTM 编码结构；仅支持 GRU 的后端不能直接处理 LSTM。
+- 导出和回读只使用上述公共区段，不输出 `quant_lstm_encodings`、`model_info`、
+  `execution_metadata` 或原生区段内的 `schema_version: 1`。消费方需支持 LSTM 本身的
+  内部量化点；公共编码容器与 GRU 一致。
 
 `load_quantizer_encodings(..., allow_overwrite=False)` 恢复参数并启用 LSTM 量化，
 后续共享校准跳过已锁定 LSTM。`reset_calibration()` 同时清除参数锁。
-`save_quantizer_encodings()` 保存的阶段检查点同样包含原生 LSTM 文档。
-阶段保存调用公共编码接口的 `for_onnx=False` 模式，不施加 ONNX 合并 bias 的限制。
-导出测试用同一个校验器检查 GRU/LSTM 部署记录，并核对一维参数数组与实际 ONNX
-W/R/B 的尺寸；原生检查点回读另行测试。
+`save_quantizer_encodings()` 也使用与 GRU 相同的公共参数布局，遵守相同的 bias 合并限制。
+回读从公共编码拆分正反向参数、还原 IFGO 门顺序；展开的参数按 per-channel 恢复。
+量化网格与数值输出保持一致，原始 per-tensor / per-gate 分组标签不作为部署元数据保存。
+全部 scale 为 2 的幂时恢复 Po2 模式，cuBLAS 模式沿用目标模块设置。
+算子独立的 `export_quant_params()` / `load_quant_params()` 仍保存原生检查点及执行信息，
+该格式与 rx-met 面向编译器的导出明确分开。
+导出测试比较实际 GRU/LSTM 的顶层字段，检查所有嵌套层级均无原生元数据，核对一维
+参数数组与 ONNX W/R/B 尺寸，并直接从公共编码验证恢复输出。
 这些文件不保存模型权重，权重应与 encodings 配套保存和恢复。
 
 ## 验证

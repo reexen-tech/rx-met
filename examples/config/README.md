@@ -63,7 +63,7 @@ LSTM 使用独立的原生配置格式，不能只把 GRU 配置节改名后复�
 - 位宽支持 8、16。权重和偏置固定对称量化，可选三种参数粒度；激活和状态使用 per-tensor，可设置 `is_symmetric`、`is_unsigned`。
 - 未列出的量化点沿用算子默认配置，默认位宽为 8。门计算可以通过 `input_gate_input`、`forget_gate_input`、`cell_gate_input`、`output_gate_input` 及其 `_output` 配置；`cell_tanh_output` 控制细胞状态经过 tanh 后的量化点。
 - `scale_mode` 控制首次 PTQ 的 scale。本 KWS 示例第 5 步还会调用公共 Po2 转换接口，QAT 沿用转换后的固定参数。
-- ONNX 将两组 bias 合并导出，因此 `bias_ih` / `bias_hh` 位宽应一致。
+- rx-met 的阶段保存和 ONNX 导出均将两组 bias 合并，因此 `bias_ih` / `bias_hh` 位宽应一致。
 
 `comment` 字段用于配置说明。配置在校准前生效；已有量化参数时改变配置需先清除旧校准结果。
 恢复模型时，使用同次保存的权重与 encodings，并保持网络类型和配置一致。

@@ -19,6 +19,23 @@ ROOT = Path(__file__).resolve().parents[1]
 CONFIG = ROOT / 'examples/config/mrnn_quantsim_config_custom_mixed_precision_v2.json'
 
 
+def assert_public_encoding_document(test, document):
+    """Compiler encodings never contain standalone LSTM checkpoint metadata."""
+    forbidden = {'quant_lstm_encodings', 'model_info', 'execution_metadata'}
+    def visit(value, root=False):
+        if isinstance(value, dict):
+            test.assertFalse(forbidden.intersection(value))
+            if not root:
+                test.assertNotIn('schema_version', value)
+            for item in value.values():
+                visit(item)
+        elif isinstance(value, list):
+            for item in value:
+                visit(item)
+    visit(document, root=True)
+    test.assertEqual(document['schema_version'], 3)  # Existing QuantGRU schema.
+
+
 def assert_recurrent_encoding_schema(test, layer):
     """One schema check applied to real QuantGRU and QuantLSTM exports."""
     fields = {'dtype', 'bitwidth', 'is_symmetric', 'enc_type',
@@ -26,19 +43,21 @@ def assert_recurrent_encoding_schema(test, layer):
     records = []
     for kind in ('input', 'output'):
         test.assertIsInstance(layer[kind], list)
+        test.assertEqual(len(layer[kind]), 1)
         records.extend(layer[kind])
     for kind in ('internal_ops', 'internal_ops_reverse'):
         for operation in layer.get(kind, {}).values():
             test.assertIn('output', operation)
             test.assertIsInstance(operation['output'], list)
+            test.assertEqual(len(operation['output']), 1)
             records.extend(operation['output'])
     for record in records:
         test.assertEqual(set(record), fields)
         test.assertIsInstance(record['bitwidth'], int)
         test.assertIn(record['is_symmetric'], ('True', 'False'))
+        test.assertEqual(record['enc_type'], 'PER_TENSOR')
         for field in ('scale', 'zero_point', 'real_min', 'real_max'):
-            values = record[field] if isinstance(record[field], list) else [record[field]]
-            test.assertTrue(all(isinstance(value, (int, float)) for value in values))
+            test.assertIsInstance(record[field], (int, float))
 
 
 class Model(nn.Module):
@@ -129,7 +148,8 @@ class QuantLSTMIntegrationTest(unittest.TestCase):
         with compute_encodings(fresh.model):
             fresh.model(self.x * 10)
         self.assertEqual(before, fresh.model.lstm.export_quant_params())
-        self.assertIn('lstm', saved['quant_lstm_encodings'])
+        self.assertIn('lstm', saved['activation_encodings'])
+        assert_public_encoding_document(self, saved)
         torch.testing.assert_close(fresh.model(self.x), sim.model(self.x))
         self.assertIn('proj.input_quantizers.0', saved)
 
@@ -175,7 +195,8 @@ class QuantLSTMIntegrationTest(unittest.TestCase):
         self.assertEqual(sum(n.op_type == 'LSTM' for n in graph.graph.node), 1)
         enc = json.loads(Path(enc_path).read_text())
         self.assertIn('gru', enc['activation_encodings'])
-        self.assertIn('lstm', enc['quant_lstm_encodings'])
+        self.assertIn('lstm', enc['activation_encodings'])
+        assert_public_encoding_document(self, enc)
         self.assertEqual(enc['schema_version'], 3)
         for name in ('gru', 'lstm'):
             assert_recurrent_encoding_schema(self, enc['activation_encodings'][name])
@@ -221,7 +242,8 @@ class QuantLSTMIntegrationTest(unittest.TestCase):
         path = self.directory / 'pair-stage.json'
         saved = save_quantizer_encodings(sim.model, str(path), verbose=False)
         self.assertIn('gru', saved['activation_encodings'])
-        self.assertIn('lstm', saved['quant_lstm_encodings'])
+        self.assertIn('lstm', saved['activation_encodings'])
+        assert_public_encoding_document(self, saved)
         fresh = make_sim()
         fresh.model.load_state_dict(sim.model.state_dict())
         loaded = load_quantizer_encodings(fresh.model, str(path), allow_overwrite=False, verbose=False)
@@ -279,12 +301,12 @@ class QuantLSTMIntegrationTest(unittest.TestCase):
                 self.assertFalse(any(n.op_type in ('QuantizeLinear','DequantizeLinear') for n in graph.graph.node))
                 enc = json.loads(Path(enc_path).read_text())
                 self.assertTrue(enc['activation_encodings']['lstm']['is_LSTM'])
-                self.assertEqual(enc['schema_version'], 3)
+                assert_public_encoding_document(self, enc)
                 assert_recurrent_encoding_schema(self, enc['activation_encodings']['lstm'])
                 self.assertEqual(len(enc['param_encodings']['lstm.weight_ih.weight']['scale']),
                                  (2 if bidirectional else 1) * 4 * sim.model.lstm.hidden_size)
                 # Check deployment encoding lengths against actual ONNX W/R/B,
-                # independently of quant_lstm_encodings used by native reload.
+                # and restore the model from these same public records.
                 initializers = {item.name: item for item in graph.graph.initializer}
                 for suffix in ('weight_ih.weight', 'weight_hh.weight', 'bias'):
                     if suffix == 'bias' and not bias:
