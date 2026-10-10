@@ -1,6 +1,6 @@
 {
-  "description": "Demo 通用全开量化配置：默认所有算子启用 8bit 量化，仅对整数 size/index 类算子（FloorDivide/Pad）一刀切禁用；GRU_config 给 QuantGRU 内部各门写明位宽与 granularity",
-  "comment": "本配置不引用任何模型特定的 layer name，复用到不同 MRNN 变体均可工作。如需对模型中的 EPS 加法 / 标量 size 乘法这类无意义量化点做精细 disable，请在 layer_name_config 中按需追加 wildcard，比如 *.cln.module_add_* / module_floordiv* 等；这些孤儿 quantizer 即使 NOT_INITIALIZED 通常也不阻断 forward，配合 step14 的兜底 compute_encodings 即可",
+  "description": "KWS GRU / LSTM 共用量化配置：普通层在 layer_type_config 中设置，循环层分别读取 GRU_config / LSTM_config",
+  "comment": "quick_start_kws.py --rnn_type gru|lstm 选择网络。两种循环层配置可同时保留，只对模型中对应的算子生效；修改后重新校准。",
 
   "default_bitwidth": {
     "weight": 8,
@@ -286,6 +286,53 @@
         "comment": "候选门(n)激活后: tanh(new_gate_input), 范围[-1,1], 候选隐藏状态, 使用 INT 对称量化"
       }
     }
+  },
+
+  "LSTM_config": {
+    "use_quantization": true,
+    "quant_config": {
+      "schema_version": 1,
+      "scale_mode": "affine",
+      "operators": {
+        "cell_state": {
+          "bitwidth": 16,
+          "comment": "细胞状态 c 使用 16 位，其余未列出的量化点沿用算子默认 8 位。"
+        },
+        "weight_ih": {
+          "bitwidth": 8,
+          "granularity": "per_channel",
+          "comment": "输入权重，包含 i/f/g/o 四个门；每个输出通道独立量化。"
+        },
+        "weight_hh": {
+          "bitwidth": 8,
+          "granularity": "per_channel",
+          "comment": "循环权重，包含 i/f/g/o 四个门。"
+        },
+        "input": {
+          "bitwidth": 8,
+          "is_unsigned": false,
+          "is_symmetric": true,
+          "comment": "输入序列 x；激活使用 per-tensor 量化。"
+        },
+        "output": {
+          "bitwidth": 8,
+          "is_unsigned": false,
+          "is_symmetric": true,
+          "comment": "隐藏状态 h，同时作为序列输出和循环输入。"
+        },
+        "bias_ih": {
+          "bitwidth": 8,
+          "granularity": "per_channel",
+          "comment": "偏置采用对称量化；两组偏置位宽需一致，以便合并导出 ONNX。"
+        },
+        "bias_hh": {
+          "bitwidth": 8,
+          "granularity": "per_channel",
+          "comment": "偏置采用对称量化；两组偏置位宽需一致，以便合并导出 ONNX。"
+        }
+      }
+    },
+    "comment": "LSTM 专用配置。首次 PTQ 使用 affine scale，第 5 步统一转换为 Po2；QAT 固定量化参数。"
   },
 
   "default_config": {

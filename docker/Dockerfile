@@ -99,6 +99,7 @@ import aimet_onnx
 import aimet_torch
 import onnxruntime
 import quant_gru
+import quant_lstm
 import torch
 
 for package, expected in {

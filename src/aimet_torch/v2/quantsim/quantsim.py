@@ -559,45 +559,8 @@ class QuantizationSimModel(_QuantizationSimModelBase):  # pylint: disable=missin
             # Let input/output of HTP resize ops to share same encoding
             self._propagate_encodings()
 
-        # ===== 自动设置 QuantGRU 校准模式（从现有参数推断） =====
-        try:
-            from quant_gru import QuantGRU
-        except ImportError:
-            QuantGRU = None
-        
-        if QuantGRU is not None:
-            all_gru_modules = [(name, m) for name, m in self.model.named_modules() 
-                             if isinstance(m, QuantGRU)]
-            
-            if all_gru_modules:
-                # quant_scheme 到校准方法的映射（外部主要使用字符串）
-                scheme_to_method = {
-                    'min_max': 'minmax',
-                    'tf': 'minmax',
-                    'tf_enhanced': 'sqnr',
-                    'percentile': 'percentile',
-                }
-                
-                # 统一转换为字符串并获取校准方法
-                if quant_scheme:
-                    if isinstance(quant_scheme, QuantScheme):
-                        # 枚举值：使用 name 属性（如 'min_max', 'post_training_tf_enhanced'）
-                        scheme_str = quant_scheme.name.replace('post_training_', '')
-                    else:
-                        # 字符串：直接使用
-                        scheme_str = str(quant_scheme).lower()
-                    calibration_method = scheme_to_method.get(scheme_str, 'minmax')
-                else:
-                    calibration_method = 'minmax'
-                
-                logger.info(f"找到 {len(all_gru_modules)} 个 QuantGRU 模块，配置校准参数")
-                logger.info(f"从 quant_scheme='{quant_scheme}' 推断 QuantGRU 校准方法: {calibration_method.upper()}")
-                
-                for name, module in all_gru_modules:
-                    module.calibration_method = calibration_method
-                    module.reset_calibration()
-                    logger.debug(f"✅ {name}: 已配置校准参数 ({calibration_method})")
-        # ===== QuantGRU 校准设置结束 =====
+        from aimet_torch.native_recurrent import configure_recurrent_calibration
+        configure_recurrent_calibration(self.model, quant_scheme, self._percentile_value)
 
     # pylint: disable=arguments-differ
     @overload
@@ -738,14 +701,10 @@ class QuantizationSimModel(_QuantizationSimModelBase):  # pylint: disable=missin
                 if isinstance(module.encoding_analyzer, PercentileEncodingAnalyzer):
                     module.encoding_analyzer.set_percentile(percentile_value)
         
-        # 同时设置 QuantGRU 的 percentile_value（如果存在）
-        try:
-            from quant_gru import QuantGRU
-            for module in self.model.modules():
-                if isinstance(module, QuantGRU) and module.calibration_method == 'percentile':
-                    module.percentile_value = percentile_value
-        except ImportError:
-            pass  # QuantGRU 未安装，跳过
+        from aimet_torch.native_recurrent import named_native_recurrent
+        for _, module, _ in named_native_recurrent(self.model):
+            if module.calibration_method == "percentile":
+                module.percentile_value = percentile_value
 
     def __str__(self):
         stream = io.StringIO(newline="\n")

@@ -1,5 +1,5 @@
 """
-RX-MET 量化演示 — kws_streaming att_mh_rnn + QuantGRU
+RX-MET 量化演示 — kws_streaming att_mh_rnn + QuantGRU / QuantLSTM
 
 流程用法：
     FP 训练 → prepare_model → QuantizationSimModel + 混合精度位宽
@@ -15,7 +15,8 @@ RX-MET 量化演示 — kws_streaming att_mh_rnn + QuantGRU
     * 增强：time shift、背景噪声、时间拉伸（resample）
     * preprocess=raw：1 秒波形进网，SpeechFeatures（mfcc_tf）在图内
     * Conv2D 10,1  kernel (5,1)  same + ReLU + BN
-    * 2 层 Bidirectional GRU（rnn_units=128）+ 4-head 注意力 + Dense
+    * 2 层 Bidirectional GRU 或 LSTM（rnn_units=128）+ 4-head 注意力 + Dense
+    * 上游原生支持 rnn_type=gru/lstm，本示例使用对应的 rx-met 量化算子
 
 数据集 Speech Commands v0.02（官方包，解压后指向容器内路径）：
 
@@ -27,11 +28,17 @@ RX-MET 量化演示 — kws_streaming att_mh_rnn + QuantGRU
 
     export RX_MET_SPEECH_COMMANDS_ROOT=/datasets/speech_commands_v0.02
     export RX_MET_KWS_OUTPUT_DIR=/workspace/output/quick_start_kws
-    python quick_start_kws.py
+    python quick_start_kws.py --rnn_type gru
+    python quick_start_kws.py --rnn_type lstm
+
+两种模式共用 config/quick_start_full_quant.json，分别读取 GRU_config / LSTM_config。
+输出自动分到输出根目录的 gru/ 或 lstm/ 下。默认各训练 1 epoch，用于学习流程；
+精度取决于训练轮数和配置，不代表上游论文成绩。完整说明见同目录 README.md。
 """
 
 from __future__ import annotations
 
+import argparse
 import contextlib
 import hashlib
 import math
@@ -69,13 +76,14 @@ from aimet_torch.utils_rx import (
 )
 from aimet_torch.v2 import quantsim
 from quant_gru import QuantGRU
+from quant_lstm import QuantLSTM
 
 
 # ============================================================================
 # 全局配置（kws_streaming base_parser / att_mh_rnn 默认值）
 # ============================================================================
 SEED = 42
-DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+DEVICE = torch.device("cuda")  # QuantGRU / QuantLSTM 的 Python 运行时要求 CUDA。
 
 DATA_ROOT = os.environ.get(
     "RX_MET_SPEECH_COMMANDS_ROOT", "/datasets/speech_commands_v0.02"
@@ -134,9 +142,6 @@ OUTPUT_DIR = Path(
     os.environ.get(
         "RX_MET_KWS_OUTPUT_DIR", str(_HERE / "output" / "quick_start_kws")
     )
-)
-FP_MODEL_PATH = Path(
-    os.environ.get("RX_MET_KWS_FP_MODEL", str(OUTPUT_DIR / "model_fp_kws.pth"))
 )
 
 
@@ -330,6 +335,9 @@ def build_dataloaders(root: str):
     train_ds = SpeechCommandsKWS(root, split="train")
     test_ds = SpeechCommandsKWS(root, split="test")
     val_ds = SpeechCommandsKWS(root, split="val")
+    # 校准只使用训练集，关闭随机数据增强；测试集仅用于阶段评估。
+    calib_ds = SpeechCommandsKWS(root, split="train")
+    calib_ds.train_mode = False
 
     g_train = torch.Generator()
     g_train.manual_seed(SEED)
@@ -357,7 +365,7 @@ def build_dataloaders(root: str):
         "train": _make(train_ds, shuffle=True, generator=g_train, drop_last=True),
         "test": _make(test_ds, shuffle=False),
         "val": _make(val_ds, shuffle=False),
-        "calib": _make(test_ds, shuffle=True, generator=g_calib, drop_last=True),
+        "calib": _make(calib_ds, shuffle=True, generator=g_calib),
     }
 
 
@@ -579,7 +587,7 @@ class SpeechFeatures(nn.Module):
 
 
 # ============================================================================
-# 模型：kws_streaming/models/att_mh_rnn.py 默认结构（GRU 换成 QuantGRU）
+# 模型：kws_streaming/models/att_mh_rnn.py，支持 GRU / LSTM 两种循环层
 # ============================================================================
 class ConvActBN(nn.Module):
     """Keras Conv2D(activation=relu) + BatchNormalization。padding=same。"""
@@ -600,7 +608,7 @@ class AttMHRNN(nn.Module):
     """
     kws_streaming.models.att_mh_rnn 默认拓扑（preprocess=raw）。
 
-    输入 [B, 16000] 波形；SpeechFeatures 在 forward 里，再接 Conv / 双向 QuantGRU / 注意力。
+    输入 [B, 16000] 波形；SpeechFeatures 在 forward 里，再接 Conv / 双向 QuantGRU 或 QuantLSTM / 注意力。
     """
 
     def __init__(
@@ -615,8 +623,12 @@ class AttMHRNN(nn.Module):
         dropout: float = 0.2,
         in_time: int = N_FRAMES,
         in_freq: int = N_MFCC,
+        rnn_type: str = "gru",
     ):
         super().__init__()
+        if rnn_type not in ("gru", "lstm"):
+            raise ValueError("rnn_type 必须是 gru 或 lstm")
+        self.rnn_type = rnn_type
         self.speech_features = SpeechFeatures(
             sample_rate=SAMPLE_RATE,
             window_size_ms=WINDOW_SIZE_MS,
@@ -634,20 +646,27 @@ class AttMHRNN(nn.Module):
             in_ch = filters
         self.convs = nn.Sequential(*convs)
 
-        gru_in = in_ch * in_freq
-        grus: list[nn.Module] = []
+        # 两种算子均返回序列输出 [B, T, 2H]，后续注意力和分类头共用。
+        # 多层网络由单层实例堆叠，QuantLSTM 每个实例使用 num_layers=1。
+        rnn_class = QuantGRU if rnn_type == "gru" else QuantLSTM
+        rnn_input_size = in_ch * in_freq
+        recurrent_layers = []
         for _ in range(rnn_layers):
-            grus.append(
-                QuantGRU(
-                    input_size=gru_in,
+            recurrent_layers.append(
+                rnn_class(
+                    input_size=rnn_input_size,
                     hidden_size=rnn_units,
                     num_layers=1,
                     batch_first=True,
                     bidirectional=True,
                 )
             )
-            gru_in = rnn_units * 2
-        self.grus = nn.ModuleList(grus)
+            rnn_input_size = rnn_units * 2
+        # 保留 GRU 的原有层名，让现有 GRU 权重的参数名保持兼容。
+        if rnn_type == "gru":
+            self.grus = nn.ModuleList(recurrent_layers)
+        else:
+            self.lstms = nn.ModuleList(recurrent_layers)
 
         feature_dim = rnn_units * 2
         self.mid_index = self.speech_features.n_frames // 2
@@ -679,8 +698,10 @@ class AttMHRNN(nn.Module):
         x = self.convs(x)
         x = x.permute(0, 2, 3, 1).contiguous()
         x = x.reshape(x.size(0), x.size(1), -1)
-        for gru in self.grus:
-            x, _ = gru(x)
+        recurrent_layers = self.grus if self.rnn_type == "gru" else self.lstms
+        for rnn in recurrent_layers:
+            # GRU 的状态是 h，LSTM 的状态是 (h, c)；本网络只使用序列输出。
+            x, _ = rnn(x)
 
         mid = x[:, self.mid_index, :].contiguous()
         heads = []
@@ -733,8 +754,8 @@ def stage(name: str, timings: dict | None = None):
 # 训练循环
 # ============================================================================
 def train_floating_point(model, train_loader, test_loader, device,
-                         epochs: int = FP_EPOCHS, lr: float = FP_LR,
-                         save_path=FP_MODEL_PATH) -> float:
+                         save_path, rnn_type: str,
+                         epochs: int = FP_EPOCHS, lr: float = FP_LR) -> float:
     save_path = Path(save_path)
     save_path.parent.mkdir(parents=True, exist_ok=True)
     loss_fn = nn.CrossEntropyLoss()
@@ -753,9 +774,9 @@ def train_floating_point(model, train_loader, test_loader, device,
             running_loss += loss.item()
             pbar.set_postfix(loss=f"{running_loss / batch_idx:.4f}")
         print(f"[FP] Epoch {epoch}/{epochs} - Loss: {running_loss / max(batch_idx, 1):.4f}")
-        torch.save(model.state_dict(), save_path)
+        save_checkpoint(model, save_path, rnn_type)
 
-    model.load_state_dict(torch.load(save_path, map_location=device), strict=False)
+    load_checkpoint(model, save_path, rnn_type, device)
     return evaluate(model, test_loader, device)
 
 
@@ -824,37 +845,82 @@ def print_stage_timings(timings: dict):
     print("=" * 70)
 
 
-def _new_model() -> AttMHRNN:
-    return AttMHRNN(num_classes=NUM_CLASSES).to(DEVICE)
+def save_checkpoint(model, path: Path, rnn_type: str) -> None:
+    """模型类型随权重保存，避免 GRU / LSTM 检查点混用。"""
+    if path.exists():
+        previous = torch.load(path, map_location="cpu", weights_only=True)
+        if previous.get("rnn_type") != rnn_type:
+            raise ValueError(f"{path} 的模型类型不匹配或缺少类型信息，请选择新的输出路径")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    torch.save({"rnn_type": rnn_type, "model": model.state_dict()}, path)
+
+
+def load_checkpoint(model, path: Path, rnn_type: str, device) -> None:
+    checkpoint = torch.load(path, map_location=device, weights_only=True)
+    if checkpoint.get("rnn_type") != rnn_type:
+        raise ValueError(f"检查点 {path} 的 rnn_type 与当前 {rnn_type} 不一致")
+    model.load_state_dict(checkpoint["model"], strict=True)
+
+
+def _new_model(rnn_type: str = "gru") -> AttMHRNN:
+    return AttMHRNN(num_classes=NUM_CLASSES, rnn_type=rnn_type).to(DEVICE)
+
+
+def parse_args(argv=None):
+    parser = argparse.ArgumentParser(
+        description="使用 Speech Commands 演示 GRU / LSTM 的浮点训练、PTQ、Po2、QAT、导出和恢复。"
+    )
+    parser.add_argument("--rnn_type", "--rnn-type", choices=("gru", "lstm"), default="gru",
+                        help="循环算子类型（默认 gru）；其余量化步骤相同")
+    parser.add_argument("--data-dir", type=Path, default=Path(DATA_ROOT),
+                        help="Speech Commands v0.02 目录；默认读取 RX_MET_SPEECH_COMMANDS_ROOT")
+    parser.add_argument("--output-dir", type=Path, default=OUTPUT_DIR,
+                        help="输出根目录；自动追加 gru/ 或 lstm/，默认读取 RX_MET_KWS_OUTPUT_DIR")
+    parser.add_argument("--quant-config", type=Path, default=BITWIDTH_CONFIG_FILE,
+                        help="完整的量化配置 JSON；编辑其中的 GRU_config 或 LSTM_config")
+    return parser.parse_args(argv)
 
 
 # ============================================================================
 # 主流程：标准 RX-MET 量化 + 加载验证
 # ============================================================================
-def main():
+def main(argv=None):
+    args = parse_args(argv)
+    if not torch.cuda.is_available():
+        raise RuntimeError("此示例需要 CUDA GPU，请在 rx-met GPU 镜像中使用 --gpus 启动容器")
+    output_dir = args.output_dir / args.rnn_type
+    fp_model_path = Path(os.environ.get("RX_MET_KWS_FP_MODEL", str(output_dir / "model_fp_kws.pth")))
+    if not args.quant_config.is_file():
+        raise FileNotFoundError(f"量化配置不存在: {args.quant_config}")
     set_seed(SEED)
     timings: dict = {}
 
     print("=" * 70)
-    print("RX-MET 量化演示 — kws_streaming att_mh_rnn + 双向 QuantGRU + Speech Commands 12 类")
+    operator_name = "QuantGRU" if args.rnn_type == "gru" else "QuantLSTM"
+    print(f"RX-MET 量化演示 — att_mh_rnn + 双向 {operator_name} + Speech Commands 12 类")
     print("=" * 70)
     print(f"使用设备: {DEVICE}")
-    print(f"数据目录: {DATA_ROOT}")
+    print(f"数据目录: {args.data_dir}")
+    print(f"量化配置: {args.quant_config}（循环层查看 {args.rnn_type.upper()}_config）")
+    print(f"输出目录: {output_dir}")
+    print("默认浮点训练和 QAT 各 1 epoch，用于学习完整流程；精度需充分训练后评估。")
     print(f"特征: preprocess=raw 波形 {WAVEFORM_SHAPE} → SpeechFeatures T={N_FRAMES}, F={N_MFCC}")
 
     with stage("步骤 1: 加载数据和模型", timings):
-        loaders = build_dataloaders(DATA_ROOT)
-        model = _new_model()
+        loaders = build_dataloaders(str(args.data_dir))
+        model = _new_model(args.rnn_type)
         n_params = sum(p.numel() for p in model.parameters())
         n_feat_buf = sum(b.numel() for b in model.speech_features.buffers())
-        n_gru = sum(1 for m in model.modules() if isinstance(m, QuantGRU))
+        n_rnn = sum(1 for m in model.modules() if isinstance(m, (QuantGRU, QuantLSTM)))
         print(
-            f"att_mh_rnn 参数量: {n_params / 1e3:.1f}K  QuantGRU 层: {n_gru}（均为 bidirectional）"
+            f"att_mh_rnn 参数量: {n_params / 1e3:.1f}K  {operator_name} 层: {n_rnn}（均为 bidirectional）"
         )
         print(f"SpeechFeatures 常量 buffer: {n_feat_buf / 1e3:.1f}K（RDFT/Mel/DCT，对齐 kws 进图）")
 
     with stage("步骤 2: 浮点训练 + 评估", timings):
-        fp_accuracy = train_floating_point(model, loaders["train"], loaders["test"], DEVICE)
+        fp_accuracy = train_floating_point(
+            model, loaders["train"], loaders["test"], DEVICE, fp_model_path, args.rnn_type
+        )
         print(f"浮点精度: {fp_accuracy * 100:.2f}%")
 
     with stage("步骤 3: prepare_model + 创建 sim", timings):
@@ -872,7 +938,7 @@ def main():
         )
         sim.set_percentile_value(PERCENTILE_VALUE)
         apply_mixed_precision_bitwidth(
-            sim.model, config_file=str(BITWIDTH_CONFIG_FILE), verbose=True,
+            sim.model, config_file=str(args.quant_config), verbose=True,
         )
 
     with stage("步骤 4: 校准 (PTQ)", timings):
@@ -902,14 +968,21 @@ def main():
         print(f"QAT 微调后精度: {qat_accuracy * 100:.2f}%")
 
     with stage("步骤 7: 保存量化产物", timings):
-        OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-        qat_state_pth = OUTPUT_DIR / "att_mh_rnn_kws_qat.pth"
-        torch.save({"model": sim.model.state_dict()}, qat_state_pth)
+        output_dir.mkdir(parents=True, exist_ok=True)
+        qat_state_pth = output_dir / "att_mh_rnn_kws_qat.pth"
+        # 主权重与量化参数分开保存；避免检查点依赖 QuantSim 的内部 Python 状态。
+        original_model = sim.get_original_model(sim.model, qdq_weights=False)
+        save_checkpoint(original_model, qat_state_pth, args.rnn_type)
+        # 在导出前保留测试样本的输出，恢复后比较数值而不只比较准确率。
+        reload_input = next(iter(loaders["test"]))[0].to(DEVICE)
+        sim.model.eval()
+        with torch.no_grad():
+            expected_output = sim.model(reload_input).detach().clone()
 
         sim.model.cpu().eval()
         onnx_path, enc_path = export_onnx_json(
             sim,
-            export_dir=OUTPUT_DIR,
+            export_dir=str(output_dir),
             filename_prefix="att_mh_rnn_kws",
             dummy_input_shape=(1, *WAVEFORM_SHAPE),
             opset=18,
@@ -920,8 +993,9 @@ def main():
         print(f"encodings:  {enc_path}")
 
     with stage("步骤 8: 重新加载并验证", timings):
-        fresh_model = _new_model().eval()
+        fresh_model = _new_model(args.rnn_type).eval()
         fresh_prepared = model_preparer.prepare_model(fresh_model)
+        load_checkpoint(fresh_prepared, qat_state_pth, args.rnn_type, DEVICE)
         fresh_sim = quantsim.QuantizationSimModel(
             fresh_prepared,
             dummy_input=dummy_input,
@@ -932,19 +1006,22 @@ def main():
         )
         fresh_sim.set_percentile_value(PERCENTILE_VALUE)
         apply_mixed_precision_bitwidth(
-            fresh_sim.model, config_file=str(BITWIDTH_CONFIG_FILE), verbose=True,
+            fresh_sim.model, config_file=str(args.quant_config), verbose=True,
         )
-
-        ckpt = torch.load(qat_state_pth, map_location=DEVICE, weights_only=False)
-        state = ckpt["model"] if isinstance(ckpt, dict) and "model" in ckpt else ckpt
-        fresh_sim.model.load_state_dict(state, strict=False)
 
         load_quantizer_encodings(
             fresh_sim.model,
             load_path=str(enc_path),
+            skip_if_not_found=False,
+            allow_overwrite=False,
             verbose=True,
         )
 
+        fresh_sim.model.eval()
+        with torch.no_grad():
+            restored_output = fresh_sim.model(reload_input)
+        torch.testing.assert_close(restored_output, expected_output, atol=1e-5, rtol=1e-4)
+        print(f"恢复输出最大绝对误差: {(restored_output - expected_output).abs().max().item():.6g}")
         reload_accuracy = evaluate(fresh_sim.model, loaders["test"], DEVICE)
         gap = abs(qat_accuracy - reload_accuracy) * 100
         print(f"QAT 保存前精度:    {qat_accuracy * 100:.2f}%")
@@ -952,7 +1029,7 @@ def main():
         if gap < 0.5:
             print(f"✅ 精度差异 {gap:.3f}%，加载验证通过")
         else:
-            print(f"⚠️  精度差异 {gap:.3f}% 偏大，请检查 sim 配置 / 权重 / encodings 一致性")
+            raise RuntimeError(f"恢复前后精度差异 {gap:.3f} 个百分点，检查点验证失败")
 
     print_accuracy_summary(fp_accuracy, ptq_accuracy, po2_accuracy, qat_accuracy, reload_accuracy)
     print_stage_timings(timings)

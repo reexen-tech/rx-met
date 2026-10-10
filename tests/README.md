@@ -20,3 +20,20 @@
 ```bash
 python3 -m unittest -v tests/test_dependencies.py
 ```
+
+
+## 循环算子与客户示例
+
+`test_quant_lstm_integration.py` 使用随机小模型验证 LSTM 的校准、实际 QAT 更新、
+参数锁、Po2、GRU/LSTM 共存和 ONNX 编码。`test_kws_example.py` 调用客户 KWS
+主入口，使用小尺寸网络和随机音频验证 GRU/LSTM 两种模式的完整流程、导出节点及
+检查点保护；另检查校准数据来自训练集且关闭增强。随机数据不用于评价任务精度。
+
+在安装了 rx-met、QuantGRU、QuantLSTM 的 CUDA 环境中执行：
+
+```bash
+python3 -m unittest -v tests/test_quant_lstm_integration.py tests/test_kws_example.py
+```
+
+面向发布镜像的真实 Speech Commands 数据验收使用
+`scripts/release/verify_kws_example.sh`，默认分别运行 GRU 和 LSTM。

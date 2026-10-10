@@ -6,7 +6,7 @@
 ## 开发环境
 
 - Python 支持范围为 3.10 至 3.12，精确定义见 `pyproject.toml`。
-- 原生 AIMET 和 QuantGRU 构建要求 Linux x86_64、C++17、CMake、Ninja 及对应的
+- 原生 AIMET、QuantGRU 和 QuantLSTM 构建要求 Linux x86_64、C++17、CMake、Ninja 及对应的
   ONNX Runtime 或 CUDA 工具链。
 - 完整 GPU 验证要求 NVIDIA Driver、NVIDIA Container Toolkit 和与目标变体兼容的
   GPU。
@@ -52,6 +52,7 @@ python3 -m unittest -v tests/test_dependencies.py
 | --- | --- |
 | AIMET 原生运行库 | `docs/AIMET_ONNX_NATIVE.md` 中的构建和冒烟测试 |
 | QuantGRU | `operators/quant-gru/README.md` 和 `operators/quant-gru/script/run_all_test.sh` |
+| QuantLSTM 集成 | `python3 -m unittest -v tests/test_quant_lstm_integration.py`（CUDA 环境） |
 | 依赖矩阵或锁文件 | `python3 scripts/dependencies.py check` |
 | Docker 构建或发布脚本 | `./scripts/release/build.sh --no-export <变体>` |
 | 发布镜像 GPU 行为 | `./scripts/release/verify_bundle.sh --gpu --gpu-device 0 <变体>` |

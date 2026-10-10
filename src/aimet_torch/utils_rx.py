@@ -281,23 +281,6 @@ def verify_percentile_calibration(sim_model, verbose: bool = True) -> Dict[str, 
 # Power-of-2 量化相关函数
 # ============================================================================
 
-def _enable_quant_gru_pot2(sim_model, verbose: bool = True) -> int:
-    """递归开启模型中 QuantGRU 的 POT2 scale 模式（use_pot2_scale=True）。"""
-    try:
-        from quant_gru import QuantGRU
-    except ImportError:
-        return 0
-
-    count = 0
-    for name, module in sim_model.named_modules():
-        if isinstance(module, QuantGRU) and bool(getattr(module, 'use_quantization', False)):
-            module.use_pot2_scale = True
-            count += 1
-            if verbose:
-                print(f"  [QuantGRU] {name}: use_pot2_scale=True")
-    return count
-
-
 def apply_power_of_2_workflow(sim_model, method: str = "cover_range", tolerance: float = 0.02, 
                               align_bias_scale: bool = False, verbose: bool = True,
                               bias_bitwidth: int = 32) -> Dict[str, Any]:
@@ -432,9 +415,14 @@ def apply_power_of_2_workflow(sim_model, method: str = "cover_range", tolerance:
         bias_alignment_stats = _align_conv_bias_scale(sim_model, verbose=verbose)
         results['bias_alignment'] = bias_alignment_stats
 
-    quant_gru_count = _enable_quant_gru_pot2(sim_model, verbose=verbose)
-    if quant_gru_count:
-        results['quant_gru_pot2_count'] = quant_gru_count
+    from aimet_torch.native_recurrent import named_native_recurrent
+    for name, module, op in named_native_recurrent(sim_model):
+        if module.use_quantization:
+            module.enable_pot2(method=method, tolerance=tolerance)
+            key = f"{op.package}_pot2_count"
+            results[key] = results.get(key, 0) + 1
+            if verbose:
+                print(f"  [{op.module_type.__name__}] {name}: POT2 enabled")
 
     return results
 
@@ -782,21 +770,16 @@ def apply_mixed_precision_bitwidth(sim_model, config_file: str, verbose: bool = 
         'default_count': 0
     }
 
-    # QuantGRU 模块由内部的 use_quantization 属性管理量化开关，
-    # 不走 AIMET 的通用 input/output/param_quantizers 流程；提前导入用于跳过判断。
-    try:
-        from quant_gru import QuantGRU as _QuantGRUType
-    except ImportError:
-        _QuantGRUType = None
+    from aimet_torch.native_recurrent import named_native_recurrent
+    recurrent_modules = list(named_native_recurrent(sim_model))
+    recurrent_names = {name for name, _, _ in recurrent_modules}
 
     # 遍历所有模块
     for name, module in sim_model.named_modules():
         module_type = type(module).__name__
 
-        # 跳过 QuantGRU：它的 param_quantizers 含 weight_ih_l0/weight_hh_l0 等占位键
-        # （值均为 None），会让通用启发式误判为"有量化器"并错误地计入 disabled_count。
-        # QuantGRU 的位宽配置由后面单独的 load_bitwidth_config 处理。
-        if _QuantGRUType is not None and isinstance(module, _QuantGRUType):
+        # Native operators parse their own stage configuration.
+        if name in recurrent_names:
             continue
 
         # 确定使用哪个配置
@@ -1066,38 +1049,16 @@ def apply_mixed_precision_bitwidth(sim_model, config_file: str, verbose: bool = 
                     elif 'Subtract' in module_type:
                         stats['subtract_count'] += 1
     
-    # 处理 QuantGRU 模块：调用 load_bitwidth_config，并按 use_quantization 区分开/关
-    if _QuantGRUType is not None:
-        quant_gru_total = 0
-        quant_gru_enabled = 0
-        quant_gru_disabled = 0
-        for name, module in sim_model.named_modules():
-            if not isinstance(module, _QuantGRUType):
-                continue
-            quant_gru_total += 1
+    for name, module, op in recurrent_modules:
+        module.set_module_name(name)
+        module.load_bitwidth_config(config_file, verbose=verbose)
+        key = op.package
+        stats[f"{key}_count"] = stats.get(f"{key}_count", 0) + 1
+        for state in ("enabled", "disabled"):
+            stats.setdefault(f"{key}_{state}", 0)
+        state = "enabled" if module.use_quantization else "disabled"
+        stats[f"{key}_{state}"] += 1
 
-            # 加载位宽配置（已校准的 QuantGRU 会被 load_bitwidth_config 内部跳过）
-            was_calibrated = module.is_calibrated()
-            try:
-                module.load_bitwidth_config(config_file, verbose=verbose)
-                if verbose and not was_calibrated:
-                    print(f"  ✅ [QuantGRU] {name}: 已从配置文件加载位宽设置")
-            except Exception as e:
-                if verbose:
-                    print(f"  ⚠️  [QuantGRU] {name}: 加载配置失败 - {e}")
-
-            # 直接读 QuantGRU 自身的 use_quantization 属性判断量化是否启用
-            if bool(getattr(module, 'use_quantization', False)):
-                quant_gru_enabled += 1
-            else:
-                quant_gru_disabled += 1
-
-        if quant_gru_total > 0:
-            # 兼容旧字段（保留 quant_gru_count 作为总数），同时新增明确的开/关计数
-            stats['quant_gru_count'] = quant_gru_total
-            stats['quant_gru_enabled'] = quant_gru_enabled
-            stats['quant_gru_disabled'] = quant_gru_disabled
-    
     # 打印统计
     if verbose:
         print("="*70)
@@ -1108,9 +1069,10 @@ def apply_mixed_precision_bitwidth(sim_model, config_file: str, verbose: bool = 
         print(f"  • Multiply 层:         {stats['multiply_count']} 个")
         print(f"  • Subtract 层:         {stats['subtract_count']} 个")
         print(f"  • 激活函数层:          {stats['activation_count']} 个")
-        if 'quant_gru_count' in stats:
-            print(f"  • QuantGRU 层:         {stats['quant_gru_count']} 个 "
-                  f"(启用量化: {stats['quant_gru_enabled']}, 未启用: {stats['quant_gru_disabled']})")
+        for op in dict((op.package, op) for _, _, op in recurrent_modules).values():
+            key = op.package
+            print(f"  • {op.module_type.__name__}: {stats[f'{key}_count']} 个 "
+                  f"(启用量化: {stats[f'{key}_enabled']}, 未启用: {stats[f'{key}_disabled']})")
         print(f"  • 禁用量化层:          {stats['disabled_count']} 个")
         print(f"  • 按名称匹配:          {stats['name_matched_count']} 个")
         print(f"  • 按类型匹配:          {stats['type_matched_count']} 个")

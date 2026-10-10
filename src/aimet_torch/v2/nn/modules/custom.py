@@ -37,7 +37,6 @@
 """Quantized definitions for custom modules of AIMET"""
 
 import copy
-import importlib
 from typing import Optional
 import torch
 from torch import Tensor
@@ -56,10 +55,7 @@ from ..true_quant import (
 # NOTE: Disabling due to pylint false alarm in ModuleList
 # pylint: disable=not-callable
 
-try:
-    _OptionalQuantGRU = importlib.import_module("quant_gru").QuantGRU
-except (ImportError, AttributeError):
-    _OptionalQuantGRU = None
+from aimet_torch.native_recurrent import recurrent_operators
 
 
 @QuantizationMixin.implements(Sin)
@@ -896,19 +892,26 @@ class QuantizedCustomSiLU(QuantizationMixin, CustomSiLU):
         return out
 
 
-if _OptionalQuantGRU is not None:
-    @QuantizationMixin.implements(_OptionalQuantGRU)
-    class QuantizedQuantGRU(QuantizationMixin, _OptionalQuantGRU):
-        """Pass-through AIMET wrapper for QuantGRU."""
+class _NativeRecurrentQuantizationMixin(QuantizationMixin):
+    """Pass through native execution and keep generic quantizers disabled."""
 
-        def __quant_init__(self):
-            super().__quant_init__()
-            # QuantGRU has its own internal quantization implementation.
-            self.input_quantizers = nn.ModuleList([None, None])
-            self.output_quantizers = nn.ModuleList([None, None])
+    def __quant_init__(self):
+        super().__quant_init__()
+        self.input_quantizers = nn.ModuleList([None, None])
+        self.output_quantizers = nn.ModuleList([None, None])
+        self.param_quantizers = nn.ModuleDict({
+            name: None for name, _ in self.named_parameters(recurse=False)
+        })
 
-        def forward(self, input: torch.Tensor, hx=None):
-            return super().forward(input, hx)
+    def forward(self, input: torch.Tensor, hx=None):
+        return super().forward(input, hx)
+
+
+for _operator in recurrent_operators():
+    _name = "Quantized" + _operator.module_type.__name__
+    _wrapper = type(_name, (_NativeRecurrentQuantizationMixin, _operator.module_type),
+                    {"__module__": __name__})
+    globals()[_name] = QuantizationMixin.implements(_operator.module_type)(_wrapper)
 
 
 # @QuantizationMixin.implements(StridedSlice)
@@ -994,4 +997,3 @@ if _OptionalQuantGRU is not None:
 # @QuantizationMixin.implements(DynamicLinear)
 # class QuantizedDynamicLinear(QuantizationMixin, DynamicLinear):
 #     """ Quantized DynamicLinear """
-

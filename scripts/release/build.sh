@@ -217,7 +217,7 @@ docker rm "${EXAMPLES_CONTAINER}" >/dev/null
 EXAMPLES_CONTAINER=""
 for required_example in README.md quick_start_kws.py onnx_ptq_quick_start.py \
     prepare_onnx_ptq_data.py config/mrnn_quantsim_config_custom_mixed_precision_v2.json \
-    config/quick_start_full_quant.json; do
+    config/quick_start_full_quant.json config/README.md; do
     [[ -f "${EXAMPLES_STAGING}/${required_example}" ]] \
         || die "产品镜像缺少示例文件: ${required_example}"
 done

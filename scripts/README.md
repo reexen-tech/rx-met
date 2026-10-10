@@ -7,7 +7,7 @@
 
 - `release/build.sh` 解析环境、构建产品镜像、执行验收并导出发布制品。
 - `release/verify_bundle.sh` 验证最终镜像和可选 GPU 流程。
-- `release/verify_kws_example.sh` 使用真实 Speech Commands 数据验证 KWS 流程。
+- `release/verify_kws_example.sh` 使用真实 Speech Commands 数据验证 KWS 的 GRU 和 LSTM 完整流程。
 - `release/verify_onnx_ptq_example.sh` 使用指定模型和校准数据验证 ONNX PTQ 流程。
 
 常用入口为：
@@ -42,3 +42,5 @@
 
 完整发布参数和操作流程见
 [`docs/Release_packaging.md`](../docs/Release_packaging.md)。
+
+- `internal/build_quant_lstm_wheel.sh` 构建 QuantLSTM CUDA 原生库和 wheel。

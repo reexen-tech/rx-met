@@ -91,7 +91,8 @@ allowed_output_types = (torch.Tensor, float, *dtypes_to_ignore_for_quantization)
 DROPOUT_TYPES = (torch.nn.Dropout, torch.nn.Dropout2d, torch.nn.Dropout3d)
 
 # list of modules which need to be treated as a leaf module
-modules_to_treat_as_leaf = []
+from aimet_torch.native_recurrent import native_recurrent_types
+modules_to_treat_as_leaf = list(native_recurrent_types())
 
 # list of modules not to treat as leaf
 modules_not_to_treat_as_leaf = [torch.nn.ModuleList, torch.nn.ModuleDict]

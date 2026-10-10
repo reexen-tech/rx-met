@@ -216,3 +216,12 @@ load_quantizer_encodings(
 - QAT 前冻结量化参数和 BatchNorm。
 - 重建模型使用与训练侧相同的模型预处理和量化配置。
 - 性能或精度结论包含模型版本、数据集、配置和复现命令。
+
+## QuantLSTM 配置
+
+`LSTM_config` 独立控制 LSTM 量化开关和原生 `quant_config`，在校准前应用。
+KWS 的两种模式共用 `examples/config/quick_start_full_quant.json`，分别读取
+`GRU_config` / `LSTM_config`。LSTM 示例设置 cell state 为 16 位、权重为 8 位
+per-channel；未列出的量化点保留默认值。用户可直接修改配置中的对应节。
+字段对照、最小 JSON 和默认值见 [示例配置说明](../examples/config/README.md)，
+Po2 和参数锁见 [LSTM 接入说明](QuantLSTM_integration.md)。

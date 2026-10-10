@@ -47,7 +47,7 @@ Python 包兼容范围定义在 `pyproject.toml`。环境版本、基础镜像�
 ONNX Runtime 组合和精确依赖定义在 `docker/variants.json`。执行
 `python3 scripts/dependencies.py lock` 会生成 Bake 配置、构建工具锁，以及
 `cu118-py310.lock`、`cu126-py310.lock`、`cu130-py312.lock` 三份自包含
-运行环境锁。环境版本默认是 `deps-v1`，与产品 `VERSION` 独立。
+运行环境锁。环境版本默认是 `deps-v2`，与产品 `VERSION` 独立。
 
 ## 3. 环境镜像
 
@@ -67,12 +67,12 @@ ONNX Runtime 组合和精确依赖定义在 `docker/variants.json`。执行
 默认 tag：
 
 ```text
-rx-met-build-env:deps-v1-cu118
-rx-met-runtime-env:deps-v1-cu118
-rx-met-build-env:deps-v1-cu126
-rx-met-runtime-env:deps-v1-cu126
-rx-met-build-env:deps-v1-cu130
-rx-met-runtime-env:deps-v1-cu130
+rx-met-build-env:deps-v2-cu118
+rx-met-runtime-env:deps-v2-cu118
+rx-met-build-env:deps-v2-cu126
+rx-met-runtime-env:deps-v2-cu126
+rx-met-build-env:deps-v2-cu130
+rx-met-runtime-env:deps-v2-cu130
 ```
 
 依赖矩阵、Torch、CUDA、Python、Ubuntu 或编译工具链变化时创建新的环境版本。
@@ -94,13 +94,13 @@ AIMET、QuantGRU、examples 和产品版本变化继续复用现有环境镜像�
 ./scripts/environment/export.sh cu118 cu126 cu130
 ```
 
-默认输出到 `.release/environment-images/deps-v1/`。每个 CUDA 变体只有一个
+默认输出到 `.release/environment-images/deps-v2/`。每个 CUDA 变体只有一个
 归档文件，其中包含对应的 build-env 和 runtime-env：
 
 ```text
-rx-met-environment-deps-v1-cu118-linux-amd64.tar.zst
-rx-met-environment-deps-v1-cu126-linux-amd64.tar.zst
-rx-met-environment-deps-v1-cu130-linux-amd64.tar.zst
+rx-met-environment-deps-v2-cu118-linux-amd64.tar.zst
+rx-met-environment-deps-v2-cu126-linux-amd64.tar.zst
+rx-met-environment-deps-v2-cu130-linux-amd64.tar.zst
 environment-manifest.json
 README.md
 SHA256SUMS
@@ -112,7 +112,7 @@ SHA256SUMS
 复制或移动整个目录后，应在目标位置再次校验：
 
 ```bash
-cd /path/to/environment-images/deps-v1
+cd /path/to/environment-images/deps-v2
 sha256sum --check --strict SHA256SUMS
 ```
 
@@ -123,7 +123,7 @@ sha256sum --check --strict SHA256SUMS
 
 ```bash
 ./scripts/environment/load.sh \
-  --archive-dir /path/to/environment-images/deps-v1 \
+  --archive-dir /path/to/environment-images/deps-v2 \
   cu118 cu126 cu130
 ```
 
@@ -131,7 +131,7 @@ sha256sum --check --strict SHA256SUMS
 
 ```bash
 ./scripts/environment/load.sh \
-  --archive /path/to/rx-met-environment-deps-v1-cu126-linux-amd64.tar.zst \
+  --archive /path/to/rx-met-environment-deps-v2-cu126-linux-amd64.tar.zst \
   cu126
 ```
 
@@ -159,7 +159,7 @@ tag，`--force` 用于显式覆盖。
 
 # 从指定目录加载缺失的环境
 ./scripts/release/build.sh \
-  --environment-dir /path/to/environment-images/deps-v1 \
+  --environment-dir /path/to/environment-images/deps-v2 \
   cu118 cu126 cu130
 
 # 强制刷新环境后发布
@@ -172,16 +172,16 @@ tag，`--force` 用于显式覆盖。
 环境归档目录由调用方提供，并直接指向具体的环境版本目录：
 
 ```text
-/path/to/environment-images/deps-v1/
+/path/to/environment-images/deps-v2/
 ```
 
 ```bash
 ./scripts/release/build.sh \
-  --environment-dir /path/to/environment-images/deps-v1 \
+  --environment-dir /path/to/environment-images/deps-v2 \
   cu118 cu126 cu130
 
 # 也可以通过环境变量指定同一目录
-RX_MET_ENV_ARCHIVE_DIR=/path/to/environment-images/deps-v1 \
+RX_MET_ENV_ARCHIVE_DIR=/path/to/environment-images/deps-v2 \
   ./scripts/release/build.sh cu118 cu126 cu130
 ```
 
@@ -195,7 +195,7 @@ manifest 和 SHA-256 校验文件。首次构建可直接运行 `scripts/environ
 
 | 变量 | 默认值 | 作用 |
 | --- | --- | --- |
-| `RX_MET_ENV_VERSION` | `deps-v1` | 稳定环境版本 |
+| `RX_MET_ENV_VERSION` | `deps-v2` | 稳定环境版本 |
 | `RX_MET_BUILD_ENV_REPOSITORY` | `rx-met-build-env` | 构建环境仓库名 |
 | `RX_MET_RUNTIME_ENV_REPOSITORY` | `rx-met-runtime-env` | 运行环境仓库名 |
 | `RX_MET_ENV_ARCHIVE_DIR` | 空 | 环境归档目录 |
@@ -245,7 +245,8 @@ GPU 验收检查 `torch.cuda.is_available()`，运行关闭 CPU 回退的 ONNX R
 session，并运行 AIMET v2 和 QuantGRU CUDA forward/backward。该步骤提供快速冒烟
 检查，完整发布验收还包括真实数据用例。
 
-KWS 完整流程在目标 GPU 上执行，默认使用 GPU 0：
+KWS 完整流程在目标 GPU 上执行，默认使用 GPU 0，并在每个 CUDA 变体中
+分别运行 GRU 和 LSTM。每次运行还检查 ONNX 循环节点及对应 encodings：
 
 ```bash
 ./scripts/release/verify_kws_example.sh \
@@ -262,6 +263,21 @@ ONNX PTQ 完整流程需要显式传入相互匹配的模型和 NPY/NPZ 校准�
   cu118 cu126 cu130
 ```
 
-两个脚本的 `--output-dir` 都有默认值，并会再按 CUDA 变体创建子目录。ONNX PTQ
+两个脚本的 `--output-dir` 都有默认值，并会再按 CUDA 变体创建子目录。
+KWS 在变体目录下继续按 `gru/`、`lstm/` 分隔输出和日志；可用 `--rnn-type gru`
+或 `--rnn-type lstm` 单独验证一种模式，默认 `both`。ONNX PTQ
 以外部模型仓库作为只读输入，KWS 用例使用 Speech Commands 数据。模型输入名、输入
 shape 和校准文件必须一致。
+
+## QuantLSTM 发布
+
+产品 builder 同时生成 `quant_gru` 和 `quant_lstm` wheel，两个算子按 CUDA 变体打标。
+`internal/build_quant_lstm_wheel.sh` 支持 `RX_MET_QUANT_LSTM_BUILD_DIR`、
+`RX_MET_WHEEL_OUT` 和 `RX_MET_CUDA_ARCHITECTURES`，无可见 GPU 时也可指定架构构建。
+LSTM CMake 使用传入的架构；测试和示例不进入 wheel 构建。
+
+环境版本更新为 `deps-v2`，build lock 增加 CMake 3.31.6 和 nlohmann-json 3.11.3（含 importlib-resources 6.5.2），
+满足 Ubuntu 22.04 上的 CMake >=3.24、JSON >=3.11.2 要求。JSON 为构建期头文件依赖，
+通过 wheel 或系统 CMake package 查找；runtime 不新增 Python 运行依赖。
+更新后需构建或加载 deps-v2 环境镜像，不能使用 deps-v1 标签冒充新构建环境。
+发布镜像导入 `quant_lstm`，GPU 验收运行双向 LSTM 的 QuantSim 校准和反向传播。

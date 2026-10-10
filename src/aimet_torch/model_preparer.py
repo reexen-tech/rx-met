@@ -131,7 +131,6 @@
 # ----------------------------------------------------------------------------------------------------------
 
 import copy
-import importlib
 import re
 from typing import Any, Optional, Dict, Union, List, Callable, Tuple
 import torch
@@ -141,10 +140,7 @@ from aimet_torch.utils import in_eval_mode
 from aimet_torch.utils import replace_modules
 import aimet_torch._base.nn.modules.custom as aimet_modules
 
-try:
-    _OptionalQuantGRU = importlib.import_module("quant_gru").QuantGRU
-except (ImportError, AttributeError):
-    _OptionalQuantGRU = None
+from aimet_torch.native_recurrent import native_recurrent_types
 
 logger = AimetLogger.get_area_logger(AimetLogger.LogAreas.ModelPreparer)
 
@@ -565,12 +561,10 @@ def _trace_model(
             # =============================================
             
 
-            # ============= 新增：默认排除 QuantGRU =============
-            # QuantGRU 内部由外部库自行处理量化与执行，FX 不应展开其实现。
-            if _OptionalQuantGRU is not None and isinstance(m, _OptionalQuantGRU):
+            # Native operators own execution and quantization; FX keeps them opaque.
+            if isinstance(m, native_recurrent_types()):
                 return True
-            # ==============================================
-            
+
             return (
                 modules_to_exclude
                 and m in modules_to_exclude

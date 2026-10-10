@@ -685,7 +685,7 @@ class QuantSimConfigurator(AimetCommonQuantSimConfigurator):
             )
 
     def _disable_generic_quantizers_on_skipped_modules(self):
-        """Keep QuantGRU on GRU_config; official defaults would re-enable I/O/params."""
+        """Keep native recurrent operators on their own configs and encodings."""
         disabled_count = 0
         for module, wrapper in self._module_to_quantsim_wrapper_dict.items():
             if not skips_generic_quantizers(module):

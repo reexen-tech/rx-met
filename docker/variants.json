@@ -1,11 +1,14 @@
 {
   "schema_version": 1,
-  "environment_version": "deps-v1",
+  "environment_version": "deps-v2",
   "build_packages": {
     "pip": "25.2",
     "setuptools": "70.2.0",
     "wheel": "0.45.1",
-    "pybind11": "2.13.6"
+    "pybind11": "2.13.6",
+    "cmake": "3.31.6",
+    "nlohmann-json": "3.11.3",
+    "importlib-resources": "6.5.2"
   },
   "common_packages": {
     "attrs": "26.1.0",

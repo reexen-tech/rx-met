@@ -4,7 +4,7 @@
 
 - 发布制品包含 `cu118`、`cu126` 和 `cu130` 三个 Linux x86_64 GPU 镜像。
 - 每个镜像包含对应版本的 Python、PyTorch、ONNX Runtime GPU、定制 AIMET 和
-  QuantGRU。
+  QuantGRU 和 QuantLSTM。
 - 发布目录包含镜像归档、`image-manifest.json`、`SHA256SUMS` 和与镜像一致的
   `examples/` 示例源码。
 

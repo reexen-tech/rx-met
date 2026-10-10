@@ -47,7 +47,7 @@ docker run --gpus device=0 --rm -it \
 `/opt/rx-met/examples` 的内容一致。模型和数据集通过 volume 提供，示例在同一版本的
 产品镜像中执行。两个入口分别是：
 
-- `examples/quick_start_kws.py`：KWS 浮点训练、PTQ、Power-of-2、QAT 和导出；
+- `examples/quick_start_kws.py`：通过 `--rnn_type gru|lstm` 选择循环层，演示 KWS 浮点训练、PTQ、Power-of-2、QAT、导出和恢复；
 - `examples/onnx_ptq_quick_start.py`：ONNX PTQ、Power-of-2 和 compiler encodings
   导出。
 
@@ -62,10 +62,15 @@ Speech Commands v0.02 在容器内挂载为
 cp -a /opt/rx-met/examples /workspace/rx-met-examples
 cd /workspace/rx-met-examples
 export RX_MET_SPEECH_COMMANDS_ROOT=/datasets/speech_commands_v0.02
-python3 quick_start_kws.py
+python3 quick_start_kws.py --rnn_type gru
+# 或运行 LSTM 版本
+python3 quick_start_kws.py --rnn_type lstm
 ```
 
-输出默认写入 `/workspace/rx-met-examples/output/quick_start_kws/`。
+输出默认分别写入 `/workspace/rx-met-examples/output/quick_start_kws/gru/` 和
+`lstm/`。可用 `--output-dir` 指定输出根目录；网络类型子目录自动追加。
+两种模式共用 `config/quick_start_full_quant.json`，分别读取 `GRU_config` /
+`LSTM_config`，字段说明见 `examples/config/README.md`。默认各训练 1 epoch，用于学习流程。
 日志输出“量化流程完成（已通过加载验证）”并返回退出码 0，表示 KWS 示例完成。
 
 ## ONNX PTQ 示例
@@ -115,6 +120,7 @@ import aimet_torch
 import aimet_onnx
 import onnxruntime
 import quant_gru
+import quant_lstm
 
 print("torch", torch.__version__, "CUDA", torch.version.cuda)
 print("GPU", torch.cuda.get_device_name(0))

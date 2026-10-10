@@ -8,10 +8,23 @@
 
 ### Added
 
+- QuantLSTM 接入 FX/ConnectedGraph、AIMET v2 QuantSim、混合精度、共享校准、Po2、
+  参数锁和 ONNX 导出回读；提供 KWS 用户示例与真实 CUDA 集成测试。
+- 发布镜像包含 QuantLSTM wheel，增加构建依赖并将环境版本更新为 `deps-v2`。
+
+- 在 `operators/quant-lstm/` 原样收录 QuantLSTM 源码、配置、构建脚本、测试和文档，
+  与 QuantGRU 同级维护并支持独立构建。
+
 - 增加独立的环境镜像构建、验证、加载和导出命令。
 - 增加 `CONTRIBUTING.md`，统一公开贡献、测试和文档更新要求。
 
 ### Changed
+
+- KWS 用户示例通过 `--rnn_type gru|lstm` 选择循环层，共用量化配置，输出按网络类型隔离。
+  随机 LSTM 流程检查归入测试，客户说明直接随 examples 交付；发布验收覆盖两种模式。
+
+- 同步 QuantLSTM 上游更新，默认构建 Release CUDA 库并关闭测试和示例，更新使用文档；
+  算子目录不再收录上游 `.github/`、`docker/` 和 `.dockerignore`。
 
 - 更新 QuantGRU 使用、配置和计算流程文档，合并 PWL 说明并清理历史算法草稿。
 - 将 AIMET Python 包整理到 `src/`，将 AIMET 原生实现放在 `native/`，并将
@@ -27,6 +40,17 @@
 - 文档按用户指南、配置说明、维护者文档和架构决策重新组织。
 
 ### Fixed
+
+- QuantLSTM signed symmetric 校准保留 `max_abs/qmax` 和零点 0，CPU/CUDA 与 QAT
+  运行范围改为完整 INT8/INT16 区间，允许 `-128/-32768`；导出及回读范围与 GRU 一致。
+
+- LSTM 的 rx-met 导出及回读统一使用与 GRU 相同的公共编码字段，移除原生参数备份
+  和执行元数据；算子独立的原生检查点格式保持分离。外层输入、输出各保存一条
+  `PER_TENSOR` 编码，h/c 状态按方向保留在内部量化点，不再展开为 `PER_CHANNEL` 数组。
+
+- KWS 校准改用无随机增强的训练集；检查点记录网络类型并严格恢复，恢复验证失败时退出。
+
+- 分阶段检查点同时保存和恢复普通层输入编码，避免回读后重复校准改变模型结果。
 
 - 修复 QuantGRU CPU 参考实现引用缺失测试源码导致的 CMake 配置失败。
 - 修复 ONNX PTQ 快速示例读取错误 `rxmet_encodings` 字段的问题。
