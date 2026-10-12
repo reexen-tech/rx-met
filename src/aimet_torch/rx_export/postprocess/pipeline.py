@@ -3,20 +3,7 @@ from __future__ import annotations
 import logging
 from typing import Tuple
 
-from .encodings_ops import (
-    add_gru_input_from_internal_ops,
-    add_gru_output_from_internal_ops,
-    compact_per_channel_param_encodings,
-    flatten_activation_io_index_dict,
-    merge_gru_activation_encodings,
-    merge_reverse_cells_into_cells,
-    merge_gru_bias_param_encodings,
-    merge_bidirectional_gru_param_encodings,
-    normalize_dtype_with_bitwidth,
-    normalize_quant_fields_add_n,
-    rename_gru_internal_ops_keys,
-    postprocess_encodings_inplace,
-)
+from .encodings_ops import postprocess_encodings_inplace
 from .io_utils import load_encodings, save_encodings
 from .onnx_graph import fix_slice_end_constants, postprocess_onnx_graph_inplace
 from .renaming import rename_gru_initializers_and_change_gru_json_format
@@ -56,62 +43,7 @@ def postprocess_all(
     if verbose:
         logger.info("=== Pipeline E*: load_encodings ===")
     enc = load_encodings(encodings_path)
-    changed_any = False
-
-    if verbose:
-        logger.info("=== Pipeline E1: merge_gru_activation_encodings ===")
-    enc, c = merge_gru_activation_encodings(enc, verbose=verbose)
-    changed_any |= c
-
-    if verbose:
-        logger.info("=== Pipeline E2: rename_gru_internal_ops_keys ===")
-    enc, c = rename_gru_internal_ops_keys(enc, verbose=verbose)
-    changed_any |= c
-
-    if verbose:
-        logger.info("=== Pipeline E3: add_gru_output_from_internal_ops ===")
-    enc, c = add_gru_output_from_internal_ops(enc, verbose=verbose)
-    changed_any |= c
-
-    if verbose:
-        logger.info("=== Pipeline E4: add_gru_input_from_internal_ops ===")
-    enc, c = add_gru_input_from_internal_ops(enc, verbose=verbose)
-    changed_any |= c
-
-    if verbose:
-        logger.info("=== Pipeline E4.5: merge_reverse_cells_into_cells ===")
-    enc, c = merge_reverse_cells_into_cells(enc, verbose=verbose)
-    changed_any |= c
-
-    if verbose:
-        logger.info("=== Pipeline E5: merge_gru_bias_param_encodings ===")
-    enc, c = merge_gru_bias_param_encodings(enc, verbose=verbose)
-    changed_any |= c
-
-    if verbose:
-        logger.info("=== Pipeline E6: compact_per_channel_param_encodings ===")
-    enc, c = compact_per_channel_param_encodings(enc, verbose=verbose)
-    changed_any |= c
-
-    if verbose:
-        logger.info("=== Pipeline E6.5: merge_bidirectional_gru_param_encodings ===")
-    enc, c = merge_bidirectional_gru_param_encodings(enc, verbose=verbose)
-    changed_any |= c
-
-    if verbose:
-        logger.info("=== Pipeline E7: flatten_activation_io_index_dict ===")
-    enc, c = flatten_activation_io_index_dict(enc, verbose=verbose)
-    changed_any |= c
-
-    if verbose:
-        logger.info("=== Pipeline E8: normalize_quant_fields_add_n ===")
-    enc, c = normalize_quant_fields_add_n(enc, verbose=verbose)
-    changed_any |= c
-
-    if verbose:
-        logger.info("=== Pipeline E9: normalize_dtype_with_bitwidth ===")
-    enc, c = normalize_dtype_with_bitwidth(enc, verbose=verbose)
-    changed_any |= c
+    enc, changed_any = postprocess_encodings_inplace(enc, verbose=verbose)
 
     enc_out = output_encodings_path or encodings_path
     if changed_any or enc_out != encodings_path:

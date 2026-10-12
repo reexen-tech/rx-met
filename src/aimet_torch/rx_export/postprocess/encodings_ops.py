@@ -623,11 +623,17 @@ def postprocess_encodings_inplace(enc: Dict[str, Any], verbose: bool = True) -> 
     enc, c1_6 = add_gru_input_from_internal_ops(enc, verbose=verbose)
     changed_any |= c1_6
 
+    enc, c2 = merge_reverse_cells_into_cells(enc, verbose=verbose)
+    changed_any |= c2
+
     enc, c3 = merge_gru_bias_param_encodings(enc, verbose=verbose)
     changed_any |= c3
 
     enc, c4 = compact_per_channel_param_encodings(enc, verbose=verbose)
     changed_any |= c4
+
+    enc, c4_5 = merge_bidirectional_gru_param_encodings(enc, verbose=verbose)
+    changed_any |= c4_5
 
     enc, c5 = flatten_activation_io_index_dict(enc, verbose=verbose)
     changed_any |= c5

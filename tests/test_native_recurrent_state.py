@@ -1,5 +1,7 @@
 """Shared GRU/LSTM quantization-state and Po2 regression tests (CUDA)."""
 import json
+import importlib
+from unittest.mock import patch
 import math
 import tempfile
 import unittest
@@ -95,6 +97,28 @@ class NativeRecurrentStateTest(unittest.TestCase):
                         self.assertEqual(sum(node.name == name and node.op_type == name.upper()
                                              for node in graph.graph.node), 1)
                     self.assert_native_entries(json.loads(Path(enc_path).read_text()), flags)
+
+    def test_export_rejects_missing_native_encodings(self):
+        exporter = importlib.import_module('aimet_torch.rx_export.export_onnx_json')
+        original = exporter.export_recurrent_encodings
+        sim = self.sim(True, True)
+        with torch.no_grad(), compute_encodings(sim.model):
+            sim.model(self.x)
+        for name in ('gru', 'lstm'):
+            for kind in ('internal_ops', 'weight'):
+                with self.subTest(name=name, kind=kind):
+                    def corrupt(model, graph_path, enc_path):
+                        original(model, graph_path, enc_path)
+                        path = Path(enc_path)
+                        document = json.loads(path.read_text())
+                        if kind == 'internal_ops':
+                            del document['activation_encodings'][name]['internal_ops']
+                        else:
+                            del document['param_encodings'][name + '.weight_ih.weight']
+                        path.write_text(json.dumps(document))
+                    with patch.object(exporter, 'export_recurrent_encodings', side_effect=corrupt), \
+                         self.assertRaisesRegex(RuntimeError, name):
+                        export_onnx_json(sim, str(self.directory), 'missing', tuple(self.x.shape))
 
     def test_strict_reload_requires_encodings_only_for_enabled_modules(self):
         path = self.directory / 'empty.json'

@@ -418,20 +418,26 @@ def postprocess_onnx_graph_inplace(onnx_path: str, input_shape: Tuple[int, int, 
 
     m = _deduplicate_initializers(m)
 
-    m, ok = simplify(m, overwrite_input_shapes={"input": list(input_shape)})
+    # Mul-by-one/Add-zero and single-input Concat can carry quantization boundaries.
+    # Keep those compute nodes and their names in sync with sidecar encodings.
+
+    m, ok = simplify(m, overwrite_input_shapes={"input": list(input_shape)},
+                     skipped_optimizers=["eliminate_nop_with_unit", "eliminate_nop_concat"])
     if not ok:
         raise RuntimeError("onnx-simplifier 校验失败")
     m = shape_inference.infer_shapes(m, data_prop=True)
     m = _fold_static_reshape_shapes(m)
     m = _fold_constant_if_nodes(m)
 
-    m, ok = simplify(m, overwrite_input_shapes={"input": list(input_shape)})
+    m, ok = simplify(m, overwrite_input_shapes={"input": list(input_shape)},
+                     skipped_optimizers=["eliminate_nop_with_unit", "eliminate_nop_concat"])
     if not ok:
         raise RuntimeError("onnx-simplifier（二次）校验失败")
     m = shape_inference.infer_shapes(m, data_prop=True)
 
     m = _fold_constant_if_nodes(m)
-    m, ok = simplify(m, overwrite_input_shapes={"input": list(input_shape)})
+    m, ok = simplify(m, overwrite_input_shapes={"input": list(input_shape)},
+                     skipped_optimizers=["eliminate_nop_with_unit", "eliminate_nop_concat"])
     if not ok:
         raise RuntimeError("onnx-simplifier（三次）校验失败")
     m = shape_inference.infer_shapes(m, data_prop=True)

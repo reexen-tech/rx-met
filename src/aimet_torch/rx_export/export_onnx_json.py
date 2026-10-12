@@ -25,6 +25,10 @@ from .custom_gru_onnx import (
     replace_optimized_gru_modules,
 )
 from .postprocess import postprocess_all
+from .parameter_names import restore_parameter_names
+from .validation import (
+    collect_expected_encodings, observe_non_tensor_inputs, validate_exported_artifacts,
+)
 
 from aimet_torch.optimized_quantizable_gru import OptimizedQuantizableGRU
 
@@ -154,6 +158,7 @@ def export_onnx_json(
 
     - ONNX 保持“干净”：不导出 Q/DQ/fakequant（固定为 sidecar encodings）
     - torch.onnx.export 强制 legacy：dynamo=False
+    - 返回前统一校验最终 ONNX 及启用量化器的编码；缺失或不一致时抛出 RuntimeError
     """
     os.makedirs(export_dir, exist_ok=True)
     # if tuple(dummy_input_shape) != STATIC_DUMMY_INPUT_SHAPE:
@@ -189,21 +194,24 @@ def export_onnx_json(
         }
 
         onnx_path = os.path.join(export_dir, filename_prefix + ".onnx")
-        sim.__class__.export_onnx_model_and_encodings(  # type: ignore[attr-defined]
-            export_dir,
-            filename_prefix,
-            original_model,
-            sim.model,
-            dummy_input,
-            onnx_export_args,
-            propagate_encodings=False,
-            module_marker_map=getattr(sim, "_module_marker_map", None),
-            is_conditional=getattr(sim, "_is_conditional", False),
-            excluded_layer_names=getattr(sim, "_excluded_layer_names", None),
-            quantizer_args=getattr(sim, "quant_args", None),
-            export_model=True,
-            filename_prefix_encodings=filename_prefix,
-        )
+        with observe_non_tensor_inputs(original_model) as scalar_inputs:
+            sim.__class__.export_onnx_model_and_encodings(  # type: ignore[attr-defined]
+                export_dir,
+                filename_prefix,
+                original_model,
+                sim.model,
+                dummy_input,
+                onnx_export_args,
+                propagate_encodings=False,
+                module_marker_map=getattr(sim, "_module_marker_map", None),
+                is_conditional=getattr(sim, "_is_conditional", False),
+                excluded_layer_names=getattr(sim, "_excluded_layer_names", None),
+                quantizer_args=getattr(sim, "quant_args", None),
+                export_model=True,
+                filename_prefix_encodings=filename_prefix,
+            )
+        expected_encodings = collect_expected_encodings(sim.model, scalar_inputs)
+        reference_graph = onnx.load(onnx_path)
 
         # -------------------------------------------------------------------------------------------------------------
         # 后处理 ONNX（去除辅助节点/If 并补齐静态 shape）
@@ -229,5 +237,10 @@ def export_onnx_json(
         )
 
         export_recurrent_encodings(sim.model, onnx_path, enc_out_path)
+        restore_parameter_names(onnx_path, original_model, expected_encodings)
+        validate_exported_artifacts(
+            onnx_path, enc_out_path, expected_encodings,
+            scalar_inputs=scalar_inputs, reference_graph=reference_graph,
+        )
 
         return onnx_path, enc_out_path
