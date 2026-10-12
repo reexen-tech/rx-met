@@ -37,3 +37,26 @@ python3 -m unittest -v tests/test_quant_lstm_integration.py tests/test_kws_examp
 
 面向发布镜像的真实 Speech Commands 数据验收使用
 `scripts/release/verify_kws_example.sh`，默认分别运行 GRU 和 LSTM。
+
+## PyTorch 导出产物校验
+
+`test_torch_export_validation.py` 在真实导出流程的末尾注入编码缺失和 ONNX 损坏，
+检查导出必须抛出错误；覆盖整层、输入编号、输出、权重通道、非法 scale、未校准，
+以及标量输入、Concat 共享量化器和重复算子消除的兼容性。另检查节点名错配、孤立 key、
+缺少量化器的计算输入，以及缺少独立编码的 GELU 展开节点必须报错。
+在安装 rx-met 的环境中可使用 CPU 执行：
+
+```bash
+python3 -m unittest discover -s tests -p test_torch_export_validation.py -v
+```
+
+`test_native_recurrent_state.py` 另在 CUDA 环境验证 GRU/LSTM 内部编码及权重缺失会使
+导出失败，并覆盖关闭量化的循环层无需编码的情况。
+
+`test_quantizable_batchnorm.py` 对照标准 PyTorch BN 检查训练输出、梯度、运行统计量、
+单通道 buffer 形状、累计平均和 QAT 冻结。KWS 测试检查自定义 BN 的展开节点、两路
+输入编码、所有 ONNX/encoding 名称及检查点重载。导出测试还覆盖参数 reshape 和相同
+常量去重后的名称恢复，并通过 ONNX Runtime 验证重命名不改计算结果。
+
+严格逐节点校验对三维 Linear/GELU 等复合算子展开的边界映射仍有限制；对应旧循环模型
+导出测试的失败与 KWS 自定义 BN 路径独立，不能据此认定已有编码被导出过程丢失。
