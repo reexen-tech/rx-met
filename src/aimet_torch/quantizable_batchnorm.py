@@ -11,7 +11,7 @@ class QuantizableBatchNorm2d(nn.Module):
     def __init__(self,
                  num_features: int,
                  eps: float = 1e-5,
-                 momentum: float = 0.1,
+                 momentum: float | None = 0.1,
                  affine: bool = True,
                  track_running_stats: bool = True):
         """
@@ -87,13 +87,16 @@ class QuantizableBatchNorm2d(nn.Module):
             # 更新 running statistics
             if self.track_running_stats:
                 with torch.no_grad():
-                    mean_flat = mean.squeeze()
-                    var_flat = var.squeeze()
-                    self.running_mean.data = (1 - self.momentum) * self.running_mean.data + \
-                                             self.momentum * mean_flat
-                    self.running_var.data = (1 - self.momentum) * self.running_var.data + \
-                                            self.momentum * var_flat
-                    self.num_batches_tracked += 1
+                    # Forward uses the biased variance; PyTorch updates its
+                    # running estimate with the unbiased sample variance.
+                    count = x.numel() // x.shape[1]
+                    if count <= 1:
+                        raise ValueError("Expected more than 1 value per channel when training")
+                    self.num_batches_tracked.add_(1)
+                    factor = (1.0 / self.num_batches_tracked.item()
+                              if self.momentum is None else self.momentum)
+                    self.running_mean.lerp_(mean.reshape(-1), factor)
+                    self.running_var.lerp_(var.reshape(-1) * (count / (count - 1)), factor)
         else:
             # 推理模式：使用 running statistics
             mean = self.running_mean.view(1, -1, 1, 1)

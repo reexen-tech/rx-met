@@ -863,6 +863,12 @@ class QuantizationSimModel(_QuantizationSimModelBase):  # pylint: disable=missin
                     orig_module = module.get_original_module()
                     setattr(starting_module, name, orig_module)
                     module = orig_module
+                elif getattr(module, '_param_quantization_enabled', False):
+                    # FX-expanded modules also own auxiliary quantizers. They
+                    # must not leak into float exports or weight checkpoints.
+                    del module.param_quantizers
+                    module.__dict__.pop('__call__', None)
+                    del module._param_quantization_enabled
             # Recursively call children modules if present
             if not utils.is_leaf_module(module):
                 cls._remove_quantization_wrappers(module, list_of_modules_to_exclude)

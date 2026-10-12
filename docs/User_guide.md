@@ -162,6 +162,37 @@ python3 quick_start_kws.py --rnn_type lstm
 重建 QuantSim 时，`prepare_model` 参数、两份配置、默认位宽和量化方案必须与训练侧
 一致；否则量化器名称或参数会错位。
 
+`export_onnx_json()` 在所有图后处理和循环算子编码合并完成后，强制校验最终 ONNX
+及 encodings，通过后才返回文件路径。校验以 `sim.model` 中启用的量化器为基准，检查：
+
+- 输入、输出和权重量化编码是否完整，包括输入编号、每个通道及原生 GRU/LSTM 内部编码。
+- 编码字段和值是否与模型一致，scale 是否为正数且有限。
+- 最终 ONNX 的结构和 shape 是否有效、节点名是否重复，以及原生循环层节点是否匹配。
+- 每个浮点计算节点的名称是否对应 activation encoding key；权重输入是否对应 initializer
+  的 parameter encoding key。无法在最终图或简化前图中找到来源的编码 key 也会报错。
+- 直接按 ONNX 输入检查覆盖率：Add/Mul/MatMul 等双浮点输入必须覆盖两路；单输入
+  激活检查一路；Conv/Gemm 的激活和权重分别检查。即使量化器未启用，也不能绕过此检查。
+
+缺少编码、缺少通道、编码值不一致或启用的张量量化器未校准时抛出 `RuntimeError`，
+错误中列出模块及具体字段，例如 `encodings.activation_encodings.module_add.output.0`。
+标量常量以及 shape/index 等非浮点输入无需编码；简化消除的节点可以保留有原始图来源
+的编码。关闭量化的计算输入如果仍出现在最终浮点计算节点上，会因缺少编码而报错。
+带偏置的高维 Linear 在导出副本中转换为 Reshape → Gemm → Reshape，保留融合计算
+及原有输入、输出和参数编码；无偏置 Linear 保持单个 MatMul。Gemm 节点使用原模块
+名称，权重与偏置名称保持对应，不新增中间量化位置，也不修改训练侧 QuantSim。
+`prepare_model()` 自动将 `nn.GELU` 和 `F.gelu` 替换成显式计算模块，保留
+`approximate="none"` 的 Erf 公式和 `approximate="tanh"` 的近似公式。展开后的
+Div/Erf/Add/Mul/Pow/Tanh 按实际所选公式参与校准和 QAT，标量常量仍豁免。
+必须在创建 QuantSim 前完成 prepare；已有 GELU 模型的浮点权重可复用，但原来的
+模块边界编码不能覆盖新增中间量化器，需要重新校准并评估 QAT 精度。
+
+KWS 示例使用 `QuantizableBatchNorm2d`，在 prepare 阶段展开为 Sub/Div/Mul/Add，
+统计量通过算子输入参与校准；标准 BatchNorm 没有统计量编码时仍不能通过全部浮点输入
+覆盖检查。导出器按 FX 参数使用位置将 reshape/常量折叠后的 initializer 恢复为参数编码
+名称，不依赖参数数值猜测。乘一、加零和单输入 Concat 的量化边界保留在最终 ONNX。
+这项校验不替代推理精度验证。
+失败时已写出的文件仅用于排查，不应作为通过验证的部署产物使用。
+
 ### 5.4 已有 ONNX 模型的 PTQ
 
 已有 ONNX 模型的 PTQ 入口是 `examples/onnx_ptq_quick_start.py`。该示例与

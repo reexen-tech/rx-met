@@ -37,3 +37,30 @@ python3 -m unittest -v tests/test_quant_lstm_integration.py tests/test_kws_examp
 
 面向发布镜像的真实 Speech Commands 数据验收使用
 `scripts/release/verify_kws_example.sh`，默认分别运行 GRU 和 LSTM。
+
+## PyTorch 导出产物校验
+
+`test_torch_export_validation.py` 在真实导出流程的末尾注入编码缺失和 ONNX 损坏，
+检查导出必须抛出错误；覆盖整层、输入编号、输出、权重通道、非法 scale、未校准，
+以及标量输入、Concat 共享量化器和重复算子消除的兼容性。另检查节点名错配、孤立 key、
+缺少量化器的计算输入，以及 GELU 展开后删除中间节点或第二路输入编码必须报错。
+在安装 rx-met 的环境中可使用 CPU 执行：
+
+```bash
+python3 -m unittest discover -s tests -p test_torch_export_validation.py -v
+```
+
+`test_native_recurrent_state.py` 另在 CUDA 环境验证 GRU/LSTM 内部编码及权重缺失会使
+导出失败，并覆盖关闭量化的循环层无需编码的情况。
+
+`test_quantizable_batchnorm.py` 对照标准 PyTorch BN 检查训练输出、梯度、运行统计量、
+单通道 buffer 形状、累计平均和 QAT 冻结。KWS 测试检查自定义 BN 的展开节点、两路
+输入编码、所有 ONNX/encoding 名称及检查点重载。导出测试还覆盖参数 reshape 和相同
+常量去重后的名称恢复，并通过 ONNX Runtime 验证重命名不改计算结果。
+
+Linear 导出回归覆盖 1～4 维非连续输入、有无偏置、单计算节点、编码名称、ONNX Runtime
+浮点数值、QuantSim 不变和编码重载；缺失输入编码仍须报错。
+
+`test_quantizable_gelu.py` 覆盖模块/函数（位置及关键字输入）两种 GELU 近似方式的
+输出和梯度、共享实例的独立校准、重复 prepare 的名称稳定性、QAT、ONNX 数值和
+编码重载。关闭量化的浮点计算输入仍受严格校验约束。

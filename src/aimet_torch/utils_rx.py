@@ -474,7 +474,8 @@ def freeze_quantizer_parameters(sim_model, verbose: bool = True, freeze_bn_affin
             if freeze_bn_affine and not should_freeze:
                 # 检查参数名称是否包含 BN 模块名称模式
                 name_lower = name.lower()
-                is_bn_param = any(pattern in name_lower for pattern in bn_name_patterns)
+                is_bn_param = (any(pattern in name_lower for pattern in bn_name_patterns)
+                               or 'bn' in name_lower.split('.'))
                 # 检查是否是 weight 或 bias 参数
                 is_affine_param = name.endswith('.weight') or name.endswith('.bias')
                 
@@ -522,7 +523,7 @@ def set_train_mode_freeze_bn(model, verbose: bool = False) -> int:
     
     支持的 BatchNorm 类型：
     - nn.BatchNorm1d, nn.BatchNorm2d, nn.BatchNorm3d (标准 PyTorch BN)
-    - QuantizableBatchNorm1d, QuantizableBatchNorm2d (自定义可量化 BN)
+    - QuantizableBatchNorm2d (自定义可量化 BN)
     - prepare_model 展开后的 BN（通过模块名称识别，如 pre_bn, rnn2d_bn）
     
     Args:
@@ -536,8 +537,8 @@ def set_train_mode_freeze_bn(model, verbose: bool = False) -> int:
     
     # 动态导入自定义 BatchNorm（避免循环导入）
     try:
-        from aimet_torch.quantizable_batchnorm import QuantizableBatchNorm1d, QuantizableBatchNorm2d
-        custom_bn_types = (QuantizableBatchNorm1d, QuantizableBatchNorm2d)
+        from aimet_torch.quantizable_batchnorm import QuantizableBatchNorm2d
+        custom_bn_types = (QuantizableBatchNorm2d,)
     except ImportError:
         custom_bn_types = ()
     
@@ -562,7 +563,8 @@ def set_train_mode_freeze_bn(model, verbose: bool = False) -> int:
     for name, module in model.named_modules():
         # 检查模块名称是否匹配 BN 模式
         name_lower = name.lower()
-        is_bn_by_name = any(pattern in name_lower for pattern in bn_name_patterns)
+        is_bn_by_name = (any(pattern in name_lower for pattern in bn_name_patterns)
+                               or 'bn' in name_lower.split('.'))
         
         if is_bn_by_name and module not in frozen_modules:
             # 将该模块及其所有子模块设置为 eval 模式
@@ -1164,8 +1166,8 @@ def check_bn_params_status(model, verbose: bool = True) -> Dict[str, Any]:
     
     # 策略 1: 通过类型识别 BatchNorm 模块
     try:
-        from aimet_torch.quantizable_batchnorm import QuantizableBatchNorm1d, QuantizableBatchNorm2d
-        custom_bn_types = (QuantizableBatchNorm1d, QuantizableBatchNorm2d)
+        from aimet_torch.quantizable_batchnorm import QuantizableBatchNorm2d
+        custom_bn_types = (QuantizableBatchNorm2d,)
     except ImportError:
         custom_bn_types = ()
     
@@ -1184,7 +1186,8 @@ def check_bn_params_status(model, verbose: bool = True) -> Dict[str, Any]:
         
         # 检查是否属于 BatchNorm
         name_lower = name.lower()
-        is_bn_param = any(pattern in name_lower for pattern in bn_name_patterns)
+        is_bn_param = (any(pattern in name_lower for pattern in bn_name_patterns)
+                               or 'bn' in name_lower.split('.'))
         
         # 检查是否在识别的 BN 模块中
         for bn_name, bn_module in bn_modules:

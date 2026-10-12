@@ -19,6 +19,13 @@ from tests.test_quant_lstm_integration import (
 
 
 class KwsExampleConfigurationTest(unittest.TestCase):
+    def test_example_uses_custom_batchnorm(self):
+        from aimet_torch.quantizable_batchnorm import QuantizableBatchNorm2d
+        block = kws.ConvActBN(1, 4, (5, 1))
+        self.assertIsInstance(block.bn, QuantizableBatchNorm2d)
+        self.assertFalse(any(isinstance(m, nn.modules.batchnorm._BatchNorm)
+                             for m in block.modules()))
+
     def test_checkpoint_rejects_wrong_model_type(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / 'model.pth'
@@ -72,10 +79,18 @@ class KwsExampleWorkflowTest(unittest.TestCase):
                     self.assertEqual(checkpoint['rnn_type'], rnn_type)
                     graph = onnx.load(output / 'att_mh_rnn_kws.onnx')
                     onnx.checker.check_model(graph)
+                    self.assertFalse(any(n.op_type == 'BatchNormalization' for n in graph.graph.node))
                     nodes = [node for node in graph.graph.node if node.op_type in ('GRU', 'LSTM')]
                     self.assertEqual([node.op_type for node in nodes], [rnn_type.upper()] * 2)
                     encodings = json.loads((output / 'att_mh_rnn_kws.encodings').read_text())
                     assert_public_encoding_document(self, encodings)
+                    node_names = {n.name for n in graph.graph.node}
+                    initializer_names = {t.name for t in graph.graph.initializer}
+                    self.assertLessEqual(set(encodings['activation_encodings']), node_names)
+                    self.assertLessEqual(set(encodings['param_encodings']), initializer_names)
+                    for node in graph.graph.node:
+                        if '.bn.' in node.name and node.op_type in ('Sub', 'Div', 'Mul', 'Add'):
+                            self.assertEqual(set(encodings['activation_encodings'][node.name]['input']), {'0', '1'})
                     metadata = (set(encodings), encodings['version'], encodings['schema_version'])
                     if rnn_type == 'gru':
                         gru_metadata = metadata
