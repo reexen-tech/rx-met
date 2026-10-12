@@ -49,6 +49,9 @@
 
 ### Fixed
 
+- prepare_model 在校准前自动展开 nn.GELU/F.gelu，保留精确或 tanh 近似语义，
+  为所有中间计算提供独立编码；修复函数 GELU 的关键字输入准备及重复 prepare 命名。
+
 - 带偏置的高维 Linear 导出为 Reshape/Gemm/Reshape，复用已校准的融合层编码并恢复
   Gemm 的模块名称，避免 MatMul/Add 拆分造成中间编码缺失；训练侧 QuantSim 保持不变。
 

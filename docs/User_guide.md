@@ -180,7 +180,11 @@ python3 quick_start_kws.py --rnn_type lstm
 带偏置的高维 Linear 在导出副本中转换为 Reshape → Gemm → Reshape，保留融合计算
 及原有输入、输出和参数编码；无偏置 Linear 保持单个 MatMul。Gemm 节点使用原模块
 名称，权重与偏置名称保持对应，不新增中间量化位置，也不修改训练侧 QuantSim。
-GELU 展开出的计算节点仍需独立编码，当前未经准备的展开路径会被严格校验拒绝。
+`prepare_model()` 自动将 `nn.GELU` 和 `F.gelu` 替换成显式计算模块，保留
+`approximate="none"` 的 Erf 公式和 `approximate="tanh"` 的近似公式。展开后的
+Div/Erf/Add/Mul/Pow/Tanh 按实际所选公式参与校准和 QAT，标量常量仍豁免。
+必须在创建 QuantSim 前完成 prepare；已有 GELU 模型的浮点权重可复用，但原来的
+模块边界编码不能覆盖新增中间量化器，需要重新校准并评估 QAT 精度。
 
 KWS 示例使用 `QuantizableBatchNorm2d`，在 prepare 阶段展开为 Sub/Div/Mul/Add，
 统计量通过算子输入参与校准；标准 BatchNorm 没有统计量编码时仍不能通过全部浮点输入

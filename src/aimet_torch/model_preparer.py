@@ -141,6 +141,7 @@ from aimet_torch.utils import replace_modules
 import aimet_torch._base.nn.modules.custom as aimet_modules
 
 from aimet_torch.native_recurrent import native_recurrent_types
+from aimet_torch.quantizable_gelu import QuantizableGELU
 
 logger = AimetLogger.get_area_logger(AimetLogger.LogAreas.ModelPreparer)
 
@@ -201,6 +202,7 @@ functional_with_stateless_api = {
     "floordiv": aimet_modules.FloorDivide,
     "matmul": aimet_modules.MatMul,
     "exp": aimet_modules.Exponential,
+    "erf": aimet_modules.Erf,
     "interpolate": aimet_modules.Interpolate,
     "max_pool2d": aimet_modules.MaxPool2d,
     "max_pool2d_with_indices": aimet_modules.MaxPool2d,
@@ -484,6 +486,7 @@ def prepare_model(
 
     1. Replace torch.nn.functional by module of type torch.nn.Module
     2. Create new independent torch.nn.Module instances for reused/duplicate module
+    3. Expand GELU into independently calibrated elementary modules
 
     :param model: pytorch Model to be modified.
     :param modules_to_exclude: List of modules to exclude when tracing.
@@ -560,6 +563,11 @@ def _trace_model(
                 return False  # 允许追踪内部，但保留模块
             # =============================================
             
+
+            # Already-prepared GELU has explicit elementary child modules.
+            # Keep their stable names if preparation is run a second time.
+            if isinstance(m, QuantizableGELU):
+                return True
 
             # Native operators own execution and quantization; FX keeps them opaque.
             if isinstance(m, native_recurrent_types()):
@@ -662,6 +670,14 @@ def _prepare_traced_model(
         lambda _: aimet_modules.CustomSiLU(),
     )
 
+    # Both nn.GELU and functional GELU are modules at this point. Expand them
+    # before QuantSim so the ONNX decomposition has real intermediate grids.
+    replace_modules(
+        traced_model,
+        lambda module: type(module) is torch.nn.GELU,
+        lambda module: QuantizableGELU(module.approximate).train(module.training),
+    )
+
 
 def _verify_traced_model(traced_model: torch.fx.GraphModule):
     """
@@ -697,6 +713,12 @@ def _insert_node_for_new_module(
             elif functional_name in functional_with_stateless_api:
                 new_node = traced_model.graph.call_module(
                     module_qualified_name, args=node.args, kwargs=node.kwargs
+                )
+            elif functional_name == "gelu":
+                # approximate is a constructor option; input may be a keyword.
+                input_arg = node.args[0] if node.args else node.kwargs["input"]
+                new_node = traced_model.graph.call_module(
+                    module_qualified_name, args=(input_arg,)
                 )
             elif functional_name in functional_with_stateful_api:
                 new_node = traced_model.graph.call_module(
@@ -752,7 +774,9 @@ def _create_module_for_functional_node(
     :return: New module
     """
     # Instantiate new module from lookup
-    if functional_name in functional_with_stateful_api:
+    if functional_name == "gelu":
+        module = torch.nn.GELU(approximate=node.kwargs.get("approximate", "none"))
+    elif functional_name in functional_with_stateful_api:
         module = functional_with_stateful_api[functional_name]()
         # Set the parameters for module from node.kwargs
         for key, value in node.kwargs.items():

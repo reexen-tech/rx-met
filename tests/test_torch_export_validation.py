@@ -106,15 +106,26 @@ class TorchExportValidationTest(unittest.TestCase):
         document = json.loads(Path(enc_path).read_text())
         self.assertNotIn('output', document['activation_encodings']['module_add'])
 
-    def test_decomposed_compute_nodes_need_their_own_encodings(self):
+    def test_gelu_intermediates_are_calibrated_before_export(self):
         class Compound(nn.Module):
             def __init__(self):
                 super().__init__()
                 self.gelu = nn.GELU()
             def forward(self, x):
                 return self.gelu(x.pow(2) + x.pow(2))
-        with self.assertRaisesRegex(RuntimeError, r'gelu#1.*encoding'):
-            self.export(self.sim(Compound()))
+        sim = self.sim(Compound())
+        _, path = self.export(sim)
+        enc = json.loads(Path(path).read_text())
+        self.assertIn('gelu.erf', enc['activation_encodings'])
+        self.assertEqual(set(enc['activation_encodings']['gelu.multiply']['input']), {'0', '1'})
+        with self.corrupt_final_encodings(
+                lambda doc: doc['activation_encodings'].pop('gelu.erf')), \
+             self.assertRaisesRegex(RuntimeError, r'gelu.erf.*missing'):
+            self.export(sim)
+        with self.corrupt_final_encodings(
+                lambda doc: doc['activation_encodings']['gelu.multiply']['input'].pop('1')), \
+             self.assertRaisesRegex(RuntimeError, r'gelu.multiply.*input.*1'):
+            self.export(sim)
 
     def test_concat_requires_all_shared_input_encodings(self):
         class Concat(nn.Module):
