@@ -66,6 +66,7 @@ if str(_SRC) not in sys.path:
 
 import aimet_torch.v2 as aimet
 from aimet_torch import model_preparer
+from aimet_torch.quantizable_batchnorm import QuantizableBatchNorm2d
 from aimet_torch.rx_export.export_onnx_json import export_onnx_json
 from aimet_torch.staged_quantization_utils import load_quantizer_encodings
 from aimet_torch.utils_rx import (
@@ -598,7 +599,9 @@ class ConvActBN(nn.Module):
         self.conv = nn.Conv2d(in_ch, out_ch, kernel_size=kernel, padding=pad, bias=True)
         self.act = nn.ReLU(inplace=False)
         # Keras BN momentum=0.99 → PyTorch momentum = 1 - 0.99
-        self.bn = nn.BatchNorm2d(out_ch, momentum=0.01)
+        # FX expands this BN into Sub/Div/Mul/Add so both operands of
+        # each operation are calibrated, including the frozen statistics.
+        self.bn = QuantizableBatchNorm2d(out_ch, momentum=0.01)
 
     def forward(self, x):
         return self.bn(self.act(self.conv(x)))

@@ -43,6 +43,12 @@ python3 quick_start_kws.py --rnn_type lstm
 默认浮点训练和 QAT 各运行 1 epoch，便于学习流程；充分训练后的精度需另外评估，
 不能将默认运行结果视为上游论文成绩。训练轮数等参数在脚本开头的“全局配置”中。
 
+卷积后的 BN 使用 `QuantizableBatchNorm2d`。浮点训练维护运行均值和方差；
+`prepare_model` 在 eval 模式将其展开为 Sub、Div、Mul、Add，每个算子的两路张量输入
+参与校准，QAT 冻结统计量和 affine 参数。不要将该类加入 `module_classes_to_exclude`。
+导出的激活编码 key 对应 ONNX 节点名，参数编码 key 对应 initializer 名；参数经过
+reshape/常量折叠时，导出器按 FX 参数来源恢复名称，无法对应的编码会报错。
+
 网络中的每个 QuantLSTM 实例都是单层、双向、CUDA float32，两个实例串联组成两层网络。
 本示例使用序列输出做整段音频分类；隐藏状态由算子初始化为零，不演示跨音频状态传递。
 
