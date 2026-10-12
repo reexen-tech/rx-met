@@ -252,15 +252,52 @@ class TorchExportValidationTest(unittest.TestCase):
         (path / 'integer.encodings').write_text(json.dumps(expected))
         validate_exported_artifacts(str(path / 'integer.onnx'), str(path / 'integer.encodings'), expected)
 
-    def test_three_dimensional_linear_exposes_unencoded_bias_add(self):
-        class Linear3d(nn.Module):
-            def __init__(self):
+    def test_linear_preserves_fused_quantization_for_all_input_ranks(self):
+        import onnxruntime as ort
+        from aimet_torch.staged_quantization_utils import load_quantizer_encodings
+        class LinearModel(nn.Module):
+            def __init__(self, bias):
                 super().__init__()
-                self.linear = nn.Linear(4, 4)
+                self.linear = nn.Linear(4, 5, bias=bias)
             def forward(self, x):
-                return self.linear(x.unsqueeze(1))
-        with self.assertRaisesRegex(RuntimeError, r'linear#1.end.*missing activation encoding'):
-            self.export(self.sim(Linear3d()))
+                return self.linear(x)
+        for shape in ((4,), (2, 4), (2, 3, 4), (2, 3, 5, 4)):
+            for bias in (False, True):
+                with self.subTest(shape=shape, bias=bias):
+                    # A strided last dimension also exercises non-contiguous input.
+                    self.x = torch.randn(*shape[:-1], shape[-1] * 2)[..., ::2]
+                    model = LinearModel(bias).eval()
+                    expected = model(self.x).detach()
+                    sim = self.sim(model)
+                    quantized = sim.model(self.x).detach()
+                    weight = sim.model.linear.weight.detach().clone()
+                    graph_path, enc_path = self.export(sim)
+                    graph = onnx.load(graph_path)
+                    enc = json.loads(Path(enc_path).read_text())
+                    compute = [n for n in graph.graph.node if n.op_type in ('Gemm', 'MatMul', 'Add')]
+                    self.assertEqual(len(compute), 1)
+                    self.assertEqual(compute[0].name, 'linear')
+                    self.assertEqual(compute[0].op_type, 'Gemm' if bias else 'MatMul')
+                    self.assertEqual(set(enc['activation_encodings']), {'linear'})
+                    self.assertEqual(set(enc['activation_encodings']['linear']['input']), {'0'})
+                    self.assertEqual(set(enc['activation_encodings']['linear']['output']), {'0'})
+                    self.assertLessEqual(set(enc['param_encodings']), {t.name for t in graph.graph.initializer})
+                    actual = ort.InferenceSession(graph_path, providers=['CPUExecutionProvider']).run(
+                        None, {'input': self.x.numpy()})[0]
+                    torch.testing.assert_close(torch.from_numpy(actual), expected)
+                    torch.testing.assert_close(sim.model(self.x), quantized, atol=0, rtol=0)
+                    torch.testing.assert_close(sim.model.linear.weight, weight, atol=0, rtol=0)
+                    fresh = self.sim(model, calibrate=False)
+                    load_quantizer_encodings(fresh.model, enc_path, skip_if_not_found=False,
+                                            allow_overwrite=False, verbose=False)
+                    torch.testing.assert_close(fresh.model(self.x), quantized, atol=1e-6, rtol=1e-5)
+
+    def test_three_dimensional_linear_still_rejects_missing_input_encoding(self):
+        self.x = torch.randn(2, 3, 4)
+        with self.corrupt_final_encodings(
+                lambda doc: doc['activation_encodings']['linear']['input'].pop('0')), \
+             self.assertRaisesRegex(RuntimeError, r'linear.*input.*0'):
+            self.export(self.sim())
 
     def test_custom_batchnorm_preserves_parameter_names(self):
         from aimet_torch.quantizable_batchnorm import QuantizableBatchNorm2d

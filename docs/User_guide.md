@@ -177,8 +177,10 @@ python3 quick_start_kws.py --rnn_type lstm
 错误中列出模块及具体字段，例如 `encodings.activation_encodings.module_add.output.0`。
 标量常量以及 shape/index 等非浮点输入无需编码；简化消除的节点可以保留有原始图来源
 的编码。关闭量化的计算输入如果仍出现在最终浮点计算节点上，会因缺少编码而报错。
-GELU 或三维 Linear 展开出的计算节点必须各自具备对应编码；不能用父模块的编码
-冒充中间节点的量化参数。当前这些展开路径仍会被严格校验拒绝，需要完善量化边界映射。
+带偏置的高维 Linear 在导出副本中转换为 Reshape → Gemm → Reshape，保留融合计算
+及原有输入、输出和参数编码；无偏置 Linear 保持单个 MatMul。Gemm 节点使用原模块
+名称，权重与偏置名称保持对应，不新增中间量化位置，也不修改训练侧 QuantSim。
+GELU 展开出的计算节点仍需独立编码，当前未经准备的展开路径会被严格校验拒绝。
 
 KWS 示例使用 `QuantizableBatchNorm2d`，在 prepare 阶段展开为 Sub/Div/Mul/Add，
 统计量通过算子输入参与校准；标准 BatchNorm 没有统计量编码时仍不能通过全部浮点输入

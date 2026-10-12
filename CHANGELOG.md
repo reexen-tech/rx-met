@@ -49,6 +49,9 @@
 
 ### Fixed
 
+- 带偏置的高维 Linear 导出为 Reshape/Gemm/Reshape，复用已校准的融合层编码并恢复
+  Gemm 的模块名称，避免 MatMul/Add 拆分造成中间编码缺失；训练侧 QuantSim 保持不变。
+
 - 自定义 BN 使用无偏方差更新 running_var，支持累计平均并保持 buffer 对象不变；
   修复自定义及展开 BN 的 QAT 冻结识别。
 - 原始模型和权重检查点移除展开模块残留的辅助参数量化器，支持 weights_only 重载。

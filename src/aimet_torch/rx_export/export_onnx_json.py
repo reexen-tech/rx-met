@@ -26,6 +26,7 @@ from .custom_gru_onnx import (
 )
 from .postprocess import postprocess_all
 from .parameter_names import restore_parameter_names
+from .linear import prepare_linear_export, restore_linear_names
 from .validation import (
     collect_expected_encodings, observe_non_tensor_inputs, validate_exported_artifacts,
 )
@@ -172,6 +173,7 @@ def export_onnx_json(
     with ExitStack() as export_stack:
         original_model = sim.get_original_model(sim.model, qdq_weights=False)
         original_model = original_model.cpu().eval()
+        linear_names = prepare_linear_export(original_model)
         has_opt_gru = any(isinstance(m, OptimizedQuantizableGRU) for m in original_model.modules())
         if has_opt_gru:
             ensure_custom_gru_op_registered(opset=opset)
@@ -210,6 +212,7 @@ def export_onnx_json(
                 export_model=True,
                 filename_prefix_encodings=filename_prefix,
             )
+        restore_linear_names(onnx_path, linear_names)
         expected_encodings = collect_expected_encodings(sim.model, scalar_inputs)
         reference_graph = onnx.load(onnx_path)
 

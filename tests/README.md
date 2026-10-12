@@ -58,5 +58,6 @@ python3 -m unittest discover -s tests -p test_torch_export_validation.py -v
 输入编码、所有 ONNX/encoding 名称及检查点重载。导出测试还覆盖参数 reshape 和相同
 常量去重后的名称恢复，并通过 ONNX Runtime 验证重命名不改计算结果。
 
-严格逐节点校验对三维 Linear/GELU 等复合算子展开的边界映射仍有限制；对应旧循环模型
-导出测试的失败与 KWS 自定义 BN 路径独立，不能据此认定已有编码被导出过程丢失。
+Linear 导出回归覆盖 1～4 维非连续输入、有无偏置、单计算节点、编码名称、ONNX Runtime
+浮点数值、QuantSim 不变和编码重载；缺失输入编码仍须报错。GELU 展开路径的中间编码
+仍需另行处理；关闭量化的浮点计算输入仍受严格校验约束。
