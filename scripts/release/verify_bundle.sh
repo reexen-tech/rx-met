@@ -1,104 +1,46 @@
 #!/usr/bin/env bash
-# 验证最终 rx-met 镜像；--gpu 额外运行真实 CUDA/QuantGRU 冒烟测试。
+# Verify the delivered installation in a clean runtime with a read-only application mount.
 set -euo pipefail
-
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-BAKE_FILE="${ROOT}/docker/docker-bake.hcl"
-VERSION="$(tr -d '[:space:]' < "${ROOT}/VERSION")"
-IMAGE_REPOSITORY="${RX_MET_IMAGE_REPOSITORY:-rx-met}"
+source "$ROOT/scripts/lib/installed_bundle.sh"
 VERIFY_GPU="${RX_MET_VERIFY_GPU:-0}"
 GPU_DEVICE="${RX_MET_VERIFY_GPU_DEVICE:-0}"
 TARGETS=()
-
-log() { printf '[verify_bundle] %s\n' "$*"; }
-die() { printf '[verify_bundle] ERROR: %s\n' "$*" >&2; exit 1; }
-
 while (($#)); do
     case "$1" in
-        --gpu) VERIFY_GPU=1 ;;
-        --no-gpu) VERIFY_GPU=0 ;;
-        --gpu-device)
-            (($# >= 2)) || die "--gpu-device 缺少参数"
-            GPU_DEVICE="$2"
-            shift
-            ;;
-        -h|--help)
-            printf '用法: ./scripts/release/verify_bundle.sh [--gpu|--no-gpu] [--gpu-device ID] [cu118|cu126|cu130 ...]\n'
-            exit 0
-            ;;
-        cu118|cu126|cu130) TARGETS+=("$1") ;;
-        *) die "未知参数: $1" ;;
+        --gpu) VERIFY_GPU=1; shift ;;
+        --no-gpu) VERIFY_GPU=0; shift ;;
+        --gpu-device|--install-prefix)
+            (($# >= 2)) || { echo "$1 缺少参数" >&2; exit 1; }
+            if [[ "$1" == --gpu-device ]]; then GPU_DEVICE="$2"; else INSTALL_PREFIX="$2"; fi
+            shift 2 ;;
+        cu118|cu126|cu130) TARGETS+=("$1"); shift ;;
+        -h|--help) echo '用法: verify_bundle.sh [--gpu] [--gpu-device ID] [--install-prefix DIR] [cu118|cu126|cu130 ...]'; exit 0 ;;
+        *) echo "未知参数: $1" >&2; exit 1 ;;
     esac
-    shift
 done
-if ((${#TARGETS[@]} == 0)); then
-    TARGETS=(cu118 cu126 cu130)
-fi
-declare -A seen_targets=()
+((${#TARGETS[@]})) || TARGETS=(cu118 cu126 cu130)
 for target in "${TARGETS[@]}"; do
-    [[ -z "${seen_targets[${target}]:-}" ]] || die "目标重复: ${target}"
-    seen_targets["${target}"]=1
-done
-[[ "${VERIFY_GPU}" == "0" || "${VERIFY_GPU}" == "1" ]] \
-    || die "RX_MET_VERIFY_GPU 必须是 0 或 1"
-[[ -n "${GPU_DEVICE}" ]] || die "--gpu-device 不能为空"
-[[ "${IMAGE_REPOSITORY}" =~ ^[A-Za-z0-9._/-]+$ ]] \
-    || die "无效的镜像仓库名: ${IMAGE_REPOSITORY}"
-for command in docker git python3; do
-    command -v "${command}" >/dev/null 2>&1 || die "缺少命令: ${command}"
-done
-
-BAKE_JSON="$(mktemp -t rx-met-verify-bake.XXXXXX.json)"
-cleanup() { rm -f "${BAKE_JSON}"; }
-trap cleanup EXIT
-VERSION="${VERSION}" IMAGE_REPOSITORY="${IMAGE_REPOSITORY}" \
-SOURCE_REVISION="$(git -C "${ROOT}" rev-parse HEAD 2>/dev/null || printf unknown)" \
-docker buildx bake -f "${BAKE_FILE}" --print "${TARGETS[@]}" > "${BAKE_JSON}"
-
-for target in "${TARGETS[@]}"; do
-    values="$(python3 - "${BAKE_JSON}" "${target}" <<'PY'
-import json
-import sys
-
-target = json.load(open(sys.argv[1], encoding="utf-8"))["target"][sys.argv[2]]
-args = target["args"]
-print(
-    "\t".join(
-        [
-            target["tags"][0],
-            args["CUDA_VARIANT"],
-            args["RX_MET_CUDA_VERSION"],
-            args["TORCH_VERSION"],
-            args["TORCHVISION_VERSION"],
-            args["TORCHAUDIO_VERSION"],
-            args["ONNXRUNTIME_VERSION"],
-            args["PYTHON_VERSION"],
-        ]
-    )
-)
+    rx_met_resolve_installation "$target"
+    values="$(python3 - "$RX_MET_INSTALLED_DIR/manifest.json" <<'PY'
+import json, sys
+m = json.load(open(sys.argv[1]))
+c = m['compatibility']
+p = c['packages']
+print('\t'.join([m['variant'], c['cuda_version'], *[p[n].split('+')[0] for n in ('torch','torchvision','torchaudio')], p['onnxruntime-gpu'], c['python_version']]))
 PY
 )"
-    IFS=$'\t' read -r image variant cuda_version torch_version vision_version \
-        audio_version onnxruntime_version python_version <<< "${values}"
-    docker image inspect "${image}" >/dev/null 2>&1 || die "本地镜像不存在: ${image}"
-    log "验证 ${image}（GPU=${VERIFY_GPU}，设备=${GPU_DEVICE}）"
-
-    docker_args=(-i --rm)
-    if ((VERIFY_GPU)); then
-        docker_args+=(--gpus "device=${GPU_DEVICE}")
-    fi
-    docker_args+=(
-        -e "EXPECTED_VARIANT=${variant}"
-        -e "EXPECTED_CUDA=${cuda_version}"
-        -e "EXPECTED_TORCH=${torch_version}"
-        -e "EXPECTED_TORCHVISION=${vision_version}"
-        -e "EXPECTED_TORCHAUDIO=${audio_version}"
-        -e "EXPECTED_ONNXRUNTIME=${onnxruntime_version}"
-        -e "EXPECTED_PYTHON=${python_version}"
-        -e "VERIFY_GPU=${VERIFY_GPU}"
-    )
-
-    docker run "${docker_args[@]}" "${image}" python3 - <<'PY'
+    IFS=$'\t' read -r variant cuda_version torch_version vision_version audio_version onnxruntime_version python_version <<< "$values"
+    docker_args=(--rm -i --network none --read-only --tmpfs /tmp:rw,exec,nosuid,size=2g
+        --user "$(id -u):$(id -g)" -e HOME=/tmp -e OMP_NUM_THREADS=8 -e MKL_NUM_THREADS=8 -e USER=rx-met-validator -e LOGNAME=rx-met-validator -e PYTHONPATH=/opt/rx-met/python
+        -e PYTHONDONTWRITEBYTECODE=1 --mount "type=bind,src=$RX_MET_INSTALLED_DIR,dst=/opt/rx-met,readonly"
+        -e "EXPECTED_VARIANT=$variant" -e "EXPECTED_CUDA=$cuda_version"
+        -e "EXPECTED_TORCH=$torch_version" -e "EXPECTED_TORCHVISION=$vision_version"
+        -e "EXPECTED_TORCHAUDIO=$audio_version" -e "EXPECTED_ONNXRUNTIME=$onnxruntime_version"
+        -e "EXPECTED_PYTHON=$python_version" -e "VERIFY_GPU=$VERIFY_GPU")
+    if ((VERIFY_GPU)); then docker_args+=(--gpus "device=$GPU_DEVICE"); fi
+    printf 'Verify %s GPU=%s\n' "$RX_MET_INSTALLED_DIR" "$VERIFY_GPU"
+    docker run "${docker_args[@]}" "$RX_MET_RUNTIME_ID" python3 - <<'PY'
 import importlib.metadata
 import os
 import runpy
@@ -118,6 +60,8 @@ import torch
 import torchaudio
 import torchvision
 
+for module in (aimet_onnx, aimet_torch, quant_gru, quant_lstm):
+    assert Path(module.__file__).resolve().is_relative_to(Path("/opt/rx-met/python")), module.__file__
 expected = {
     "torch": os.environ["EXPECTED_TORCH"],
     "torchvision": os.environ["EXPECTED_TORCHVISION"],
@@ -167,13 +111,14 @@ onnx_sim.compute_encodings([feed])
 assert onnx_sim.session.run(None, feed)[0].shape == (1, 4)
 assert onnx_sim.session.get_providers()[0] == onnx_provider
 
-site_roots = [Path(value) for value in site.getsitepackages()]
+site_roots = [Path("/opt/rx-met/python"), *[Path(value) for value in site.getsitepackages()]]
 patterns = [
     (site_roots, "aimet_common/_libpymo*.so"),
     (site_roots, "aimet_common/libquant_info*.so"),
     (site_roots, "aimet_common/libaimet_onnxrt_ops.so"),
     (site_roots, "onnxruntime/capi/libonnxruntime_providers_cuda.so"),
     (site_roots, "gru_interface_binding*.so"),
+    (site_roots, "_quant_lstm*.so"),
     (site_roots, "lib/libgru_quant_shared.so"),
 ]
 libraries = []
@@ -260,7 +205,5 @@ if os.environ["VERIFY_GPU"] == "1":
 
 print("image verification passed", torch.__version__, torch.version.cuda)
 PY
-    docker run --rm "${image}" python3 -m pip check
+    docker run "${docker_args[@]}" "$RX_MET_RUNTIME_ID" python3 -m pip check
 done
-
-log "全部目标验证通过"

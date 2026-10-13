@@ -1,13 +1,8 @@
 # 使用示例
 
-本目录随 rx-met 发布包交付，镜像内位置为 `/opt/rx-met/examples`。
-示例应在同一版本的 rx-met GPU 镜像中运行，并通过 `--gpus` 开放 NVIDIA GPU。
-将数据和输出目录挂载到容器中，再复制示例到可写目录：
-
-```bash
-cp -a /opt/rx-met/examples /workspace/rx-met-examples
-cd /workspace/rx-met-examples
-```
+本目录随 rx-met 应用包交付。按发布包顶层 README 在宿主机将 `examples/`
+复制到 `~/rx-met-user/`，再启动匹配的 runtime 并挂载应用、工作目录和数据目录。
+以下运行命令均在容器内的 `/workspace/examples` 中执行；数据和输出通过挂载目录保存。
 
 | 入口 | 用途 | 需要准备 |
 | --- | --- | --- |
@@ -101,15 +96,61 @@ ONNX 表达浮点计算语义，量化参数位于配套 encodings；仅运行 O
 
 ## ONNX PTQ
 
-准备 ONNX 模型和 ImageNette parquet 数据后执行：
+### 使用已有模型和校准数据
+
+默认读取 `/datasets/mobilenetv2/mobilenetv2-12.onnx` 和
+`/datasets/mobilenetv2/calib/` 中的 NPY/NPZ 校准数据。模型输入应为静态 shape，
+校准数据的输入名和 shape 应与模型一致。在容器内执行：
 
 ```bash
-python3 prepare_onnx_ptq_data.py \
-  --onnx /workspace/mobilenetv2-12.onnx \
-  --parquet /workspace/imagenette2-320.parquet \
-  --out-root /workspace/datasets/mobilenetv2
 python3 onnx_ptq_quick_start.py
 ```
 
+使用其他输入路径时，可在命令中指定：
+
+```bash
+RX_MET_ONNX_PTQ_MODEL=/datasets/model.onnx \
+RX_MET_ONNX_PTQ_CALIB=/datasets/calib \
+python3 onnx_ptq_quick_start.py
+```
+
+输出文件名前缀、量化方式等参数可在复制出的 `onnx_ptq_quick_start.py` 开头修改。
+
+### 准备公开的 MobileNetV2 示例输入（可选）
+
+没有现成输入时，可以使用 ONNX Model Zoo 的 MobileNetV2 和 ImageNette 数据。
+先在**宿主机**下载到个人工作目录：
+
+```bash
+mkdir -p ~/rx-met-user/inputs
+curl -fL --retry 3 \
+  -o ~/rx-met-user/inputs/mobilenetv2-12.onnx \
+  https://huggingface.co/onnxmodelzoo/mobilenetv2-12/resolve/main/mobilenetv2-12.onnx
+curl -fL --retry 3 \
+  -o ~/rx-met-user/inputs/imagenette2-320.parquet \
+  https://huggingface.co/datasets/johnowhitaker/imagenette2-320/resolve/main/data/train-00000-of-00001.parquet
+```
+
+也可在联网机器下载后复制到该目录。如果直接访问 Hugging Face 受限，可使用已获准的镜像源。
+
+按顶层 README 启动容器后，在**容器内**执行：
+
+```bash
+python3 prepare_onnx_ptq_data.py \
+  --onnx /workspace/inputs/mobilenetv2-12.onnx \
+  --parquet /workspace/inputs/imagenette2-320.parquet \
+  --out-root /workspace/datasets/mobilenetv2
+export RX_MET_ONNX_PTQ_ROOT=/workspace/datasets
+python3 onnx_ptq_quick_start.py
+```
+
+准备脚本将模型 batch 固定为 1，并生成各 200 个互不重叠的校准和验证样本。
+这里把生成的数据写入可写的工作目录，因此需要设置 `RX_MET_ONNX_PTQ_ROOT`；
+该变量在当前容器 shell 中有效，重新进入容器后需再次设置。
+
+### 输出
+
 输出“量化流程完成”及 metadata 路径并返回退出码 0，表示 ONNX PTQ 示例完成。
-模型下载及容器挂载方式见发布包顶层 README。
+默认输出到 `/workspace/examples/output/onnx_ptq_quick_start/`，对应宿主机
+`~/rx-met-user/examples/output/onnx_ptq_quick_start/`。
+目录包含 clean ONNX、配套编译器 encodings、AIMET 原始 encodings 和运行 metadata。
