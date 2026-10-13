@@ -117,7 +117,8 @@ INT16 `[-32768,32767]`；CPU/CUDA、QAT 饱和掩码和导出范围均遵循此�
   正反向可使用不同的 scale；状态和激活不支持按隐藏通道独立量化，不展开成通道数组。
 - `param_encodings` 对齐实际 ONNX W/R/B initializer，四门由 PyTorch IFGO 重排到
   ONNX IOFC，原生 per-gate 参数已按行展开，仅 per-tensor 标量扩展至每行，按正向、反向顺序拼接为一维数组。
-- B 合并 bias_ih/bias_hh；两者 dtype 与对称性必须相同，否则导出显式报错。
+- 有 bias 时，B 合并 bias_ih/bias_hh；两者 dtype 与对称性必须相同，否则导出显式报错。
+  `bias=False` 时 ONNX 省略可选 B 输入，`param_encodings` 也不包含 bias；真实 bias 即使全零仍需编码。
 - 导出和回读只使用上述公共区段，不输出 `quant_lstm_encodings`、`model_info`、
   `execution_metadata` 或原生区段内的 `schema_version: 1`。消费方需支持 LSTM 本身的
   内部量化点；公共编码容器与 GRU 一致。

@@ -90,8 +90,9 @@ B_onnx = concat(bW_i, bW_o, bW_f, bW_g,
                 bR_i, bR_o, bR_f, bR_g)
 ```
 
-最终 shape 为 `W=[D,4H,I]`、`R=[D,4H,H]`、`B=[D,8H]`。双向方向顺序固定为
-forward、reverse；`bias=False` 使用全零 B，不改变图结构。
+最终 shape 为 `W=[D,4H,I]`、`R=[D,4H,H]`，有 bias 时 `B=[D,8H]`。双向方向顺序固定为
+forward、reverse。`bias=False` 省略 ONNX 的可选 B 输入，也不生成 bias 参数编码。
+`bias=True` 时即使参数值全部为零，也会保留 B 及其编码。
 
 ## 4. rx-met 的配套编码
 
@@ -113,7 +114,7 @@ h0/h 使用各方向的 `output` 网格，c0/c 使用 `cell_state` 网格，均�
 `pytorch/tests/test_onnx_export.py` 覆盖单向/双向、bias 开关和两种布局。测试要求：
 
 - ONNX checker 通过，图中恰好一个标准 `LSTM` 且没有 custom-domain 节点。
-- W/R/B initializer 或常量逐值符合 `(i,o,f,c)` 重排。
+- W/R 及存在时的 B initializer 或常量逐值符合 `(i,o,f,c)` 重排；无 bias 时 B 输入缺省。
 - ONNX Runtime 的 `output/h_n/c_n` 分别满足浮点 MAE、MSE、余弦和 allclose 门禁。
 - 每次运行的指标写入忽略目录
   `tests/precision/results/stage9_onnx_report.json`。

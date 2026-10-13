@@ -1284,7 +1284,7 @@ class QuantLSTM(_UnidirectionalQuantLSTM):
 
     def _pack_onnx_direction(
         self, input: Tensor, reverse: bool
-    ) -> tuple[Tensor, Tensor, Tensor]:
+    ) -> tuple[Tensor, Tensor, Optional[Tensor]]:
         suffix = "_reverse" if reverse else ""
         weight_ih = getattr(self, f"weight_ih_l0{suffix}").detach().to(
             device=input.device, dtype=input.dtype
@@ -1303,10 +1303,11 @@ class QuantLSTM(_UnidirectionalQuantLSTM):
             )
             bias_ih = self._reorder_onnx_gates(bias_ih)
             bias_hh = self._reorder_onnx_gates(bias_hh)
+            packed_bias = torch.cat((bias_ih, bias_hh))
         else:
-            bias_ih = input.new_zeros(4 * self.hidden_size)
-            bias_hh = input.new_zeros(4 * self.hidden_size)
-        return weight_ih, weight_hh, torch.cat((bias_ih, bias_hh))
+            # ONNX B is optional; absent model parameters have no encodings.
+            packed_bias = None
+        return weight_ih, weight_hh, packed_bias
 
     def _forward_onnx(
         self,
@@ -1346,9 +1347,10 @@ class QuantLSTM(_UnidirectionalQuantLSTM):
         self._onnx_export_weight_hh = torch.stack(
             [item[1] for item in packed], dim=0
         ).contiguous()
-        self._onnx_export_bias = torch.stack(
-            [item[2] for item in packed], dim=0
-        ).contiguous()
+        self._onnx_export_bias = (
+            torch.stack([item[2] for item in packed], dim=0).contiguous()
+            if self.bias else None
+        )
 
         output, final_hidden, final_cell = onnx_lstm(
             input_time,

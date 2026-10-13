@@ -1,9 +1,11 @@
 """Real CUDA integration coverage; run in the rx-met build/runtime environment."""
 import copy
+import importlib
 import json
 import math
 import tempfile
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 import torch
@@ -302,10 +304,38 @@ class QuantLSTMIntegrationTest(unittest.TestCase):
             module.load_bitwidth_config({'LSTM_config': {'unknown': 1}})
         self.assertTrue(module.use_quantization)
 
+    def test_zero_bias_is_exported_and_requires_encoding(self):
+        import onnx
+
+        sim = self.sim(bidirectional=True, bias=True)
+        with torch.no_grad():
+            for name, parameter in sim.model.lstm.named_parameters():
+                if name.startswith('bias_'):
+                    parameter.zero_()
+        self.calibrate(sim)
+        path, enc_path = export_onnx_json(sim, str(self.directory), 'zero_bias', tuple(self.x.shape))
+        node, = [node for node in onnx.load(path).graph.node if node.op_type == 'LSTM']
+        self.assertEqual(node.input[3], 'lstm.bias')
+        self.assertIn('lstm.bias', json.loads(Path(enc_path).read_text())['param_encodings'])
+
+        exporter = importlib.import_module('aimet_torch.rx_export.export_onnx_json')
+        original = exporter.export_recurrent_encodings
+
+        def remove_bias_encoding(model, onnx_path, encodings_path):
+            original(model, onnx_path, encodings_path)
+            target = Path(encodings_path)
+            document = json.loads(target.read_text())
+            del document['param_encodings']['lstm.bias']
+            target.write_text(json.dumps(document))
+
+        with patch.object(exporter, 'export_recurrent_encodings', side_effect=remove_bias_encoding):
+            with self.assertRaisesRegex(RuntimeError, r'lstm\.bias'):
+                export_onnx_json(sim, str(self.directory), 'missing_zero_bias', tuple(self.x.shape))
+
     def test_onnx_encodings_roundtrip(self):
         import onnx
         import onnxruntime as ort
-        for bidirectional, bias in ((False, True), (True, True), (True, False)):
+        for bidirectional, bias in ((False, True), (False, False), (True, True), (True, False)):
             with self.subTest(bidirectional=bidirectional, bias=bias):
                 sim = self.sim(bidirectional, bias)
                 self.calibrate(sim)
@@ -326,6 +356,10 @@ class QuantLSTMIntegrationTest(unittest.TestCase):
                 # Check deployment encoding lengths against actual ONNX W/R/B,
                 # and restore the model from these same public records.
                 initializers = {item.name: item for item in graph.graph.initializer}
+                self.assertEqual(len(nodes[0].input) > 3 and bool(nodes[0].input[3]), bias)
+                if not bias:
+                    self.assertNotIn('lstm.bias', initializers)
+                    self.assertNotIn('lstm.bias', enc['param_encodings'])
                 for suffix in ('weight_ih.weight', 'weight_hh.weight', 'bias'):
                     if suffix == 'bias' and not bias:
                         continue
