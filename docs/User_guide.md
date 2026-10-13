@@ -229,14 +229,14 @@ python3 onnx_ptq_quick_start.py
 
 ## 6. 常见问题（FAQ）
 
-以下条目适用于 `1.0.0`，均为当前版本的已知排查方法。
+以下条目适用于当前应用包与其匹配的公共 runtime。
 
 ### 6.1 镜像和运行环境
 
 | 现象 | 原因 | 处理 |
 | --- | --- | --- |
-| `import quant_gru` 失败 | 镜像来源错误或镜像归档损坏 | 重新校验 `SHA256SUMS`，加载正确的 `rx-met:<版本>-cu*` 镜像 |
-| `libpymo` 或 QuantGRU 报 CUDA 动态库缺失 | 镜像归档损坏，或容器中的 Torch/CUDA 包被替换 | 执行 `python3 -m pip check`，重新加载发布镜像并保留内置的 Torch/CUDA wheel |
+| `import quant_gru` 失败 | 应用挂载或 Python 搜索路径不正确 | 按应用包 README 检查只读挂载与 PYTHONPATH，并运行 install.sh 自检 |
+| `libpymo` 或 QuantGRU 报 CUDA 动态库缺失 | 镜像归档损坏，或容器中的 Torch/CUDA 包被替换 | 执行 `python3 -m pip check`，使用应用包指定的公共 runtime 并保留其固定 Torch/CUDA 依赖 |
 | `torch.cuda.is_available()` 为 `False` | 容器缺少 GPU 映射，或宿主机驱动、Container Toolkit 异常 | 检查 `--gpus all`、宿主机 `nvidia-smi` 和 Container Toolkit，再确认镜像变体满足驱动要求 |
 
 ### 6.2 PyTorch 量化和重载

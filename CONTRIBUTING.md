@@ -71,6 +71,13 @@ python3 -m unittest -v tests/test_dependencies.py
 
 文档中的命令、路径和版本以当前提交中的文件为依据。
 
+## 公共环境与应用包
+
+GPU 环境使用 rx-quant-env v1，两个仓库独立维护相同公共配置和发布身份记录。
+修改公共定义后核对 `python3 scripts/environment/common.py digest`，按 [公共环境](docs/Shared_environment.md)
+完成两边验收；已发布环境不覆盖。产品 VERSION 与环境版本独立。
+发布相关改动补充运行安装器、当前版本日志和环境身份测试，并从真实应用包执行离线安装与只读挂载验收。
+
 ## 提交说明
 
 提交或 Pull Request 应包含：
