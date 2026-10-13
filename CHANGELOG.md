@@ -47,6 +47,8 @@
 
 ### Fixed
 
+- 为 CUDA 11.8/13.0 提供带来源与校验清单的 ONNX Runtime 离线头文件缓存，避免重复下载大型源码归档。
+
 - 修复单向/双向 QuantLSTM 在 `bias=False` 时的 ONNX 导出：正确省略可选 bias 输入，
   消除缺少 `lstm.bias` 编码的校验错误；真实的全零 bias 仍保留参数和完整编码校验。
 - prepare_model 在校准前自动展开 nn.GELU/F.gelu，保留精确或 tanh 近似语义，

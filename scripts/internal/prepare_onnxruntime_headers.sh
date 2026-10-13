@@ -23,6 +23,12 @@ if [[ "${SHA256}" == "vendored" ]]; then
         sha256sum --check --strict --quiet SHA256SUMS
     )
     cp -a "${VENDORED}/." "${OUT_DIR}/"
+elif [[ -d "${ROOT}/native/third_party/onnxruntime-prepared/${VERSION}" ]]; then
+    cached="${ROOT}/native/third_party/onnxruntime-prepared/${VERSION}"
+    [[ "$(tr -d '[:space:]' < "$cached/SOURCE_SHA256")" == "$SHA256" ]] || die "缓存头文件源码身份不匹配"
+    (cd "$cached" && sha256sum --check --strict --quiet SHA256SUMS)
+    cp -a "$cached/." "$OUT_DIR/"
+    log "使用已校验的离线头文件: $cached"
 else
     tmp="$(mktemp -d -t rx-met-onnxruntime-headers.XXXXXX)"
     cleanup() { rm -rf -- "${tmp}"; }
