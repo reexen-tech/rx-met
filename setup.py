@@ -3,6 +3,7 @@
 import platform
 import sys
 import sysconfig
+import shutil
 from pathlib import Path
 
 from setuptools import Distribution, setup
@@ -35,6 +36,13 @@ class _BuildPyWithAimetNative(_build_py):
             )
 
         super().run()
+        resources = Path(self.build_lib) / "aimet_onnx" / "rx_ptq" / "config"
+        resources.mkdir(parents=True, exist_ok=True)
+        for name in (
+            "mrnn_quantsim_config_custom_mixed_precision_v2.json",
+            "quick_start_full_quant.json",
+        ):
+            shutil.copy2(Path(__file__).parent / "examples" / "config" / name, resources / name)
         native_dir = Path(self.build_lib) / "aimet_common"
         missing = [name for name in _NATIVE_FILES if not (native_dir / name).is_file()]
         if missing:

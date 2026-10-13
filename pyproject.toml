@@ -68,4 +68,5 @@ include = [
 [tool.setuptools.package-data]
 aimet_common = ["*.json", "*.so", "*.pyd", "*.dll", "bin/*", "quantsim_config/*.json"]
 aimet_onnx = ["*.json", "*.so", "*.pyd", "*.dll"]
+"aimet_onnx.rx_ptq" = ["config/*.json"]
 aimet_torch = ["*.json", "*.so", "*.pyd", "*.dll"]
