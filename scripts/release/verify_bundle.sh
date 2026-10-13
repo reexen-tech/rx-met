@@ -71,7 +71,8 @@ for package, version in expected.items():
     actual = importlib.metadata.version(package).split("+", 1)[0]
     assert actual == version, (package, actual, version)
 assert torch.version.cuda == os.environ["EXPECTED_CUDA"], torch.version.cuda
-assert os.environ["CUDA_VARIANT"] == os.environ["EXPECTED_VARIANT"]
+environment = dict(line.split("=", 1) for line in Path("/opt/rx-quant-env/environment.env").read_text().splitlines())
+assert environment["cuda_variant"] == os.environ["EXPECTED_VARIANT"]
 assert importlib.metadata.version("quant-lstm").endswith("+" + os.environ["EXPECTED_VARIANT"])
 assert importlib.metadata.version("onnxruntime-gpu") == os.environ["EXPECTED_ONNXRUNTIME"]
 assert "CUDAExecutionProvider" in onnxruntime.get_available_providers()

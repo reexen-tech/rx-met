@@ -20,6 +20,7 @@ import zipfile
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / 'scripts'))
 import dependencies
+from environment import common
 
 
 def run(*args, **kwargs):
@@ -40,57 +41,8 @@ def write_json(path, value):
 
 
 def image_info(reference, role, variant, env_version):
-    try:
-        info = json.loads(subprocess.check_output(['docker', 'image', 'inspect', reference]))[0]
-    except subprocess.CalledProcessError:
-        raise RuntimeError(f'缺少固定环境 {reference}；先运行 scripts/environment/build.sh，发布时不会自动重建环境') from None
-    labels = info['Config'].get('Labels') or {}
-    for key, expected in {'environment.role': role, 'environment.version': env_version, 'cuda.variant': variant}.items():
-        if labels.get('com.reexen.rx-met.' + key) != expected:
-            raise RuntimeError(f'{reference}: {key} 不匹配')
-    if info['Architecture'] != 'amd64' or info['Os'] != 'linux':
-        raise RuntimeError(f'{reference}: 需要 linux/amd64')
-    return info
+    return common.inspect(reference, role, variant)
 
-
-def export_runtime(info, variant, env_version, directory):
-    directory.mkdir(parents=True, exist_ok=True)
-    archive = directory / f'rx-met-runtime-env-{env_version}-{variant}-linux-amd64.tar.gz'
-    record = archive.with_name(archive.name + '.json')
-    if archive.exists() or record.exists():
-        if not archive.is_file() or not record.is_file():
-            raise RuntimeError(f'归档不完整: {archive}')
-        metadata = json.loads(record.read_text())
-        if metadata['image_id'] != info['Id'] or sha256(archive) != metadata['sha256']:
-            raise RuntimeError(f'拒绝覆盖已有 runtime 归档: {archive}')
-        return metadata, archive
-    partial = archive.with_name(archive.name + '.partial')
-    if partial.exists():
-        raise RuntimeError(f'存在未完成的归档，请检查后移走: {partial}')
-    print('Export runtime:', archive, flush=True)
-    compressor = ['pigz', '-p', '2', '-1', '-n'] if shutil.which('pigz') else ['gzip', '-1', '-n']
-    try:
-        # Saving by ID avoids retagging an unrelated local image during docker load.
-        with partial.open('xb') as output:
-            saver = subprocess.Popen(['docker', 'save', info['Id']], stdout=subprocess.PIPE)
-            try:
-                compressed = subprocess.run(compressor, stdin=saver.stdout, stdout=output)
-                saver.stdout.close()
-                if compressed.returncode or saver.wait():
-                    raise RuntimeError('runtime 导出失败')
-            finally:
-                if saver.poll() is None:
-                    saver.terminate()
-                    saver.wait()
-        run('gzip', '-t', partial)
-        metadata = {'schema_version': 1, 'image_id': info['Id'], 'repo_digests': info.get('RepoDigests', []),
-                    'environment_version': env_version, 'variant': variant,
-                    'filename': archive.name, 'sha256': sha256(partial), 'size_bytes': partial.stat().st_size}
-        partial.rename(archive)
-        write_json(record, metadata)
-    finally:
-        partial.unlink(missing_ok=True)
-    return metadata, archive
 
 
 def source_digest():
@@ -182,7 +134,7 @@ def assemble(args, matrix, variant, runtime, build, runtime_record, archive, whe
     if subprocess.check_output(['git', 'status', '--porcelain'], cwd=ROOT).strip():
         revision += '-dirty'
     manifest = {'schema_version': 1, 'bundle_name': name, 'version': version, 'wheel_version': wheel_version,
-                'environment_version': env_version, 'variant': variant, 'source_revision': revision,
+                'environment_name': common.NAME, 'environment_version': env_version, 'variant': variant, 'source_revision': revision,
                 'wheel_source_sha256': source_digest(), 'delivery_sources_sha256': delivery_digest(changelog), 'build_image_id': build['Id'],
                 'runtime': {**runtime_record, 'url': (args.runtime_base_url.rstrip('/') + '/' + archive.name) if args.runtime_base_url else ''},
                 'compatibility': compatibility, 'wheels': wheels}
@@ -258,11 +210,14 @@ def main():
     parser.add_argument('--runtime-dir', type=Path)
     parser.add_argument('--runtime-base-url', default=os.environ.get('RX_MET_RUNTIME_BASE_URL', ''))
     parser.add_argument('--install-prefix', type=Path, default=ROOT / '.release/installed')
-    parser.add_argument('--with-runtime', action='store_true')
+    parser.add_argument('--with-images', action='store_true', help='附带已发布的公共 runtime 归档到交付目录 images/')
+    parser.add_argument('--with-runtime', action='store_true', help='把 runtime 归档嵌入每个应用包')
     parser.add_argument('--skip-build', action='store_true', help='只重新组装源码和环境身份未变的已有 wheels')
     parser.add_argument('--replace', action='store_true', help='替换本机尚未发布的应用产物；不覆盖安装目录和 runtime')
     parser.add_argument('--jobs', type=int, default=8)
     args = parser.parse_intermixed_args()
+    if args.action == 'export-runtime':
+        raise RuntimeError('请使用 scripts/environment/export_runtime.sh 导出公共环境')
     matrix = dependencies.load_matrix()
     dependencies.check_generated_artifacts(matrix)
     targets = args.variants or list(matrix['variants'])
@@ -275,33 +230,35 @@ def main():
     env_version = matrix['environment_version']
     version = (ROOT / 'VERSION').read_text().strip()
     runtime_directory = args.runtime_dir or (args.output_dir if args.action == 'export-runtime' else None)
-    args.output_dir = (args.output_dir or ROOT / '.release/export' / f'v{version}').resolve()
+    args.output_dir = (args.output_dir or ROOT / '.release/export' / f'rx-quant-env-{env_version}' / f'v{version}').resolve()
     args.runtime_dir = (runtime_directory or ROOT / '.release/runtime-images' / env_version).resolve()
     args.install_prefix = args.install_prefix.resolve()
     if args.action == 'build':
         changelog = release_changelog(version)
         args.output_dir.mkdir(parents=True, exist_ok=True)
     for variant in targets:
-        runtime_ref = f'{os.environ.get("RX_MET_RUNTIME_ENV_REPOSITORY", "rx-met-runtime-env")}:{env_version}-{variant}'
+        published = common.load_record(variant)
+        record = published['runtime']
+        runtime_ref = common.image_ref('runtime', variant)
+        build_ref = common.image_ref('build', variant)
         runtime = image_info(runtime_ref, 'runtime', variant, env_version)
-        record, archive = export_runtime(runtime, variant, env_version, args.runtime_dir)
-        if args.action == 'export-runtime':
-            continue
-        images = args.output_dir / 'images'
-        images.mkdir(exist_ok=True)
-        destination = images / archive.name
-        if not destination.exists():
-            try:
-                os.link(archive, destination)
-            except OSError:
-                shutil.copy2(archive, destination)
-        elif sha256(destination) != record['sha256']:
-            raise RuntimeError(f'交付目录 runtime 归档冲突: {destination}')
-        archive_record = archive.with_name(archive.name + '.json')
-        if archive_record.resolve() != (images / archive_record.name).resolve():
-            shutil.copy2(archive_record, images)
-        build_ref = f'{os.environ.get("RX_MET_BUILD_ENV_REPOSITORY", "rx-met-build-env")}:{env_version}-{variant}'
         build = image_info(build_ref, 'build', variant, env_version)
+        if runtime['Id'] != published['runtime_image_id'] or build['Id'] != published['build_image_id']:
+            raise RuntimeError('公共环境标签与已发布镜像身份不一致')
+        archive = args.runtime_dir / record['filename']
+        if args.with_images or args.with_runtime:
+            if not archive.is_file() or sha256(archive) != record['sha256']:
+                raise RuntimeError(f'缺少或损坏的公共 runtime 归档: {archive}；指定 --runtime-dir 或先运行环境 export')
+        if args.with_images:
+            images = args.output_dir / 'images'
+            images.mkdir(exist_ok=True)
+            destination = images / archive.name
+            if not destination.exists():
+                try: os.link(archive, destination)
+                except OSError: shutil.copy2(archive, destination)
+            elif sha256(destination) != record['sha256']:
+                raise RuntimeError(f'交付目录 runtime 归档冲突: {destination}')
+            write_json(images / (archive.name + '.json'), record)
         compatibility = runtime_compatibility(runtime['Id'], matrix, variant)
         if runtime_compatibility(build['Id'], matrix, variant) != compatibility:
             raise RuntimeError('build-env 与 runtime 的 Python ABI 或运行依赖不一致')

@@ -11,15 +11,16 @@ ARG TORCH_CUDA_ARCH_LIST
 ARG RX_MET_VERSION
 ARG ENV_VERSION
 ARG JOBS=8
+ENV RX_MET_ONNXRUNTIME_ROOT=/opt/rx-quant-env/onnxruntime
 ENV JOBS=${JOBS} MAX_JOBS=${JOBS}
 
 WORKDIR /opt/rx-met-src
 COPY . /opt/rx-met-src
 
-RUN grep -Fx "environment_role=build" /opt/rx-met-env/environment.env \
-    && grep -Fx "environment_version=${ENV_VERSION}" /opt/rx-met-env/environment.env \
-    && grep -Fx "cuda_variant=${CUDA_VARIANT}" /opt/rx-met-env/environment.env \
-    && grep -Fx "cuda_version=${RX_MET_CUDA_VERSION}" /opt/rx-met-env/environment.env \
+RUN grep -Fx "environment_role=build" /opt/rx-quant-env/environment.env \
+    && grep -Fx "environment_version=${ENV_VERSION}" /opt/rx-quant-env/environment.env \
+    && grep -Fx "cuda_variant=${CUDA_VARIANT}" /opt/rx-quant-env/environment.env \
+    && grep -Fx "cuda_version=${RX_MET_CUDA_VERSION}" /opt/rx-quant-env/environment.env \
     && [[ "${RX_MET_VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
 
 RUN CUDA_VARIANT="${CUDA_VARIANT}" \

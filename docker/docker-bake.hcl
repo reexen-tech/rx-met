@@ -9,31 +9,21 @@ variable "SOURCE_REVISION" {
 }
 
 variable "ENV_VERSION" {
-  default = "deps-v2"
+  default = "v1"
 }
 
 variable "BUILD_ENV_REPOSITORY" {
-  default = "rx-met-build-env"
+  default = "rx-quant-env-build"
 }
 
 variable "RUNTIME_ENV_REPOSITORY" {
-  default = "rx-met-runtime-env"
+  default = "rx-quant-env-runtime"
 }
 
 group "default" {
   targets = ["cu118", "cu126", "cu130"]
 }
 
-group "environments" {
-  targets = [
-    "environment-build-cu118",
-    "environment-runtime-cu118",
-    "environment-build-cu126",
-    "environment-runtime-cu126",
-    "environment-build-cu130",
-    "environment-runtime-cu130",
-  ]
-}
 
 target "variant-cu118" {
   args = {
@@ -89,65 +79,13 @@ target "variant-cu130" {
   }
 }
 
-target "environment-build" {
-  context    = "."
-  dockerfile = "docker/Dockerfile.environment"
-  target     = "build-env"
-  platforms  = ["linux/amd64"]
-  pull       = false
-  args = {
-    ENV_VERSION = ENV_VERSION
-  }
-  labels = {
-    "org.opencontainers.image.title"   = "rx-met build environment"
-    "org.opencontainers.image.version" = ENV_VERSION
-  }
-}
 
-target "environment-runtime" {
-  context    = "."
-  dockerfile = "docker/Dockerfile.environment"
-  target     = "runtime-env"
-  platforms  = ["linux/amd64"]
-  pull       = false
-  args = {
-    ENV_VERSION = ENV_VERSION
-  }
-  labels = {
-    "org.opencontainers.image.title"   = "rx-met runtime environment"
-    "org.opencontainers.image.version" = ENV_VERSION
-  }
-}
 
-target "environment-build-cu118" {
-  inherits = ["environment-build", "variant-cu118"]
-  tags     = ["${BUILD_ENV_REPOSITORY}:${ENV_VERSION}-cu118"]
-}
 
-target "environment-runtime-cu118" {
-  inherits = ["environment-runtime", "variant-cu118"]
-  tags     = ["${RUNTIME_ENV_REPOSITORY}:${ENV_VERSION}-cu118"]
-}
 
-target "environment-build-cu126" {
-  inherits = ["environment-build", "variant-cu126"]
-  tags     = ["${BUILD_ENV_REPOSITORY}:${ENV_VERSION}-cu126"]
-}
 
-target "environment-runtime-cu126" {
-  inherits = ["environment-runtime", "variant-cu126"]
-  tags     = ["${RUNTIME_ENV_REPOSITORY}:${ENV_VERSION}-cu126"]
-}
 
-target "environment-build-cu130" {
-  inherits = ["environment-build", "variant-cu130"]
-  tags     = ["${BUILD_ENV_REPOSITORY}:${ENV_VERSION}-cu130"]
-}
 
-target "environment-runtime-cu130" {
-  inherits = ["environment-runtime", "variant-cu130"]
-  tags     = ["${RUNTIME_ENV_REPOSITORY}:${ENV_VERSION}-cu130"]
-}
 
 target "release" {
   context    = "."

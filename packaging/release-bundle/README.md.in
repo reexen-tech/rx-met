@@ -2,8 +2,8 @@
 
 源码仓库：[reexen-tech/rx-met](https://github.com/reexen-tech/rx-met)
 
-本发布包提供 PyTorch / ONNX 小模型量化工具及 GRU、LSTM 示例，配套运行环境为
-`@ENV_VERSION@`。首次使用按以下三个步骤完成。
+本发布包提供 PyTorch / ONNX 小模型量化工具及 GRU、LSTM 示例，配套公共运行环境为
+`rx-quant-env` 的 `@ENV_VERSION@`。首次使用按以下三个步骤完成。
 版本变化、已知限制和升级说明见 [CHANGELOG.md](CHANGELOG.md)。
 
 ## 步骤 1：安装

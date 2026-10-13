@@ -11,7 +11,7 @@
 - QuantLSTM 接入 FX/ConnectedGraph、AIMET v2 QuantSim、混合精度、共享校准、Po2、
   参数锁和 ONNX 导出回读；提供 KWS 用户示例与真实 CUDA 集成测试。
 - 在 `operators/quant-lstm/` 收录 QuantLSTM 源码、配置、构建脚本、测试和文档，
-  与 QuantGRU 同级维护并支持独立构建；应用包增加 QuantLSTM wheel，环境版本更新为 `deps-v2`。
+  与 QuantGRU 同级维护并支持独立构建；应用包增加 QuantLSTM wheel，环境使用公共 `rx-quant-env` v1。
 - PyTorch 导出增加节点名/encoding key 双向对应及浮点计算输入覆盖检查；双输入计算
   必须覆盖两路浮点张量，标量常量与非浮点输入豁免。即使未启用量化器也不能放过缺失。
 - PyTorch 导出末尾强制校验 ONNX 和 encodings；缺少已启用量化器的编码、通道或
@@ -21,6 +21,9 @@
 - 增加 `CONTRIBUTING.md`，统一公开贡献、测试和文档更新要求。
 
 ### Changed
+
+- GPU 环境改为公共 `rx-quant-env` v1；两个产品独立安装和更新，复用同一批固定 runtime 镜像。
+- 默认发布只生成应用包；`--with-images` 可附带 runtime 归档。安装器负责离线安装和自检，README 说明 Docker 挂载运行。
 
 - 发布改为三个固定 runtime 镜像及三个独立应用包。用户通过 `install.sh` 离线安装，
   再按 README 使用原生 Docker 命令挂载运行；构建环境 `build-env` 继续供内部使用。
@@ -79,7 +82,7 @@
 
 ### Upgrade notes
 
-- 首次使用需要对应的 `deps-v2` runtime。安装应用包后，按 README 挂载该版本的应用目录。
+- 首次使用需要对应的公共 `rx-quant-env` v1 runtime。安装应用包后，按 README 挂载该版本的应用目录。
 - 后续产品更新可复用兼容的 runtime；升级和回滚通过选择应用目录及其匹配的镜像完成。
 - 工作目录、模型、数据和输出独立于应用安装目录保存。
 

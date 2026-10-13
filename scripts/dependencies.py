@@ -7,6 +7,7 @@ import argparse
 import hashlib
 import importlib.util
 import json
+import re
 import subprocess
 import sys
 import tempfile
@@ -234,11 +235,11 @@ def render_bake(matrix: Mapping[str, Any]) -> str:
         "}",
         "",
         'variable "BUILD_ENV_REPOSITORY" {',
-        '  default = "rx-met-build-env"',
+        '  default = "rx-quant-env-build"',
         "}",
         "",
         'variable "RUNTIME_ENV_REPOSITORY" {',
-        '  default = "rx-met-runtime-env"',
+        '  default = "rx-quant-env-runtime"',
         "}",
         "",
         'group "default" {',
@@ -373,7 +374,11 @@ def render_bake(matrix: Mapping[str, Any]) -> str:
                 "",
             ]
         )
-    return "\n".join(lines)
+    # Public environment builds use a neutral context prepared by common.py.
+    text = "\n".join(lines) + "\n"
+    text = re.sub(r'(?ms)^target "environment-(?:build|runtime)(?:-cu[0-9]+)?" \{.*?^\}\n?', '', text)
+    text = re.sub(r'(?ms)^group "environments" \{.*?^\}\n?', '', text)
+    return text.rstrip() + "\n"
 
 
 def write_generated_artifacts(matrix: Mapping[str, Any]) -> None:
