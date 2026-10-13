@@ -66,7 +66,7 @@ def main() -> None:
     quant_text = quant_version.read_text(encoding="utf-8")
     quant_text, count = re.subn(
         r'^__version__ = "([0-9]+\.[0-9]+\.[0-9]+)(?:\+[^\"]+)?"$',
-        rf'__version__ = "\1+{variant}"',
+        f'__version__ = "{wheel_version}"',
         quant_text,
         count=1,
         flags=re.M,
