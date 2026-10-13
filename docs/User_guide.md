@@ -1,6 +1,6 @@
 # rx-met 用户使用指南
 
-本文档说明如何选择、启动 rx-met 镜像，并运行 PyTorch 或 ONNX 量化流程。
+本文档说明如何安装应用包、启动匹配的 runtime，并运行 PyTorch 或 ONNX 量化流程。
 文中的版本和命令以当前仓库为准。
 
 相关文档：
@@ -17,7 +17,7 @@
 
 rx-met 是面向 Linux x86_64 NVIDIA GPU 的**小模型量化工具包**，包含定制
 AIMET（`aimet_torch`、`aimet_onnx`、`aimet_common`）和 QuantGRU、QuantLSTM。项目通过独立
-Docker 镜像提供完整运行环境。
+runtime 镜像提供第三方环境，项目代码由应用包安装后挂载。
 
 | 工作流 | 适用对象 | 底层引擎 | 入口 | 对应章节 |
 |--------|----------|----------|------|----------|
@@ -47,37 +47,38 @@ Docker 镜像提供完整运行环境。
 `nvcc --version` 显示本地 CUDA Toolkit 版本。`cu130` 包含 `sm_120` 目标；
 实验性 ExportedProgram API 适用于 `cu126` 和 `cu130`。
 
-`QuantGRU` 和 CUDA 版 ONNX Runtime 已安装在镜像中，可直接导入。ONNX PTQ
+CUDA 版 ONNX Runtime 安装在 runtime 中；QuantGRU 和 QuantLSTM 来自挂载的应用安装目录。ONNX PTQ
 默认要求 `CUDAExecutionProvider`。
 
 ---
 
 ## 3. 加载并启动镜像
 
-当前公开安装入口是发布制品中的离线镜像归档。从源码构建镜像见
+当前安装入口是应用包内的 `install.sh`。离线首次交付时，同时提供对应 runtime 归档，
+放到包内或包旁边的 images/。从源码构建应用包见
 [`Release_packaging.md`](./Release_packaging.md)。
 
-以 `cu126` 为例，先校验制品并加载：
-
 ```bash
-sha256sum --check --strict SHA256SUMS
-zstd -dc rx-met-v1.0.0-cu126-linux-amd64.tar.zst | docker load
+./install.sh --offline
 ```
 
-启动时挂载工作目录和数据集：
+安装器打印应用目录和固定镜像 ID。将它们填入以下命令，并选择实际分配的 GPU、工作目录和数据目录：
 
 ```bash
-docker run --gpus all --rm -it \
+RUNTIME_IMAGE_ID='sha256:替换为安装器输出的镜像ID'
+docker run --gpus device=0 --rm -it \
   --ipc=host \
   --user "$(id -u):$(id -g)" \
   --group-add "$(stat -c '%g' /path/to/datasets)" \
   -e HOME=/tmp \
   -e USER="$(id -un)" \
   -e LOGNAME="$(id -un)" \
+  -e PYTHONPATH=/opt/rx-met/python \
+  -v /path/to/installed-version:/opt/rx-met:ro \
   -v /path/to/workspace:/workspace \
   -v /path/to/datasets:/datasets:ro \
   -w /workspace \
-  rx-met:1.0.0-cu126
+  "$RUNTIME_IMAGE_ID" bash
 ```
 
 `--group-add` 让非 root 容器继承数据目录的只读组权限，适用于 CIFS/NFS
@@ -257,6 +258,6 @@ python3 onnx_ptq_quick_start.py
 
 ## 7. 卸载与回滚
 
-镜像作为完整运行单元使用。回滚时加载上一个版本对应 CUDA 变体的
-`tar.zst`，并切换完整镜像 tag。工作目录和数据通过 volume 挂载，其生命周期独立于
-容器。
+应用安装到独立版本目录。升级时挂载新目录并使用 manifest 指定的 runtime 启动新容器；
+回滚时恢复旧目录与其匹配的 runtime。保留仍被容器使用的版本目录。
+工作目录、数据和输出通过独立挂载保存。

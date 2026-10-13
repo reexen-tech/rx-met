@@ -179,21 +179,22 @@ flowchart LR
     EnvDocker --> RuntimeEnv[runtime-env]
     BuildEnv --> ProjectBuilder[Dockerfile project-builder]
     Source[当前源码] --> ProjectBuilder
-    ProjectBuilder --> Wheels[rx-met / QuantGRU wheels]
-    Wheels --> Product[发布镜像]
-    RuntimeEnv --> Product
-    Product --> Verify[静态 / GPU / 示例验收]
-    Verify --> Bundle[tar.zst / manifest / SHA256SUMS]
+    ProjectBuilder --> Wheels[rx-met / QuantGRU / QuantLSTM wheels]
+    Wheels --> Bundle[应用包 / install.sh / manifest / SHA256SUMS]
+    RuntimeEnv --> Images[runtime 镜像归档]
+    Bundle --> Install[离线安装到版本目录]
+    Images --> Install
+    Install --> Verify[纯 runtime + 外部只读目录 / GPU / 示例验收]
 ```
 
-环境镜像和项目镜像使用独立版本：
+环境镜像和应用包使用独立版本：
 
 - 环境版本随 CUDA、Python、Torch、ONNX Runtime 或构建工具链变化。
 - 项目版本随 AIMET Python、原生实现、QuantGRU、示例或产品行为变化。
 - 项目构建复用匹配的 build-env 和 runtime-env。
 
-`scripts/release/build.sh` 是发布构建入口，`scripts/release/verify_bundle.sh` 是镜像验收
-入口。发布目录包含镜像归档、`image-manifest.json`、`SHA256SUMS` 和示例源码。
+`scripts/release/build.sh` 是发布构建入口，`scripts/release/verify_bundle.sh` 是安装包验收
+入口。发布目录包含应用包、独立 runtime 归档、manifest、SHA256SUMS 和示例源码。
 完整操作说明见 [Docker 构建与发布](./Release_packaging.md)。
 
 ## 10. 制品关系
@@ -203,14 +204,15 @@ flowchart LR
 | rx-met wheel | 项目 builder | 安装 `aimet_common`、`aimet_torch` 和 `aimet_onnx` |
 | QuantGRU wheel | QuantGRU builder | 安装 `quant_gru` 和 CUDA 扩展 |
 | build-env / runtime-env | 环境构建模块 | 固化编译环境与运行依赖 |
-| `rx-met:<version>-<variant>` | 发布构建模块 | 用户运行环境 |
+| 应用 bundle + runtime 镜像 | 发布构建模块 | install.sh 安装，README 说明原生 Docker 运行方式 |
+| QuantLSTM wheel | QuantLSTM builder | 安装 quant_lstm、CUDA 扩展和默认配置 |
 | PyTorch state dict | PyTorch 量化流程 | QAT 权重和量化器状态 |
 | 部署 ONNX + encodings | PyTorch 导出流程 | PyTorch 模型部署 |
 | Clean ONNX + compiler encodings | ONNX PTQ 流程 | 已有 ONNX 模型部署 |
 | metadata | ONNX PTQ 流程 | 输入、校准、Po2、覆盖率和数值对比记录 |
 
-模型文件和 encodings 按同一次导出结果配套使用。`image-manifest.json` 和
-`SHA256SUMS` 提供镜像发布制品的身份与完整性信息。
+模型文件和 encodings 按同一次导出结果配套使用。`manifest.json` 和
+`SHA256SUMS` 提供应用与环境制品的身份及完整性信息。
 
 ## 11. 验证策略
 

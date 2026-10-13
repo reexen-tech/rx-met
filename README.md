@@ -10,7 +10,7 @@ QuantGRU、QuantLSTM 和可复现的多 CUDA 运行环境。
 编译器 encodings 和运行元数据。
 - **量化循环算子**：QuantGRU / QuantLSTM 可替换 `num_layers=1`、`dropout=0` 的 PyTorch GRU / LSTM，
 支持单向、双向、校准和 QAT。
-- **可复现环境**：发布 `cu118`、`cu126` 和 `cu130` 三个独立 Docker 镜像。
+- **可复现环境**：发布 `cu118`、`cu126` 和 `cu130` 三个固定 runtime 镜像及独立应用包。
 
 ## 支持范围
 
@@ -27,35 +27,25 @@ QuantGRU、QuantLSTM 和可复现的多 CUDA 运行环境。
 
 ## 获取与运行
 
-选择与宿主机驱动和 GPU 计算能力匹配的镜像变体。每个版本包含镜像归档、
-`SHA256SUMS` 和 `image-manifest.json`。
-
-以 `1.0.0` 的 `cu126` 变体为例：
+选择与宿主机驱动、GPU 架构和依赖匹配的应用包。首次离线交付同时提供对应 runtime 归档，
+后续产品更新只需下载应用包。解压后执行：
 
 ```bash
-sha256sum --check --strict SHA256SUMS
-zstd -dc rx-met-v1.0.0-cu126-linux-amd64.tar.zst | docker load
-
-docker run --gpus all --rm \
-  rx-met:1.0.0-cu126 \
-  python3 -c "import torch, aimet_torch, aimet_onnx, quant_gru, quant_lstm; print(torch.__version__, torch.version.cuda)"
+./install.sh --offline
 ```
 
-命令退出码为 0，并打印与镜像变体匹配的 PyTorch 和 CUDA 版本，表示基础环境可用。
+安装器校验并准备 runtime，在临时容器中离线安装三个 wheel，最后打印应用目录和 Docker 启动命令。
+运行命令需将应用目录只读挂到 `/opt/rx-met`，设置 `PYTHONPATH=/opt/rx-met/python`，
+并按自己的任务指定 GPU、工作目录和数据目录。完整参数见发布包 README，模板位于
+[packaging/release-bundle/README.md.in](packaging/release-bundle/README.md.in)。
 
-完整 KWS 示例需要 Speech Commands v0.02 数据集，默认使用 GRU：
+按该命令进入容器后，可运行完整 KWS 示例（需要 Speech Commands v0.02）：
 
 ```bash
-docker run --gpus all --rm \
-  --ipc=host \
-  -v /path/to/workspace:/workspace \
-  -v /path/to/datasets:/datasets:ro \
-  -w /workspace \
-  -e RX_MET_SPEECH_COMMANDS_ROOT=/datasets/speech_commands_v0.02 \
-  rx-met:1.0.0-cu126 \
-  bash -lc 'cp -a /opt/rx-met/examples /workspace/rx-met-examples &&
-    cd /workspace/rx-met-examples &&
-    python3 quick_start_kws.py'
+cp -a /opt/rx-met/examples /workspace/rx-met-examples
+cd /workspace/rx-met-examples
+export RX_MET_SPEECH_COMMANDS_ROOT=/datasets/speech_commands_v0.02
+python3 quick_start_kws.py
 ```
 
 将示例命令中的 `python3 quick_start_kws.py` 改为 `python3 quick_start_kws.py --rnn_type lstm` 即可运行 LSTM。
@@ -84,10 +74,11 @@ docker run --gpus all --rm \
 
 ## 从源码构建
 
-以下命令构建 `cu126` 发布镜像并跳过归档导出：
+以下命令准备环境并构建 `cu126` 应用包与离线 runtime 归档：
 
 ```bash
-./scripts/release/build.sh --no-export cu126
+./scripts/environment/build.sh --no-export cu126
+./scripts/release/build.sh cu126
 ```
 
 完整构建矩阵、环境镜像复用和 GPU 验收流程见

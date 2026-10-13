@@ -1,6 +1,6 @@
 # 参与贡献
 
-本文档说明 rx-met 的公开开发、验证和提交要求。完整运行环境以 Docker 发布镜像为准；
+本文档说明 rx-met 的公开开发、验证和提交要求。完整运行环境以固定 runtime 与匹配的应用包为准；
 本地开发构建和测试本次修改涉及的模块。
 
 ## 开发环境
@@ -54,8 +54,8 @@ python3 -m unittest -v tests/test_dependencies.py
 | QuantGRU | `operators/quant-gru/README.md` 和 `operators/quant-gru/script/run_all_test.sh` |
 | QuantLSTM 集成 | `python3 -m unittest -v tests/test_quant_lstm_integration.py`（CUDA 环境） |
 | 依赖矩阵或锁文件 | `python3 scripts/dependencies.py check` |
-| Docker 构建或发布脚本 | `./scripts/release/build.sh --no-export <变体>` |
-| 发布镜像 GPU 行为 | `./scripts/release/verify_bundle.sh --gpu --gpu-device 0 <变体>` |
+| Docker 构建或发布脚本 | `./scripts/release/build.sh <变体>` |
+| 应用包 GPU 行为 | `./scripts/release/verify_bundle.sh --gpu --gpu-device 0 <变体>` |
 | KWS 或 ONNX PTQ 示例 | `scripts/release/verify_*_example.sh` 对应的真实数据验证 |
 
 提交说明记录受 GPU、模型或数据集条件限制的测试项及原因。
@@ -66,7 +66,8 @@ python3 -m unittest -v tests/test_dependencies.py
 - 配置字段变化时，更新 `docs/Quant_config.md` 和示例配置说明。
 - 构建、依赖或发布流程变化时，更新 `docs/Release_packaging.md`。
 - 非显然的架构决策使用 `docs/adr/` 记录背景、决策、影响和备选方案。
-- 面向下一个版本的重要变化写入 `CHANGELOG.md` 的 `[Unreleased]`。
+- 面向下一个版本的重要变化写入 `CHANGELOG.md` 的 `[Unreleased]`（不存在时新建）。
+- 发布前将已纳入本次产物的 Unreleased 条目并入 `VERSION` 对应的版本，按最终行为合并重复或已被替代的记录；发布脚本从根目录 CHANGELOG 提取当前版本内容，应用包不包含其他版本或 Unreleased。
 
 文档中的命令、路径和版本以当前提交中的文件为依据。
 
