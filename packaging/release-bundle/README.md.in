@@ -8,30 +8,25 @@
 
 ## 步骤 1：安装
 
-宿主机需要 Linux x86_64、Docker、NVIDIA Container Toolkit 和兼容的 NVIDIA 驱动。
-安装时需具备 Bash、gzip、flock 等常用 Linux 工具，无需另外安装 Python 或 CUDA Toolkit。
+宿主机需要 Linux x86_64、Docker、NVIDIA Container Toolkit、兼容的 NVIDIA 驱动，以及 Bash、gzip、flock 等常用工具。
+无需在宿主机安装 Python 或 CUDA Toolkit。
 
 | 变体 | CUDA | Python | 最低驱动 |
 | --- | --- | --- | --- |
-| `cu118` | 11.8 | 3.10 | 520.61.05 |
-| `cu126` | 12.6 | 3.10 | 560.35.05 |
-| `cu130` | 13.0 | 3.12 | 580.126.20 |
+| cu118 | 11.8 | 3.10 | 520.61.05 |
+| cu126 | 12.6 | 3.10 | 560.35.05 |
+| cu130 | 13.0 | 3.12 | 580.126.20 |
 
-三个变体支持 GPU 计算能力 `sm_80/86/89/90`，`cu130` 另支持 `sm_120`。
-可通过 `nvidia-smi` 查看驱动版本；当前应用包使用 `@VARIANT@`。
-
-首次安装时，将对应的 runtime 镜像归档放在应用包目录旁的 `images/` 目录中。
-在解压后的应用包目录执行：
+三个变体支持 sm_80/86/89/90，cu130 另支持 sm_120。当前包为 `@VARIANT@`。
+首次离线使用，将对应公共 runtime 镜像归档放入应用包同级的 `images/` 目录，在解压后的应用包目录执行：
 
 ```bash
-./install.sh --offline
+./install.sh
 ```
 
-脚本自动校验文件、准备镜像、安装应用并自检。出现“安装完成”后即可继续。
-默认安装位置为 `~/.local/share/rx-met/@BUNDLE_NAME@`。本机已有匹配镜像时会直接复用。
+> 或指定镜像文件 `--runtime-image /path/to/runtime.tar.gz`。
 
-如果镜像归档位于共享盘或其他目录，安装时改用
-`./install.sh --offline --runtime-archive /path/to/runtime.tar.gz`，替换为对应归档的实际路径。
+默认安装位置为 `~/.local/share/rx-met/@BUNDLE_NAME@`。
 
 ## 步骤 2：准备数据和工作目录
 
@@ -55,36 +50,32 @@ cp -a examples ~/rx-met-user/
 示例和量化配置位于 `~/rx-met-user/examples/`。需要调整参数时，编辑这里的脚本或
 `config/` 下的 JSON；模型和数据路径使用下文的容器内路径。
 
-## 步骤 3：进入容器并运行示例
+## 步骤 3：进入容器并运行
 
-在宿主机执行以下命令。已有数据目录时修改 `RX_MET_DATA_DIR`，并将 GPU `0` 改为分配的设备号：
+在宿主机执行以下命令。按实际情况调整 GPU 和宿主机路径。
+将 `/path/to/datasets` 替换为数据目录的绝对路径。
 
 ```bash
-RX_MET_DATA_DIR="$HOME/rx-met-user/datasets"
-
-docker run --rm -it --gpus device=0 \
-  --shm-size=2g \
+docker run --rm -it --shm-size=2g \
   --user "$(id -u):$(id -g)" \
-  --group-add "$(stat -c '%g' "$RX_MET_DATA_DIR")" \
   -e HOME=/tmp \
-  -e USER="$(id -un)" \
-  -e LOGNAME="$(id -un)" \
+  -e USER="$(id -un)" -e LOGNAME="$(id -un)" \
+  -w /workspace \
   -e PYTHONPATH=/opt/rx-met/python \
+  --gpus device=0 \
   -v "$HOME/.local/share/rx-met/@BUNDLE_NAME@:/opt/rx-met:ro" \
-  -v "$RX_MET_DATA_DIR:/datasets:ro" \
+  -v "/path/to/datasets:/datasets:ro" \
   -v "$HOME/rx-met-user:/workspace" \
-  -w /workspace/examples \
   @RUNTIME_IMAGE_ID@ bash
 ```
 
 命令使用默认安装位置；如果安装时指定过其他目录，将应用挂载来源改为安装器输出的路径。
-`--group-add` 用于读取共享数据目录，`--shm-size` 为示例的数据加载进程提供共享内存。
-进入后，当前目录为 `/workspace/examples`，以下命令都在容器内执行。
+进入后目录为 `/workspace`，以下命令都在容器内执行。
 
 ### KWS：GRU 或 LSTM
 
 ```bash
-python3 quick_start_kws.py --rnn_type gru
+python3 /workspace/examples/quick_start_kws.py --rnn_type gru
 ```
 
 运行 LSTM 时，把 `gru` 改为 `lstm` 即可。示例依次完成浮点训练、PTQ、Power-of-2、
@@ -94,7 +85,7 @@ QAT、导出和重新加载验证，默认浮点训练和 QAT 各运行 1 epoch�
 ### ONNX PTQ
 
 ```bash
-python3 onnx_ptq_quick_start.py
+python3 /workspace/examples/onnx_ptq_quick_start.py
 ```
 
 示例使用准备好的 ONNX 模型和校准数据完成 PTQ、Power-of-2、导出和重新加载验证。

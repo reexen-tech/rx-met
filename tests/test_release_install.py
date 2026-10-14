@@ -92,7 +92,7 @@ else:
         self.env['FAKE_IMAGE_PRESENT'] = '1'
         archive = self.root / 'runtime.tar.gz'
         archive.write_bytes(b'corrupt archive')
-        self.assert_failed_with('镜像归档校验失败', self.invoke('--runtime-archive', str(archive)))
+        self.assert_failed_with('镜像归档校验失败', self.invoke('--runtime-image', str(archive)))
         self.assertNotIn("['load'", (self.root / 'docker.log').read_text())
 
     def test_tampered_bundle_never_installs(self):

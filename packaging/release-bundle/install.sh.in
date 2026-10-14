@@ -14,17 +14,18 @@ cleanup() { if [[ -n "$STAGING" && -d "$STAGING" ]]; then rm -rf -- "$STAGING"; 
 trap cleanup EXIT
 while (($#)); do
     case "$1" in
-        --prefix|--cache-dir|--runtime-archive)
+        --prefix|--cache-dir|--runtime-image)
             (($# >= 2)) || die "$1 缺少参数"
             case "$1" in
                 --prefix) PREFIX="$2" ;;
                 --cache-dir) CACHE_DIR="$2" ;;
-                --runtime-archive) ARCHIVE="$2" ;;
+                --runtime-image) ARCHIVE="$2" ;;
             esac
             shift 2 ;;
         --offline) OFFLINE=1; shift ;;
         -h|--help)
-            printf '用法: ./install.sh [--prefix DIR] [--offline] [--runtime-archive FILE] [--cache-dir DIR]\n'
+            printf '用法: ./install.sh [--prefix DIR] [--offline] [--runtime-image FILE] [--cache-dir DIR]\n'
+            printf '  --runtime-image FILE  指定本地 runtime Docker 镜像文件\n'
             exit 0 ;;
         *) die "未知参数: $1" ;;
     esac
@@ -74,7 +75,7 @@ else
         if [[ -f "$candidate" ]]; then ARCHIVE="$candidate"; break; fi
     done
     if [[ -z "$ARCHIVE" ]]; then
-        ((OFFLINE == 0)) || die "离线模式缺少 runtime，请将 $RUNTIME_ARCHIVE 放入 images/ 或使用 --runtime-archive"
+        ((OFFLINE == 0)) || die "离线模式缺少 runtime，请将 $RUNTIME_ARCHIVE 放入 images/ 或使用 --runtime-image"
         [[ -n "$RUNTIME_URL" ]] || die '本版本尚未配置下载地址，请提供离线 runtime 归档'
         [[ "$RUNTIME_URL" == https://* ]] || die 'runtime 下载地址必须使用 HTTPS'
         command -v curl >/dev/null || die '下载 runtime 需要 curl'
@@ -147,6 +148,14 @@ PY
 fi
 log "安装完成: $DESTINATION"
 printf '\n按 README 选择 GPU、工作目录及数据目录。最小交互启动示例：\n\n'
-printf 'docker run --rm -it --gpus device=0 --shm-size=2g --user %q -e HOME=/tmp -e USER=%q -e LOGNAME=%q -e PYTHONPATH=/opt/rx-met/python --mount %q --mount %q -w /workspace %q bash\n' \
-    "$(id -u):$(id -g)" "$(id -un)" "$(id -un)" "type=bind,src=$DESTINATION,dst=/opt/rx-met,readonly" \
-    'type=bind,src=/path/to/workspace,dst=/workspace' "$RUNTIME_IMAGE_ID"
+printf 'docker run --rm -it --shm-size=2g \\\n'
+printf '  --user %q \\\n' "$(id -u):$(id -g)"
+printf '  -e HOME=/tmp \\\n'
+printf '  -e USER=%q -e LOGNAME=%q \\\n' "$(id -un)" "$(id -un)"
+printf '  -w /workspace \\\n'
+printf '  -e PYTHONPATH=/opt/rx-met/python \\\n'
+printf '  --gpus device=0 \\\n'
+printf '  -v %q \\\n' "${DESTINATION}:/opt/rx-met:ro"
+printf '  -v "/path/to/datasets:/datasets:ro" \\\n'
+printf '  -v "/path/to/workspace:/workspace" \\\n'
+printf '  %q bash\n' "$RUNTIME_IMAGE_ID"

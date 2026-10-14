@@ -2,7 +2,7 @@
 
 本目录随 rx-met 应用包交付。按发布包顶层 README 在宿主机将 `examples/`
 复制到 `~/rx-met-user/`，再启动匹配的 runtime 并挂载应用、工作目录和数据目录。
-以下运行命令均在容器内的 `/workspace/examples` 中执行；数据和输出通过挂载目录保存。
+以下运行命令均在容器内的 `/workspace` 中执行；数据和输出通过挂载目录保存。
 
 | 入口 | 用途 | 需要准备 |
 | --- | --- | --- |
@@ -27,10 +27,10 @@
 export RX_MET_SPEECH_COMMANDS_ROOT=/datasets/speech_commands_v0.02
 
 # 默认使用 GRU；不传 --rnn_type 时等价于此命令
-python3 quick_start_kws.py --rnn_type gru
+python3 /workspace/examples/quick_start_kws.py --rnn_type gru
 
 # 使用 LSTM，其余量化步骤相同
-python3 quick_start_kws.py --rnn_type lstm
+python3 /workspace/examples/quick_start_kws.py --rnn_type lstm
 ```
 
 依次执行浮点训练、PTQ 校准与评估、Power-of-2（Po2）转换、QAT 微调、导出和恢复。
@@ -65,15 +65,15 @@ reshape/常量折叠时，导出器按 FX 参数来源恢复名称，无法对�
 也可以传入修改后的完整配置：
 
 ```bash
-python3 quick_start_kws.py --rnn_type lstm \
+python3 /workspace/examples/quick_start_kws.py --rnn_type lstm \
   --data-dir /datasets/speech_commands_v0.02 \
-  --quant-config config/quick_start_full_quant.json \
+  --quant-config /workspace/examples/config/quick_start_full_quant.json \
   --output-dir /workspace/output/kws
 ```
 
 ### 输出和恢复
 
-默认输出根目录是 `output/quick_start_kws/`。两种模式分别写入 `gru/` 和 `lstm/`，
+默认输出根目录是 `/workspace/examples/output/quick_start_kws/`。两种模式分别写入 `gru/` 和 `lstm/`，
 避免混用权重和量化参数。上面的命令写入 `/workspace/output/kws/lstm/`。
 `--output-dir` 优先于环境变量 `RX_MET_KWS_OUTPUT_DIR`；两者均表示**输出根目录**。
 
@@ -92,7 +92,7 @@ ONNX 表达浮点计算语义，量化参数位于配套 encodings；仅运行 O
 
 如使用 `RX_MET_KWS_FP_MODEL` 指定浮点检查点保存位置，请为两种模式指定不同文件；
 已有检查点类型不符或缺少类型信息时会报错，选择新路径后再运行。
-查看所有入口参数：`python3 quick_start_kws.py --help`。
+查看所有入口参数：`python3 /workspace/examples/quick_start_kws.py --help`。
 
 ## ONNX PTQ
 
@@ -103,7 +103,7 @@ ONNX 表达浮点计算语义，量化参数位于配套 encodings；仅运行 O
 校准数据的输入名和 shape 应与模型一致。在容器内执行：
 
 ```bash
-python3 onnx_ptq_quick_start.py
+python3 /workspace/examples/onnx_ptq_quick_start.py
 ```
 
 使用其他输入路径时，可在命令中指定：
@@ -111,7 +111,7 @@ python3 onnx_ptq_quick_start.py
 ```bash
 RX_MET_ONNX_PTQ_MODEL=/datasets/model.onnx \
 RX_MET_ONNX_PTQ_CALIB=/datasets/calib \
-python3 onnx_ptq_quick_start.py
+python3 /workspace/examples/onnx_ptq_quick_start.py
 ```
 
 输出文件名前缀、量化方式等参数可在复制出的 `onnx_ptq_quick_start.py` 开头修改。
@@ -136,12 +136,12 @@ curl -fL --retry 3 \
 按顶层 README 启动容器后，在**容器内**执行：
 
 ```bash
-python3 prepare_onnx_ptq_data.py \
+python3 /workspace/examples/prepare_onnx_ptq_data.py \
   --onnx /workspace/inputs/mobilenetv2-12.onnx \
   --parquet /workspace/inputs/imagenette2-320.parquet \
   --out-root /workspace/datasets/mobilenetv2
 export RX_MET_ONNX_PTQ_ROOT=/workspace/datasets
-python3 onnx_ptq_quick_start.py
+python3 /workspace/examples/onnx_ptq_quick_start.py
 ```
 
 准备脚本将模型 batch 固定为 1，并生成各 200 个互不重叠的校准和验证样本。

@@ -22,6 +22,8 @@
 
 ### Changed
 
+- 安装器指定镜像文件的参数由 `--runtime-archive` 更名为 `--runtime-image`。
+
 - GPU 环境改为公共 `rx-quant-env` v1；两个产品独立安装和更新，复用同一批固定 runtime 镜像。
 - 发布构建支持 `--build-env-dir` 复用离线 build 镜像归档，`--runtime-dir` 更名为 `--runtime-env-dir`；本地缺少环境时校验并导入对应归档。
 - 默认发布只生成应用包；`--with-images` 可附带 runtime 归档。安装器负责离线安装和自检，README 说明 Docker 挂载运行。
