@@ -21,6 +21,7 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / 'scripts'))
 import dependencies
 from environment import common
+from release import environment_archives
 
 
 def run(*args, **kwargs):
@@ -207,7 +208,8 @@ def main():
     parser.add_argument('action', choices=['build', 'export-runtime'])
     parser.add_argument('variants', nargs='*', choices=['cu118', 'cu126', 'cu130'])
     parser.add_argument('--output-dir', type=Path)
-    parser.add_argument('--runtime-dir', type=Path)
+    parser.add_argument('--build-env-dir', type=Path, help='本地缺少 build 镜像时，从此目录校验并导入归档')
+    parser.add_argument('--runtime-env-dir', type=Path, help='runtime 镜像导入及交付归档目录；默认 .release/runtime-images/<环境版本>')
     parser.add_argument('--runtime-base-url', default=os.environ.get('RX_MET_RUNTIME_BASE_URL', ''))
     parser.add_argument('--install-prefix', type=Path, default=ROOT / '.release/installed')
     parser.add_argument('--with-images', action='store_true', help='附带已发布的公共 runtime 归档到交付目录 images/')
@@ -227,11 +229,15 @@ def main():
         parser.error('--runtime-base-url 必须使用 HTTPS')
     if args.jobs < 1:
         parser.error('--jobs 必须大于零')
+    for option, directory in [('--build-env-dir', args.build_env_dir), ('--runtime-env-dir', args.runtime_env_dir)]:
+        if directory is not None and not directory.is_dir():
+            parser.error(f'{option} 目录不存在: {directory}')
     env_version = matrix['environment_version']
     version = (ROOT / 'VERSION').read_text().strip()
-    runtime_directory = args.runtime_dir or (args.output_dir if args.action == 'export-runtime' else None)
     args.output_dir = (args.output_dir or ROOT / '.release/export' / f'rx-quant-env-{env_version}' / f'v{version}').resolve()
-    args.runtime_dir = (runtime_directory or ROOT / '.release/runtime-images' / env_version).resolve()
+    args.runtime_env_dir = (args.runtime_env_dir or ROOT / '.release/runtime-images' / env_version).resolve()
+    if args.build_env_dir is not None:
+        args.build_env_dir = args.build_env_dir.resolve()
     args.install_prefix = args.install_prefix.resolve()
     if args.action == 'build':
         changelog = release_changelog(version)
@@ -239,16 +245,15 @@ def main():
     for variant in targets:
         published = common.load_record(variant)
         record = published['runtime']
-        runtime_ref = common.image_ref('runtime', variant)
         build_ref = common.image_ref('build', variant)
-        runtime = image_info(runtime_ref, 'runtime', variant, env_version)
-        build = image_info(build_ref, 'build', variant, env_version)
+        runtime = environment_archives.ensure_image('runtime', variant, published, args.runtime_env_dir)
+        build = environment_archives.ensure_image('build', variant, published, args.build_env_dir)
         if runtime['Id'] != published['runtime_image_id'] or build['Id'] != published['build_image_id']:
             raise RuntimeError('公共环境标签与已发布镜像身份不一致')
-        archive = args.runtime_dir / record['filename']
+        archive = args.runtime_env_dir / record['filename']
         if args.with_images or args.with_runtime:
             if not archive.is_file() or sha256(archive) != record['sha256']:
-                raise RuntimeError(f'缺少或损坏的公共 runtime 归档: {archive}；指定 --runtime-dir 或先运行环境 export')
+                raise RuntimeError(f'缺少或损坏的公共 runtime 归档: {archive}；指定 --runtime-env-dir 或先运行环境 export')
         if args.with_images:
             images = args.output_dir / 'images'
             images.mkdir(exist_ok=True)

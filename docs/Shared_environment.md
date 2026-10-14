@@ -73,6 +73,12 @@ images/
 ./scripts/environment/load.sh --directory /path/to/images cu126
 ```
 
+内部构建可在 `scripts/release/build.sh` 使用 `--build-env-dir DIR` 与 `--runtime-env-dir DIR`，
+从已有归档恢复本机缺少的 build/runtime 镜像。目录可以相同；build 归档名称为
+`rx-quant-env-build-v1-<变体>-linux-amd64.tar.gz`，并附同名 `.json` 身份记录。
+脚本校验环境摘要、变体、镜像 ID、大小和 SHA-256，导入后再次核对镜像身份。
+完整命令见 [应用包发布](Release_packaging.md)。
+
 用户通常直接运行应用包 install.sh，由安装器自动完成上述检查和导入。
 正式下载地址未配置时使用离线归档；以后可在产品发布时配置固定 HTTPS 地址。
 

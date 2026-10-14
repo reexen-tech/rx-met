@@ -11,6 +11,17 @@
 ./scripts/release/build.sh cu118 cu126 cu130
 ```
 
+新构建机器可直接指定已归档的环境目录，两个参数可以指向同一目录：
+
+```bash
+./scripts/release/build.sh cu126 \
+  --build-env-dir /mnt/data2/reexen_rx-met_share/rx-quant-env/v1 \
+  --runtime-env-dir /mnt/data2/reexen_rx-met_share/rx-quant-env/v1
+```
+
+本地已有匹配镜像时直接复用；缺少时校验对应归档及其 `.json` 身份记录，再执行 `docker load`。
+同名镜像的身份不符时直接报错。两个目录参数均不会重新构建或导出环境镜像。
+
 脚本核对公共环境配置和精确镜像 ID，在对应 build 环境中生成三个项目 wheel，
 组装应用包，并在纯 runtime 中实际离线安装、自检。默认不生成 images/，不执行 docker save。
 输出目录为 `.release/export/rx-quant-env-v1/v<VERSION>/`，安装验收目录默认为 `.release/installed/`。
@@ -23,7 +34,7 @@
 公共 runtime 已在环境发布时单独导出。需要随应用附带镜像时：
 
 ```bash
-./scripts/release/build.sh --with-images --runtime-dir /path/to/public-runtime-archives cu126
+./scripts/release/build.sh --with-images --runtime-env-dir /path/to/public-runtime-archives cu126
 ```
 
 此参数校验并将已有归档硬链接或复制到交付目录 images/，不会构建或重新导出镜像。
@@ -32,6 +43,8 @@
 
 ## 参数与版本记录
 
+- `--build-env-dir DIR`：缺少本地 build 镜像时，从该目录导入；未指定时要求镜像已在本机。
+- `--runtime-env-dir DIR`：runtime 镜像导入及交付归档目录，默认 `.release/runtime-images/<环境版本>/`；原 `--runtime-dir` 已更名。
 - `--jobs N`：编译并行数，默认 8。
 - `--output-dir DIR`：应用交付目录。
 - `--install-prefix DIR`：此次安装验收的根目录。
