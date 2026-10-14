@@ -31,6 +31,8 @@ class InstallerFailureTest(unittest.TestCase):
         self.env['FAKE_DOCKER_LOG'] = str(self.root / 'docker.log')
         self.env['FAKE_IMAGE_PRESENT'] = '0'
         self.env['FAKE_IMAGE_STATE'] = str(self.root / 'image-loaded')
+        self.env['FAKE_RUNTIME_TAG'] = 'rx-quant-env-runtime:v1-cu126'
+        self.env['FAKE_TAG_STATE'] = str(self.root / 'runtime-tag')
         self.env['FAKE_ARCHIVE'] = base64.b64encode(gzip.compress(b'example docker archive')).decode()
         docker = self.tools / 'docker'
         docker.write_text(f'#!{sys.executable}\n' + '''import os, sys
@@ -43,9 +45,20 @@ if args[:2] == ['context', 'inspect']:
 elif args == ['info']:
     pass
 elif args[:2] == ['image', 'inspect']:
-    if os.environ.get('FAKE_IMAGE_PRESENT') != '1' and not Path(os.environ['FAKE_IMAGE_STATE']).exists():
-        sys.exit(1)
-    print('sha256:' + '1' * 64)
+    if args[-1] == os.environ['FAKE_RUNTIME_TAG']:
+        tag_state = Path(os.environ['FAKE_TAG_STATE'])
+        image_id = os.environ.get('FAKE_TAG_ID') or (tag_state.read_text() if tag_state.exists() else '')
+        if not image_id:
+            sys.exit(1)
+        print(image_id)
+    else:
+        if os.environ.get('FAKE_IMAGE_PRESENT') != '1' and not Path(os.environ['FAKE_IMAGE_STATE']).exists():
+            sys.exit(1)
+        print('sha256:' + '1' * 64)
+elif args and args[0] == 'tag':
+    assert args[1] == 'sha256:' + '1' * 64
+    assert args[2] == os.environ['FAKE_RUNTIME_TAG']
+    Path(os.environ['FAKE_TAG_STATE']).write_text(args[1])
 elif args == ['load']:
     assert sys.stdin.buffer.read() == b'example docker archive'
     Path(os.environ['FAKE_IMAGE_STATE']).touch()
@@ -63,7 +76,8 @@ else:
         manifest = self.bundle / 'manifest.json'
         manifest.write_text(json.dumps({'version': '1.1.0'}))
         bootstrap = {'BUNDLE_NAME': 'rx-met-test', 'MANIFEST_SHA256': hashlib.sha256(manifest.read_bytes()).hexdigest(),
-                     'RUNTIME_IMAGE_ID': 'sha256:' + '1' * 64, 'RUNTIME_ARCHIVE': 'runtime.tar.gz',
+                     'RUNTIME_IMAGE_ID': 'sha256:' + '1' * 64, 'RUNTIME_IMAGE_TAG': self.env['FAKE_RUNTIME_TAG'],
+                     'RUNTIME_ARCHIVE': 'runtime.tar.gz',
                      'RUNTIME_ARCHIVE_SHA256': hashlib.sha256(base64.b64decode(self.env['FAKE_ARCHIVE'])).hexdigest(), 'RUNTIME_URL': url, 'APP_INSTALL_BYTES': '1'}
         script = (ROOT / 'packaging/release-bundle/install.sh.in').read_text()
         script = script.replace('@BOOTSTRAP@', '\n'.join(f'readonly {key}={shlex.quote(value)}' for key, value in bootstrap.items()))
@@ -94,6 +108,25 @@ else:
         archive.write_bytes(b'corrupt archive')
         self.assert_failed_with('镜像归档校验失败', self.invoke('--runtime-image', str(archive)))
         self.assertNotIn("['load'", (self.root / 'docker.log').read_text())
+
+    def test_missing_runtime_tag_is_created_from_verified_image(self):
+        self.env['FAKE_IMAGE_PRESENT'] = '1'
+        self.assert_failed_with('injected container failure', self.invoke('--offline'))
+        self.assertEqual((self.root / 'runtime-tag').read_text(), 'sha256:' + '1' * 64)
+
+    def test_matching_runtime_tag_is_reused(self):
+        self.env['FAKE_IMAGE_PRESENT'] = '1'
+        self.env['FAKE_TAG_ID'] = 'sha256:' + '1' * 64
+        self.assert_failed_with('injected container failure', self.invoke('--offline'))
+        self.assertNotIn("['tag'", (self.root / 'docker.log').read_text())
+
+    def test_conflicting_runtime_tag_is_not_overwritten_or_used(self):
+        self.env['FAKE_IMAGE_PRESENT'] = '1'
+        self.env['FAKE_TAG_ID'] = 'sha256:' + '2' * 64
+        self.assert_failed_with('runtime 标签指向其他镜像', self.invoke('--offline'))
+        log = (self.root / 'docker.log').read_text()
+        self.assertNotIn("['tag'", log)
+        self.assertNotIn("['run'", log)
 
     def test_tampered_bundle_never_installs(self):
         (self.bundle / 'manifest.json').write_text('{}')

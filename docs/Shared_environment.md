@@ -18,7 +18,8 @@ variants 定义公共 GPU 环境。CPU 专用字段和产品 VERSION 不参与�
 
 `docker/environment-images.json` 保存发布环境的公共配置摘要、各变体的 build/runtime 镜像 ID、
 runtime 归档名称和 SHA-256。产品打包核对本地配置、镜像标签、精确镜像身份和运行依赖。
-安装器按镜像 ID 复用或导入环境，不依赖 latest 或可变标签。
+安装器按精确镜像 ID 复用或导入环境，再校验或补齐 `rx-quant-env-runtime:<环境版本>-<变体>` 标签。
+同名标签指向其他镜像时直接报错。用户启动命令使用这个可读标签，正式环境版本的标签不可替换内容。
 
 公共摘要包含环境定义、Dockerfile、构建辅助脚本和 vendored ORT 头文件。对比两仓库输出：
 

@@ -22,6 +22,8 @@
 
 ### Changed
 
+- 发布包启动命令使用对应 CUDA 变体的可读 runtime 标签；安装器按镜像 ID 校验并补齐标签，拒绝覆盖冲突标签。
+
 - 安装器指定镜像文件的参数由 `--runtime-archive` 更名为 `--runtime-image`。
 
 - GPU 环境改为公共 `rx-quant-env` v1；两个产品独立安装和更新，复用同一批固定 runtime 镜像。

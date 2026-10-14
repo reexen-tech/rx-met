@@ -124,6 +124,7 @@ def inspect_wheels(directory, wheel_version, python_version):
 
 def assemble(args, matrix, variant, runtime, build, runtime_record, archive, wheel_dir, compatibility, *, version, changelog):
     env_version = matrix['environment_version']
+    runtime_tag = common.image_ref('runtime', variant)
     name = f'rx-met-v{version}-{env_version}-{variant}-linux-amd64'
     output = args.output_dir / name
     packed = args.output_dir / (name + '.tar.gz')
@@ -147,7 +148,7 @@ def assemble(args, matrix, variant, runtime, build, runtime_record, archive, whe
         shutil.copytree(ROOT / 'examples', staged / 'examples', ignore=shutil.ignore_patterns('__pycache__', 'output', '*.pyc'))
         write_json(staged / 'manifest.json', manifest)
         bootstrap = {'BUNDLE_NAME': name, 'MANIFEST_SHA256': sha256(staged / 'manifest.json'),
-                     'RUNTIME_IMAGE_ID': runtime['Id'], 'RUNTIME_ARCHIVE': archive.name,
+                     'RUNTIME_IMAGE_ID': runtime['Id'], 'RUNTIME_IMAGE_TAG': runtime_tag, 'RUNTIME_ARCHIVE': archive.name,
                      'RUNTIME_ARCHIVE_SHA256': runtime_record['sha256'], 'RUNTIME_URL': manifest['runtime']['url'],
                      'APP_INSTALL_BYTES': str(max(512 * 1024**2, sum(w['unpacked_size_bytes'] for w in wheels) * 2))}
         script = (ROOT / 'packaging/release-bundle/install.sh.in').read_text()
@@ -156,7 +157,7 @@ def assemble(args, matrix, variant, runtime, build, runtime_record, archive, whe
         (staged / 'install.sh').write_text(script)
         (staged / 'install.sh').chmod(0o755)
         readme = (ROOT / 'packaging/release-bundle/README.md.in').read_text()
-        for key, value in {'VERSION': version, 'ENV_VERSION': env_version, 'VARIANT': variant, 'BUNDLE_NAME': name, 'RUNTIME_IMAGE_ID': runtime['Id']}.items():
+        for key, value in {'VERSION': version, 'ENV_VERSION': env_version, 'VARIANT': variant, 'BUNDLE_NAME': name, 'RUNTIME_IMAGE_TAG': runtime_tag}.items():
             readme = readme.replace('@' + key + '@', value)
         (staged / 'README.md').write_text(readme)
         (staged / 'CHANGELOG.md').write_text(changelog, encoding='utf-8')

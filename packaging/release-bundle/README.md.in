@@ -52,11 +52,13 @@ cp -a examples ~/rx-met-user/
 
 ## 步骤 3：进入容器并运行
 
-在宿主机执行以下命令。按实际情况调整 GPU 和宿主机路径。
+以下命令已按本包 `@VARIANT@` 生成，应用目录与 runtime 镜像配套使用。
+安装器自动校验并准备镜像标签 `@RUNTIME_IMAGE_TAG@`，无需填写镜像 SHA-256。
+在宿主机执行时，按实际情况调整 GPU 和宿主机路径。
 将 `/path/to/datasets` 替换为数据目录的绝对路径。
 
 ```bash
-docker run --rm -it --shm-size=2g \
+docker run --rm -it --pull=never --shm-size=2g \
   --user "$(id -u):$(id -g)" \
   -e HOME=/tmp \
   -e USER="$(id -un)" -e LOGNAME="$(id -un)" \
@@ -66,7 +68,7 @@ docker run --rm -it --shm-size=2g \
   -v "$HOME/.local/share/rx-met/@BUNDLE_NAME@:/opt/rx-met:ro" \
   -v "/path/to/datasets:/datasets:ro" \
   -v "$HOME/rx-met-user:/workspace" \
-  @RUNTIME_IMAGE_ID@ bash
+  @RUNTIME_IMAGE_TAG@ bash
 ```
 
 命令使用默认安装位置；如果安装时指定过其他目录，将应用挂载来源改为安装器输出的路径。
@@ -102,5 +104,7 @@ python3 /workspace/examples/onnx_ptq_quick_start.py
 [examples/README.md](examples/README.md)，量化配置说明见
 [examples/config/README.md](examples/config/README.md)。
 
-在容器内修改配置后，可以重复运行同一条 Python 命令。退出后容器自动删除，工作目录中的
-配置和结果仍保留；下次使用重复步骤 3 即可。升级时安装新应用包，并使用新版本 README 中的启动命令。
+退出后容器自动删除，工作目录中的
+配置和结果仍保留。
+
+升级时安装新应用包，并使用新版本 README 中的启动命令。

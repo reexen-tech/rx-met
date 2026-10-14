@@ -94,6 +94,13 @@ else
     load_archive "$ARCHIVE"
 fi
 [[ "$(docker image inspect --format '{{.Id}}' "$RUNTIME_IMAGE_ID")" == "$RUNTIME_IMAGE_ID" ]] || die '导入的镜像与所需 runtime 不匹配'
+# Keep the readable version tag pinned to the already verified image.
+if tag_image_id="$(docker image inspect --format '{{.Id}}' "$RUNTIME_IMAGE_TAG" 2>/dev/null)"; then
+    [[ "$tag_image_id" == "$RUNTIME_IMAGE_ID" ]] || die "runtime 标签指向其他镜像: $RUNTIME_IMAGE_TAG；不会自动覆盖"
+else
+    docker tag "$RUNTIME_IMAGE_ID" "$RUNTIME_IMAGE_TAG"
+fi
+[[ "$(docker image inspect --format '{{.Id}}' "$RUNTIME_IMAGE_TAG")" == "$RUNTIME_IMAGE_ID" ]] || die 'runtime 标签身份校验失败'
 verify_installation() {
     local directory="$1"
     docker run --rm -i --network none --read-only --tmpfs /tmp:rw,exec,nosuid,size=1g \
@@ -148,7 +155,7 @@ PY
 fi
 log "安装完成: $DESTINATION"
 printf '\n按 README 选择 GPU、工作目录及数据目录。最小交互启动示例：\n\n'
-printf 'docker run --rm -it --shm-size=2g \\\n'
+printf 'docker run --rm -it --pull=never --shm-size=2g \\\n'
 printf '  --user %q \\\n' "$(id -u):$(id -g)"
 printf '  -e HOME=/tmp \\\n'
 printf '  -e USER=%q -e LOGNAME=%q \\\n' "$(id -un)" "$(id -un)"
@@ -158,4 +165,4 @@ printf '  --gpus device=0 \\\n'
 printf '  -v %q \\\n' "${DESTINATION}:/opt/rx-met:ro"
 printf '  -v "/path/to/datasets:/datasets:ro" \\\n'
 printf '  -v "/path/to/workspace:/workspace" \\\n'
-printf '  %q bash\n' "$RUNTIME_IMAGE_ID"
+printf '  %q bash\n' "$RUNTIME_IMAGE_TAG"

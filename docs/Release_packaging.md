@@ -28,6 +28,7 @@
 
 应用包包含 install.sh、README、当前版本 CHANGELOG、manifest、SHA256SUMS、wheels、examples。
 用户运行 install.sh 后按 README 使用原生 Docker 命令，不提供 run.sh。
+每个变体的应用包只生成对应的一套启动命令；安装器核对镜像 ID 并准备可读的版本标签，用户无需填写长 SHA-256。
 
 ## 首次离线交付
 
