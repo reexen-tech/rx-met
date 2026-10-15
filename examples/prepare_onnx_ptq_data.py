@@ -28,6 +28,7 @@ from __future__ import annotations
 import argparse
 import io
 import json
+import shlex
 import sys
 from pathlib import Path
 
@@ -252,7 +253,7 @@ def main() -> None:
         f"  export RX_MET_ONNX_PTQ_EXAMPLE=mobilenetv2\n"
         f"  export RX_MET_ONNX_PTQ_MODEL={onnx_out}\n"
         f"  export RX_MET_ONNX_PTQ_CALIB={calib_dir}\n"
-        "  python3 onnx_ptq_quick_start.py"
+        f"  python3 {shlex.quote(str(Path(__file__).resolve().with_name('onnx_ptq_quick_start.py')))}"
     )
 
 

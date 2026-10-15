@@ -7,6 +7,7 @@ import argparse
 import hashlib
 import importlib.util
 import json
+import re
 import subprocess
 import sys
 import tempfile
@@ -225,10 +226,6 @@ def render_bake(matrix: Mapping[str, Any]) -> str:
         f'  default = "{version}"',
         "}",
         "",
-        'variable "IMAGE_REPOSITORY" {',
-        '  default = "rx-met"',
-        "}",
-        "",
         'variable "SOURCE_REVISION" {',
         '  default = "unknown"',
         "}",
@@ -238,11 +235,11 @@ def render_bake(matrix: Mapping[str, Any]) -> str:
         "}",
         "",
         'variable "BUILD_ENV_REPOSITORY" {',
-        '  default = "rx-met-build-env"',
+        '  default = "rx-quant-env-build"',
         "}",
         "",
         'variable "RUNTIME_ENV_REPOSITORY" {',
-        '  default = "rx-met-runtime-env"',
+        '  default = "rx-quant-env-runtime"',
         "}",
         "",
         'group "default" {',
@@ -347,7 +344,7 @@ def render_bake(matrix: Mapping[str, Any]) -> str:
             'target "release" {',
             '  context    = "."',
             '  dockerfile = "docker/Dockerfile"',
-            '  target     = "runtime"',
+            '  target     = "wheels"',
             '  platforms  = ["linux/amd64"]',
             "  pull       = false",
             "  args = {",
@@ -369,16 +366,19 @@ def render_bake(matrix: Mapping[str, Any]) -> str:
             [
                 f'target "{name}" {{',
                 f'  inherits = ["release", "variant-{name}"]',
-                f'  tags     = ["${{IMAGE_REPOSITORY}}:${{VERSION}}-{name}"]',
+                f'  output   = ["type=local,dest=.release/wheels/${{VERSION}}/${{ENV_VERSION}}/{name}"]',
                 "  args = {",
                 f'    BUILD_ENV_IMAGE   = "${{BUILD_ENV_REPOSITORY}}:${{ENV_VERSION}}-{name}"',
-                f'    RUNTIME_ENV_IMAGE = "${{RUNTIME_ENV_REPOSITORY}}:${{ENV_VERSION}}-{name}"',
                 "  }",
                 "}",
                 "",
             ]
         )
-    return "\n".join(lines)
+    # Public environment builds use a neutral context prepared by common.py.
+    text = "\n".join(lines) + "\n"
+    text = re.sub(r'(?ms)^target "environment-(?:build|runtime)(?:-cu[0-9]+)?" \{.*?^\}\n?', '', text)
+    text = re.sub(r'(?ms)^group "environments" \{.*?^\}\n?', '', text)
+    return text.rstrip() + "\n"
 
 
 def write_generated_artifacts(matrix: Mapping[str, Any]) -> None:

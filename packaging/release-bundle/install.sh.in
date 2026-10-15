@@ -1,0 +1,263 @@
+#!/usr/bin/env bash
+# Install this release with a local Docker daemon; no host Python or compiler required.
+set -euo pipefail
+@BOOTSTRAP@
+BUNDLE_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+PREFIX="${HOME}/.local/share/rx-met"
+CACHE_DIR="${XDG_CACHE_HOME:-${HOME}/.cache}/rx-met/images"
+ARCHIVE=""
+OFFLINE=0
+STAGING=""
+DOWNLOAD_DIR=""
+RUNTIME_LOADED=0
+log() { printf '[install] %s\n' "$*"; }
+die() { printf '[install] ERROR: %s\n' "$*" >&2; exit 1; }
+cleanup() {
+    if [[ -n "$STAGING" && -d "$STAGING" ]]; then rm -rf -- "$STAGING"; fi
+    if [[ -n "$DOWNLOAD_DIR" && -d "$DOWNLOAD_DIR" ]]; then rm -rf -- "$DOWNLOAD_DIR"; fi
+}
+trap cleanup EXIT
+while (($#)); do
+    case "$1" in
+        --prefix|--cache-dir|--runtime-image)
+            (($# >= 2)) || die "$1 缺少参数"
+            case "$1" in
+                --prefix) PREFIX="$2" ;;
+                --cache-dir) CACHE_DIR="$2" ;;
+                --runtime-image) ARCHIVE="$2" ;;
+            esac
+            shift 2 ;;
+        --offline) OFFLINE=1; shift ;;
+        -h|--help)
+            printf '用法: ./install.sh [--prefix DIR] [--offline] [--runtime-image FILE] [--cache-dir DIR]\n'
+            printf '  --runtime-image FILE  指定本地 runtime Docker 镜像文件\n'
+            exit 0 ;;
+        *) die "未知参数: $1" ;;
+    esac
+done
+for command in docker sha256sum realpath flock mktemp find sort xargs cp df tail tr cut uname id; do
+    command -v "$command" >/dev/null || die "缺少工具: $command"
+done
+[[ "$(uname -s)" == Linux && "$(uname -m)" == x86_64 ]] || die '需要 Linux x86_64'
+# Bind mounts refer to paths on the daemon host, so remote contexts are not supported.
+endpoint="$(docker context inspect --format '{{.Endpoints.docker.Host}}')"
+if [[ -z "${DOCKER_CONTEXT:-}" ]]; then endpoint="${DOCKER_HOST:-$endpoint}"; fi
+[[ "$endpoint" == unix://* ]] || die '请使用本机 Docker daemon（unix socket）'
+docker info >/dev/null 2>&1 || die '无法访问 Docker daemon，请检查服务和用户权限'
+(cd "$BUNDLE_DIR" && sha256sum --check --strict SHA256SUMS) || die '发布包校验失败'
+[[ "$(sha256sum "$BUNDLE_DIR/manifest.json" | cut -d ' ' -f1)" == "$MANIFEST_SHA256" ]] || die '安装脚本与 manifest 不匹配'
+PREFIX="$(realpath -m -- "$PREFIX")"
+CACHE_DIR="$(realpath -m -- "$CACHE_DIR")"
+# Docker --mount uses commas as separators.
+for directory in "$PREFIX" "$BUNDLE_DIR" "$CACHE_DIR"; do
+    [[ "$directory" != *','* && "$directory" != *$'\n'* ]] || die '路径不能包含逗号或换行'
+done
+mkdir -p -- "$PREFIX/.locks"
+exec 9>"$PREFIX/.locks/$BUNDLE_NAME.lock"
+flock -n 9 || die '该版本正在被另一个安装进程处理'
+DESTINATION="$PREFIX/$BUNDLE_NAME"
+if [[ ! -e "$DESTINATION" ]]; then
+    available_bytes="$(df --output=avail -B1 "$PREFIX" | tail -n1 | tr -d ' ')"
+    ((available_bytes >= APP_INSTALL_BYTES)) || die "安装目录可用空间不足，至少需要 $APP_INSTALL_BYTES bytes"
+fi
+check_archive() {
+    local file="$1" name="${1##*/}" line checksum_file expected="" listed_name count=0
+    [[ -f "$file" ]] || die "镜像归档不存在: $file"
+    if [[ -f "$file.sha256" ]]; then
+        checksum_file="$file.sha256"
+        while IFS= read -r line || [[ -n "$line" ]]; do
+            [[ -n "$line" ]] || continue
+            if [[ "$line" =~ ^([0-9a-f]{64})$ ]]; then
+                expected="${BASH_REMATCH[1]}"
+            elif [[ "$line" =~ ^([0-9a-f]{64})[[:space:]][\ *](.+)$ ]]; then
+                expected="${BASH_REMATCH[1]}"
+                listed_name="${BASH_REMATCH[2]}"
+                [[ "$listed_name" == "$name" || "$listed_name" == "./$name" ]] || die "镜像校验文件名不匹配: $checksum_file"
+            else
+                die "无效的镜像校验文件: $checksum_file"
+            fi
+            ((count += 1))
+        done < "$checksum_file"
+        ((count == 1)) || die "无效的镜像校验文件: $checksum_file"
+    elif [[ -f "${file%/*}/SHA256SUMS" ]]; then
+        checksum_file="${file%/*}/SHA256SUMS"
+        while IFS= read -r line || [[ -n "$line" ]]; do
+            if [[ "$line" =~ ^([^[:space:]]+)[[:space:]][\ *](.+)$ ]]; then
+                listed_name="${BASH_REMATCH[2]}"
+                if [[ "$listed_name" == "$name" || "$listed_name" == "./$name" ]]; then
+                    expected="${BASH_REMATCH[1]}"
+                    [[ "$expected" =~ ^[0-9a-f]{64}$ ]] || die "无效的镜像校验清单: $checksum_file"
+                    ((count += 1))
+                fi
+            fi
+        done < "$checksum_file"
+        ((count <= 1)) || die "镜像校验清单包含重复记录: $checksum_file"
+    fi
+    if [[ -n "$expected" ]]; then
+        [[ "$(sha256sum "$file" | cut -d ' ' -f1)" == "$expected" ]] || die "镜像归档校验失败: $file"
+        log 'runtime 归档独立文件校验通过'
+    fi
+    gzip -t -- "$file" || die "镜像归档损坏: $file"
+}
+verify_archive_content() {
+    local file="$1"
+    log '校验归档中的 runtime 镜像身份和内容'
+    docker run --rm -i --network none --read-only --tmpfs /tmp:rw,noexec,nosuid,size=64m \
+        --user "$(id -u):$(id -g)" -e HOME=/tmp -e PYTHONDONTWRITEBYTECODE=1 \
+        --mount "type=bind,src=$file,dst=/runtime-image.tar.gz,readonly" \
+        --entrypoint python3 "$RUNTIME_IMAGE_ID" -B - /runtime-image.tar.gz "$RUNTIME_IMAGE_ID" <<'PY'
+@VERIFY_RUNTIME_ARCHIVE@
+PY
+}
+load_archive() {
+    local file output line reference loaded_id count=0 verified=0
+    file="$(realpath -- "$1")" || die "镜像归档不存在: $1"
+    [[ "$file" != *','* && "$file" != *$'\n'* ]] || die '镜像路径不能包含逗号或换行'
+    check_archive "$file"
+    if docker image inspect "$RUNTIME_IMAGE_ID" >/dev/null 2>&1; then
+        verify_archive_content "$file" || die 'runtime 归档身份或内容校验失败'
+        verified=1
+    fi
+    log "导入 runtime: $file"
+    output="$(docker load --input "$file")" || die "runtime 镜像导入失败: $file"
+    printf '%s\n' "$output"
+    while IFS= read -r line; do
+        case "$line" in
+            'Loaded image ID: '*) reference="${line#Loaded image ID: }" ;;
+            'Loaded image: '*) reference="${line#Loaded image: }" ;;
+            *) continue ;;
+        esac
+        loaded_id="$(docker image inspect --format '{{.Id}}' "$reference")" || die '无法检查本次导入的镜像'
+        [[ "$loaded_id" == "$RUNTIME_IMAGE_ID" ]] || die "本次归档导入了不匹配的镜像: $reference"
+        ((count += 1))
+    done <<< "$output"
+    ((count > 0)) || die 'docker load 未返回本次导入的镜像身份'
+    [[ "$(docker image inspect --format '{{.Id}}' "$RUNTIME_IMAGE_ID")" == "$RUNTIME_IMAGE_ID" ]] || die '导入的镜像与所需 runtime 不匹配'
+    if ((verified == 0)); then
+        verify_archive_content "$file" || die 'runtime 归档身份或内容校验失败'
+    fi
+    RUNTIME_LOADED=1
+}
+# Reject a conflicting public tag before docker load can change it.
+if tag_image_id="$(docker image inspect --format '{{.Id}}' "$RUNTIME_IMAGE_TAG" 2>/dev/null)"; then
+    [[ "$tag_image_id" == "$RUNTIME_IMAGE_ID" ]] || die "runtime 标签指向其他镜像: $RUNTIME_IMAGE_TAG；不会自动覆盖"
+fi
+if [[ -n "$ARCHIVE" ]]; then
+    command -v gzip >/dev/null || die '缺少 gzip'
+    load_archive "$ARCHIVE"
+elif docker image inspect "$RUNTIME_IMAGE_ID" >/dev/null 2>&1; then
+    log '复用已存在且身份匹配的 runtime'
+else
+    command -v gzip >/dev/null || die '缺少 gzip'
+    for candidate in "$BUNDLE_DIR/images/$RUNTIME_ARCHIVE" "$BUNDLE_DIR/../images/$RUNTIME_ARCHIVE" "$CACHE_DIR/$RUNTIME_ARCHIVE"; do
+        if [[ -f "$candidate" ]]; then ARCHIVE="$candidate"; break; fi
+    done
+    if [[ -z "$ARCHIVE" ]]; then
+        ((OFFLINE == 0)) || die "离线模式缺少 runtime，请将 $RUNTIME_ARCHIVE 放入 images/ 或使用 --runtime-image"
+        [[ -n "$RUNTIME_URL" ]] || die '本版本尚未配置下载地址，请提供离线 runtime 归档'
+        [[ "$RUNTIME_URL" == https://* ]] || die 'runtime 下载地址必须使用 HTTPS'
+        command -v curl >/dev/null || die '下载 runtime 需要 curl'
+        mkdir -p -- "$CACHE_DIR"
+        exec 8>"$CACHE_DIR/$RUNTIME_ARCHIVE.lock"
+        flock 8
+        ARCHIVE="$CACHE_DIR/$RUNTIME_ARCHIVE"
+        if [[ ! -f "$ARCHIVE" ]]; then
+            DOWNLOAD_DIR="$(mktemp -d "$CACHE_DIR/.download.XXXXXX")"
+            log '下载发布环境的 runtime'
+            curl --fail --location --proto '=https' --proto-redir '=https' --retry 3 \
+                --connect-timeout 30 --speed-time 120 --speed-limit 1024 --output "$DOWNLOAD_DIR/$RUNTIME_ARCHIVE" "$RUNTIME_URL"
+            checksum_status="$(curl --silent --show-error --location --proto '=https' --proto-redir '=https' --retry 3 \
+                --connect-timeout 30 --speed-time 120 --speed-limit 1024 --max-filesize 1048576 \
+                --write-out '%{http_code}' --output "$DOWNLOAD_DIR/$RUNTIME_ARCHIVE.sha256" "$RUNTIME_CHECKSUM_URL")" \
+                || die 'runtime 校验文件下载失败'
+            case "$checksum_status" in
+                200) ;;
+                404|410) rm -f -- "$DOWNLOAD_DIR/$RUNTIME_ARCHIVE.sha256" ;;
+                *) die "runtime 校验文件下载失败: HTTP $checksum_status" ;;
+            esac
+            load_archive "$DOWNLOAD_DIR/$RUNTIME_ARCHIVE"
+            if [[ -f "$DOWNLOAD_DIR/$RUNTIME_ARCHIVE.sha256" ]]; then
+                mv -- "$DOWNLOAD_DIR/$RUNTIME_ARCHIVE.sha256" "$ARCHIVE.sha256"
+            else
+                rm -f -- "$ARCHIVE.sha256"
+            fi
+            mv -- "$DOWNLOAD_DIR/$RUNTIME_ARCHIVE" "$ARCHIVE"
+            rm -rf -- "$DOWNLOAD_DIR"
+            DOWNLOAD_DIR=""
+        fi
+    fi
+    if ((RUNTIME_LOADED == 0)); then load_archive "$ARCHIVE"; fi
+fi
+[[ "$(docker image inspect --format '{{.Id}}' "$RUNTIME_IMAGE_ID")" == "$RUNTIME_IMAGE_ID" ]] || die '导入的镜像与所需 runtime 不匹配'
+# Keep the readable version tag pinned to the already verified image.
+if tag_image_id="$(docker image inspect --format '{{.Id}}' "$RUNTIME_IMAGE_TAG" 2>/dev/null)"; then
+    [[ "$tag_image_id" == "$RUNTIME_IMAGE_ID" ]] || die "runtime 标签指向其他镜像: $RUNTIME_IMAGE_TAG；不会自动覆盖"
+else
+    docker tag "$RUNTIME_IMAGE_ID" "$RUNTIME_IMAGE_TAG"
+fi
+[[ "$(docker image inspect --format '{{.Id}}' "$RUNTIME_IMAGE_TAG")" == "$RUNTIME_IMAGE_ID" ]] || die 'runtime 标签身份校验失败'
+verify_installation() {
+    local directory="$1"
+    docker run --rm -i --network none --read-only --tmpfs /tmp:rw,exec,nosuid,size=1g \
+        --user "$(id -u):$(id -g)" -e HOME=/tmp -e "USER=$(id -un)" -e "LOGNAME=$(id -un)" -e PYTHONDONTWRITEBYTECODE=1 \
+        -e PYTHONPATH=/opt/rx-met/python \
+        --mount "type=bind,src=$directory,dst=/opt/rx-met,readonly" \
+        --entrypoint python3 "$RUNTIME_IMAGE_ID" -B - <<'PY'
+@VERIFY_INSTALL@
+PY
+}
+if [[ -e "$DESTINATION" ]]; then
+    [[ -d "$DESTINATION" && ! -L "$DESTINATION" ]] || die '目标路径不是独立安装目录'
+    [[ "$(sha256sum "$DESTINATION/manifest.json" | cut -d ' ' -f1)" == "$MANIFEST_SHA256" ]] || die '目标目录已存在其他内容，请使用新的 --prefix'
+    (cd "$DESTINATION" && sha256sum --check --strict INSTALL_SHA256SUMS >/dev/null) || die '已有安装内容发生变化，请安装到新的 --prefix'
+    verify_installation "$DESTINATION"
+    log '相同版本已经完整安装，复用现有目录'
+else
+    STAGING="$(mktemp -d "$PREFIX/.$BUNDLE_NAME.XXXXXX")"
+    log '在匹配的 runtime 内离线安装三个项目 wheel'
+    docker run --rm -i --network none --read-only --tmpfs /tmp:rw,exec,nosuid,size=1g \
+        --user "$(id -u):$(id -g)" -e HOME=/tmp -e "USER=$(id -un)" -e "LOGNAME=$(id -un)" -e PYTHONDONTWRITEBYTECODE=1 \
+        --mount "type=bind,src=$BUNDLE_DIR,dst=/bundle,readonly" \
+        --mount "type=bind,src=$STAGING,dst=/install" \
+        --entrypoint python3 "$RUNTIME_IMAGE_ID" -B - <<'PY'
+import importlib.metadata as metadata
+import json
+from pathlib import Path
+import shutil
+import subprocess
+import sys
+import sysconfig
+bundle = Path('/bundle')
+manifest = json.loads((bundle / 'manifest.json').read_text())
+assert sysconfig.get_config_var('SOABI') == manifest['compatibility']['python_abi']
+for name, version in manifest['compatibility']['packages'].items():
+    assert metadata.version(name) == version, (name, metadata.version(name), version)
+subprocess.run([sys.executable, '-m', 'pip', 'install', '--no-index', '--no-deps',
+                '--no-compile', '--no-cache-dir', '--target', '/install/python',
+                *[str(bundle / 'wheels' / item['filename']) for item in manifest['wheels']]], check=True)
+shutil.copytree(bundle / 'examples', '/install/examples')
+for name in ('manifest.json', 'README.md', 'CHANGELOG.md'):
+    shutil.copy2(bundle / name, Path('/install') / name)
+PY
+    verify_installation "$STAGING"
+    (
+        cd "$STAGING"
+        find python examples -type f -print0 | sort -z | xargs -0 sha256sum > INSTALL_SHA256SUMS
+        sha256sum manifest.json README.md CHANGELOG.md >> INSTALL_SHA256SUMS
+    )
+    mv -T -- "$STAGING" "$DESTINATION"
+    STAGING=""
+fi
+log "安装完成: $DESTINATION"
+printf '\n按 README 选择 GPU、工作目录及数据目录。最小交互启动示例：\n\n'
+printf 'docker run --rm -it --pull=never --shm-size=2g \\\n'
+printf '  --user %q \\\n' "$(id -u):$(id -g)"
+printf '  -e HOME=/tmp \\\n'
+printf '  -e USER=%q -e LOGNAME=%q \\\n' "$(id -un)" "$(id -un)"
+printf '  -w /workspace \\\n'
+printf '  -e PYTHONPATH=/opt/rx-met/python \\\n'
+printf '  --gpus device=0 \\\n'
+printf '  -v %q \\\n' "${DESTINATION}:/opt/rx-met:ro"
+printf '  -v "/path/to/datasets:/datasets:ro" \\\n'
+printf '  -v "/path/to/workspace:/workspace" \\\n'
+printf '  %q bash\n' "$RUNTIME_IMAGE_TAG"

@@ -44,7 +44,7 @@ mkdir -p "${OUT_DIR}"
 log "build wheel -> ${OUT_DIR}"
 export RX_MET_QUANT_LSTM_BUILD_DIR="${BUILD_DIR}"
 if [[ -n "${CUDA_VARIANT:-}" ]]; then
-    export RX_MET_QUANT_LSTM_VERSION="0.1.0+${CUDA_VARIANT}"
+    export RX_MET_QUANT_LSTM_VERSION="${RX_MET_VERSION:?RX_MET_VERSION is required}+${CUDA_VARIANT}"
 fi
 "${PYTHON}" -m pip wheel "${SOURCE}/pytorch" \
     -w "${OUT_DIR}" --no-deps --no-build-isolation

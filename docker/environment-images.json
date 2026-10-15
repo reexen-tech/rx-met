@@ -1,0 +1,65 @@
+{
+  "schema_version": 1,
+  "environment_name": "rx-quant-env",
+  "environment_version": "v1",
+  "config_sha256": "118f10be23da1bac624c9d2b851befde56617afc1e7cfea1ed866f72f1b87b9e",
+  "variants": {
+    "cu126": {
+      "build_image_id": "sha256:ec2511bb8d4d3dc1467e389e5fbf30caedb2f04e0fa606be9abd730206e2dfd2",
+      "runtime_image_id": "sha256:981450f2b1646abc5c51ca7743b50b7eea13641d3a4e8cf89c5f8a68f8441c17",
+      "runtime": {
+        "schema_version": 1,
+        "environment_name": "rx-quant-env",
+        "environment_version": "v1",
+        "variant": "cu126",
+        "config_sha256": "118f10be23da1bac624c9d2b851befde56617afc1e7cfea1ed866f72f1b87b9e",
+        "image_id": "sha256:981450f2b1646abc5c51ca7743b50b7eea13641d3a4e8cf89c5f8a68f8441c17",
+        "repo_digests": [
+          "rx-quant-env-runtime@sha256:981450f2b1646abc5c51ca7743b50b7eea13641d3a4e8cf89c5f8a68f8441c17"
+        ],
+        "filename": "rx-quant-env-runtime-v1-cu126-linux-amd64.tar.gz",
+        "sha256": "63089438f9cb17218fd7c11eba53ca038025a88f3ad3f7b558519b24a853c715",
+        "size_bytes": 4069603146,
+        "url": ""
+      }
+    },
+    "cu118": {
+      "build_image_id": "sha256:f0fa109238e74a882c9987cf3f905c4b4495fbd9706543c003f3714b8016d4a1",
+      "runtime_image_id": "sha256:f2c0c6bf6dd9763b36c694d243450640575d2ffa1cca6962bd9ad582a5e81378",
+      "runtime": {
+        "schema_version": 1,
+        "environment_name": "rx-quant-env",
+        "environment_version": "v1",
+        "variant": "cu118",
+        "config_sha256": "118f10be23da1bac624c9d2b851befde56617afc1e7cfea1ed866f72f1b87b9e",
+        "image_id": "sha256:f2c0c6bf6dd9763b36c694d243450640575d2ffa1cca6962bd9ad582a5e81378",
+        "repo_digests": [
+          "rx-quant-env-runtime@sha256:f2c0c6bf6dd9763b36c694d243450640575d2ffa1cca6962bd9ad582a5e81378"
+        ],
+        "filename": "rx-quant-env-runtime-v1-cu118-linux-amd64.tar.gz",
+        "sha256": "6b3069ef37b93a401940774b0296ed7d541ef5f8e660eed6fea43325d425fac0",
+        "size_bytes": 5645058393,
+        "url": ""
+      }
+    },
+    "cu130": {
+      "build_image_id": "sha256:280e488be36b883f4af0e59fd5df32f868e6f3b61f8f673eaa26fd16ed01b26b",
+      "runtime_image_id": "sha256:9f8276a1feb39dfd0380ffb6e666f7f7dac0fa9b6340df55862ca523c5ebce7e",
+      "runtime": {
+        "schema_version": 1,
+        "environment_name": "rx-quant-env",
+        "environment_version": "v1",
+        "variant": "cu130",
+        "config_sha256": "118f10be23da1bac624c9d2b851befde56617afc1e7cfea1ed866f72f1b87b9e",
+        "image_id": "sha256:9f8276a1feb39dfd0380ffb6e666f7f7dac0fa9b6340df55862ca523c5ebce7e",
+        "repo_digests": [
+          "rx-quant-env-runtime@sha256:9f8276a1feb39dfd0380ffb6e666f7f7dac0fa9b6340df55862ca523c5ebce7e"
+        ],
+        "filename": "rx-quant-env-runtime-v1-cu130-linux-amd64.tar.gz",
+        "sha256": "055828ed6594880992fd8df1f590ee81eb16c17785d722520f34478e5c97a029",
+        "size_bytes": 3497024103,
+        "url": ""
+      }
+    }
+  }
+}

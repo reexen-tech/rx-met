@@ -16,7 +16,9 @@ from .compiler_encodings import CompilerEncodingConverter
 from .mixed_precision import apply_onnx_mixed_precision_bitwidth
 from .po2 import apply_power_of_2_workflow, disable_onnx_bias_quantizers
 
-_EXAMPLES_CONFIG = Path(__file__).resolve().parents[3] / "examples" / "config"
+_EXAMPLES_CONFIG = Path(__file__).resolve().parent / "config"
+if not _EXAMPLES_CONFIG.is_dir():
+    _EXAMPLES_CONFIG = Path(__file__).resolve().parents[3] / "examples" / "config"
 DEFAULT_QUANTSIM_CONFIG = (
     _EXAMPLES_CONFIG / "mrnn_quantsim_config_custom_mixed_precision_v2.json"
 )

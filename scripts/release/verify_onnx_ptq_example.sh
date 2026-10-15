@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# 在最终产品镜像中使用指定 ONNX 模型和真实校准数据运行 ONNX PTQ 示例。
+# 在纯 runtime + 只读应用挂载中使用指定 ONNX 模型和真实校准数据运行 ONNX PTQ 示例。
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 VERSION="$(tr -d '[:space:]' < "${ROOT}/VERSION")"
-IMAGE_REPOSITORY="${RX_MET_IMAGE_REPOSITORY:-rx-met}"
+source "$ROOT/scripts/lib/installed_bundle.sh"
 MODEL_PATH=""
 DATASET_DIR=""
 OUTPUT_ROOT="${RX_MET_ONNX_PTQ_VALIDATION_OUTPUT:-${ROOT}/.release/example-validation/v${VERSION}/onnx_ptq}"
@@ -24,6 +24,7 @@ usage() {
   --dataset-dir DIR      含 *.npy 或 *.npz 的校准数据目录
 
 可选参数:
+  --install-prefix DIR  应用安装根目录（默认 .release/installed）
   --output-dir DIR       输出根目录
                          默认: ${OUTPUT_ROOT}
   --gpu-device ID        仅向容器开放指定 GPU，默认: ${GPU_DEVICE}
@@ -52,6 +53,10 @@ while (($#)); do
             DATASET_DIR="$(require_value "$1" "${2:-}")"
             shift 2
             ;;
+        --install-prefix)
+            INSTALL_PREFIX="$(require_value "$1" "${2:-}")"
+            shift 2
+            ;;
         --output-dir)
             OUTPUT_ROOT="$(require_value "$1" "${2:-}")"
             shift 2
@@ -75,9 +80,7 @@ done
 [[ -n "${MODEL_PATH}" ]] || die "必须传入 --model"
 [[ -n "${DATASET_DIR}" ]] || die "必须传入 --dataset-dir"
 [[ -n "${GPU_DEVICE}" ]] || die "--gpu-device 不能为空"
-[[ "${IMAGE_REPOSITORY}" =~ ^[A-Za-z0-9._/-]+$ ]] \
-    || die "无效的镜像仓库名: ${IMAGE_REPOSITORY}"
-for command in docker realpath stat tee; do
+for command in docker python3 realpath stat tee; do
     command -v "${command}" >/dev/null 2>&1 || die "缺少命令: ${command}"
 done
 
@@ -111,9 +114,8 @@ model_group_id="$(stat -c '%g' "${MODEL_PATH}")"
 dataset_group_id="$(stat -c '%g' "${DATASET_DIR}")"
 
 for target in "${TARGETS[@]}"; do
-    image="${IMAGE_REPOSITORY}:${VERSION}-${target}"
-    docker image inspect "${image}" >/dev/null 2>&1 \
-        || die "本地产品镜像不存在: ${image}"
+    rx_met_resolve_installation "$target" || die "缺少已安装的应用或 runtime: $target"
+    image="$RX_MET_RUNTIME_ID"
 
     target_output="${OUTPUT_ROOT}/${target}"
     mkdir -p -- "${target_output}"
@@ -121,13 +123,16 @@ for target in "${TARGETS[@]}"; do
     log "运行 ${image}（ONNX Runtime CUDAExecutionProvider），GPU=${GPU_DEVICE}"
     log "输出目录: ${target_output}"
 
-    docker run --rm \
+    docker run --rm --network none --read-only --tmpfs /tmp:rw,exec,nosuid,size=4g \
         --gpus "device=${GPU_DEVICE}" \
         --shm-size=2g \
         --user "${user_id}:${group_id}" \
         --group-add "${model_group_id}" \
         --group-add "${dataset_group_id}" \
-        -e HOME=/tmp \
+        -e HOME=/tmp -e OMP_NUM_THREADS=8 -e MKL_NUM_THREADS=8 \
+            -e PYTHONPATH=/opt/rx-met/python \
+            -e PYTHONDONTWRITEBYTECODE=1 \
+            --mount "type=bind,src=$RX_MET_INSTALLED_DIR,dst=/opt/rx-met,readonly" \
         -e USER=rx-met-validator \
         -e LOGNAME=rx-met-validator \
         -e "RX_MET_ONNX_PTQ_MODEL=/model/${model_name}" \

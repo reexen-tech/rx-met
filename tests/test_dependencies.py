@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import importlib.util
 import json
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -62,6 +63,16 @@ class DependencyConfigurationTest(unittest.TestCase):
             path.write_text(json.dumps(invalid), encoding="utf-8")
             with self.assertRaises(dependencies.DependencyError):
                 dependencies.load_matrix(path)
+
+    def test_vendored_headers_can_be_prepared_offline(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            result = subprocess.run(
+                [str(ROOT / "scripts/internal/prepare_onnxruntime_headers.sh"),
+                 "1.23.2", str(Path(temporary) / "headers"), "vendored"],
+                text=True, capture_output=True,
+            )
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn("#define ORT_API_VERSION 23", (Path(temporary) / "headers/include/onnxruntime_c_api.h").read_text())
 
     def test_checksum_manifest_accepts_sha256sum_relative_paths(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

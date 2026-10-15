@@ -1,11 +1,5 @@
-# 发布制品输入
+# 应用发布模板
 
-本目录保存发布制品使用的模板和静态输入。构建结果写入 `.release/export/`。
-
-## 目录说明
-
-- `release-bundle/README.md.in` 是镜像和导出目录中的使用说明模板。
-- `release-bundle/CHANGELOG.md.in` 是镜像和导出目录中的变更记录模板。
-
-`scripts/release/build.sh` 复制模板并替换版本占位符。Git 忽略
-`.release/export/` 中的生成结果。
+release-bundle/install.sh.in 是唯一用户安装入口。打包时内嵌镜像身份和自检代码。
+README.md.in 提供安装、数据准备和原生 Docker 挂载运行流程；CHANGELOG 从根目录提取当前版本。
+公共 runtime 可由本地镜像、离线 images/ 或配置的固定 HTTPS 地址提供。
