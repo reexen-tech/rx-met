@@ -15,8 +15,8 @@
 
 ```bash
 ./scripts/release/build.sh cu126 \
-  --build-env-dir /mnt/data2/reexen_rx-met_share/rx-quant-env/v1 \
-  --runtime-env-dir /mnt/data2/reexen_rx-met_share/rx-quant-env/v1
+  --build-env-dir /path/to/environment-images \
+  --runtime-env-dir /path/to/environment-images
 ```
 
 本地已有匹配镜像时直接复用；缺少时校验对应归档及其 `.json` 身份记录，再执行 `docker load`。
