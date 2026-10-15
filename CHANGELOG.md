@@ -8,6 +8,7 @@
 
 ### Fixed
 
+- QuantGRU/QuantLSTM 在校准时为固定 bias 网格保留相对与最小绝对训练余量，防止零偏置的微小 QAT 更新立即饱和；保留导入编码。
 - QuantGRU 输入线性截断 mask 在 bias 累加与跨 CUDA stream 同步之前应用，统一输入、权重和偏置梯度。
 - QuantGRU QAT 将候选门输入/输出截断 mask 先传到 reset gate 上游，修正截断时泄漏的梯度。
 

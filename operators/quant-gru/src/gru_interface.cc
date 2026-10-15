@@ -44,6 +44,39 @@ inline EncodedScaleResult encodeFromRange(
     return encodeScaleResult(cont, bw, is_symmetric, use_pot2, method, tolerance);
 }
 
+// Biases have one value per channel. Histogram bin expansion and clipping
+// are not a useful training range for them; reserve headroom from observations.
+// Imported encodings never pass through this calibration helper.
+template <typename RangeAt>
+void calibrateBias(ChannelQuantParam& out, int hidden,
+                   OperatorQuantConfig::QuantizationGranularity granularity,
+                   QuantBitWidth width, bool use_pot2, RangeAt range_at) {
+    out.granularity = granularity;
+    out.hidden = hidden;
+    out.resize(3 * hidden);
+    const int group_size = granularity == OperatorQuantConfig::PER_TENSOR ? 3 * hidden
+                         : granularity == OperatorQuantConfig::PER_GATE ? hidden : 1;
+    for (int begin = 0; begin < 3 * hidden; begin += group_size) {
+        double extent = 0.0;
+        for (int c = begin; c < begin + group_size; ++c) {
+            const auto range = range_at(c);
+            if (!std::isfinite(range.first) || !std::isfinite(range.second) ||
+                range.first > range.second) {
+                throw std::invalid_argument("Bias calibration requires finite observations");
+            }
+            extent = std::max(extent, std::max(std::abs(static_cast<double>(range.first)),
+                                               std::abs(static_cast<double>(range.second))));
+        }
+        double scale = std::max(2.0 * extent, 0.01) / width.qmax_auto_scale();
+        if (use_pot2) scale = std::exp2(std::ceil(std::log2(scale)));
+        if (!std::isfinite(scale) || scale > std::numeric_limits<float>::max()) {
+            throw std::overflow_error("Bias headroom scale exceeds float32 range");
+        }
+        std::fill(out.channels.begin() + begin, out.channels.begin() + begin + group_size,
+                  QuantParam{static_cast<float>(scale), 0});
+    }
+}
+
 }  // namespace
 
 // =====================================================================
@@ -112,10 +145,10 @@ GRUQuantParams calculateGRUQuantitativeParameters(
                      bitwidth_config.W_symmetric_, quant_ranges.min_W_, quant_ranges.max_W_);
     calibrateChannel(quant_params.R_, bitwidth_config.R_granularity_, bitwidth_config.R_,
                      bitwidth_config.R_symmetric_, quant_ranges.min_R_, quant_ranges.max_R_);
-    calibrateChannel(quant_params.bw_, bitwidth_config.bw_granularity_, bitwidth_config.bw_,
-                     bitwidth_config.bw_symmetric_, quant_ranges.min_bw_, quant_ranges.max_bw_);
-    calibrateChannel(quant_params.br_, bitwidth_config.br_granularity_, bitwidth_config.br_,
-                     bitwidth_config.br_symmetric_, quant_ranges.min_br_, quant_ranges.max_br_);
+    calibrateBias(quant_params.bw_, hidden_size, bitwidth_config.bw_granularity_,
+        bitwidth_config.bw_, usePOT2, [&](int c) { return std::make_pair(quant_ranges.min_bw_[c], quant_ranges.max_bw_[c]); });
+    calibrateBias(quant_params.br_, hidden_size, bitwidth_config.br_granularity_,
+        bitwidth_config.br_, usePOT2, [&](int c) { return std::make_pair(quant_ranges.min_br_[c], quant_ranges.max_br_[c]); });
 
     // Linear 输出 (GEMM+bias)
     quant_params.weight_ih_linear_ = calibrateScalar(bitwidth_config.weight_ih_linear_,
@@ -1043,6 +1076,8 @@ GRUHistogramCollectors convertGPUHistogramsToCPU(const GRUGPUHistogramCollectors
         for (int c = 0; c < src.channel_size; ++c) {
             Histogram& hist = dst[c].histogram();
             hist.num_bins = src.num_bins;
+            hist.observed_min = src.original_mins[c];
+            hist.observed_max = src.original_maxs[c];
             hist.min_val = src.mins[c];
             hist.max_val = src.maxs[c];
             hist.total_count = src.per_channel_count;
@@ -1136,10 +1171,12 @@ GRUQuantParams calculateGRUQuantitativeParametersFromHistograms(
         bitwidth_config.W_symmetric_, hist_collectors.W_tensor_hist, hist_collectors.W_gate_hist, hist_collectors.W_hist, "W");
     histCalibrateChannel(quant_params.R_, bitwidth_config.R_granularity_, bitwidth_config.R_,
         bitwidth_config.R_symmetric_, hist_collectors.R_tensor_hist, hist_collectors.R_gate_hist, hist_collectors.R_hist, "R");
-    histCalibrateChannel(quant_params.bw_, bitwidth_config.bw_granularity_, bitwidth_config.bw_,
-        bitwidth_config.bw_symmetric_, hist_collectors.bw_tensor_hist, hist_collectors.bw_gate_hist, hist_collectors.bw_hist, "bw");
-    histCalibrateChannel(quant_params.br_, bitwidth_config.br_granularity_, bitwidth_config.br_,
-        bitwidth_config.br_symmetric_, hist_collectors.br_tensor_hist, hist_collectors.br_gate_hist, hist_collectors.br_hist, "br");
+    calibrateBias(quant_params.bw_, hidden_size, bitwidth_config.bw_granularity_,
+        bitwidth_config.bw_, usePOT2, [&](int c) { const auto& h = hist_collectors.bw_hist[c].histogram();
+            return std::make_pair(h.observed_min, h.observed_max); });
+    calibrateBias(quant_params.br_, hidden_size, bitwidth_config.br_granularity_,
+        bitwidth_config.br_, usePOT2, [&](int c) { const auto& h = hist_collectors.br_hist[c].histogram();
+            return std::make_pair(h.observed_min, h.observed_max); });
 
     // 标量参数（不受 granularity 影响）
     quant_params.x_ = histCalibrate(hist_collectors.x_hist, bitwidth_config.x_, bitwidth_config.x_symmetric_, "scale_x");
@@ -1262,10 +1299,12 @@ GRUQuantParams calculateGRUQuantitativeParametersFromGPUHistograms(
         gpu_collectors.W_tensor_hist, gpu_collectors.W_gate_hist, gpu_collectors.W_batch, "W");
     sqnrChannel(quant_params.R_, bitwidth_config.R_granularity_, bitwidth_config.R_symmetric_, bitwidth_config.R_,
         gpu_collectors.R_tensor_hist, gpu_collectors.R_gate_hist, gpu_collectors.R_batch, "R");
-    sqnrChannel(quant_params.bw_, bitwidth_config.bw_granularity_, bitwidth_config.bw_symmetric_, bitwidth_config.bw_,
-        gpu_collectors.bw_tensor_hist, gpu_collectors.bw_gate_hist, gpu_collectors.bw_batch, "bw");
-    sqnrChannel(quant_params.br_, bitwidth_config.br_granularity_, bitwidth_config.br_symmetric_, bitwidth_config.br_,
-        gpu_collectors.br_tensor_hist, gpu_collectors.br_gate_hist, gpu_collectors.br_batch, "br");
+    calibrateBias(quant_params.bw_, hidden_size, bitwidth_config.bw_granularity_,
+        bitwidth_config.bw_, usePOT2, [&](int c) { return std::make_pair(gpu_collectors.bw_batch.original_mins[c],
+                                  gpu_collectors.bw_batch.original_maxs[c]); });
+    calibrateBias(quant_params.br_, hidden_size, bitwidth_config.br_granularity_,
+        bitwidth_config.br_, usePOT2, [&](int c) { return std::make_pair(gpu_collectors.br_batch.original_mins[c],
+                                  gpu_collectors.br_batch.original_maxs[c]); });
 
     // 同步 CUDA 操作
     cudaDeviceSynchronize();

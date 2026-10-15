@@ -175,3 +175,16 @@ python3 tests/test_quant_gru.py
 
 项目使用的 GRU 实现源自 [Haste](https://github.com/lmnt-com/haste)，并与
 [PyTorch GRU 接口](https://pytorch.org/docs/stable/generated/torch.nn.GRU.html) 集成。
+
+### 固定 bias 网格的训练余量
+
+新校准的输入/循环 bias 在各自粒度下，由观测到的最大绝对值建立 scale
+`max(2 * max_abs_bias, 0.01) / qmax`；Po2 模式再严格向上取整为 2 的幂。
+此策略将观测范围至少扩大一倍，并为零 bias 提供至少 ±0.01 的可训练区间。
+8 位下最小 affine 步长约 7.87e-5、Po2 步长约 1.22e-4，可表示 1e-4 量级的更新。
+位宽、对称零点和部署算术保持原有约定。MinMax、Percentile、SQNR 均对 bias 使用此规则；bias 不使用直方图裁剪或常数 bin 扩展范围。
+
+已加载的编码与 QAT 期间的固定编码不会被扩张。
+
+余量以较粗的 bias 分辨率为代价，不能保证任意学习率/训练时长都不饱和；应同时检查
+偏置饱和、梯度与任务指标。可加载经过独立验证的显式编码以采用其他范围策略。

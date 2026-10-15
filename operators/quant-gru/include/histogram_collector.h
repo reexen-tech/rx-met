@@ -45,6 +45,8 @@ struct Histogram {
     std::vector<float> counts;  // 每个 bin 的计数
     float min_val;              // 直方图覆盖的最小值
     float max_val;              // 直方图覆盖的最大值
+    float observed_min = std::numeric_limits<float>::max();
+    float observed_max = std::numeric_limits<float>::lowest();
     int num_bins;               // bin 数量
     int64_t total_count;        // 总采样数
 
@@ -74,6 +76,8 @@ struct Histogram {
         min_val = std::numeric_limits<float>::max();
         max_val = std::numeric_limits<float>::lowest();
         total_count = 0;
+        observed_min = std::numeric_limits<float>::max();
+        observed_max = std::numeric_limits<float>::lowest();
     }
 
     void print(const char* name = nullptr) const {
@@ -213,6 +217,8 @@ class HistogramCollector {
         // 2. 如果 min == max，在 _add_to_histogram 时使用扩展的 bin_edges（与 _create_bin_edges 一致）
         // 3. 首次收集时，计算 range_limit 时使用 minimum_range 机制
         
+        hist_.observed_min = std::min(hist_.observed_min, data_min);
+        hist_.observed_max = std::max(hist_.observed_max, data_max);
         float original_min = data_min;
         float original_max = data_max;
         
@@ -313,6 +319,8 @@ class HistogramCollector {
         }
 
         // 后续合并：应用范围限制（与 collect 一致）
+        hist_.observed_min = std::min(hist_.observed_min, other.observed_min);
+        hist_.observed_max = std::max(hist_.observed_max, other.observed_max);
         float updated_min = hist_.min_val;
         float updated_max = hist_.max_val;
         
