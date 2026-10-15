@@ -458,11 +458,9 @@ GRUQuantParams calculateGRUQuantitativeParametersFromGPUHistograms(
 // 浮点存储版量化 GRU 前向传播接口（GPU-FP）
 // =====================================================================
 // 
-// 与整数版的区别：
-//   - 所有量化值使用 float 存储（值仍是定点整数）
-//   - 使用 cuBLAS SGEMM + 单独的 bias/rescale kernel
-//   - 只使用 real_sigmoid/real_tanh，不用 LUT
-//   - shift 预处理为除数，避免运行时位移
+// 与整数版共享量化、整数重缩放、LUT 门函数、输出和截断 mask。
+// 仅将 W/R/bias/x 的量化码缓存转换为 float，保持现有 STE backward ABI。
+// 8/16 位量化码可精确存入 FP32；绝对值超过 2^24 的码仍有精度限制。
 
 // 量化权重为浮点存储格式（GPU 端）
 // GPU 浮点存储版量化前向传播（浮点输入/输出，全部 device 内存）
@@ -496,7 +494,7 @@ void quantGRUForwardFP(
     const cublasHandle_t &g_blas_handle,
     float *h, float *v,
     // 输出量化后的值（必须由外部分配内存，训练和推理模式都需要）
-    // 函数会直接写入这些指针指向的内存，无需拷贝
+    // 共享整数前向后，将量化码转换为 FP32 缓存
     float *W_q_out,  // [input_size, hidden_size * 3]
     float *R_q_out,  // [hidden_size, hidden_size * 3]
     float *bw_q_out, // [hidden_size * 3]

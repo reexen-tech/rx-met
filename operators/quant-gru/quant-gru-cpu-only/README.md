@@ -14,6 +14,7 @@
 cmake -S operators/quant-gru/quant-gru-cpu-only \
   -B quant-gru-cpu-only/build -DCMAKE_BUILD_TYPE=Release
 cmake --build quant-gru-cpu-only/build --parallel 2
+ctest --test-dir quant-gru-cpu-only/build --output-on-failure
 ./quant-gru-cpu-only/build/gru_cpu_example
 ```
 
@@ -46,3 +47,6 @@ cmake --build quant-gru-cpu-only/build --parallel 2
 
 主模块文档见 [QuantGRU README](../README.md) 和
 [量化计算流程](../docs/GRU量化计算流程.md)。
+
+`update_zero_point` 回归检查非零更新门 zero point 的七步递推；`q_one-q_z` 已消去零点，
+不应再次减去 zero point。主 CUDA 整数核与保留的浮点参考遵循同一公式。

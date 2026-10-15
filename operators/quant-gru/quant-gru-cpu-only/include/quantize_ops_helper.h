@@ -313,11 +313,11 @@ inline int32_t computeHiddenState(int32_t update_gate, int32_t new_gate, int32_t
     // quant_one = 2^shift + zp，是常数 1 在 update_gate_output 量化空间的完整表示
     // one_minus_u = quant_one - update_gate = (2^shift + zp) - update_gate
     const int64_t one_minus_u = static_cast<int64_t>(params.quant_one_in_update_gate_scale_) - update_gate;
-    const int64_t one_minus_u_diff = one_minus_u - params.zp_update_gate_output_;  // 在 update_gate_output scale
+    // quant_one and update_gate contain the same zero point; their difference is centered.
     const int64_t n_diff_aligned = static_cast<int64_t>(new_gate_aligned_to_h) - params.zp_h_;  // 在 h scale
-    // one_minus_u_diff 在 update_gate_output scale，n_diff_aligned 在 h scale
+    // one_minus_u 在 update_gate_output scale，n_diff_aligned 在 h scale
     // 乘积 scale = scale_update_gate_output * scale_h
-    const int64_t new_contribution_mul = one_minus_u_diff * n_diff_aligned;  // scale = S_u * S_h
+    const int64_t new_contribution_mul = one_minus_u * n_diff_aligned;  // scale = S_u * S_h
 
     // ========== 步骤4: 合并两个贡献并 rescale 到 h scale ==========
     // old_contribution_mul 和 new_contribution_mul 都在 scale_update_gate_output * scale_h

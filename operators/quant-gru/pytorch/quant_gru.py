@@ -1646,6 +1646,11 @@ class QuantGRU(nn.Module):
         Args:
             locked: True 锁定（禁止覆盖）；False 解锁（允许覆盖）
         """
+        # Resolve lazy mode/bitwidth changes while calibration data is still usable.
+        # Otherwise the next locked forward discards the dirty flag and executes
+        # with stale scales that cannot describe the runtime in public encodings.
+        if locked and not self._quant_params_locked:
+            _ensure_quant_params_fresh_for_export(self)
         self._quant_params_locked = bool(locked)
 
     def finalize_calibration(self, verbose: bool = False):
@@ -3396,7 +3401,21 @@ class QuantGRU(nn.Module):
         try:
             # 初始化 bitwidth_config 和 quant_params
             # gru_ops 已在模块顶部导入
+            # Compiler encodings carry standard scales, not execution metadata.
+            # As with QuantLSTM, all-Po2 grids select the shift execution mode.
+            scales = []
+            for direction in (operators, operators_reverse):
+                if direction:
+                    for record in direction.values():
+                        scale = record.get("scale", [])
+                        scales.extend(scale if isinstance(scale, list) else [scale])
+            use_pot2 = bool(scales) and all(
+                isinstance(scale, (int, float)) and scale > 0 and math.isfinite(scale)
+                and math.frexp(scale)[0] == 0.5 for scale in scales
+            )
             self._bitwidth_config = gru_ops.OperatorQuantConfig()
+            self._bitwidth_config.usePOT2_ = use_pot2
+            self._use_pot2_scale = use_pot2
             self.quant_params = gru_ops.GRUQuantParams()
             self.quant_params.hidden_ = self.hidden_size
             

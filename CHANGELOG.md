@@ -8,6 +8,10 @@
 
 ### Fixed
 
+- 修复 GRU `(1-z)` 重复减去更新门 zero point 的错误，覆盖主整数核、浮点参考和独立 CPU 参考；默认 zero point 为零的公式不变。
+
+- QuantGRU 的 FP32/INT32 carrier 共用整数/LUT 前向与截断 mask；锁定前完成待处理的网格转换，公共编码重载恢复 Po2 执行模式，消除 QAT、整数评估和重载之间的数值分歧。
+
 - PyTorch Po2 工作流遵守 `bias_bitwidth`，在 Conv/Linear bias 对齐到 `Sx*Sw` 前检查范围，并拒绝静默饱和。
 - QuantGRU/QuantLSTM 在校准时为固定 bias 网格保留相对与最小绝对训练余量，防止零偏置的微小 QAT 更新立即饱和；保留导入编码。
 - QuantGRU 输入线性截断 mask 在 bias 累加与跨 CUDA stream 同步之前应用，统一输入、权重和偏置梯度。

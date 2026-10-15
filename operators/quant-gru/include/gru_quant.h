@@ -143,7 +143,7 @@ class ForwardPassQuant {
 // ============================================================================
 
 /**
- * @brief 量化 GRU 前向传播类（浮点存储版本）
+ * @brief 真实激活/浮点算术参考实现（非公共 QAT 目标前向）
  *
  * 与 ForwardPassQuant 的区别：
  *   - 所有量化值使用 float 存储（值仍是定点整数）
@@ -151,7 +151,7 @@ class ForwardPassQuant {
  *   - 只使用 real_sigmoid/real_tanh，不用 LUT
  *
  * 适用场景：
- *   - 需要浮点存储格式进行后续处理
+ *   - 调试旧浮点算术；公共 quantGRUForwardFP 已复用整数/LUT 核心
  *   - 调试和验证量化精度
  */
 class ForwardPassQuantFP {
