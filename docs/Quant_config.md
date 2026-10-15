@@ -225,3 +225,15 @@ KWS 的两种模式共用 `examples/config/quick_start_full_quant.json`，分别
 per-channel；未列出的量化点保留默认值。用户可直接修改配置中的对应节。
 字段对照、最小 JSON 和默认值见 [示例配置说明](../examples/config/README.md)，
 Po2 和参数锁见 [LSTM 接入说明](QuantLSTM_integration.md)。
+
+### Conv/Linear bias 对齐的范围检查
+
+`apply_power_of_2_workflow(..., align_bias_scale=True, bias_bitwidth=32)` 在 PyTorch 中
+实际将已校准 Conv/Linear 的 bias 量化器设为指定的有符号位宽（默认 32），并使用精确的
+`Sb = Sx * Sw`。对齐前逐通道检查当前 bias 的整数码是否可表示。显式请求 16 位但范围
+不足、32 位仍溢出、scale 小于量化器下限或通道布局不兼容时抛出 `ValueError`，不再静默
+截断或吞掉错误。普通未校准/未量化层仍报告为 skipped，需在使用部署结果前检查统计。
+
+支持标量输入 scale，以及逐张量或与输出通道一一对应的权重/bias scale。目标后端需要支持
+所选 bias 位宽；不能仅修改元数据而让部署继续按 bias16 执行。对齐只检查当前参数，QAT
+期间仍应监测固定编码下的参数饱和；重复调用不会改变已经对齐的网格。

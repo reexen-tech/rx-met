@@ -310,7 +310,7 @@ def apply_power_of_2_workflow(sim_model, method: str = "cover_range", tolerance:
             - True: 执行对齐，使得硬件可以直接计算 (Qx*Qw + Qb)
             - False: 跳过对齐
         verbose: 是否打印详细信息
-        bias_bitwidth: 仅 ONNX 路径使用，对齐后的 Conv/Gemm/MatMul bias 位宽
+        bias_bitwidth: 对齐后的有符号 bias 位宽；PyTorch Conv/Linear 与 ONNX 均使用，默认 32。不可表示时拒绝对齐
     
     Returns:
         结果字典，包含统计信息和对比结果
@@ -412,7 +412,7 @@ def apply_power_of_2_workflow(sim_model, method: str = "cover_range", tolerance:
             print("📝 将卷积/全连接层的 bias scale 对齐到输入和权重的 scale 乘积")
             print("📝 目标：使得硬件可以直接计算 Sy*Qy = Sx*Sw*(Qx*Qw + Qb)\n")
         
-        bias_alignment_stats = _align_conv_bias_scale(sim_model, verbose=verbose)
+        bias_alignment_stats = _align_conv_bias_scale(sim_model, verbose=verbose, bias_bitwidth=bias_bitwidth)
         results['bias_alignment'] = bias_alignment_stats
 
     from aimet_torch.native_recurrent import named_native_recurrent
@@ -1242,409 +1242,77 @@ def check_bn_params_status(model, verbose: bool = True) -> Dict[str, Any]:
     }
 
 
-def _align_conv_bias_scale(model, verbose: bool = True) -> Dict[str, Any]:
+def _align_conv_bias_scale(model, verbose: bool = True, bias_bitwidth: int = 32) -> Dict[str, Any]:
+    """Align Conv/Linear bias to the accumulator grid, rejecting unrepresentable values.
+
+    The requested signed bias width is applied to the actual PyTorch quantizer.
+    All candidate bias grids are checked before any bias quantizer is replaced.
     """
-    将所有卷积层和全连接（Linear）层的 bias scale 对齐到 Sx * Sw
-    
-    目标量化公式：Sy*Qy = Sx*Sw*(Qx*Qw + Qb)
-    通过设置 Sb = Sx*Sw，使得 bias 可以在整数域与乘积结果直接相加
-    
-    适用场景：
-    - 权重对称量化（zp_w = 0）
-    - 输入可能非对称量化（zp_x 可能非零，但不影响 Sb 的设置）
-    
-    Args:
-        model: 量化后的模型（已执行 compute_encodings 和 Power-of-2）
-        verbose: 是否打印详细信息
-        
-    Returns:
-        stats: {
-            'total_conv': 检查的卷积层总数,
-            'modified_conv': 成功修改的数量,
-            'skipped': 跳过的层列表及原因,
-            'scale_changes': 每层的 scale 变化详情
-        }
-    """
+    import copy
     import torch
     import torch.nn as nn
     from aimet_torch.v2.nn import QuantizationMixin
-    
-    stats = {
-        'total_conv': 0,
-        'modified_conv': 0,
-        'skipped': [],
-        'scale_changes': []
-    }
-    
-    # 支持的层类型：卷积 + 全连接
-    # Linear 的 bias 若走 AIMET 独立标定，近零通道会落到 minimum_scale 地板，
-    # 且 scale 与累加器 Sx*Sw 脱节（可能小到 2^-38、移位超 32 位）。
-    # 对齐到 Sb = Sx*Sw 后，scale 跟随累加器（约 2^-17~2^-26），必为 POT2 且移位 <=32。
-    conv_types = (
-        nn.Conv1d, nn.Conv2d, nn.Conv3d,
-        nn.ConvTranspose1d, nn.ConvTranspose2d, nn.ConvTranspose3d,
-        nn.Linear,
-    )
-    
+
+    if type(bias_bitwidth) is not int or not 2 <= bias_bitwidth <= 32:
+        raise ValueError("bias_bitwidth must be an integer between 2 and 32")
+    stats = {'total_conv': 0, 'modified_conv': 0, 'skipped': [], 'scale_changes': []}
+    conv_types = (nn.Conv1d, nn.Conv2d, nn.Conv3d, nn.ConvTranspose1d,
+                  nn.ConvTranspose2d, nn.ConvTranspose3d, nn.Linear)
+    pending = []
     for name, module in model.named_modules():
-        # 只处理卷积层和全连接层
         if not isinstance(module, conv_types):
             continue
-        
         stats['total_conv'] += 1
-        
-        # 检查是否有 bias
-        if not hasattr(module, 'bias') or module.bias is None:
-            stats['skipped'].append((name, 'no bias'))
-            if verbose:
-                print(f"⏭️  {name}: 跳过（无 bias）")
+        if module.bias is None or not isinstance(module, QuantizationMixin):
+            stats['skipped'].append((name, 'no bias or not quantized'))
             continue
-        
-        # 检查是否是量化模块
-        if not isinstance(module, QuantizationMixin):
-            stats['skipped'].append((name, 'not quantized'))
-            if verbose:
-                print(f"⏭️  {name}: 跳过（未量化）")
+        weight_q = module.param_quantizers['weight']
+        bias_q = module.param_quantizers['bias']
+        input_q = module.input_quantizers[0] if module.input_quantizers else None
+        if any(q is None or not q.is_initialized() for q in (weight_q, bias_q, input_q)):
+            stats['skipped'].append((name, 'input/weight/bias quantizer not initialized'))
             continue
-        
-        # 获取参数量化器
-        if not hasattr(module, 'param_quantizers') or not module.param_quantizers:
-            stats['skipped'].append((name, 'no param_quantizers'))
-            if verbose:
-                print(f"⏭️  {name}: 跳过（无参数量化器）")
-            continue
-        
-        # 获取权重量化器（ModuleDict 访问方式）
-        weight_quantizer = None
-        if 'weight' in module.param_quantizers:
-            weight_quantizer = module.param_quantizers['weight']
-        
-        if weight_quantizer is None or not weight_quantizer.is_initialized():
-            stats['skipped'].append((name, 'weight quantizer not initialized'))
-            if verbose:
-                print(f"⏭️  {name}: 跳过（权重量化器未初始化）")
-            continue
-        
-        # 获取 bias 量化器（ModuleDict 访问方式）
-        bias_quantizer = None
-        if 'bias' in module.param_quantizers:
-            bias_quantizer = module.param_quantizers['bias']
-        
-        if bias_quantizer is None or not bias_quantizer.is_initialized():
-            stats['skipped'].append((name, 'bias quantizer not initialized'))
-            if verbose:
-                print(f"⏭️  {name}: 跳过（bias 量化器未初始化）")
-            continue
-        
-        # 获取输入量化器（从输入量化器列表）
-        input_quantizer = None
-        if hasattr(module, 'input_quantizers') and module.input_quantizers:
-            input_quantizer = module.input_quantizers[0]  # 通常第一个是数据输入
-        
-        if input_quantizer is None or not input_quantizer.is_initialized():
-            stats['skipped'].append((name, 'input quantizer not found or not initialized'))
-            if verbose:
-                print(f"⏭️  {name}: 跳过（输入量化器未找到或未初始化）")
-            continue
-        
-        # ===== 步骤 1: 提取量化参数 =====
-        try:
-            # 确保所有量化器使用 scale-offset 参数化
-            input_quantizer._reparametrize_to_scale_offset()
-            weight_quantizer._reparametrize_to_scale_offset()
-            bias_quantizer._reparametrize_to_scale_offset()
-            
-            # 获取 scale（直接访问属性）
-            Sx = input_quantizer.scale
-            Sw = weight_quantizer.scale
-            Sb_old = bias_quantizer.scale
-            
-            # 获取 zero-point（用于记录）
-            zp_x = input_quantizer.offset if hasattr(input_quantizer, 'offset') and input_quantizer.offset is not None else 0
-            if isinstance(zp_x, torch.Tensor):
-                zp_x = float(zp_x.item()) if zp_x.numel() == 1 else zp_x
-            
-            # 转换为标量（如果是 tensor）
-            if isinstance(Sx, torch.Tensor):
-                Sx = float(Sx.item()) if Sx.numel() == 1 else Sx
-            if isinstance(Sb_old, torch.Tensor):
-                Sb_old = float(Sb_old.item()) if Sb_old.numel() == 1 else Sb_old
-            
-            # 检查是否是 per-channel 权重量化
-            is_per_channel = isinstance(Sw, torch.Tensor) and Sw.numel() > 1
-            
-        except Exception as e:
-            stats['skipped'].append((name, f'error getting scales: {e}'))
-            if verbose:
-                print(f"⏭️  {name}: 跳过（获取 scale 失败: {e}）")
-            continue
-        
-        # ===== 步骤 2: 计算新的 bias scale =====
-        if is_per_channel:
-            # Per-channel: Sb_new 是向量
-            # Sx 是标量，Sw 是向量
-            if isinstance(Sx, torch.Tensor):
-                Sx_val = float(Sx.item())
-            else:
-                Sx_val = float(Sx)
-            
-            Sb_new_raw = Sx_val * Sw  # 可能是 [out_channels] 或 [out_channels, 1, 1, 1]
-            
-            # 🔑 关键：如果 Sw 是多维的（例如 [16, 1, 1, 1]），需要展平为 1D
-            if isinstance(Sb_new_raw, torch.Tensor) and Sb_new_raw.dim() > 1:
-                # 找到非1的维度
-                non_one_dims = [i for i, s in enumerate(Sb_new_raw.shape) if s > 1]
-                if len(non_one_dims) == 1:
-                    # 只有一个非1维度，squeeze 掉其他维度
-                    Sb_new = Sb_new_raw.squeeze()
-                else:
-                    # 多个非1维度，保持原样
-                    Sb_new = Sb_new_raw
-            else:
-                Sb_new = Sb_new_raw
-        else:
-            # Per-tensor: Sb_new 是标量
-            Sw_scalar = float(Sw.item()) if isinstance(Sw, torch.Tensor) else float(Sw)
-            if isinstance(Sx, torch.Tensor):
-                Sx_val = float(Sx.item())
-            else:
-                Sx_val = float(Sx)
-            Sb_new = Sx_val * Sw_scalar
-        
-        # ===== 步骤 3: 计算新的浮点表示范围 =====
-        try:
-            # 获取 bias 位宽
-            bias_bitwidth = bias_quantizer.bitwidth
-            
-            # 计算量化整数范围（对称量化）
-            Qmax = 2 ** (bias_bitwidth - 1) - 1
-            Qmin = -2 ** (bias_bitwidth - 1)
-            
-            # 🔑 使用展平后的 Sb_new 计算范围
-            if is_per_channel:
-                fmin_new = Qmin * Sb_new  # 向量，现在应该是 1D
-                fmax_new = Qmax * Sb_new  # 向量，现在应该是 1D
-            else:
-                fmin_new = Qmin * Sb_new
-                fmax_new = Qmax * Sb_new
-            
-        except Exception as e:
-            stats['skipped'].append((name, f'error computing new range: {e}'))
-            if verbose:
-                print(f"⏭️  {name}: 跳过（计算新范围失败: {e}）")
-            continue
-        
-        # ===== 步骤 4: 更新 bias 量化器 =====
-        try:
-            # 确保量化器使用 scale-offset 参数化
-            bias_quantizer._reparametrize_to_scale_offset()
-            
-            # 🔑 关键：保持与原始 scale 相同的形状
-            original_scale_shape = bias_quantizer.scale.shape
-            
-            if verbose:
-                print(f"\n🔧 准备更新 bias 量化器:")
-                print(f"  原始 scale 形状: {original_scale_shape}")
-            
-            # 转换 Sb_new 为 tensor（如果是标量）
-            if not isinstance(Sb_new, torch.Tensor):
-                Sb_new_tensor = torch.tensor(Sb_new, dtype=bias_quantizer.scale.dtype, device=bias_quantizer.scale.device)
-            else:
-                Sb_new_tensor = Sb_new.clone().to(dtype=bias_quantizer.scale.dtype, device=bias_quantizer.scale.device)
-            
-            if verbose:
-                print(f"  Sb_new 原始形状: {Sb_new_tensor.shape}")
-            
-            # 确保形状匹配：如果原始 scale 有特殊形状，需要调整
-            if Sb_new_tensor.shape != original_scale_shape:
-                if Sb_new_tensor.numel() == 1:
-                    # 标量情况：扩展到目标形状
-                    Sb_new_tensor = Sb_new_tensor.view(1).expand(original_scale_shape).contiguous()
-                elif original_scale_shape == torch.Size([]):
-                    # 目标是标量
-                    Sb_new_tensor = Sb_new_tensor.squeeze()
-                else:
-                    # Per-channel 情况：尝试 reshape
-                    # 首先确保元素数量匹配
-                    if Sb_new_tensor.numel() == original_scale_shape.numel():
-                        Sb_new_tensor = Sb_new_tensor.reshape(original_scale_shape)
-                    else:
-                        # 如果元素数量不匹配，可能需要广播
-                        # 例如 [16] -> [16, 1, 1, 16] 是不合理的，应该只是 [16]
-                        # 尝试保持 1D 形状
-                        if len(original_scale_shape) > 1 and original_scale_shape[0] == Sb_new_tensor.numel():
-                            # 假设第一维是通道维度
-                            target_shape = [original_scale_shape[0]] + [1] * (len(original_scale_shape) - 1)
-                            Sb_new_tensor = Sb_new_tensor.view(target_shape).expand(original_scale_shape).contiguous()
-                        else:
-                            if verbose:
-                                print(f"  ⚠️  形状不兼容: {Sb_new_tensor.shape} -> {original_scale_shape}")
-            
-            if verbose:
-                print(f"  Sb_new 调整后形状: {Sb_new_tensor.shape}")
-            
-            # 修改 scale（使用 copy_ 避免破坏梯度图）
-            with torch.no_grad():
-                bias_quantizer.scale.copy_(Sb_new_tensor)
-            
-            # offset 保持 0（对称量化，无需修改）
-            # bias_quantizer.offset 已经是 0，不需要改
-            
-            # 更新 min/max 范围（也需要匹配形状）
-            if is_per_channel:
-                fmin_new_tensor = fmin_new.clone().to(dtype=bias_quantizer.scale.dtype, device=bias_quantizer.scale.device)
-                fmax_new_tensor = fmax_new.clone().to(dtype=bias_quantizer.scale.dtype, device=bias_quantizer.scale.device)
-            else:
-                fmin_new_tensor = torch.tensor(fmin_new, dtype=bias_quantizer.scale.dtype, device=bias_quantizer.scale.device)
-                fmax_new_tensor = torch.tensor(fmax_new, dtype=bias_quantizer.scale.dtype, device=bias_quantizer.scale.device)
-            
-            # 确保 min/max 也匹配原始形状
-            if hasattr(bias_quantizer, 'min') and bias_quantizer.min is not None:
-                original_min_shape = bias_quantizer.min.shape
-                if fmin_new_tensor.shape != original_min_shape:
-                    if fmin_new_tensor.numel() == 1:
-                        fmin_new_tensor = fmin_new_tensor.view(1).expand(original_min_shape).contiguous()
-                    elif original_min_shape == torch.Size([]):
-                        fmin_new_tensor = fmin_new_tensor.squeeze()
-                    else:
-                        if fmin_new_tensor.numel() == original_min_shape.numel():
-                            fmin_new_tensor = fmin_new_tensor.reshape(original_min_shape)
-                        elif len(original_min_shape) > 1 and original_min_shape[0] == fmin_new_tensor.numel():
-                            target_shape = [original_min_shape[0]] + [1] * (len(original_min_shape) - 1)
-                            fmin_new_tensor = fmin_new_tensor.view(target_shape).expand(original_min_shape).contiguous()
-            
-            if hasattr(bias_quantizer, 'max') and bias_quantizer.max is not None:
-                original_max_shape = bias_quantizer.max.shape
-                if fmax_new_tensor.shape != original_max_shape:
-                    if fmax_new_tensor.numel() == 1:
-                        fmax_new_tensor = fmax_new_tensor.view(1).expand(original_max_shape).contiguous()
-                    elif original_max_shape == torch.Size([]):
-                        fmax_new_tensor = fmax_new_tensor.squeeze()
-                    else:
-                        if fmax_new_tensor.numel() == original_max_shape.numel():
-                            fmax_new_tensor = fmax_new_tensor.reshape(original_max_shape)
-                        elif len(original_max_shape) > 1 and original_max_shape[0] == fmax_new_tensor.numel():
-                            target_shape = [original_max_shape[0]] + [1] * (len(original_max_shape) - 1)
-                            fmax_new_tensor = fmax_new_tensor.view(target_shape).expand(original_max_shape).contiguous()
-            
-            if verbose:
-                print(f"  fmin 形状: {fmin_new_tensor.shape}")
-                print(f"  fmax 形状: {fmax_new_tensor.shape}")
-            
-            # 使用 set_range() 方法更新 min/max
-            bias_quantizer.set_range(fmin_new_tensor, fmax_new_tensor)
-            
-            if verbose:
-                print(f"  ✅ 更新成功")
-            
-            stats['modified_conv'] += 1
-            
-            # 记录修改信息
-            # 转换为可序列化的格式
-            Sx_display = float(Sx) if not isinstance(Sx, torch.Tensor) else float(Sx.item()) if Sx.numel() == 1 else f'tensor shape={Sx.shape}'
-            Sb_old_display = float(Sb_old) if not isinstance(Sb_old, torch.Tensor) else float(Sb_old.item()) if Sb_old.numel() == 1 else 'tensor'
-            
-            scale_change_info = {
-                'layer': name,
-                'Sx': Sx_display,
-                'Sw': float(Sw_scalar) if not is_per_channel else f'per-channel (shape={Sw.shape})',
-                'Sb_old': Sb_old_display,
-                'Sb_new': float(Sb_new) if not is_per_channel else f'per-channel (shape={Sb_new.shape})',
-                'scale_ratio': float(Sb_new / Sb_old_display) if not is_per_channel and isinstance(Sb_old_display, (int, float)) else 'varies',
-                'bias_bitwidth': bias_bitwidth,
-                'new_float_range': [float(fmin_new), float(fmax_new)] if not is_per_channel else 'per-channel',
-                'zp_x': int(zp_x) if isinstance(zp_x, (int, float, torch.Tensor)) and zp_x is not None else 0,
-                'is_per_channel': is_per_channel
-            }
-            stats['scale_changes'].append(scale_change_info)
-            
-            # 打印详细信息
-            if verbose:
-                print(f"\n📊 {name}:")
-                print(f"  类型: {type(module).__name__}")
-                
-                # 打印 Sx
-                Sx_display = float(Sx) if not isinstance(Sx, torch.Tensor) else float(Sx.item()) if Sx.numel() == 1 else Sx
-                if isinstance(Sx_display, torch.Tensor):
-                    print(f"  Sx (输入 scale):   per-channel, shape={Sx_display.shape}")
-                else:
-                    print(f"  Sx (输入 scale):   {Sx_display:.8f}")
-                
-                # 打印 Sw
-                if is_per_channel:
-                    # 显示原始形状和 Sb_new 的形状
-                    Sb_new_shape = Sb_new.shape if isinstance(Sb_new, torch.Tensor) else "scalar"
-                    if isinstance(Sb_new, torch.Tensor) and Sw.shape != Sb_new.shape:
-                        print(f"  Sw (权重 scale):   per-channel, 原始形状={Sw.shape} → Sb_new形状={Sb_new.shape}")
-                    else:
-                        print(f"  Sw (权重 scale):   per-channel, shape={Sw.shape}")
-                    print(f"                     min={Sw.min().item():.8f}, max={Sw.max().item():.8f}")
-                else:
-                    print(f"  Sw (权重 scale):   {Sw_scalar:.8f}")
-                
-                # 打印 Sb_old
-                Sb_old_display = float(Sb_old) if not isinstance(Sb_old, torch.Tensor) else float(Sb_old.item()) if Sb_old.numel() == 1 else Sb_old
-                if isinstance(Sb_old_display, torch.Tensor):
-                    print(f"  Sb_old (旧 bias scale): per-channel")
-                else:
-                    print(f"  Sb_old (旧 bias scale): {Sb_old_display:.8f}")
-                
-                # 打印 Sb_new
-                if is_per_channel:
-                    print(f"  Sb_new (新 bias scale): per-channel, shape={Sb_new.shape}")
-                    print(f"                          min={Sb_new.min().item():.8f}, max={Sb_new.max().item():.8f}")
-                    # 计算平均变化倍数
-                    ratio_tensor = Sb_new / Sb_old_display if isinstance(Sb_old_display, torch.Tensor) else Sb_new / Sb_old_display
-                    print(f"  变化倍数:          平均 {ratio_tensor.mean().item():.4f}x (范围: {ratio_tensor.min().item():.4f}x - {ratio_tensor.max().item():.4f}x)")
-                else:
-                    print(f"  Sb_new (新 bias scale): {Sb_new:.8f}")
-                    print(f"  变化倍数:          {Sb_new / Sb_old_display:.4f}x")
-                
-                print(f"  Bias 位宽:         {bias_bitwidth}-bit")
-                print(f"  量化范围:          [{Qmin}, {Qmax}]")
-                
-                if is_per_channel:
-                    print(f"  新浮点范围:        per-channel")
-                    print(f"                     min范围: [{fmin_new.min().item():.6f}, {fmin_new.max().item():.6f}]")
-                    print(f"                     max范围: [{fmax_new.min().item():.6f}, {fmax_new.max().item():.6f}]")
-                else:
-                    print(f"  新浮点范围:        [{fmin_new:.6f}, {fmax_new:.6f}]")
-                
-                print(f"  offset:            0 (对称量化)")
-                
-                if isinstance(zp_x, (int, float)) and zp_x != 0:
-                    print(f"  输入 zero-point:   {zp_x} (非对称量化)")            
-        except Exception as e:
-            stats['skipped'].append((name, f'error updating quantizer: {e}'))
-            if verbose:
-                print(f"❌ {name}: 更新失败: {e}")
-            continue
-    
-    # 打印汇总
-    if verbose:
-        print("\n" + "="*80)
-        print("Bias Scale 对齐汇总")
-        print("="*80)
-        print(f"检查的卷积/全连接层总数: {stats['total_conv']}")
-        print(f"成功修改的层数:     {stats['modified_conv']}")
-        print(f"跳过的层数:         {len(stats['skipped'])}")
-        
-        if stats['skipped'] and len(stats['skipped']) <= 10:
-            print("\n跳过的层:")
-            for layer_name, reason in stats['skipped']:
-                print(f"  - {layer_name}: {reason}")
-        elif len(stats['skipped']) > 10:
-            print(f"\n跳过的层（仅显示前 10 个）:")
-            for layer_name, reason in stats['skipped'][:10]:
-                print(f"  - {layer_name}: {reason}")
-            print(f"  ... 还有 {len(stats['skipped']) - 10} 个")
-        
-        if stats['modified_conv'] > 0:
-            print(f"\n✅ 成功对齐 {stats['modified_conv']} 个卷积/全连接层的 bias scale")
-        else:
-            print("\n⚠️  没有成功修改任何层")
-        
-        print("="*80)
-    
-    return stats
 
+        sx = input_q.get_scale().detach()
+        sw = weight_q.get_scale().detach()
+        if sx.numel() != 1 or sw.numel() not in (1, module.bias.numel()):
+            raise ValueError(f"{name}: bias alignment requires scalar input and output-channel weight scales")
+        target = (sx.reshape(()) * sw.reshape(-1)).to(module.bias.device)
+        if not torch.all(torch.isfinite(target) & (target > 0)):
+            raise ValueError(f"{name}: bias accumulator scale must be finite and positive")
+        codes = torch.round(module.bias.detach().double().reshape(-1) / target.double())
+        qmin, qmax = -(2 ** (bias_bitwidth - 1)), 2 ** (bias_bitwidth - 1) - 1
+        if not torch.all(torch.isfinite(codes) & (codes >= qmin) & (codes <= qmax)):
+            raise ValueError(
+                f"{name}: bias is not representable at Sx*Sw with signed {bias_bitwidth}-bit range; "
+                "use a supported wider bias width or revise the input/weight grid"
+            )
+
+        aligned = copy.deepcopy(bias_q)
+        aligned.bitwidth = bias_bitwidth
+        aligned.signed = True
+        aligned.symmetric = True
+        aligned._reparametrize_to_scale_offset()
+        if target.numel() == 1:
+            target = target.reshape(()).expand_as(aligned.scale)
+        elif target.numel() == aligned.scale.numel():
+            target = target.reshape_as(aligned.scale)
+        else:
+            raise ValueError(f"{name}: bias quantizer shape cannot represent the output-channel accumulator grid")
+        with torch.no_grad():
+            aligned.scale.copy_(target)
+        if not torch.equal(aligned.get_scale(), target):
+            raise ValueError(f"{name}: bias accumulator scale is below the quantizer's representable scale range")
+        pending.append((name, module, aligned, sx, sw, bias_q.get_scale().detach().clone(), target))
+
+    for name, module, aligned, sx, sw, previous, target in pending:
+        module.param_quantizers['bias'] = aligned
+        stats['modified_conv'] += 1
+        stats['scale_changes'].append({
+            'layer': name, 'Sx': sx.cpu().tolist(), 'Sw': sw.cpu().tolist(),
+            'Sb_old': previous.cpu().tolist(), 'Sb_new': target.cpu().tolist(),
+            'bias_bitwidth': bias_bitwidth, 'is_per_channel': target.numel() > 1,
+        })
+        if verbose:
+            print(f"{name}: bias aligned to Sx*Sw, signed {bias_bitwidth}-bit; range checked")
+    return stats
