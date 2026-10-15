@@ -8,9 +8,14 @@ CACHE_DIR="${XDG_CACHE_HOME:-${HOME}/.cache}/rx-met/images"
 ARCHIVE=""
 OFFLINE=0
 STAGING=""
+DOWNLOAD_DIR=""
+RUNTIME_LOADED=0
 log() { printf '[install] %s\n' "$*"; }
 die() { printf '[install] ERROR: %s\n' "$*" >&2; exit 1; }
-cleanup() { if [[ -n "$STAGING" && -d "$STAGING" ]]; then rm -rf -- "$STAGING"; fi; }
+cleanup() {
+    if [[ -n "$STAGING" && -d "$STAGING" ]]; then rm -rf -- "$STAGING"; fi
+    if [[ -n "$DOWNLOAD_DIR" && -d "$DOWNLOAD_DIR" ]]; then rm -rf -- "$DOWNLOAD_DIR"; fi
+}
 trap cleanup EXIT
 while (($#)); do
     case "$1" in
@@ -56,14 +61,87 @@ if [[ ! -e "$DESTINATION" ]]; then
     ((available_bytes >= APP_INSTALL_BYTES)) || die "安装目录可用空间不足，至少需要 $APP_INSTALL_BYTES bytes"
 fi
 check_archive() {
-    [[ -f "$1" ]] || die "镜像归档不存在: $1"
-    [[ "$(sha256sum "$1" | cut -d ' ' -f1)" == "$RUNTIME_ARCHIVE_SHA256" ]] || die "镜像归档校验失败: $1"
+    local file="$1" name="${1##*/}" line checksum_file expected="" listed_name count=0
+    [[ -f "$file" ]] || die "镜像归档不存在: $file"
+    if [[ -f "$file.sha256" ]]; then
+        checksum_file="$file.sha256"
+        while IFS= read -r line || [[ -n "$line" ]]; do
+            [[ -n "$line" ]] || continue
+            if [[ "$line" =~ ^([0-9a-f]{64})$ ]]; then
+                expected="${BASH_REMATCH[1]}"
+            elif [[ "$line" =~ ^([0-9a-f]{64})[[:space:]][\ *](.+)$ ]]; then
+                expected="${BASH_REMATCH[1]}"
+                listed_name="${BASH_REMATCH[2]}"
+                [[ "$listed_name" == "$name" || "$listed_name" == "./$name" ]] || die "镜像校验文件名不匹配: $checksum_file"
+            else
+                die "无效的镜像校验文件: $checksum_file"
+            fi
+            ((count += 1))
+        done < "$checksum_file"
+        ((count == 1)) || die "无效的镜像校验文件: $checksum_file"
+    elif [[ -f "${file%/*}/SHA256SUMS" ]]; then
+        checksum_file="${file%/*}/SHA256SUMS"
+        while IFS= read -r line || [[ -n "$line" ]]; do
+            if [[ "$line" =~ ^([^[:space:]]+)[[:space:]][\ *](.+)$ ]]; then
+                listed_name="${BASH_REMATCH[2]}"
+                if [[ "$listed_name" == "$name" || "$listed_name" == "./$name" ]]; then
+                    expected="${BASH_REMATCH[1]}"
+                    [[ "$expected" =~ ^[0-9a-f]{64}$ ]] || die "无效的镜像校验清单: $checksum_file"
+                    ((count += 1))
+                fi
+            fi
+        done < "$checksum_file"
+        ((count <= 1)) || die "镜像校验清单包含重复记录: $checksum_file"
+    fi
+    if [[ -n "$expected" ]]; then
+        [[ "$(sha256sum "$file" | cut -d ' ' -f1)" == "$expected" ]] || die "镜像归档校验失败: $file"
+        log 'runtime 归档独立文件校验通过'
+    fi
+    gzip -t -- "$file" || die "镜像归档损坏: $file"
+}
+verify_archive_content() {
+    local file="$1"
+    log '校验归档中的 runtime 镜像身份和内容'
+    docker run --rm -i --network none --read-only --tmpfs /tmp:rw,noexec,nosuid,size=64m \
+        --user "$(id -u):$(id -g)" -e HOME=/tmp -e PYTHONDONTWRITEBYTECODE=1 \
+        --mount "type=bind,src=$file,dst=/runtime-image.tar.gz,readonly" \
+        --entrypoint python3 "$RUNTIME_IMAGE_ID" -B - /runtime-image.tar.gz "$RUNTIME_IMAGE_ID" <<'PY'
+@VERIFY_RUNTIME_ARCHIVE@
+PY
 }
 load_archive() {
-    check_archive "$1"
-    log "导入 runtime: $1"
-    gzip -dc -- "$1" | docker load
+    local file output line reference loaded_id count=0 verified=0
+    file="$(realpath -- "$1")" || die "镜像归档不存在: $1"
+    [[ "$file" != *','* && "$file" != *$'\n'* ]] || die '镜像路径不能包含逗号或换行'
+    check_archive "$file"
+    if docker image inspect "$RUNTIME_IMAGE_ID" >/dev/null 2>&1; then
+        verify_archive_content "$file" || die 'runtime 归档身份或内容校验失败'
+        verified=1
+    fi
+    log "导入 runtime: $file"
+    output="$(docker load --input "$file")" || die "runtime 镜像导入失败: $file"
+    printf '%s\n' "$output"
+    while IFS= read -r line; do
+        case "$line" in
+            'Loaded image ID: '*) reference="${line#Loaded image ID: }" ;;
+            'Loaded image: '*) reference="${line#Loaded image: }" ;;
+            *) continue ;;
+        esac
+        loaded_id="$(docker image inspect --format '{{.Id}}' "$reference")" || die '无法检查本次导入的镜像'
+        [[ "$loaded_id" == "$RUNTIME_IMAGE_ID" ]] || die "本次归档导入了不匹配的镜像: $reference"
+        ((count += 1))
+    done <<< "$output"
+    ((count > 0)) || die 'docker load 未返回本次导入的镜像身份'
+    [[ "$(docker image inspect --format '{{.Id}}' "$RUNTIME_IMAGE_ID")" == "$RUNTIME_IMAGE_ID" ]] || die '导入的镜像与所需 runtime 不匹配'
+    if ((verified == 0)); then
+        verify_archive_content "$file" || die 'runtime 归档身份或内容校验失败'
+    fi
+    RUNTIME_LOADED=1
 }
+# Reject a conflicting public tag before docker load can change it.
+if tag_image_id="$(docker image inspect --format '{{.Id}}' "$RUNTIME_IMAGE_TAG" 2>/dev/null)"; then
+    [[ "$tag_image_id" == "$RUNTIME_IMAGE_ID" ]] || die "runtime 标签指向其他镜像: $RUNTIME_IMAGE_TAG；不会自动覆盖"
+fi
 if [[ -n "$ARCHIVE" ]]; then
     command -v gzip >/dev/null || die '缺少 gzip'
     load_archive "$ARCHIVE"
@@ -84,14 +162,31 @@ else
         flock 8
         ARCHIVE="$CACHE_DIR/$RUNTIME_ARCHIVE"
         if [[ ! -f "$ARCHIVE" ]]; then
-            log '下载发布版本指定的 runtime'
+            DOWNLOAD_DIR="$(mktemp -d "$CACHE_DIR/.download.XXXXXX")"
+            log '下载发布环境的 runtime'
             curl --fail --location --proto '=https' --proto-redir '=https' --retry 3 \
-                --connect-timeout 30 --speed-time 120 --speed-limit 1024 --output "$ARCHIVE.partial" "$RUNTIME_URL"
-            check_archive "$ARCHIVE.partial"
-            mv -- "$ARCHIVE.partial" "$ARCHIVE"
+                --connect-timeout 30 --speed-time 120 --speed-limit 1024 --output "$DOWNLOAD_DIR/$RUNTIME_ARCHIVE" "$RUNTIME_URL"
+            checksum_status="$(curl --silent --show-error --location --proto '=https' --proto-redir '=https' --retry 3 \
+                --connect-timeout 30 --speed-time 120 --speed-limit 1024 --max-filesize 1048576 \
+                --write-out '%{http_code}' --output "$DOWNLOAD_DIR/$RUNTIME_ARCHIVE.sha256" "$RUNTIME_CHECKSUM_URL")" \
+                || die 'runtime 校验文件下载失败'
+            case "$checksum_status" in
+                200) ;;
+                404|410) rm -f -- "$DOWNLOAD_DIR/$RUNTIME_ARCHIVE.sha256" ;;
+                *) die "runtime 校验文件下载失败: HTTP $checksum_status" ;;
+            esac
+            load_archive "$DOWNLOAD_DIR/$RUNTIME_ARCHIVE"
+            if [[ -f "$DOWNLOAD_DIR/$RUNTIME_ARCHIVE.sha256" ]]; then
+                mv -- "$DOWNLOAD_DIR/$RUNTIME_ARCHIVE.sha256" "$ARCHIVE.sha256"
+            else
+                rm -f -- "$ARCHIVE.sha256"
+            fi
+            mv -- "$DOWNLOAD_DIR/$RUNTIME_ARCHIVE" "$ARCHIVE"
+            rm -rf -- "$DOWNLOAD_DIR"
+            DOWNLOAD_DIR=""
         fi
     fi
-    load_archive "$ARCHIVE"
+    if ((RUNTIME_LOADED == 0)); then load_archive "$ARCHIVE"; fi
 fi
 [[ "$(docker image inspect --format '{{.Id}}' "$RUNTIME_IMAGE_ID")" == "$RUNTIME_IMAGE_ID" ]] || die '导入的镜像与所需 runtime 不匹配'
 # Keep the readable version tag pinned to the already verified image.

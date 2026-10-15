@@ -20,7 +20,7 @@
 ```
 
 本地已有匹配镜像时直接复用；缺少时校验对应归档及其 `.json` 身份记录，再执行 `docker load`。
-同名镜像的身份不符时直接报错。两个目录参数均不会重新构建或导出环境镜像。
+同名镜像的身份不符时直接报错。两个目录参数用于复用环境，不会重新构建镜像；只有 `--with-images` 会自动导出缺失的 runtime 归档。
 
 脚本核对公共环境配置和精确镜像 ID，在对应 build 环境中生成三个项目 wheel，
 组装应用包，并在纯 runtime 中实际离线安装、自检。默认不生成 images/，不执行 docker save。
@@ -32,20 +32,65 @@
 
 ## 首次离线交付
 
-公共 runtime 已在环境发布时单独导出。需要随应用附带镜像时：
+本机已有匹配的 build/runtime 镜像时，一条命令生成应用包及镜像附件：
 
 ```bash
-./scripts/release/build.sh --with-images --runtime-env-dir /path/to/public-runtime-archives cu126
+./scripts/release/build.sh --with-images cu126
 ```
 
-此参数校验并将已有归档硬链接或复制到交付目录 images/，不会构建或重新导出镜像。
-也可直接向用户提供共享的 images/；已安装过另一个产品相同公共环境的机器可复用镜像。
-`--with-runtime` 保留为把归档嵌入每个应用包的可选方式，默认关闭。
+省略 `cu126` 时处理全部三个 CUDA 变体。归档默认缓存于 `.release/runtime-images/<环境版本>/`：
+已有完整归档则校验复用，缺失则从本机固定镜像 ID 自动导出。删除 `.release` 后也可重新执行，
+无需先手动导出镜像。Docker 中的环境镜像和构建缓存不会随 `.release` 删除；脚本不会重建已发布环境。
+
+需要复用共享盘归档时，加上 `--runtime-env-dir /path/to/public-runtime-archives`。
+带 `--with-images` 时，该目录不存在会自动创建；已有归档损坏或身份不符时会报错，不会覆盖。
+缺少本机环境镜像时，仍需通过两个环境目录参数导入已发布镜像。
+
+交付目录布局如下，应用包内部不嵌入镜像：
+
+```text
+v<VERSION>/
+├── 应用包.tar.gz
+├── 解压后的应用包/
+├── images/
+│   ├── rx-quant-env-runtime-v1-cu126-linux-amd64.tar.gz
+│   ├── rx-quant-env-runtime-v1-cu126-linux-amd64.tar.gz.json
+│   └── rx-quant-env-runtime-v1-cu126-linux-amd64.tar.gz.sha256
+├── README.md
+├── CHANGELOG.md
+└── SHA256SUMS
+```
+
+`--with-images` 是唯一的镜像附件开关。归档通过硬链接或复制放入 `images/`。
+首次交付同时提供应用包和 `images/`；后续已安装相同环境的用户只需应用包。
+
+### 镜像身份与文件校验
+
+应用包只固定公共环境配置和精确镜像 ID，不记录 runtime 归档文件的 SHA256 或大小。
+同一镜像重新导出的归档，即使文件 SHA256 改变，也可以用于同一个应用包；已发布的旧安装器需要重新打包才能采用此规则。
+
+归档实际 SHA256 单独保存在同名 `.sha256`、`.json` 和交付 `SHA256SUMS` 中。
+安装器支持同名 `.sha256`（一行 SHA256 或标准 sha256sum 格式），以及归档同目录 `SHA256SUMS` 中对应文件的记录。
+提供了匹配的文件校验记录时必须通过校验；没有记录时仍检查 gzip 完整性和镜像身份、内容。
+应用包自己的 SHA256SUMS 和安装后的 INSTALL_SHA256SUMS 继续校验应用文件。
+
+安装器检查本次 `docker load` 返回的每个镜像身份，再使用固定 runtime 中的 Python 验证归档内的
+Docker/OCI 配置、清单和层摘要；不会执行归档中的其他镜像。若本机已有匹配 runtime，则可在导入前完成内容验证。
+无需在宿主机安装 Python；本机原有的正确镜像不能使错误的显式 `--runtime-image` 通过校验。
+
+配置 `--runtime-base-url` 后，安装器下载对应归档，并尝试下载 `<归档URL>.sha256`。
+校验文件返回 404/410 时按无校验文件处理，网络错误、其他 HTTP 错误或校验失败会停止安装。
+下载文件只有通过镜像身份和内容验证后才进入缓存。下载地址可以提供同一固定镜像的其他导出文件，
+配套校验文件应与实际归档一致；更新归档不要求重新生成应用包。
+
+独立 `scripts/environment/export_runtime.sh` 和 `load.sh` 使用相同的镜像身份规则，
+允许重新导出文件的 SHA256 改变，保留公共环境首次发布的身份记录。目录结构和环境版本保持原样。
 
 ## 参数与版本记录
 
 - `--build-env-dir DIR`：缺少本地 build 镜像时，从该目录导入；未指定时要求镜像已在本机。
-- `--runtime-env-dir DIR`：runtime 镜像导入及交付归档目录，默认 `.release/runtime-images/<环境版本>/`；原 `--runtime-dir` 已更名。
+- `--runtime-env-dir DIR`：runtime 归档的导入、复用及自动导出目录，默认 `.release/runtime-images/<环境版本>/`。
+- `--with-images`：附带镜像到交付目录 `images/`，缺少归档时自动导出；默认关闭。
 - `--jobs N`：编译并行数，默认 8。
 - `--output-dir DIR`：应用交付目录。
 - `--install-prefix DIR`：此次安装验收的根目录。

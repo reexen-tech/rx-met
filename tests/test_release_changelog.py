@@ -89,7 +89,7 @@ class ReleaseChangelogTest(unittest.TestCase):
 
     def test_delivery_identity_tracks_current_notes_only(self):
         for name in ['packaging/release-bundle/install.sh.in', 'packaging/release-bundle/README.md.in',
-                     'scripts/release/verify_install.py', 'examples/README.md']:
+                     'scripts/release/verify_install.py', 'scripts/release/verify_runtime_archive.py', 'examples/README.md']:
             path = self.root / name
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(name)

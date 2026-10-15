@@ -299,7 +299,53 @@ class EnvironmentArchiveTest(unittest.TestCase):
             ('runtime', 'cu126', self.published, self.directory),
             ('build', 'cu126', self.published, self.directory)])
 
+    def test_cli_with_images_exports_to_missing_directory_and_passes_actual_record_to_bundle(self):
+        _, _, original = self.archive('runtime')
+        (self.directory / 'VERSION').write_text('1.0.0\n')
+        runtime_dir = self.directory / 'new-runtime-cache'
+        output_dir = self.directory / 'delivery'
+        image_id = self.published['runtime_image_id']
+        self.images[image_id] = {'Id': image_id}
+        def save(image, path):
+            self.write_payload(path, config_path='blobs/sha256/' + image_id[7:])
+        self.install_patch(archives, '_save_runtime', side_effect=save)
+        self.install_patch(archives, 'ensure_image', side_effect=lambda role, *args: {'Id': self.published[role + '_image_id']})
+        self.install_patch(artifacts, 'ROOT', new=self.directory)
+        self.install_patch(artifacts.dependencies, 'load_matrix', return_value=self.matrix)
+        self.install_patch(artifacts.dependencies, 'check_generated_artifacts')
+        self.install_patch(artifacts, 'release_changelog', return_value='notes')
+        self.install_patch(artifacts.common, 'load_record', return_value=self.published)
+        self.install_patch(artifacts, 'runtime_compatibility', return_value={})
+        self.install_patch(artifacts, 'source_digest', return_value='source')
+        self.install_patch(artifacts, 'image_info', return_value={'Id': self.published['build_image_id']})
+        def compile_artifacts(*command, **kwargs):
+            output = next(value.split('dest=', 1)[1] for value in command if isinstance(value, str) and '.output=type=local,dest=' in value)
+            Path(output).mkdir(parents=True)
+        self.install_patch(artifacts, 'run', side_effect=compile_artifacts)
+        assemble = self.install_patch(artifacts, 'assemble')
+        argv = ['artifacts.py', 'build', 'cu126', '--with-images', '--runtime-env-dir', str(runtime_dir),
+                '--output-dir', str(output_dir)]
+        with patch('sys.argv', argv):
+            artifacts.main()
+        archive = output_dir / 'images' / original['filename']
+        actual = json.loads(archive.with_name(archive.name + '.json').read_text())
+        self.assertEqual(actual['sha256'], archives.common.sha256(archive))
+        self.assertNotEqual(actual['sha256'], original['sha256'])
+        self.assertEqual(assemble.call_args.args[5], actual)
+        self.assertEqual(self.published['runtime'], original)
+        self.assertIn(actual['sha256'], (output_dir / 'SHA256SUMS').read_text())
 
+    def test_application_requirement_is_independent_of_archive_bytes(self):
+        _, _, original = self.archive('runtime')
+        changed = {**original, 'sha256': 'f' * 64, 'size_bytes': original['size_bytes'] + 100,
+                   'repo_digests': ['another-host-copy']}
+        url = 'https://example.invalid/' + original['filename']
+        requirement = artifacts.runtime_requirement(original, url)
+        self.assertEqual(requirement, artifacts.runtime_requirement(changed, url))
+        self.assertNotIn('sha256', requirement)
+        self.assertNotIn('size_bytes', requirement)
+        self.assertEqual(requirement['image_id'], self.published['runtime_image_id'])
+        self.assertEqual(requirement['checksum_url'], url + '.sha256')
 
     def test_standalone_export_accepts_recompression_without_rewriting_publication(self):
         path, sidecar, original = self.archive('runtime')
@@ -333,6 +379,11 @@ class EnvironmentArchiveTest(unittest.TestCase):
         self.assertEqual(self.loads, [str(path)])
         self.assertIn(archives.common.image_ref('runtime', self.variant), self.tags)
 
+    def test_removed_with_runtime_option_is_rejected(self):
+        with patch('sys.argv', ['artifacts.py', 'build', '--with-runtime']), \
+                contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as raised:
+            artifacts.main()
+        self.assertEqual(raised.exception.code, 2)
 
     def test_old_runtime_option_is_rejected(self):
         with patch('sys.argv', ['artifacts.py', 'build', '--runtime-dir', str(self.directory)]), \

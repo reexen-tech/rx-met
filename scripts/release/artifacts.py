@@ -76,7 +76,7 @@ def release_changelog(version):
 def delivery_digest(changelog):
     digest = hashlib.sha256()
     digest.update(b'CHANGELOG.md' + hashlib.sha256(changelog.encode('utf-8')).digest())
-    paths = [ROOT / 'packaging/release-bundle/install.sh.in', ROOT / 'packaging/release-bundle/README.md.in', ROOT / 'scripts/release/verify_install.py']
+    paths = [ROOT / 'packaging/release-bundle/install.sh.in', ROOT / 'packaging/release-bundle/README.md.in', ROOT / 'scripts/release/verify_install.py', ROOT / 'scripts/release/verify_runtime_archive.py']
     paths += sorted(p for p in (ROOT / 'examples').rglob('*') if p.is_file() and '__pycache__' not in p.parts and 'output' not in p.parts)
     for path in paths:
         digest.update(str(path.relative_to(ROOT)).encode() + bytes.fromhex(sha256(path)))
@@ -122,6 +122,14 @@ def inspect_wheels(directory, wheel_version, python_version):
     return wheels
 
 
+def runtime_requirement(record, url=''):
+    """Application identity depends on the runtime image, not its export bytes."""
+    keys = ('schema_version', 'environment_name', 'environment_version', 'variant',
+            'config_sha256', 'image_id', 'filename')
+    return {**{key: record[key] for key in keys}, 'url': url,
+            'checksum_url': url + '.sha256' if url else ''}
+
+
 def assemble(args, matrix, variant, runtime, build, runtime_record, archive, wheel_dir, compatibility, *, version, changelog):
     env_version = matrix['environment_version']
     runtime_tag = common.image_ref('runtime', variant)
@@ -138,7 +146,7 @@ def assemble(args, matrix, variant, runtime, build, runtime_record, archive, whe
     manifest = {'schema_version': 1, 'bundle_name': name, 'version': version, 'wheel_version': wheel_version,
                 'environment_name': common.NAME, 'environment_version': env_version, 'variant': variant, 'source_revision': revision,
                 'wheel_source_sha256': source_digest(), 'delivery_sources_sha256': delivery_digest(changelog), 'build_image_id': build['Id'],
-                'runtime': {**runtime_record, 'url': (args.runtime_base_url.rstrip('/') + '/' + archive.name) if args.runtime_base_url else ''},
+                'runtime': runtime_requirement(runtime_record, (args.runtime_base_url.rstrip('/') + '/' + archive.name) if args.runtime_base_url else ''),
                 'compatibility': compatibility, 'wheels': wheels}
     with tempfile.TemporaryDirectory(prefix='.bundle-', dir=args.output_dir) as temporary:
         staged = Path(temporary) / name
@@ -149,10 +157,11 @@ def assemble(args, matrix, variant, runtime, build, runtime_record, archive, whe
         write_json(staged / 'manifest.json', manifest)
         bootstrap = {'BUNDLE_NAME': name, 'MANIFEST_SHA256': sha256(staged / 'manifest.json'),
                      'RUNTIME_IMAGE_ID': runtime['Id'], 'RUNTIME_IMAGE_TAG': runtime_tag, 'RUNTIME_ARCHIVE': archive.name,
-                     'RUNTIME_ARCHIVE_SHA256': runtime_record['sha256'], 'RUNTIME_URL': manifest['runtime']['url'],
+                     'RUNTIME_URL': manifest['runtime']['url'], 'RUNTIME_CHECKSUM_URL': manifest['runtime']['checksum_url'],
                      'APP_INSTALL_BYTES': str(max(512 * 1024**2, sum(w['unpacked_size_bytes'] for w in wheels) * 2))}
         script = (ROOT / 'packaging/release-bundle/install.sh.in').read_text()
         script = script.replace('@BOOTSTRAP@', '\n'.join(f'readonly {key}={shlex.quote(value)}' for key, value in bootstrap.items()))
+        script = script.replace('@VERIFY_RUNTIME_ARCHIVE@', (ROOT / 'scripts/release/verify_runtime_archive.py').read_text())
         script = script.replace('@VERIFY_INSTALL@', (ROOT / 'scripts/release/verify_install.py').read_text())
         (staged / 'install.sh').write_text(script)
         (staged / 'install.sh').chmod(0o755)
@@ -163,10 +172,6 @@ def assemble(args, matrix, variant, runtime, build, runtime_record, archive, whe
         (staged / 'CHANGELOG.md').write_text(changelog, encoding='utf-8')
         checksums = ''.join(f'{sha256(path)}  {path.relative_to(staged).as_posix()}\n' for path in sorted(staged.rglob('*')) if path.is_file())
         (staged / 'SHA256SUMS').write_text(checksums)
-        # Optional self-contained offline bundle; ordinary releases keep images separate.
-        if args.with_runtime:
-            (staged / 'images').mkdir()
-            shutil.copy2(archive, staged / 'images' / archive.name)
         run('bash', '-n', staged / 'install.sh')
         run(staged / 'install.sh', '--offline', '--prefix', args.install_prefix)
         with tarfile.open(packed.with_name(packed.name + '.partial'), 'w:gz', compresslevel=1) as tar:
@@ -182,7 +187,7 @@ def write_release_index(directory, changelog):
     archives = sorted(directory.glob('rx-met-v*.tar.gz'))
     lines = ["# rx-met 离线交付", "",
              "首次部署请提供应用包和 images/ 中对应的 runtime 归档；后续版本更新只需分发应用包。",
-             "将所选应用包解压到与 images/ 同级的位置，然后运行包内 ./install.sh --offline。",
+             "将所选应用包解压到与 images/ 同级的位置，然后运行包内 ./install.sh。",
              "运行时的 GPU、应用挂载、工作目录和数据目录参数见应用包 README。", "",
              "| 变体 | 应用包 | 应用大小（MiB） | runtime 归档 |", "| --- | --- | ---: | --- |"]
     for archive in archives:
@@ -213,8 +218,7 @@ def main():
     parser.add_argument('--runtime-env-dir', type=Path, help='runtime 镜像导入及交付归档目录；默认 .release/runtime-images/<环境版本>')
     parser.add_argument('--runtime-base-url', default=os.environ.get('RX_MET_RUNTIME_BASE_URL', ''))
     parser.add_argument('--install-prefix', type=Path, default=ROOT / '.release/installed')
-    parser.add_argument('--with-images', action='store_true', help='附带已发布的公共 runtime 归档到交付目录 images/')
-    parser.add_argument('--with-runtime', action='store_true', help='把 runtime 归档嵌入每个应用包')
+    parser.add_argument('--with-images', action='store_true', help='附带 runtime 归档到交付目录 images/；归档缺失时从本机匹配镜像自动导出')
     parser.add_argument('--skip-build', action='store_true', help='只重新组装源码和环境身份未变的已有 wheels')
     parser.add_argument('--replace', action='store_true', help='替换本机尚未发布的应用产物；不覆盖安装目录和 runtime')
     parser.add_argument('--jobs', type=int, default=8)
@@ -232,6 +236,8 @@ def main():
         parser.error('--jobs 必须大于零')
     for option, directory in [('--build-env-dir', args.build_env_dir), ('--runtime-env-dir', args.runtime_env_dir)]:
         if directory is not None and not directory.is_dir():
+            if option == '--runtime-env-dir' and args.with_images and not directory.exists():
+                continue
             parser.error(f'{option} 目录不存在: {directory}')
     env_version = matrix['environment_version']
     version = (ROOT / 'VERSION').read_text().strip()
@@ -245,16 +251,13 @@ def main():
         args.output_dir.mkdir(parents=True, exist_ok=True)
     for variant in targets:
         published = common.load_record(variant)
-        record = published['runtime']
         build_ref = common.image_ref('build', variant)
         runtime = environment_archives.ensure_image('runtime', variant, published, args.runtime_env_dir)
         build = environment_archives.ensure_image('build', variant, published, args.build_env_dir)
         if runtime['Id'] != published['runtime_image_id'] or build['Id'] != published['build_image_id']:
             raise RuntimeError('公共环境标签与已发布镜像身份不一致')
-        archive = args.runtime_env_dir / record['filename']
-        if args.with_images or args.with_runtime:
-            if not archive.is_file() or sha256(archive) != record['sha256']:
-                raise RuntimeError(f'缺少或损坏的公共 runtime 归档: {archive}；指定 --runtime-env-dir 或先运行环境 export')
+        archive, record = environment_archives.runtime_archive(
+            variant, published, args.runtime_env_dir, export=args.with_images)
         if args.with_images:
             images = args.output_dir / 'images'
             images.mkdir(exist_ok=True)
@@ -265,6 +268,7 @@ def main():
             elif sha256(destination) != record['sha256']:
                 raise RuntimeError(f'交付目录 runtime 归档冲突: {destination}')
             write_json(images / (archive.name + '.json'), record)
+            environment_archives.write_checksum(destination, record)
         compatibility = runtime_compatibility(runtime['Id'], matrix, variant)
         if runtime_compatibility(build['Id'], matrix, variant) != compatibility:
             raise RuntimeError('build-env 与 runtime 的 Python ABI 或运行依赖不一致')
