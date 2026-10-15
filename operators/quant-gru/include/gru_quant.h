@@ -340,6 +340,7 @@ private:
     void IterateInternal(const T *R_t, const T *h, const T *v, const T *dh_new,
                          T *dbw, T *dbr, T *dh, T *dp, T *dq,
                          const T *zoneout_mask,
+                         const uint8_t *weight_ih_linear_mask,
                          const uint8_t *weight_hh_linear_mask,
                          const uint8_t *gate_input_mask,
                          const uint8_t *gate_output_mask,

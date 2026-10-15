@@ -96,6 +96,7 @@ __global__ void PointwiseOperationsQuant(
     const T *h, const T *v, const T *dh_new,
     T *dbw_out, T *dbr_out, T *dh_inout, T *dp_out, T *dq_out,
     const T *zoneout_mask,
+    const uint8_t *weight_ih_linear_mask,
     const uint8_t *weight_hh_linear_mask,
     const uint8_t *gate_input_mask,
     const uint8_t *gate_output_mask,
@@ -143,15 +144,22 @@ __global__ void PointwiseOperationsQuant(
     // 标准 GRU 反向传播计算
     const T dg = (static_cast<T>(1.0) - z) * dh_total;
     const T dz = (h[base_idx] - g) * dh_total;
-    const T dp_g = d_tanh(g) * dg;
+    // The candidate clamp lies upstream of BOTH candidate contributions
+    // and the reset gate. Apply its STE before branching the derivative.
+    const int idx = col * (hidden_dim * 3) + row;
+    T dp_g = d_tanh(g) * dg;
+    if (gate_output_mask != nullptr) {
+        dp_g *= static_cast<T>(gate_output_mask[idx + 2 * hidden_dim]);
+    }
+    if (gate_input_mask != nullptr) {
+        dp_g *= static_cast<T>(gate_input_mask[idx + 2 * hidden_dim]);
+    }
     const T dq_g = dp_g * r;
     const T dr = dp_g * q_g;
     const T dp_r = d_sigmoid(r) * dr;
     const T dq_r = dp_r;
     const T dp_z = d_sigmoid(z) * dz;
     const T dq_z = dp_z;
-
-    const int idx = col * (hidden_dim * 3) + row;
 
     // 初始化输出梯度（这些是相对于 gate_input 的梯度）
     T final_dp_z = dp_z;
@@ -166,20 +174,16 @@ __global__ void PointwiseOperationsQuant(
     if (gate_output_mask != nullptr) {
         const int z_mask_idx = idx + 0 * hidden_dim;
         const int r_mask_idx = idx + 1 * hidden_dim;
-        const int g_mask_idx = idx + 2 * hidden_dim;
 
         // mask=0 表示被 clamp（置零），mask=1 表示未被 clamp（保持原值）
         // mask 在 Forward 生成时已反转，可直接使用
         const T z_mask_mult = static_cast<T>(gate_output_mask[z_mask_idx]);
         const T r_mask_mult = static_cast<T>(gate_output_mask[r_mask_idx]);
-        const T g_mask_mult = static_cast<T>(gate_output_mask[g_mask_idx]);
         
         final_dp_z *= z_mask_mult;
         final_dq_z *= z_mask_mult;
         final_dp_r *= r_mask_mult;
         final_dq_r *= r_mask_mult;
-        final_dp_g *= g_mask_mult;
-        final_dq_g *= g_mask_mult;
     }
 
     // 应用 gate_input_mask（STE：门输入被 clamp 时梯度置零）
@@ -188,20 +192,16 @@ __global__ void PointwiseOperationsQuant(
     if (gate_input_mask != nullptr) {
         const int z_mask_idx = idx + 0 * hidden_dim;
         const int r_mask_idx = idx + 1 * hidden_dim;
-        const int g_mask_idx = idx + 2 * hidden_dim;
 
         // mask=0 表示被 clamp（置零），mask=1 表示未被 clamp（保持原值）
         // mask 在 Forward 生成时已反转，可直接使用
         const T z_mask_mult = static_cast<T>(gate_input_mask[z_mask_idx]);
         const T r_mask_mult = static_cast<T>(gate_input_mask[r_mask_idx]);
-        const T g_mask_mult = static_cast<T>(gate_input_mask[g_mask_idx]);
         
         final_dp_z *= z_mask_mult;
         final_dq_z *= z_mask_mult;
         final_dp_r *= r_mask_mult;
         final_dq_r *= r_mask_mult;
-        final_dp_g *= g_mask_mult;
-        final_dq_g *= g_mask_mult;
     }
 
     // 应用 weight_hh_linear_mask（STE：R*h+br 输出被 clamp 时 dq 梯度置零）
@@ -209,13 +209,20 @@ __global__ void PointwiseOperationsQuant(
     if (weight_hh_linear_mask != nullptr) {
         const int z_mask_idx = idx + 0 * hidden_dim;
         const int r_mask_idx = idx + 1 * hidden_dim;
-        const int g_mask_idx = idx + 2 * hidden_dim;
 
         // mask=0 表示被 clamp（置零），mask=1 表示未被 clamp（保持原值）
         // mask 在 Forward 生成时已反转，可直接使用
         final_dq_z *= static_cast<T>(weight_hh_linear_mask[z_mask_idx]);
         final_dq_r *= static_cast<T>(weight_hh_linear_mask[r_mask_idx]);
-        final_dq_g *= static_cast<T>(weight_hh_linear_mask[g_mask_idx]);
+        final_dq_g *= static_cast<T>(weight_hh_linear_mask[idx + 2 * hidden_dim]);
+    }
+
+    // Mask the input linear result before all of its parents (including
+    // bias) consume dp. The recorded pointwise event now covers this mask.
+    if (weight_ih_linear_mask != nullptr) {
+        final_dp_z *= static_cast<T>(weight_ih_linear_mask[idx]);
+        final_dp_r *= static_cast<T>(weight_ih_linear_mask[idx + hidden_dim]);
+        final_dp_g *= static_cast<T>(weight_ih_linear_mask[idx + 2 * hidden_dim]);
     }
 
     // 写出 dp 和 dq（相对于 gate_input 的梯度）
@@ -310,6 +317,7 @@ void BackwardPassQuant<T>::IterateInternal(
     const T *R_t, const T *h, const T *v, const T *dh_new,
     T *dbw, T *dbr, T *dh, T *dp, T *dq,
     const T *zoneout_mask,
+    const uint8_t *weight_ih_linear_mask,
     const uint8_t *weight_hh_linear_mask,
     const uint8_t *gate_input_mask,
     const uint8_t *gate_output_mask,
@@ -339,14 +347,14 @@ void BackwardPassQuant<T>::IterateInternal(
             <<<gridDim, blockDim, 0, stream1>>>(
                 batch_size, hidden_size, h, v, dh_new,
                 dbw, dbr, dh, dp, dq,
-                zoneout_mask, weight_hh_linear_mask, gate_input_mask, gate_output_mask, h_mask,
+                zoneout_mask, weight_ih_linear_mask, weight_hh_linear_mask, gate_input_mask, gate_output_mask, h_mask,
                 bw_mask, br_mask);
     } else {
         kernel::PointwiseOperationsQuant<T, false>
             <<<gridDim, blockDim, 0, stream1>>>(
                 batch_size, hidden_size, h, v, dh_new,
                 dbw, dbr, dh, dp, dq,
-                nullptr, weight_hh_linear_mask, gate_input_mask, gate_output_mask, h_mask,
+                nullptr, weight_ih_linear_mask, weight_hh_linear_mask, gate_input_mask, gate_output_mask, h_mask,
                 bw_mask, br_mask);
     }
     cudaEventRecord(event, stream1);
@@ -358,7 +366,7 @@ void BackwardPassQuant<T>::IterateInternal(
                   &beta_sum, dh, hidden_size);
 }
 
-/// @brief 辅助函数：对 dp 应用 weight_ih_linear_mask（在所有时间步完成后调用）
+/// @brief Apply input/master-parameter clamp masks to gradient buffers.
 template <typename T>
 static void ApplyMaskToBuffer(T *buffer, const uint8_t *mask, size_t size, cudaStream_t stream) {
     if (mask == nullptr) return;
@@ -421,17 +429,13 @@ void BackwardPassQuant<T>::Run(
             dp + i * NH3,
             dq + i * NH3,
             zoneout_mask ? zoneout_mask + i * NH : nullptr,
+            weight_ih_linear_mask ? weight_ih_linear_mask + i * NH3 : nullptr,
             weight_hh_linear_mask ? weight_hh_linear_mask + i * NH3 : nullptr,
             gate_input_mask ? gate_input_mask + i * NH3 : nullptr,
             gate_output_mask ? gate_output_mask + i * NH3 : nullptr,
             h_mask ? h_mask + i * NH : nullptr,
             bw_mask,  // bw_mask 是全局的，不按时间步偏移
             br_mask); // br_mask 是全局的，不按时间步偏移
-    }
-
-    // 对 dp 应用 weight_ih_linear_mask（W*x+bw 输出被 clamp 时，dp 梯度置零）
-    if (weight_ih_linear_mask != nullptr) {
-        ApplyMaskToBuffer(dp, weight_ih_linear_mask, static_cast<size_t>(steps) * NH3, stream1);
     }
 
     // Wait for pointwise operations to complete

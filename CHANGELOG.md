@@ -4,6 +4,13 @@
 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，正式版本遵循
 [Semantic Versioning](https://semver.org/lang/zh-CN/)。
 
+## [Unreleased]
+
+### Fixed
+
+- QuantGRU 输入线性截断 mask 在 bias 累加与跨 CUDA stream 同步之前应用，统一输入、权重和偏置梯度。
+- QuantGRU QAT 将候选门输入/输出截断 mask 先传到 reset gate 上游，修正截断时泄漏的梯度。
+
 ## [1.1.0] - 2026-10-12
 
 ### Added
