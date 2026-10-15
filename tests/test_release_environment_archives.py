@@ -1,10 +1,15 @@
 """Offline environment reuse must preserve the published image identity."""
 import contextlib
+import gzip
+import hashlib
 import importlib.util
 import io
 import json
+import os
 from pathlib import Path
 import subprocess
+import sys
+import tarfile
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -14,6 +19,9 @@ SPEC = importlib.util.spec_from_file_location('release_artifacts_archive_tests',
 artifacts = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(artifacts)
 archives = artifacts.environment_archives
+ENV_SPEC = importlib.util.spec_from_file_location('runtime_archive_cli_tests', ROOT / 'scripts/environment/runtime_archives.py')
+runtime_cli = importlib.util.module_from_spec(ENV_SPEC)
+ENV_SPEC.loader.exec_module(runtime_cli)
 
 
 class EnvironmentArchiveTest(unittest.TestCase):
@@ -21,7 +29,9 @@ class EnvironmentArchiveTest(unittest.TestCase):
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         self.directory = Path(temporary.name)
-        self.published = {'build_image_id': 'sha256:' + 'b' * 64, 'runtime_image_id': 'sha256:' + 'c' * 64}
+        self.config = b'{"architecture":"amd64","os":"linux","rootfs":{"type":"layers","diff_ids":[]}}'
+        self.published = {'build_image_id': 'sha256:' + 'b' * 64,
+                          'runtime_image_id': 'sha256:' + hashlib.sha256(self.config).hexdigest()}
         self.images = {}
         self.loads = []
         self.tags = []
@@ -55,10 +65,28 @@ class EnvironmentArchiveTest(unittest.TestCase):
             self.fail(f'Unexpected Docker operation: {command}')
         return subprocess.CompletedProcess(command, 0)
 
+    def write_payload(self, path, *, config=None, image_count=1, config_path=None):
+        name = config_path or (hashlib.sha256(self.config).hexdigest() + '.json')
+        manifest = [{'Config': name, 'RepoTags': None, 'Layers': []}] * image_count
+        with tarfile.open(path, 'w:gz') as output:
+            for filename, data in [('manifest.json', json.dumps(manifest).encode()),
+                                   (name, self.config if config is None else config)]:
+                member = tarfile.TarInfo(filename)
+                member.size = len(data)
+                output.addfile(member, io.BytesIO(data))
+
+    def update_sidecar(self, path, sidecar, record):
+        record = {**record, 'sha256': archives.common.sha256(path), 'size_bytes': path.stat().st_size}
+        sidecar.write_text(json.dumps(record))
+        return record
+
     def archive(self, role='build'):
         name = f"rx-quant-env-{role}-{self.matrix['environment_version']}-{self.variant}-linux-amd64.tar.gz"
         path = self.directory / name
-        path.write_bytes(b'a verified docker archive fixture')
+        if role == 'runtime':
+            self.write_payload(path)
+        else:
+            path.write_bytes(b'a verified docker archive fixture')
         record = {'schema_version': 1, 'environment_name': 'rx-quant-env',
                   'environment_version': self.matrix['environment_version'], 'variant': self.variant,
                   'config_sha256': archives.common.config_digest(), 'image_id': self.published[role + '_image_id'],
@@ -127,14 +155,116 @@ class EnvironmentArchiveTest(unittest.TestCase):
                     self.ensure()
                 self.assertFalse(self.loads or self.tags)
 
-    def test_runtime_checksum_must_match_published_record(self):
-        path, sidecar, record = self.archive('runtime')
-        path.write_bytes(b'x' * path.stat().st_size)
-        record['sha256'] = archives.common.sha256(path)
-        sidecar.write_text(json.dumps(record))
-        with self.assertRaisesRegex(RuntimeError, 'sha256.*发布记录'):
+    def test_recompressed_runtime_is_verified_and_loaded(self):
+        path, sidecar, original = self.archive('runtime')
+        path.write_bytes(gzip.compress(gzip.decompress(path.read_bytes()), mtime=1))
+        record = self.update_sidecar(path, sidecar, original)
+        self.assertNotEqual(record['sha256'], original['sha256'])
+        self.loaded_role = 'runtime'
+        self.assertEqual(self.ensure('runtime')['Id'], self.published['runtime_image_id'])
+        self.assertEqual(len(self.loads), 1)
+        self.assertEqual(self.published['runtime'], original)
+
+    def test_reexport_with_false_identity_is_rejected_even_with_matching_file_checksum(self):
+        path, sidecar, original = self.archive('runtime')
+        self.write_payload(path, config=b'{"different":"image"}')
+        self.update_sidecar(path, sidecar, original)
+        with self.assertRaisesRegex(RuntimeError, '镜像身份不匹配'):
             self.ensure('runtime')
         self.assertFalse(self.loads or self.tags)
+
+    def test_classic_archive_with_wrong_layer_content_is_rejected(self):
+        config = json.dumps({'rootfs': {'diff_ids': ['sha256:' + hashlib.sha256(b'expected layer').hexdigest()]}}).encode()
+        image_id = 'sha256:' + hashlib.sha256(config).hexdigest()
+        path = self.directory / 'wrong-layer.tar.gz'
+        config_name = image_id[7:] + '.json'
+        with tarfile.open(path, 'w:gz') as output:
+            files = {'manifest.json': json.dumps([{'Config': config_name, 'Layers': ['layer.tar']}]).encode(),
+                     config_name: config, 'layer.tar': b'changed layer'}
+            for name, data in files.items():
+                member = tarfile.TarInfo(name)
+                member.size = len(data)
+                output.addfile(member, io.BytesIO(data))
+        with self.assertRaisesRegex(RuntimeError, '镜像层不匹配'):
+            archives.verify_runtime_payload(path, image_id)
+
+    def test_reexport_cannot_include_other_images(self):
+        path, sidecar, original = self.archive('runtime')
+        self.write_payload(path, image_count=2)
+        self.update_sidecar(path, sidecar, original)
+        with self.assertRaisesRegex(RuntimeError, '仅能包含'):
+            self.ensure('runtime')
+        self.assertFalse(self.loads or self.tags)
+
+    def test_oci_config_path_is_supported(self):
+        path, sidecar, original = self.archive('runtime')
+        self.write_payload(path, config_path='blobs/sha256/' + self.published['runtime_image_id'][7:])
+        self.update_sidecar(path, sidecar, original)
+        self.loaded_role = 'runtime'
+        self.ensure('runtime')
+        self.assertEqual(len(self.loads), 1)
+
+    def test_missing_archive_is_exported_once_without_changing_environment_record(self):
+        _, _, original = self.archive('runtime')
+        target = self.directory / 'fresh-cache'
+        image_id = self.published['runtime_image_id']
+        self.images[image_id] = {'Id': image_id}
+        save = self.install_patch(archives, '_save_runtime', side_effect=lambda image, path: self.write_payload(path))
+        path, record = archives.runtime_archive(self.variant, self.published, target, export=True)
+        self.assertTrue(path.is_file())
+        self.assertEqual(record['sha256'], archives.common.sha256(path))
+        self.assertEqual(record['size_bytes'], path.stat().st_size)
+        self.assertEqual(record['image_id'], image_id)
+        self.assertEqual(archives.runtime_archive(self.variant, self.published, target, export=True), (path, record))
+        self.assertEqual(archives.runtime_archive(self.variant, self.published, target), (path, record))
+        save.assert_called_once()
+        self.assertEqual(self.published['runtime'], original)
+
+    def test_app_only_without_archive_does_not_export_or_create_directory(self):
+        self.archive('runtime')
+        target = self.directory / 'absent-cache'
+        save = self.install_patch(archives, '_save_runtime')
+        _, record = archives.runtime_archive(self.variant, self.published, target)
+        self.assertEqual(record, self.published['runtime'])
+        save.assert_not_called()
+        self.assertFalse(target.exists())
+
+    def test_valid_archive_reuse_requires_no_directory_write(self):
+        path, _, record = self.archive('runtime')
+        save = self.install_patch(archives, '_save_runtime')
+        with patch.object(Path, 'mkdir', side_effect=AssertionError('read-only archive source')):
+            self.assertEqual(archives.runtime_archive(self.variant, self.published, self.directory, export=True), (path, record))
+        save.assert_not_called()
+
+    def test_corrupt_or_incomplete_archives_are_not_overwritten(self):
+        path, sidecar, _ = self.archive('runtime')
+        save = self.install_patch(archives, '_save_runtime')
+        path.write_bytes(b'damaged')
+        with self.assertRaises(RuntimeError):
+            archives.runtime_archive(self.variant, self.published, self.directory, export=True)
+        self.assertEqual(path.read_bytes(), b'damaged')
+        path.unlink()
+        with self.assertRaisesRegex(RuntimeError, '缺少 runtime'):
+            archives.runtime_archive(self.variant, self.published, self.directory, export=True)
+        self.assertTrue(sidecar.exists())
+        save.assert_not_called()
+
+    def test_export_failure_leaves_no_partial_archive_and_can_be_retried(self):
+        self.archive('runtime')
+        target = self.directory / 'failed-export'
+        image_id = self.published['runtime_image_id']
+        self.images[image_id] = {'Id': image_id}
+        def fail(image, path):
+            path.write_bytes(b'partial')
+            raise RuntimeError('injected save failure')
+        save = self.install_patch(archives, '_save_runtime', side_effect=fail)
+        with self.assertRaisesRegex(RuntimeError, 'injected save failure'):
+            archives.runtime_archive(self.variant, self.published, target, export=True)
+        self.assertFalse(list(target.glob('rx-quant-env-*.tar.gz*')))
+        self.assertFalse(list(target.glob('.runtime-export-*')))
+        save.side_effect = lambda image, path: self.write_payload(path)
+        path, _ = archives.runtime_archive(self.variant, self.published, target, export=True)
+        self.assertTrue(path.is_file())
 
     def test_docker_connection_failure_does_not_attempt_import(self):
         self.install_patch(archives.subprocess, 'run', return_value=subprocess.CompletedProcess(
@@ -169,12 +299,106 @@ class EnvironmentArchiveTest(unittest.TestCase):
             ('runtime', 'cu126', self.published, self.directory),
             ('build', 'cu126', self.published, self.directory)])
 
+
+
+    def test_standalone_export_accepts_recompression_without_rewriting_publication(self):
+        path, sidecar, original = self.archive('runtime')
+        path.write_bytes(gzip.compress(gzip.decompress(path.read_bytes()), mtime=1))
+        actual = self.update_sidecar(path, sidecar, original)
+        repository = self.directory / 'repository'
+        publication = repository / 'docker/environment-images.json'
+        publication.parent.mkdir(parents=True)
+        before = json.dumps({'variants': {self.variant: self.published}})
+        publication.write_text(before)
+        digest = archives.common.config_digest()
+        self.install_patch(archives.common, 'ROOT', new=repository)
+        self.install_patch(archives.common, 'config', return_value=self.matrix)
+        self.install_patch(archives.common, 'config_digest', return_value=digest)
+        self.install_patch(archives.common, 'load_record', return_value=self.published)
+        initial_export = self.install_patch(archives.common, 'export')
+        runtime_cli.export_runtime(self.variant, self.directory)
+        initial_export.assert_not_called()
+        self.assertEqual(publication.read_text(), before)
+        emitted = json.loads((self.directory / 'manifest.json').read_text())['variants'][self.variant]['runtime']
+        self.assertEqual(emitted['sha256'], actual['sha256'])
+        self.assertIn(actual['sha256'], path.with_name(path.name + '.sha256').read_text())
+
+    def test_standalone_load_accepts_recompressed_runtime(self):
+        path, sidecar, original = self.archive('runtime')
+        path.write_bytes(gzip.compress(gzip.decompress(path.read_bytes()), mtime=1))
+        self.update_sidecar(path, sidecar, original)
+        self.loaded_role = 'runtime'
+        self.install_patch(archives.common, 'load_record', return_value=self.published)
+        runtime_cli.load_runtime(self.variant, self.directory)
+        self.assertEqual(self.loads, [str(path)])
+        self.assertIn(archives.common.image_ref('runtime', self.variant), self.tags)
+
+
     def test_old_runtime_option_is_rejected(self):
         with patch('sys.argv', ['artifacts.py', 'build', '--runtime-dir', str(self.directory)]), \
                 contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as raised:
             artifacts.main()
         self.assertEqual(raised.exception.code, 2)
         self.assertFalse(self.loads or self.tags)
+
+
+class OciArchiveIdentityTest(unittest.TestCase):
+    def fixture(self, path, *, corrupt_layer=False, missing_layer=False, extra_root=False):
+        files = {}
+        def blob(data, media_type):
+            digest = hashlib.sha256(data).hexdigest()
+            files['blobs/sha256/' + digest] = data
+            return {'mediaType': media_type, 'digest': 'sha256:' + digest, 'size': len(data)}
+        layer = blob(b'layer payload', 'application/vnd.oci.image.layer.v1.tar')
+        config = blob(b'{"architecture":"amd64","os":"linux"}', 'application/vnd.oci.image.config.v1+json')
+        manifest = blob(json.dumps({'schemaVersion': 2, 'config': config, 'layers': [layer]}).encode(),
+                        'application/vnd.oci.image.manifest.v1+json')
+        root = blob(json.dumps({'schemaVersion': 2, 'manifests': [manifest]}).encode(),
+                    'application/vnd.oci.image.index.v1+json')
+        files['index.json'] = json.dumps({'schemaVersion': 2, 'manifests': [root] * (2 if extra_root else 1)}).encode()
+        files['manifest.json'] = json.dumps([{'Config': 'blobs/sha256/' + config['digest'][7:], 'Layers': []}]).encode()
+        if corrupt_layer:
+            files['blobs/sha256/' + layer['digest'][7:]] = b'wrong payload'
+        if missing_layer:
+            del files['blobs/sha256/' + layer['digest'][7:]]
+        with tarfile.open(path, 'w:gz') as output:
+            for name, data in files.items():
+                member = tarfile.TarInfo(name)
+                member.size = len(data)
+                output.addfile(member, io.BytesIO(data))
+        return root['digest']
+
+    def test_docker29_oci_index_identity_is_accepted(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / 'oci.tar.gz'
+            image_id = self.fixture(path)
+            archives.verify_runtime_payload(path, image_id)
+
+    def test_invalid_oci_content_is_rejected(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / 'oci.tar.gz'
+            for corruption in ('corrupt_layer', 'missing_layer', 'extra_root'):
+                with self.subTest(corruption=corruption):
+                    image_id = self.fixture(path, **{corruption: True})
+                    with self.assertRaises(RuntimeError):
+                        archives.verify_runtime_payload(path, image_id)
+
+
+class SavePipelineTest(unittest.TestCase):
+    def test_docker_save_and_compression_pipeline(self):
+        # Run real gzip/pigz against a fake Docker executable, including save failure.
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            docker = directory / 'docker'
+            docker.write_text(f'#!{sys.executable}\nimport os,sys\nassert sys.argv[1:] == ["save", "pinned-image"]\nsys.stdout.buffer.write(b"image payload")\nsys.exit(int(os.environ.get("SAVE_EXIT", "0")))\n')
+            docker.chmod(0o755)
+            with patch.dict(os.environ, {'PATH': str(directory) + os.pathsep + os.environ['PATH'], 'SAVE_EXIT': '0'}):
+                output = directory / 'runtime.tar.gz'
+                archives._save_runtime('pinned-image', output)
+                self.assertEqual(gzip.decompress(output.read_bytes()), b'image payload')
+                os.environ['SAVE_EXIT'] = '1'
+                with self.assertRaisesRegex(RuntimeError, '导出失败'):
+                    archives._save_runtime('pinned-image', directory / 'failed.tar.gz')
 
 
 if __name__ == '__main__':

@@ -3,7 +3,7 @@
 - environment/build.sh、verify.sh：准备和验证公共 GPU 环境。
 - environment/export_runtime.sh、export.sh：导出公共 runtime 归档，记录固定镜像身份。
 - environment/load.sh：校验并导入公共 runtime。
-- environment/common.py：两仓库独立保存的公共环境实现。
+- environment/common.py：两仓库独立保存的公共环境定义；runtime_archives.py 处理独立归档的导出和加载。
 - release/build.sh：默认只构建应用包，并执行离线安装自检；--with-images 附带已有镜像归档。
 - release/verify_bundle.sh：验证应用安装目录及 GPU 流程。
 - release/artifacts.py、verify_install.py：维护者实现，不独立交付给用户。

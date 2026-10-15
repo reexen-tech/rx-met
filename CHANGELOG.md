@@ -28,6 +28,7 @@
 
 - GPU 环境改为公共 `rx-quant-env` v1；两个产品独立安装和更新，复用同一批固定 runtime 镜像。
 - 发布构建支持 `--build-env-dir` 复用离线 build 镜像归档，`--runtime-dir` 更名为 `--runtime-env-dir`；本地缺少环境时校验并导入对应归档。
+- 独立环境导出、加载入口统一支持相同镜像的不同归档 SHA256，保留首次发布的环境身份记录。
 - 默认发布只生成应用包；`--with-images` 可附带 runtime 归档。安装器负责离线安装和自检，README 说明 Docker 挂载运行。
 
 - 发布改为三个固定 runtime 镜像及三个独立应用包。用户通过 `install.sh` 离线安装，

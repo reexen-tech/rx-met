@@ -1,12 +1,16 @@
 """Reuse the published GPU environment locally or import its verified archives."""
 from __future__ import annotations
 
+import fcntl
 import json
 from pathlib import Path
 import re
+import shutil
 import subprocess
+import tempfile
 
 from environment import common
+from release.verify_runtime_archive import verify_runtime_payload
 
 
 def _local_image(reference):
@@ -19,7 +23,7 @@ def _local_image(reference):
 
 
 def verified_archive(role, variant, published, directory):
-    """Check archive identity and bytes before allowing docker load."""
+    """Return the archive and its actual file record, pinned to the published image."""
     matrix = common.config()
     filename = f"{common.NAME}-{role}-{matrix['environment_version']}-{variant}-linux-amd64.tar.gz"
     archive = Path(directory) / filename
@@ -35,8 +39,6 @@ def verified_archive(role, variant, published, directory):
                 'filename': filename}
     if role == 'build' or 'role' in record:
         expected['role'] = role
-    if role == 'runtime':
-        expected.update({key: published['runtime'][key] for key in ('filename', 'sha256', 'size_bytes')})
     for key, value in expected.items():
         if record.get(key) != value:
             raise RuntimeError(f'{sidecar}: {key} 与公共环境发布记录不一致')
@@ -47,7 +49,78 @@ def verified_archive(role, variant, published, directory):
     print(f'校验 {role} 镜像归档: {archive}', flush=True)
     if common.sha256(archive) != record['sha256']:
         raise RuntimeError(f'镜像归档 SHA-256 不匹配: {archive}')
-    return archive
+    # The publication checksum identifies the initial export, not every possible
+    # docker-save/gzip representation of this immutable image.
+    if role == 'runtime' and record['sha256'] != published['runtime']['sha256']:
+        verify_runtime_payload(archive, expected['image_id'])
+    return archive, record
+
+
+def write_checksum(archive, record):
+    """Publish a standalone file checksum; application manifests do not pin it."""
+    checksum = archive.with_name(archive.name + '.sha256')
+    temporary = checksum.with_name(checksum.name + '.partial')
+    temporary.write_text(f"{record['sha256']}  {archive.name}\n")
+    temporary.replace(checksum)
+
+
+def _save_runtime(image_id, destination):
+    compressor = ['pigz', '-p', '2', '-1', '-n'] if shutil.which('pigz') else ['gzip', '-1', '-n']
+    with destination.open('xb') as output:
+        saver = subprocess.Popen(['docker', 'save', image_id], stdout=subprocess.PIPE)
+        try:
+            subprocess.run(compressor, stdin=saver.stdout, stdout=output, check=True)
+            saver.stdout.close()
+            if saver.wait():
+                raise RuntimeError('runtime 镜像导出失败')
+        finally:
+            saver.stdout.close()
+            if saver.poll() is None:
+                saver.terminate()
+                saver.wait()
+    subprocess.run(['gzip', '-t', str(destination)], check=True)
+
+
+def runtime_archive(variant, published, directory, *, export=False):
+    """Reuse a checked archive, optionally exporting a missing one from the pinned ID."""
+    directory = Path(directory)
+    archive = directory / published['runtime']['filename']
+    sidecar = archive.with_name(archive.name + '.json')
+
+    def existing():
+        if archive.exists() or sidecar.exists():
+            return verified_archive('runtime', variant, published, directory)
+        return None
+
+    if not export:
+        # App-only builds need no archive; the first published export remains the
+        # default download record when no local archive has been selected.
+        return existing() or (archive, dict(published['runtime']))
+    found = existing()
+    if found:
+        return found
+    directory.mkdir(parents=True, exist_ok=True)
+    with (directory / ('.' + archive.name + '.lock')).open('a') as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        found = existing()
+        if found:
+            return found
+        image_id = published['runtime_image_id']
+        runtime = common.inspect(image_id, 'runtime', variant)
+        if runtime['Id'] != image_id:
+            raise RuntimeError('待导出的 runtime 与公共环境发布记录不一致')
+        print(f'自动导出 runtime 镜像: {image_id} -> {archive}', flush=True)
+        with tempfile.TemporaryDirectory(prefix='.runtime-export-', dir=directory) as temporary:
+            staged = Path(temporary) / archive.name
+            _save_runtime(image_id, staged)
+            verify_runtime_payload(staged, image_id)
+            record = {**published['runtime'], 'image_id': image_id,
+                      'sha256': common.sha256(staged), 'size_bytes': staged.stat().st_size, 'url': ''}
+            staged_sidecar = staged.with_name(staged.name + '.json')
+            common.write_json(staged_sidecar, record)
+            staged.replace(archive)
+            staged_sidecar.replace(sidecar)
+        return archive, record
 
 
 def ensure_image(role, variant, published, directory=None):
@@ -62,7 +135,7 @@ def ensure_image(role, variant, published, directory=None):
             option = f'--{role}-env-dir'
             if directory is None:
                 raise RuntimeError(f'缺少公共环境镜像 {reference}；使用 {option} 指定已归档镜像目录')
-            archive = verified_archive(role, variant, published, directory)
+            archive, _ = verified_archive(role, variant, published, directory)
             print(f'导入 {role} 镜像: {archive}', flush=True)
             subprocess.run(['docker', 'load', '--input', str(archive)], check=True)
         # Archives saved by image ID may not carry a tag. Validate before tagging.

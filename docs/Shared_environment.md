@@ -17,7 +17,8 @@ variants 定义公共 GPU 环境。CPU 专用字段和产品 VERSION 不参与�
 两个产品的代码、定制 llama.cpp、算子和示例由各自应用包交付。
 
 `docker/environment-images.json` 保存发布环境的公共配置摘要、各变体的 build/runtime 镜像 ID、
-runtime 归档名称和 SHA-256。产品打包核对本地配置、镜像标签、精确镜像身份和运行依赖。
+首次发布的 runtime 归档名称和 SHA-256。产品打包核对本地配置、镜像标签、精确镜像身份和运行依赖。
+独立环境导出允许同一镜像产生不同的归档文件 SHA256；实际文件校验值保存在归档目录中，不改写公共环境身份记录。
 安装器按精确镜像 ID 复用或导入环境，再校验或补齐 `rx-quant-env-runtime:<环境版本>-<变体>` 标签。
 同名标签指向其他镜像时直接报错。用户启动命令使用这个可读标签，正式环境版本的标签不可替换内容。
 
@@ -45,9 +46,10 @@ wheel 缓存根目录，其下按 cu118/cu126/cu130 分目录；脚本校验 whe
 ORT 1.20.1/1.27.0 所需头文件保存在 native/third_party/onnxruntime-prepared，
 从已验证的旧环境原样恢复，附来源、许可证和 SHA256SUMS；构建时校验缓存，不重复下载大型源码归档。
 
-导出默认写入 `.release/runtime-images/v1/`，同时创建或补全 `docker/environment-images.json`。
+导出默认写入 `.release/runtime-images/v1/`。首次发布时创建或补全 `docker/environment-images.json`；
+后续独立导出复用固定镜像 ID，只更新导出目录的归档及其记录，不改写首次发布记录。
 将该身份记录独立保存到另一个仓库，在同一批镜像上完成两个产品的验收。正式发布前需完成全部目标变体。
-已发布版本禁止覆盖；现有镜像和归档不匹配时直接报错。需要升级依赖或工具链时，使用新环境版本
+已发布镜像身份禁止覆盖；已有归档损坏或镜像身份不符时直接报错。归档缺失时可重新导出同一镜像，允许文件 SHA256 变化。需要升级依赖或工具链时，使用新环境版本
 及对应的新身份记录，保留旧版本。升级前先将当前 docker/environment-images.json
 归档为 docker/environment-records/<旧环境版本>.json，再构建和导出新版本，生成新的当前记录。已有发布记录时，环境 build 复用该记录的精确镜像；
 其他构建机器应先导入或拉取这批内部 build 镜像，不能用本地重建结果覆盖发布身份。
@@ -61,14 +63,14 @@ images/
 ├── rx-quant-env-runtime-v1-cu118-linux-amd64.tar.gz
 ├── rx-quant-env-runtime-v1-cu126-linux-amd64.tar.gz
 ├── rx-quant-env-runtime-v1-cu130-linux-amd64.tar.gz
-├── 各归档的 .json 身份记录
+├── 各归档的 .json 身份记录和 .sha256 文件校验
 ├── manifest.json
 ├── README.md
 └── SHA256SUMS
 ```
 
 首次离线交付可将 images/ 放在应用包旁；两个工具复用同一份归档。
-加载匹配本仓库发布记录的 runtime：
+加载匹配镜像身份的 runtime 归档（包括重新导出的归档）：
 
 ```bash
 ./scripts/environment/load.sh --directory /path/to/images cu126
@@ -78,9 +80,10 @@ images/
 从已有归档恢复本机缺少的 build/runtime 镜像。目录可以相同；build 归档名称为
 `rx-quant-env-build-v1-<变体>-linux-amd64.tar.gz`，并附同名 `.json` 身份记录。
 脚本校验环境摘要、变体、镜像 ID、大小和 SHA-256，导入后再次核对镜像身份。
+同一镜像重新导出的归档也可以通过 `--runtime-env-dir` 复用；此时会额外检查归档内的镜像身份。
 完整命令见 [应用包发布](Release_packaging.md)。
 
-用户通常直接运行应用包 install.sh，由安装器自动完成上述检查和导入。
+用户通常直接运行应用包 install.sh，由安装器完成应用包所要求的文件检查和环境导入。
 正式下载地址未配置时使用离线归档；以后可在产品发布时配置固定 HTTPS 地址。
 
 ## 验收边界
