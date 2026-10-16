@@ -206,6 +206,11 @@ load_quantizer_encodings(
 加载已有 encodings 后，可以通过 `allow_overwrite=False` 防止后续校准覆盖已确认的
 量化参数。任何精度结论都应同时记录模型版本、数据集、配置和复现命令。
 
+阶段文件加载以保存的 `qmin/qmax/symmetric/scale/offset` 为准，包括 Po2 对齐后
+与初始配置不同的 bias 位宽。普通 affine 量化器使用 scale/offset 参数化精确恢复，
+不再从实数 min/max 反推网格；加载后再冻结量化器参数或创建训练 optimizer。
+目标量化器形状必须匹配，非法 scale、offset 或不一致的范围会抛出 `ValueError`。
+
 ## 检查清单
 
 - 配置文件路径指向仓库中实际存在的文件。

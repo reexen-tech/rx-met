@@ -682,53 +682,55 @@ def _apply_aimet_encoding_to_quantizer(
 
 
 def _apply_encoding_to_quantizer(quantizer, encoding_info: Dict):
-    """将编码信息应用到量化器"""
-    # 转换为张量
-    scale_data = encoding_info['scale']
-    offset_data = encoding_info['offset']
-    min_data = encoding_info['min']
-    max_data = encoding_info['max']
-    
-    # 处理标量或列表
-    scale = torch.tensor(scale_data, dtype=torch.float32) if not isinstance(scale_data, torch.Tensor) else scale_data
-    offset = torch.tensor(offset_data, dtype=torch.float32) if not isinstance(offset_data, torch.Tensor) else offset_data
-    min_val = torch.tensor(min_data, dtype=torch.float32) if not isinstance(min_data, torch.Tensor) else min_data
-    max_val = torch.tensor(max_data, dtype=torch.float32) if not isinstance(max_data, torch.Tensor) else max_data
-    
-    # 如果 shape 不为空，reshape
-    if encoding_info.get('shape'):
-        shape = tuple(encoding_info['shape'])
-        if scale.numel() == 1 and shape:
-            scale = scale.expand(shape)
-        elif scale.shape != shape:
-            scale = scale.view(shape)
-        if offset.numel() == 1 and shape:
-            offset = offset.expand(shape)
-        elif offset.shape != shape:
-            offset = offset.view(shape)
-        if min_val.numel() == 1 and shape:
-            min_val = min_val.expand(shape)
-        elif min_val.shape != shape:
-            min_val = min_val.view(shape)
-        if max_val.numel() == 1 and shape:
-            max_val = max_val.expand(shape)
-        elif max_val.shape != shape:
-            max_val = max_val.view(shape)
-    
-    # 确保在正确的设备上
-    device = next((p.device for p in quantizer.parameters()), torch.device('cpu'))
-    scale = scale.to(device)
-    offset = offset.to(device)
-    min_val = min_val.to(device)
-    max_val = max_val.to(device)
-    
-    # 使用 set_range 方法设置编码
-    try:
-        quantizer.set_range(min_val, max_val)
-    except Exception as e:
-        print(f"    ⚠️  set_range 失败: {e}")
-        # 如果 set_range 失败，尝试其他方法
-        pass
+    """Restore the saved affine execution grid without recomputing its scale."""
+    from aimet_torch.v2.quantization.affine import AffineQuantizerBase
+
+    if not isinstance(quantizer, AffineQuantizerBase):
+        raise ValueError("Stage encodings require an affine quantizer")
+    qmin, qmax = encoding_info['qmin'], encoding_info['qmax']
+    symmetric = encoding_info['symmetric']
+    if (type(qmin) is not int or type(qmax) is not int or qmin >= qmax
+            or type(symmetric) is not bool):
+        raise ValueError("Invalid stage encoding integer grid or symmetry")
+    shape = tuple(encoding_info['shape'])
+    if shape != tuple(quantizer.shape):
+        raise ValueError(f"Stage encoding shape {shape} does not match {quantizer.shape}")
+    device = next(quantizer.parameters()).device
+
+    def tensor(field):
+        value = torch.as_tensor(encoding_info[field], dtype=torch.float32, device=device)
+        if tuple(value.shape) != shape:
+            raise ValueError(f"Stage encoding {field} shape does not match {shape}")
+        if not torch.isfinite(value).all():
+            raise ValueError(f"Stage encoding {field} must be finite")
+        return value
+
+    scale, offset = tensor('scale'), tensor('offset')
+    if not (scale > 0).all():
+        raise ValueError("Stage encoding scale must be positive")
+    if not torch.equal(offset, offset.round()):
+        raise ValueError("Stage encoding offset must be integral")
+    if symmetric and not (offset == -round((qmin + qmax) / 2)).all():
+        raise ValueError("Stage encoding offset does not match the symmetric grid")
+    if not symmetric and ((offset < -qmax) | (offset > -qmin)).any():
+        raise ValueError("Stage encoding grid must represent zero")
+    for field, code in [('min', qmin), ('max', qmax)]:
+        if not torch.allclose(tensor(field), (offset + code) * scale, rtol=1e-6, atol=0):
+            raise ValueError(f"Stage encoding {field} disagrees with scale/offset/grid")
+
+    # Min/max alone loses the bitwidth and can perturb a non-Po2 scale by an ULP.
+    # Use the same scale/offset parametrization as the Po2 workflow. Re-entering
+    # min/max first also resets symmetry correctly for already-loaded quantizers.
+    quantizer._reparametrize_to_min_max()
+    quantizer.qmin, quantizer.qmax = qmin, qmax
+    quantizer.symmetric = symmetric
+    quantizer._reparametrize_to_scale_offset()
+    with torch.no_grad():
+        quantizer.scale.copy_(scale)
+        if not symmetric:
+            quantizer.offset.copy_(offset)
+    if not torch.equal(quantizer.get_scale(), scale):
+        raise ValueError("Stage encoding scale is below the quantizer's supported minimum")
 
 
 def _set_quantizer_allow_overwrite(quantizer, allow_overwrite: Optional[bool]) -> None:
