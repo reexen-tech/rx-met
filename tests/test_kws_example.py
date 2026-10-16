@@ -88,9 +88,15 @@ class KwsExampleWorkflowTest(unittest.TestCase):
                     initializer_names = {t.name for t in graph.graph.initializer}
                     self.assertLessEqual(set(encodings['activation_encodings']), node_names)
                     self.assertLessEqual(set(encodings['param_encodings']), initializer_names)
+                    for index in (0, 1):
+                        for parameter in ('weight', 'bias'):
+                            self.assertIn(f'convs.{index}.bn.{parameter}', encodings['param_encodings'])
                     for node in graph.graph.node:
                         if '.bn.' in node.name and node.op_type in ('Sub', 'Div', 'Mul', 'Add'):
-                            self.assertEqual(set(encodings['activation_encodings'][node.name]['input']), {'0', '1'})
+                            inputs = set(encodings['activation_encodings'][node.name]['input'])
+                            # BN affine parameters own their QDQ at get_attr.
+                            expected = {'0'} if node.input[1] in encodings['param_encodings'] else {'0', '1'}
+                            self.assertEqual(inputs, expected, node.name)
                     metadata = (set(encodings), encodings['version'], encodings['schema_version'])
                     if rnn_type == 'gru':
                         gru_metadata = metadata
