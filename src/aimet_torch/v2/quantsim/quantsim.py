@@ -335,7 +335,9 @@ class QuantizationSimModel(_QuantizationSimModelBase):  # pylint: disable=missin
 
         model = _convert_to_qmodel(model)
 
-        # ===== PATCH: 自动为未量化模块的参数创建 param_quantizers =====
+        from .fx_parameters import ParameterQuantizers, bind_parameter_quantizers
+
+        # Parameter owners retained by FX need QDQ at get_attr reads.
         # 参考 nn.Conv2d 的机制，为所有 nn.Parameter 创建量化器
         # 但避免重复处理已有量化定义的模块
         def _auto_create_param_quantizers_for_unquantized_modules(model, default_param_bw, default_data_type):
@@ -378,7 +380,7 @@ class QuantizationSimModel(_QuantizationSimModelBase):  # pylint: disable=missin
                 
                 # 为这个模块的参数创建 param_quantizers
                 if not hasattr(module, 'param_quantizers'):
-                    module.param_quantizers = torch.nn.ModuleDict()
+                    module.param_quantizers = ParameterQuantizers()
                 
                 for param_name, param in module.named_parameters(recurse=False):
                     # ============= 新增：跳过 dummy 参数 =============
@@ -422,67 +424,12 @@ class QuantizationSimModel(_QuantizationSimModelBase):  # pylint: disable=missin
                         param_quantizers_created += 1
                         logger.info(f"Auto-created param_quantizer for {module_name}.{param_name}")
                 
-                # 为模块添加 __call__ 钩子以量化参数
-                if hasattr(module, 'param_quantizers') and len(module.param_quantizers) > 0:
-                    if not hasattr(module, '_param_quantization_enabled'):
-                        _add_param_quantization_hook(module)
-                        module._param_quantization_enabled = True
-            
+                module._param_quantization_enabled = bool(module.param_quantizers)
+
             if param_quantizers_created > 0:
                 logger.info(f"Auto-created {param_quantizers_created} param_quantizers for nn.Parameters in unquantized modules")
             
             return param_quantizers_created
-        
-        def _add_param_quantization_hook(module):
-            """为模块添加参数量化钩子"""
-            import types
-            from aimet_torch.v2.utils import patch_attr
-            import contextlib
-            
-            original_call = module.__class__.__call__
-            
-            def __call_with_param_quantization__(self, *args, **kwargs):
-                """在 forward 前量化参数"""
-                if not hasattr(self, 'param_quantizers'):
-                    return original_call(self, *args, **kwargs)
-                
-                # 首先计算参数编码（如果尚未初始化）
-                for param_name, param_quantizer in self.param_quantizers.items():
-                    if param_quantizer and not param_quantizer.is_initialized():
-                        try:
-                            param = getattr(self, param_name)
-                            if isinstance(param, torch.nn.Parameter):
-                                # 使用参数值计算编码
-                                with param_quantizer.compute_encodings():
-                                    param_quantizer(param.detach())
-                        except Exception:
-                            pass
-                
-                stack = contextlib.ExitStack()
-                
-                # 量化所有参数
-                for param_name, param_quantizer in self.param_quantizers.items():
-                    if param_quantizer and param_quantizer.is_initialized():
-                        try:
-                            original_param = getattr(self, param_name)
-                            if isinstance(original_param, torch.nn.Parameter):
-                                quantized_param = param_quantizer(original_param)
-                                # 保持为 Parameter 类型
-                                quantized_param = torch.nn.Parameter(
-                                    quantized_param.detach(), 
-                                    requires_grad=original_param.requires_grad
-                                )
-                                ctx = patch_attr(self, param_name, quantized_param)
-                                stack.enter_context(ctx)
-                        except Exception:
-                            pass
-                
-                with stack:
-                    output = original_call(self, *args, **kwargs)
-                
-                return output
-            
-            module.__call__ = types.MethodType(__call_with_param_quantization__, module)
         
         # 调用自动创建函数
         _auto_create_param_quantizers_for_unquantized_modules(
@@ -514,6 +461,8 @@ class QuantizationSimModel(_QuantizationSimModelBase):  # pylint: disable=missin
                 config_file=config_file,
                 default_data_type=default_data_type,
             )
+
+        bind_parameter_quantizers(self.model)
 
         # Quantization parameters are placed on cpu by default.
         # Move them to cuda device as necessary
@@ -785,6 +734,12 @@ class QuantizationSimModel(_QuantizationSimModelBase):  # pylint: disable=missin
                 if isinstance(module, QuantizationMixin):
                     stack.enter_context(module._patch_dequantized_parameters())
                 stack.enter_context(cls._update_parameters_by_attr(module))
+            elif getattr(module, '_param_quantization_enabled', False):
+                # This model is a copy being converted to a float/QDQ export.
+                for name, quantizer in module.param_quantizers.items():
+                    if quantizer is not None:
+                        param = getattr(module, name)
+                        param.copy_(quantizer(param).as_subclass(torch.Tensor))
         return stack
 
     def named_qmodules(self):
@@ -857,6 +812,8 @@ class QuantizationSimModel(_QuantizationSimModelBase):  # pylint: disable=missin
         :param list_of_modules_to_exclude: List of torch modules to remove quantization wrappers from (if present)
         :return: None
         """
+        from .fx_parameters import remove_parameter_quantizer_nodes
+        remove_parameter_quantizer_nodes(starting_module, list_of_modules_to_exclude)
         for name, module in starting_module.named_children():
             if module in list_of_modules_to_exclude:
                 if isinstance(module, BaseQuantizationMixin):

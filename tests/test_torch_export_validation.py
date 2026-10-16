@@ -331,8 +331,13 @@ class TorchExportValidationTest(unittest.TestCase):
             self.assertEqual(node.input[1], parameter)
             self.assertIn(parameter, enc['param_encodings'])
         for node in graph.graph.node:
-            if node.op_type in ('Sub', 'Div', 'Mul', 'Add'):
+            if node.op_type in ('Sub', 'Div'):
                 self.assertEqual(set(enc['activation_encodings'][node.name]['input']), {'0', '1'})
+            elif node.op_type in ('Mul', 'Add'):
+                # Parameter QDQ owns gamma/beta; an activation QDQ on this
+                # same edge would quantize them a second time.
+                self.assertEqual(set(enc['activation_encodings'][node.name]['input']), {'0'})
+                self.assertIn(node.input[1], enc['param_encodings'])
 
     def test_equal_parameters_keep_distinct_names_after_constant_deduplication(self):
         from aimet_torch.quantizable_batchnorm import QuantizableBatchNorm2d

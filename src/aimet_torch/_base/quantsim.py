@@ -1219,7 +1219,8 @@ class _QuantizationSimModelBase(_QuantizationSimModelInterface):
         quant_layers_to_exclude = []
         for layer in layers_to_exclude:
             for module in layer.modules():
-                if isinstance(module, self._quantized_modules):
+                if (isinstance(module, self._quantized_modules)
+                        or getattr(module, '_param_quantization_enabled', False)):
                     quant_layers_to_exclude.append(module)
                     excluded_module_name = module_to_name_dict.get(module)
                     self._excluded_layer_names.append(excluded_module_name)

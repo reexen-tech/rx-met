@@ -242,3 +242,16 @@ Po2 和参数锁见 [LSTM 接入说明](QuantLSTM_integration.md)。
 支持标量输入 scale，以及逐张量或与输出通道一一对应的权重/bias scale。目标后端需要支持
 所选 bias 位宽；不能仅修改元数据而让部署继续按 bias16 执行。对齐只检查当前参数，QAT
 期间仍应监测固定编码下的参数饱和；重复调用不会改变已经对齐的网格。
+
+### FX 展开模块的参数量化
+
+自定义 BN 等模块展开后，`weight/bias` 仍由原模块的 `param_quantizers` 管理。
+QuantSim 在 FX `get_attr` 后、reshape/view 前执行这些量化器；直接消费该参数
+或其形状变换结果的计算节点不再重复启用该路 input quantizer。激活、运行均值
+和标准差等 buffer 输入仍按普通算子配置量化。参数边只有一个量化归属，导出通过
+`param_encodings` 覆盖该边，而不是再写一份不同的 activation encoding。
+
+按模块名称修改参数位宽后需重新校准。参数量化不会 detach master 权重，
+`param_quantizers[name] = None` 会旁路该参数 QDQ。普通浮点检查点会移除新增的
+FX 量化调用；带 QDQ 权重的导出则使用实际执行的参数网格。旧版为同一参数
+同时保存父参数编码和子输入编码的阶段文件不保证兼容，应从固定 FP 权重重新校准。
