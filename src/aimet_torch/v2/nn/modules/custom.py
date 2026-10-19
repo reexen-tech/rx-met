@@ -44,12 +44,17 @@ from torch import nn
 import torch.nn.functional as F
 from aimet_torch._base.nn.modules.custom import *  # pylint: disable=wildcard-import, unused-wildcard-import
 from aimet_torch.v2.quantization.tensor import QuantizedTensorBase
-from aimet_torch.v2.quantization.affine import QuantizeDequantize
+from aimet_torch.v2.quantization.affine import AffineQuantizerBase, QuantizeDequantize
+from aimet_torch.v2.quantization.affine.backends.torch_builtins import (
+    get_encoding_shape_with_blocks,
+    reshape_tensor_for_blocks,
+)
 from ..true_quant import (
     QuantizationMixin,
     _DispatchMixin,
     _quantize_if_applicable,
     _quantize_dequantize_if_applicable,
+    _is_computing_encodings,
 )
 
 # NOTE: Disabling due to pylint false alarm in ModuleList
@@ -415,6 +420,38 @@ class QuantizedLog(_DispatchMixin, QuantizationMixin, Log):
     """Quantized Log"""
 
     _builtin_torch_fn = torch.log
+
+    def _builtin_torch_fn_helper(self, fn):
+        output_quantizer = self.output_quantizers[0]
+        # 有限饱和处理要求已初始化的 affine 输出编码。
+        # 校准仍需观察原始 Log，不能用此前的输出编码覆盖校准样本。
+        if (not isinstance(output_quantizer, AffineQuantizerBase)
+                or not output_quantizer.is_initialized()
+                or _is_computing_encodings(self)):
+            return super()._builtin_torch_fn_helper(fn)
+
+        def saturated_log(x, **kwargs):
+            if kwargs or not x.is_floating_point():
+                return fn(x, **kwargs)
+            # 此处的 x 已经过输入 QDQ，基类稍后仍会执行输出 QDQ。
+            # 因 Qout(log(0)) == Qout(y_min)，零码直接取输出编码下限，
+            # 可保持前向结果一致，并避免饱和分支的输入梯度被无穷中间值污染。
+            # 不移动 QDQ、不改变 epsilon、不读取量化前输入，也不恢复已压零的小值信息。
+            zero = x == 0
+            # torch.where 会计算两个分支。1 仅用于未选中的 Log 分支，避免 log(0)
+            # 污染反向；零码实际返回 y_min，而非 log(1)。保留 y_min 的编码参数梯度。
+            safe = torch.where(zero, torch.ones_like(x), x)
+            lower = output_quantizer.get_min(dtype=x.dtype)
+            if output_quantizer.block_size is not None:
+                # 分块编码下每块有独立下限，不能按普通通道广播，也不能共用全局最小值。
+                # 沿用 QDQ 后端的分块布局，再映射回输入形状；保留 lower 的梯度，
+                # 使零码对编码参数的梯度与有限的饱和输入一致，避开 -Inf 污染。
+                blocked = reshape_tensor_for_blocks(x, lower.shape, output_quantizer.block_size)
+                lower = lower.view(get_encoding_shape_with_blocks(
+                    lower.shape, output_quantizer.block_size)).expand_as(blocked).reshape(x.shape)
+            return torch.where(zero, lower, fn(safe))
+
+        return super()._builtin_torch_fn_helper(saturated_log)
 
 
 @QuantizationMixin.implements(Abs)
