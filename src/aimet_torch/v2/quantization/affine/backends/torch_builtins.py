@@ -241,7 +241,12 @@ def quantize_dequantize(
         ret = _torch_fake_quantize(tensor, scale, offset, qmin, qmax)
 
         if ret is not None:
-            return ret
+            # PyTorch 快速 fake-quant 会把 NaN 转成最小整数码，掩盖上游算子的非法值；
+            # 通用浮点 QDQ 路径则保留 NaN。保持两条路径一致，便于训练及时发现异常。
+            # 只恢复 NaN，有限值、Inf 饱和和原有 clamp STE 均不改变，也不移动 QDQ。
+            # 快速内核返回独立输出，在其上原地处理可保留 stride；重新分配连续张量
+            # 会改变 RDFT 等转置权重的布局，进而改变后续矩阵计算的舍入和训练轨迹。
+            return ret.masked_fill_(torch.isnan(tensor), float("nan"))
 
     if _torch_compiler_is_exporting():
         raise RuntimeError
