@@ -63,6 +63,58 @@ from ..true_quant import (
 from aimet_torch.native_recurrent import recurrent_operators
 
 
+class _QuantizedSingularUnary(torch.autograd.Function):
+    """保持一元算子的前向结果，约定量化训练在奇点处的反向行为。"""
+
+    @staticmethod
+    def forward(ctx, x, is_sqrt, zero_code):
+        output = torch.sqrt(x) if is_sqrt else torch.log(x)
+        ctx.save_for_backward(x, output)
+        ctx.is_sqrt = is_sqrt
+        ctx.zero_code = zero_code
+        return output
+
+    @staticmethod
+    def backward(ctx, grad):
+        x, output = ctx.saved_tensors
+        denominator = 2 * output if ctx.is_sqrt else x
+        # 下游截断可能给 log/sqrt(0) 传回零梯度，此时应避开 0/0。
+        # TensorFlow 的 SqrtGrad 对零上游梯度也采用这一保护。
+        inactive = (denominator == 0) & (grad == 0)
+        if ctx.zero_code:
+            # 待审核的 QAT 近似梯度：Sqrt 输入为零码时，即使收到有限非零梯度也返回零。
+            # 这可防止无穷梯度传到上游平方，与平方的零导数相乘后产生 NaN。
+            # 这不是数学上的 Sqrt 零点导数，也不是量化截断的 STE mask：
+            # 被舍入为零的小非零值同样会失去梯度。
+            # 目前仅验证波形梯度变为有限，尚未证实训练收益；该策略仍待研究、审核。
+            # 正值沿用原导数，非有限的上游梯度不被屏蔽。
+            inactive = (denominator == 0) & torch.isfinite(grad)
+        # 除法前先为无效分支选择安全分母；先算无穷导数再乘零 mask 仍会产生 NaN。
+        safe = torch.where(inactive, torch.ones_like(denominator), denominator)
+        return torch.where(inactive, torch.zeros_like(grad), grad / safe), None, None
+
+
+def _singular_unary_qat_fn(module, fn, is_sqrt):
+    """校准期间和所有量化器均禁用时，保持 Torch 原有行为。"""
+    quantizers = list(module.input_quantizers) + list(module.output_quantizers)
+    if (not torch.is_grad_enabled() or _is_computing_encodings(module)
+            or not any(isinstance(q, AffineQuantizerBase) and q.is_initialized()
+                       for q in quantizers)):
+        return fn
+    input_quantizer = module.input_quantizers[0]
+    # 仅在输入 QDQ 已初始化时启用实验性的 Sqrt 零码规则。
+    # 只有输出 QDQ 时，零点收到非零梯度仍保留原有奇点行为。
+    zero_code = (is_sqrt and isinstance(input_quantizer, AffineQuantizerBase)
+                 and input_quantizer.is_initialized())
+
+    def call(x, **kwargs):
+        if kwargs or not x.is_floating_point():
+            return fn(x, **kwargs)
+        return _QuantizedSingularUnary.apply(x, is_sqrt, zero_code)
+
+    return call
+
+
 @QuantizationMixin.implements(Sin)
 class QuantizedSin(_DispatchMixin, QuantizationMixin, Sin):
     """Quantized Sin"""
@@ -261,6 +313,9 @@ class QuantizedSqrt(_DispatchMixin, QuantizationMixin, Sqrt):
 
     _builtin_torch_fn = torch.sqrt
 
+    def _builtin_torch_fn_helper(self, fn):
+        return super()._builtin_torch_fn_helper(_singular_unary_qat_fn(self, fn, True))
+
 
 # @QuantizationMixin.implements(Maximum)
 # class QuantizedMaximum(_DispatchMixin, QuantizationMixin, Maximum):
@@ -422,6 +477,7 @@ class QuantizedLog(_DispatchMixin, QuantizationMixin, Log):
     _builtin_torch_fn = torch.log
 
     def _builtin_torch_fn_helper(self, fn):
+        fn = _singular_unary_qat_fn(self, fn, False)
         output_quantizer = self.output_quantizers[0]
         # 有限饱和处理要求已初始化的 affine 输出编码。
         # 校准仍需观察原始 Log，不能用此前的输出编码覆盖校准样本。
