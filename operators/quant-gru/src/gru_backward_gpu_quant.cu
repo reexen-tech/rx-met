@@ -40,6 +40,7 @@
 #include <cuda_runtime_api.h>
 
 #include "blas.h"
+#include "backward_bias.cuh"
 #include "device_assert.h"
 #include "gru_quant.h"
 #include "inline_ops.h"
@@ -80,8 +81,6 @@ __global__ void ApplyMaskKernel(T *data, const uint8_t *mask, size_t size) {
  *   - br_mask: [H*3] 偏置 br 量化 clamp mask
  *
  * 输出：
- *   - dbw_out: [H*3] 输入偏置梯度（atomicAdd 累加）
- *   - dbr_out: [H*3] 循环偏置梯度（atomicAdd 累加）
  *   - dh_inout: [N, H] 传递到上一时间步的隐状态梯度
  *   - dp_out: [N, H*3] dp 中间梯度（传回 weight_ih_linear）
  *   - dq_out: [N, H*3] dq 中间梯度（传回 weight_hh_linear）
@@ -234,35 +233,6 @@ __global__ void PointwiseOperationsQuant(
     dq_out[idx + 1 * hidden_dim] = final_dq_r;
     dq_out[idx + 2 * hidden_dim] = final_dq_g;
 
-    // 累加偏置梯度（应用 bw_mask 和 br_mask）
-    T dbw_z = final_dp_z;
-    T dbw_r = final_dp_r;
-    T dbw_g = final_dp_g;
-    T dbr_z = final_dq_z;
-    T dbr_r = final_dq_r;
-    T dbr_g = final_dq_g;
-
-    // 使用乘法替代分支以避免 warp divergence
-    // mask=0 表示被 clamp（置零），mask=1 表示未被 clamp（保持原值）
-    // mask 在 Forward 生成时已反转，可直接使用
-    if (bw_mask != nullptr) {
-        dbw_z *= static_cast<T>(bw_mask[row + 0 * hidden_dim]);
-        dbw_r *= static_cast<T>(bw_mask[row + 1 * hidden_dim]);
-        dbw_g *= static_cast<T>(bw_mask[row + 2 * hidden_dim]);
-    }
-    if (br_mask != nullptr) {
-        dbr_z *= static_cast<T>(br_mask[row + 0 * hidden_dim]);
-        dbr_r *= static_cast<T>(br_mask[row + 1 * hidden_dim]);
-        dbr_g *= static_cast<T>(br_mask[row + 2 * hidden_dim]);
-    }
-
-    atomicAdd(&dbw_out[row + 0 * hidden_dim], dbw_z);
-    atomicAdd(&dbw_out[row + 1 * hidden_dim], dbw_r);
-    atomicAdd(&dbw_out[row + 2 * hidden_dim], dbw_g);
-
-    atomicAdd(&dbr_out[row + 0 * hidden_dim], dbr_z);
-    atomicAdd(&dbr_out[row + 1 * hidden_dim], dbr_r);
-    atomicAdd(&dbr_out[row + 2 * hidden_dim], dbr_g);
 }
 
 }  // namespace kernel
@@ -437,6 +407,10 @@ void BackwardPassQuant<T>::Run(
             bw_mask,  // bw_mask 是全局的，不按时间步偏移
             br_mask); // br_mask 是全局的，不按时间步偏移
     }
+
+    // 在写入 dp/dq 的同一 stream 上归约，保证读取已完成的 masked 梯度。
+    kernel::ReduceBiasGradients<T><<<(hidden_size * 3 + 31) / 32, dim3(32, 8), 0, stream1>>>(
+        batch_size * steps, hidden_size * 3, dp, dq, dbw, dbr, bw_mask, br_mask);
 
     // Wait for pointwise operations to complete
     cudaStreamWaitEvent(stream2, event, 0);
