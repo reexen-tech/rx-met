@@ -17,7 +17,6 @@
 #include <cuda_runtime_api.h>
 
 #include "blas.h"
-#include "backward_bias.cuh"
 #include "device_assert.h"
 #include "gru.h"
 #include "inline_ops.h"
@@ -78,6 +77,13 @@ __global__ void PointwiseOperations(
     dq_out[idx + 1 * hidden_dim] = dq_r;
     dq_out[idx + 2 * hidden_dim] = dq_g;
 
+    atomicAdd(&dbw_out[row + 0 * hidden_dim], dp_z);
+    atomicAdd(&dbw_out[row + 1 * hidden_dim], dp_r);
+    atomicAdd(&dbw_out[row + 2 * hidden_dim], dp_g);
+
+    atomicAdd(&dbr_out[row + 0 * hidden_dim], dq_z);
+    atomicAdd(&dbr_out[row + 1 * hidden_dim], dq_r);
+    atomicAdd(&dbr_out[row + 2 * hidden_dim], dq_g);
 }
 
 #if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ < 700)
@@ -172,8 +178,6 @@ void BackwardPass<T>::Iterate(const T *W_t,             // [H*3,C]
     cublasGetStream(blas_handle, &save_stream);
 
     IterateInternal(R_t, h, v, dh_new, dbw, dbr, dh, dp, dq, zoneout_mask);
-    kernel::ReduceBiasGradients<T><<<(hidden_size * 3 + 31) / 32, dim3(32, 8), 0, stream1>>>(
-        batch_size, hidden_size * 3, dp, dq, dbw, dbr, nullptr, nullptr);
 
     cublasSetStream(blas_handle, stream1);
     blas<T>::gemm(blas_handle, CUBLAS_OP_N, CUBLAS_OP_N, hidden_size * 3, input_size, batch_size,
@@ -263,9 +267,6 @@ void BackwardPass<T>::Run(const int steps, const T *W_t, const T *R_t, const T *
                         dp + i * NH * 3, dq + i * NH * 3,
                         zoneout_mask ? zoneout_mask + i * NH : nullptr);
     }
-
-    kernel::ReduceBiasGradients<T><<<(hidden_size * 3 + 31) / 32, dim3(32, 8), 0, stream1>>>(
-        batch_size * steps, hidden_size * 3, dp, dq, dbw, dbr, nullptr, nullptr);
 
     // Wait for pointwise operations to complete since there's a
     // data dependency between its output (`dp`, `dq`) and the following matmuls.

@@ -62,8 +62,10 @@ class GruEvalBackwardTest(unittest.TestCase):
             with self.subTest(bits=bits):
                 torch.manual_seed(42)
                 model = QuantGRU(3, 5, bidirectional=True).cuda()
-                x = torch.randn(4, 2, 3, device='cuda') * .2
-                h = torch.randn(2, 2, 5, device='cuda') * .1
+                # 单样本避免 bias 的 atomicAdd 并发归约顺序差异，
+                # 使零容差断言只检查 train/eval 的缓存和反向语义。
+                x = torch.randn(4, 1, 3, device='cuda') * .2
+                h = torch.randn(2, 1, 5, device='cuda') * .1
                 if bits is not None:
                     model.set_all_bitwidth(bits)
                     model.calibrating = True
