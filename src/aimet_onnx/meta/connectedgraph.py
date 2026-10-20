@@ -277,6 +277,13 @@ class ConnectedGraph(AimetCommonConnectedGraph):
             if weight_tensor:
                 set_as_param(weight_tensor, my_op, "weight")
 
+        def create_matmul_bias_params(my_op: Op):
+            bias_index = _get_matmul_add_bias_idx(my_op, self.model)
+            if bias_index is not None:
+                bias_tensor = ParamUtils.get_param(self.model, my_op.get_module(), bias_index)
+                if bias_tensor is not None:
+                    set_as_param(bias_tensor, my_op, "bias")
+
         def create_recurrent_type_params(my_op: Op):
             """
             Create products for RNN, LSTM and GRU layer
@@ -334,6 +341,7 @@ class ConnectedGraph(AimetCommonConnectedGraph):
             "LayerNormalization": create_weight_bias_params,
             "GroupNormalization": create_weight_bias_params,
             "MatMul": create_matmul_params,
+            "Add": create_matmul_bias_params,
         }
 
         for op in self._ops.values():

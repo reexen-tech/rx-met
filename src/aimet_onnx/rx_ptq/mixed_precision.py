@@ -79,24 +79,24 @@ def map_json2_types_to_onnx(
 
 
 def _quantizers_for_op(sim: Any, op: Any) -> Tuple[List[Any], List[Any], Dict[str, Any]]:
-    inputs = []
-    for product in getattr(op, "inputs", []) or []:
-        quantizer = sim.qc_quantize_op_dict.get(getattr(product, "name", None))
-        if quantizer is not None:
-            inputs.append(quantizer)
-    outputs = []
-    for product in getattr(op, "outputs", []) or []:
-        quantizer = sim.qc_quantize_op_dict.get(getattr(product, "name", None))
-        if quantizer is not None:
-            outputs.append(quantizer)
     params: Dict[str, Any] = {}
+    parameter_names = set(getattr(op, "parameters", {}))
     getter = getattr(sim, "_get_weight_and_bias", None)
     if getter is not None:
         weight, bias = getter(op)
         if weight is not None:
+            parameter_names.add(weight.name)
             params["weight"] = sim.qc_quantize_op_dict.get(weight.name)
         if bias is not None:
+            parameter_names.add(bias.name)
             params["bias"] = sim.qc_quantize_op_dict.get(bias.name)
+    # Keep empty activation slots so input_bitwidths retains its input indices.
+    inputs = [
+        sim.qc_quantize_op_dict.get(product.name)
+        for product in op.inputs
+        if not product.is_parm and product.name not in parameter_names
+    ]
+    outputs = [sim.qc_quantize_op_dict.get(product.name) for product in op.outputs]
     return inputs, outputs, params
 
 
