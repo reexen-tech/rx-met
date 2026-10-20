@@ -132,6 +132,10 @@ QuantGRU 使用独立的 `GRU_config` 配置路径。`apply_mixed_precision_bitw
 `operator_config` 可以配置输入、输出、权重、偏置、线性计算结果以及三个门的输入和
 输出。完整键集合以 `examples/config/quick_start_full_quant.json` 为准。
 
+GRU 和 LSTM 的所有内部量化点默认均为对称量化。新建实例的 JSON 省略整个量化点
+或该点的 `is_symmetric` 时，使用 `true`；激活量化点显式设置 `false` 时仍按非对称
+配置执行。对称性与 signedness 独立，sigmoid 门输出保持默认无符号量化。
+
 `quantization_granularity` 支持 `PER_TENSOR`、`PER_GATE` 和 `PER_CHANNEL`。
 `is_unsigned` 适用于值域非负的量化点，例如 sigmoid 门输出。已校准或已加载量化参数
 的 QuantGRU 会跳过位宽配置加载，因此配置应用位于校准之前。

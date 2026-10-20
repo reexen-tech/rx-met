@@ -64,6 +64,65 @@ class NativeRecurrentStateTest(unittest.TestCase):
             params = [key for key in encodings.get('param_encodings', {}) if key.startswith(name + '.')]
             self.assertEqual(bool(params), enabled)
 
+    def test_default_and_sparse_configs_export_symmetric_grids(self):
+        cases = {
+            'constructor': None,
+            'empty': {},
+            'empty_sections': {'GRU_config': {}, 'LSTM_config': {}},
+            'sparse': {
+                'GRU_config': {'operator_config': {'input': {'bitwidth': 16}}},
+                'LSTM_config': {'quant_config': {
+                    'schema_version': 1, 'operators': {'input': {'bitwidth': 16}}}},
+            },
+        }
+        for cls in (QuantGRU, QuantLSTM):
+            for bidirectional in (False, True):
+                for case, config in cases.items():
+                    with self.subTest(operator=cls.__name__, bidirectional=bidirectional, case=case):
+                        module = cls(4, 3, batch_first=True, bidirectional=bidirectional).cuda()
+                        if config is not None:
+                            path = self.directory / 'defaults.json'
+                            path.write_text(json.dumps(config))
+                            module.load_bitwidth_config(str(path))
+                        with torch.no_grad(), module.calibration_context():
+                            module(self.x + 2)
+                        document = module.export_quant_params_to_aimet_format({}, module_name='rnn')
+                        layer = document['activation_encodings']['rnn']
+                        records = layer['input'] + layer['output']
+                        self.assertEqual(layer['input'][0]['bitwidth'], 16 if case == 'sparse' else 8)
+                        for direction in ('internal_ops', 'internal_ops_reverse'):
+                            for name, operation in layer.get(direction, {}).items():
+                                records.extend(operation['output'])
+                                if name in ('update_gate_output', 'reset_gate_output',
+                                            'input_gate_output', 'forget_gate_output', 'output_gate_output'):
+                                    self.assertEqual(operation['output'][0]['dtype'], 'UINT8')
+                        records.extend(document['param_encodings'].values())
+                        for record in records:
+                            self.assertEqual(record['is_symmetric'], 'True')
+                            zero_points = record['zero_point']
+                            if not isinstance(zero_points, list):
+                                zero_points = [zero_points]
+                            self.assertTrue(zero_points)
+                            self.assertTrue(all(value == 0 for value in zero_points))
+
+    def test_explicit_asymmetric_config_is_preserved(self):
+        path = self.directory / 'asymmetric.json'
+        path.write_text(json.dumps({
+            'GRU_config': {'operator_config': {'input': {'is_symmetric': False}}},
+            'LSTM_config': {'quant_config': {
+                'schema_version': 1, 'operators': {'input': {'is_symmetric': False}}}},
+        }))
+        for cls in (QuantGRU, QuantLSTM):
+            with self.subTest(operator=cls.__name__):
+                module = cls(4, 3, batch_first=True).cuda()
+                module.load_bitwidth_config(str(path))
+                with torch.no_grad(), module.calibration_context():
+                    module(self.x + 2)
+                document = module.export_quant_params_to_aimet_format({}, module_name='rnn')
+                layer = document['activation_encodings']['rnn']
+                self.assertEqual(layer['input'][0]['is_symmetric'], 'False')
+                self.assertEqual(layer['output'][0]['is_symmetric'], 'True')
+
     def test_disabled_stage_roundtrip_and_onnx(self):
         for flags in ({'gru': False, 'lstm': False}, {'gru': True, 'lstm': False},
                       {'gru': False, 'lstm': True}):

@@ -65,6 +65,8 @@
 - 省略整个算子条目时，实例保留该算子的当前配置。
 - 算子条目存在时，加载器按上表补齐省略的属性。
 - 新建实例的初始配置来自 C++ `OperatorQuantConfig`，具体值见下一节。
+- 所有量化点初始均为对称量化；新建实例省略算子条目或 `is_symmetric` 时均使用 `true`。
+  激活量化点仍可显式设置 `is_symmetric=false`。
 - 同目录完整 JSON 显式设置各算子的 `is_symmetric=true`，两个 sigmoid 门输出设置
   `is_unsigned=true`。
 
@@ -77,18 +79,18 @@
 
 | JSON 算子名称 | 用途 | `is_symmetric` | `is_unsigned` |
 | --- | --- | --- | --- |
-| `input` | 当前输入序列 | `false` | `false` |
-| `output` | 每个时间步的隐藏状态 | `false` | `false` |
+| `input` | 当前输入序列 | `true` | `false` |
+| `output` | 每个时间步的隐藏状态 | `true` | `false` |
 | `weight_ih`、`weight_hh` | 输入权重、循环权重 | `true` | `false` |
 | `bias_ih`、`bias_hh` | 输入偏置、循环偏置 | `true` | `false` |
-| `weight_ih_linear`、`weight_hh_linear` | 两路矩阵乘与偏置相加结果 | `false` | `false` |
-| `update_gate_input`、`reset_gate_input` | sigmoid 输入 | `false` | `false` |
-| `update_gate_output`、`reset_gate_output` | sigmoid 输出 | `false` | `true` |
-| `new_gate_input` | tanh 输入 | `false` | `false` |
+| `weight_ih_linear`、`weight_hh_linear` | 两路矩阵乘与偏置相加结果 | `true` | `false` |
+| `update_gate_input`、`reset_gate_input` | sigmoid 输入 | `true` | `false` |
+| `update_gate_output`、`reset_gate_output` | sigmoid 输出 | `true` | `true` |
+| `new_gate_input` | tanh 输入 | `true` | `false` |
 | `new_gate_output` | tanh 输出 | `true` | `false` |
-| `mul_reset_hidden` | 重置门与隐藏线性结果的乘积 | `false` | `false` |
-| `mul_old_contribution` | 更新门与旧隐藏状态的乘积 | `false` | `false` |
-| `mul_new_contribution` | 候选状态对新隐藏状态的贡献 | `false` | `false` |
+| `mul_reset_hidden` | 重置门与隐藏线性结果的乘积 | `true` | `false` |
+| `mul_old_contribution` | 更新门与旧隐藏状态的乘积 | `true` | `false` |
+| `mul_new_contribution` | 候选状态对新隐藏状态的贡献 | `true` | `false` |
 
 三个 `mul_*` 条目仍用于配置、校准与参数表示。执行内核将这些乘积直接对齐到目标
 量化空间，计算关系见[量化计算流程](../../docs/GRU量化计算流程.md)。

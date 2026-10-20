@@ -34,6 +34,10 @@ KWS 的 GRU 和 LSTM 模式共用两份 JSON。先在 `QuantizationSimModel` 中
 GRU 示例的各量化点和说明已列在完整 JSON 的 `GRU_config` 中。
 LSTM 使用独立的原生配置格式，不能只把 GRU 配置节改名后复用。
 
+两种算子的所有量化点默认均为对称量化，新建实例省略算子条目或 `is_symmetric`
+不会启用非对称量化；激活量化点仍可显式配置 `is_symmetric=false`。
+sigmoid 门输出的默认无符号设置与对称性独立。
+
 ## LSTM 配置示例
 
 以下配置节放在完整 JSON 顶层，与 `layer_type_config`、`GRU_config` 同级：
