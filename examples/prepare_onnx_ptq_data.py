@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Prepare MobileNetV2 PTQ feeds from the ImageNette parquet mirror.
 
-The HF parquet is a single unlabeled mix of official train+val (13394 images).
+The HF parquet mixes official train+val without split markers (13394 images).
 This script does not train. It:
 
   1. validates the ONNX model and parquet
@@ -46,6 +46,8 @@ IMAGENET_STD = np.array([0.229, 0.224, 0.225], dtype=np.float32).reshape(3, 1, 1
 RESIZE_MIN = 256
 CROP = 224
 DEFAULT_OUTPUT_ROOT = Path("output") / "onnx_ptq_quick_start"
+# Canonical ImageNette class order, mapped to the full ImageNet-1k output space.
+IMAGENETTE_TO_IMAGENET = (0, 217, 482, 491, 497, 566, 569, 571, 574, 701)
 
 
 def _load_parquet_images(parquet_path: Path) -> tuple[object, list[int]]:
@@ -267,6 +269,8 @@ def main(argv=None) -> None:
     _check_output_paths(args.onnx, onnx_out, data_dir)
     model, input_name = _prepare_onnx_model(args.onnx)
     image_bytes, labels = _load_parquet_images(args.parquet)
+    if any(label < 0 or label >= len(IMAGENETTE_TO_IMAGENET) for label in labels):
+        raise SystemExit("ImageNette 的 label 必须在 0..9 范围内")
     calib_idx, val_idx = _stratified_split(
         labels, args.calib_count, args.val_count, args.seed
     )
@@ -310,6 +314,9 @@ def main(argv=None) -> None:
         "val_indices": val_idx,
         "calib_files": calib_files,
         "val_files": val_files,
+        "val_labels": [IMAGENETTE_TO_IMAGENET[labels[index]] for index in val_idx],
+        "validation_label_space": "imagenet-1k",
+        "imagenette_to_imagenet": list(IMAGENETTE_TO_IMAGENET),
         "note": "parquet 无官方 train/val 标记；本脚本按 label 分层抽样，calib 与 val 不重叠。",
     }
     manifest_path = data_dir / "manifest.json"

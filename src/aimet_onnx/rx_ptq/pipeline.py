@@ -13,8 +13,10 @@ import numpy as np
 import onnx
 
 from aimet_common.compiler_encodings import normalize_compiler_encodings
+from aimet_common.evaluation import classification_accuracy, compare_outputs
 from .calibration import inspect_model_input_dtypes, inspect_model_inputs, iter_calibration_feeds
 from .compiler_encodings import CompilerEncodingConverter
+from .evaluation import evaluate_onnx_dataset, load_onnx_validation_inputs
 from .mixed_precision import apply_onnx_mixed_precision_bitwidth
 from .po2 import apply_power_of_2_workflow, disable_onnx_bias_quantizers
 from .validation import validate_quantizer_state
@@ -73,35 +75,6 @@ def force_model_io_quantizers(sim: Any, model: onnx.ModelProto) -> None:
             session_options=sim._ort_session_options,
             path=sim._path,
         )
-
-
-def compare_outputs(
-    reference: Sequence[np.ndarray], actual: Sequence[np.ndarray]
-) -> List[Dict[str, Any]]:
-    if len(reference) != len(actual):
-        raise RuntimeError(
-            f"输出数量不一致: reference={len(reference)}, actual={len(actual)}"
-        )
-    report: List[Dict[str, Any]] = []
-    for index, (ref, value) in enumerate(zip(reference, actual)):
-        if ref.shape != value.shape:
-            raise RuntimeError(
-                f"输出 {index} shape 不一致: {ref.shape} vs {value.shape}"
-            )
-        if not np.all(np.isfinite(ref)) or not np.all(np.isfinite(value)):
-            raise ValueError(f"输出 {index} 含 NaN 或 Inf")
-        diff = np.asarray(value, dtype=np.float64) - np.asarray(ref, dtype=np.float64)
-        report.append(
-            {
-                "index": index,
-                "shape": list(ref.shape),
-                "max_abs": float(np.max(np.abs(diff))),
-                "mean_abs": float(np.mean(np.abs(diff))),
-                "rmse": float(np.sqrt(np.mean(np.square(diff)))),
-                "reference_max_abs": float(np.max(np.abs(ref))),
-            }
-        )
-    return report
 
 
 def load_onnx_ptq_inputs(
@@ -232,10 +205,15 @@ def verify_onnx_ptq_artifacts(
     providers: Sequence[str] = ("CPUExecutionProvider",),
     atol: float = 1e-5,
     rtol: float = 1e-4,
+    validation_feeds: Sequence[Dict[str, np.ndarray]] | None = None,
+    expected_validation_outputs: Sequence[Sequence[np.ndarray]] | None = None,
+    validation_labels: Sequence[int] | None = None,
 ) -> List[Dict[str, Any]]:
     """Restore saved quantization, verify compiler grids, and compare outputs."""
     from aimet_onnx.quantsim import load_encodings_to_sim
 
+    if (validation_feeds is None) != (expected_validation_outputs is None):
+        raise ValueError("Validation feeds and expected outputs must be supplied together")
     model = onnx.load(str(artifacts["onnx"]))
     with tempfile.TemporaryDirectory(prefix="rx-met-onnx-reload-") as work_dir:
         restored = create_onnx_ptq_sim(
@@ -264,6 +242,26 @@ def verify_onnx_ptq_artifacts(
                 raise RuntimeError(
                     f"Restored quantized output {index} differs from its pre-export value: {report[index]}"
                 )
+        if validation_feeds is not None:
+            restored_outputs, dataset_report = evaluate_onnx_dataset(
+                restored, validation_feeds, reference=expected_validation_outputs,
+                labels=validation_labels, providers=providers,
+            )
+            for batch_index, (expected_batch, actual_batch) in enumerate(
+                zip(expected_validation_outputs, restored_outputs)
+            ):
+                for index, (expected, actual) in enumerate(zip(expected_batch, actual_batch)):
+                    if not np.allclose(actual, expected, atol=atol, rtol=rtol):
+                        raise RuntimeError(f"Restored quantized output {index} differs in batch {batch_index}")
+            report = dataset_report["comparison"]
+            if validation_labels is not None:
+                expected_accuracy = classification_accuracy(expected_validation_outputs, validation_labels)
+                correct_gap = abs(dataset_report["correct_count"] - expected_accuracy["correct_count"])
+                if correct_gap * 200 >= expected_accuracy["sample_count"]:
+                    raise RuntimeError("Restored classification accuracy differs by at least 0.5 percentage points")
+                report[0].update({key: dataset_report[key]
+                                  for key in ("sample_count", "correct_count", "top1_accuracy")})
+                report[0]["reference_top1_accuracy"] = expected_accuracy["top1_accuracy"]
     return report
 
 
@@ -313,6 +311,8 @@ def run_onnx_ptq(
     bias_bitwidth: int = 32,
     providers: Sequence[str] = ("CPUExecutionProvider",),
     calibration_limit: int | None = None,
+    validation_dir: str | Path | None = None,
+    validation_labels: Sequence[int] | None = None,
 ) -> Dict[str, Path]:
     """Run PTQ and emit clean ONNX plus compiler-native encodings."""
     model_path = Path(model_path).resolve()
@@ -321,6 +321,14 @@ def run_onnx_ptq(
 
     original_model, input_shapes, feeds = load_onnx_ptq_inputs(
         model_path, calibration_dir, calibration_limit
+    )
+    evaluation_feeds = feeds
+    if validation_dir is not None:
+        evaluation_feeds, validation_labels = load_onnx_validation_inputs(
+            original_model, validation_dir, labels=validation_labels
+        )
+    reference_batches, fp32_evaluation = evaluate_onnx_dataset(
+        model_path, evaluation_feeds, labels=validation_labels, providers=providers
     )
     if config_file is None:
         config_file = str(DEFAULT_QUANTSIM_CONFIG)
@@ -345,6 +353,9 @@ def run_onnx_ptq(
     if align_bias_scale:
         disable_onnx_bias_quantizers(sim)
     sim.compute_encodings(feeds)
+    _, ptq_evaluation = evaluate_onnx_dataset(
+        sim, evaluation_feeds, reference=reference_batches, labels=validation_labels, providers=providers
+    )
     po2_report = apply_power_of_2_workflow(
         sim,
         method=po2_method,
@@ -353,21 +364,25 @@ def run_onnx_ptq(
         verbose=False,
         bias_bitwidth=bias_bitwidth,
     )
-    reference_outputs = run_onnx_feed(model_path, feeds[0], providers)
-    quantized_outputs = run_onnx_feed(sim, feeds[0], providers)
-    sim_report = compare_outputs(reference_outputs, quantized_outputs)
+    quantized_batches, po2_evaluation = evaluate_onnx_dataset(
+        sim, evaluation_feeds, reference=reference_batches, labels=validation_labels, providers=providers
+    )
+    sim_report = po2_evaluation["comparison"]
     artifacts = export_onnx_json(
         sim, original_model, output_dir, filename_prefix
     )
-    clean_report = evaluate_onnx_outputs(
-        artifacts["onnx"], feeds[0], reference_outputs, providers
+    _, clean_evaluation = evaluate_onnx_dataset(
+        artifacts["onnx"], evaluation_feeds, reference=reference_batches, providers=providers
     )
+    clean_report = clean_evaluation["comparison"]
     if any(item["max_abs"] > 0 for item in clean_report):
         raise RuntimeError("Exported clean ONNX differs from the original floating-point model")
     reload_report = verify_onnx_ptq_artifacts(
-        artifacts, feeds[0], quantized_outputs, config_file=config_file,
+        artifacts, evaluation_feeds[0], quantized_batches[0], config_file=config_file,
         param_type=param_type, activation_type=activation_type, quant_scheme=quant_scheme,
         percentile_value=percentile_value, providers=providers,
+        validation_feeds=evaluation_feeds, expected_validation_outputs=quantized_batches,
+        validation_labels=validation_labels,
     )
     metadata_path = write_onnx_ptq_metadata(
         output_dir,
@@ -378,6 +393,9 @@ def run_onnx_ptq(
             "input_shapes": input_shapes,
             "calibration_dir": str(Path(calibration_dir).resolve()),
             "calibration_count": len(feeds),
+            "evaluation_source": "validation" if validation_dir is not None else "calibration",
+            "validation_dir": str(Path(validation_dir).resolve()) if validation_dir is not None else None,
+            "evaluation": {"fp32": fp32_evaluation, "ptq": ptq_evaluation, "po2": po2_evaluation},
             "config_file": str(config_file),
             "bitwidth_config_file": str(bitwidth_config_file) if bitwidth_config_file else None,
             "param_type": param_type,

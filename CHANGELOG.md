@@ -16,6 +16,7 @@
 
 ### Fixed
 
+- ONNX PTQ 在完整验证集上报告 FP32、PTQ、Po2 和恢复后的 Top-1 及累计误差，复用推理 session；准备脚本保存 ImageNette 到 ImageNet-1k 的验证标签，恢复验证逐样本检查输出和分类精度。
 - Torch/ONNX 共用 JSON2 默认位宽转换，使 `default_bitwidth.weight/output` 在 Torch 中实际生效；默认激活位宽同时用于已有输入、输出量化器，并保留显式禁用的输入槽及具体层配置的优先级。
 - ONNX 校准按模型声明保留或转换输入 dtype，支持 INT64 索引、BOOL mask 和 FLOAT16 数据；拒绝浮点索引截断、整数范围溢出及非有限输入，并保持标量输入形状。
 - 混合精度 JSON2 共用字段校验和匹配规则；ONNX 在写入前检测共享量化器的位宽、对称性和启用状态冲突，默认值作为回退，避免按遍历顺序覆盖显式配置。

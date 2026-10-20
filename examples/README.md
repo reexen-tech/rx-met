@@ -58,7 +58,7 @@ curl -fL --retry 3 \
 
 ### 3. 预处理并量化（容器内，同一目录）
 
-先执行此演示专用的预处理：
+先执行此演示专用的预处理，生成校准、验证数据及标签：
 
 ```bash
 python3 examples/prepare_onnx_ptq_data.py \
@@ -73,4 +73,5 @@ python3 examples/quick_start_onnx_ptq.py
 ```
 
 结果保存到 `./output/onnx_ptq_quick_start/`，包含 ONNX、encodings 和 metadata。
+日志报告 FP32、PTQ、Po2 和恢复后的验证集 Top-1 精度。
 日志输出“量化流程完成”表示运行成功。

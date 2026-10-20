@@ -4,8 +4,8 @@
 
 核对入口：`examples/quick_start_kws.py` 与 `examples/quick_start_onnx_ptq.py`。
 前者已有较多使用验证，但不将旧实现的所有行为直接视为正确规范。
-第一轮修复第 1 至 4 项，本轮修复第 5 至 8 项，均已完成回归验证。
-第 9 项的完整验证集评估和第 10 项保留为后续工作。
+原始第 1 至 10 项均已修复并完成回归验证。
+完整评估另行暴露 MobileNetV2 的 Po2 精度损失，记录为第 11 项，待后续分析。
 
 ## 修复进度
 
@@ -19,8 +19,9 @@
 | 6 | P2 | 相邻层共用 ONNX 张量量化器，配置冲突静默覆盖 | 已修复，冲突在写入前报错 |
 | 7 | P2 | JSON2 类型映射、字段支持和未知类型检查不完整 | 已修复，共用配置规则，回归通过 |
 | 8 | P2 | 校准输入全部强制转换成 float32 | 已修复，真实多输入模型验证通过 |
-| 9 | P2 | 只评估首个校准样本，NaN 可能被当作验证成功 | 已拒绝 NaN/Inf；完整验证集待后续处理 |
-| 10 | P2 | Torch 的 default_bitwidth 未转换成实际读取的字段 | 待后续修复 |
+| 9 | P2 | 只评估首个校准样本，NaN 可能被当作验证成功 | 已修复，完整验证集和分类精度验证通过 |
+| 10 | P2 | Torch 的 default_bitwidth 未转换成实际读取的字段 | 已修复，两框架默认位宽回归通过 |
+| 11 | P2 | 真实 MobileNetV2 在 Po2 阶段出现较大 Top-1 损失 | 新发现，待分析 |
 
 ## 1. 输入配置覆盖参数配置
 
@@ -109,16 +110,31 @@
 
 ## 9. 评估覆盖和非有限值
 
-- 入口仅使用 `feeds[0]`，未使用准备脚本产出的 200 个 val 样本，也没有任务精度指标。
-- `pipeline.compare_outputs` 不拒绝 NaN/Inf；NaN RMSE 与 0 的大小比较为 False，旧示例可能打印通过。
-- 后续方案：通用比较器检查有限值与误差容差；示例按任务实现验证集精度，ImageNette 需要正确处理标签与 ImageNet 输出的映射。
-- 第 4 项恢复验证必须拒绝 NaN/Inf，因此这部分会随本轮修复提前处理；完整验证集评估仍留待后续。
+- 原入口仅使用 `feeds[0]`，未使用准备脚本产出的 200 个 val 样本，也没有任务精度指标；NaN RMSE 可能被旧判断当作通过。
+- 修复：公共 `aimet_common.evaluation` 负责有限值检查、跨 batch 的累计数值误差和分类精度。RMSE 按元素数累计平方误差，避免直接平均各 batch RMSE。
+- ONNX `evaluate_onnx_dataset` 为整个数据集复用一个 session；示例对完整 val 分别评估 FP32、PTQ、Po2 和恢复后的结果，clean ONNX 也检查全部样本。
+- 准备脚本将验证样本标签按文件名保存到 manifest。ImageNette 的 0..9 映射到完整 ImageNet-1k 输出索引 `[0,217,482,491,497,566,569,571,574,701]`，没有把 1000 类模型缩成 10 类后报告精度。
+- 验证标签依文件名对齐，检查缺失、重复或多余文件。旧 manifest 缺少标签时明确要求重跑准备脚本，两步示例流程保持不变。
+- `verify_onnx_ptq_artifacts` 保留原来的单样本调用形式，并支持整个验证集逐样本恢复检查；分类正确数差异达到 0.5 个百分点时失败，使用整数计数避免阈值浮点误差。
+- 通用 `run_onnx_ptq` 新增可选 validation_dir/validation_labels。用户没有独立验证集时检查全部校准数据，并在 metadata 中明确记录 evaluation_source=calibration；自定义数据没有标签时仍可检查数值误差，不虚构任务精度。
+- 示例默认读取 calib 同级的 val，也支持 `RX_MET_ONNX_PTQ_VAL`；不执行模型专属预处理。
+- 验证覆盖后续样本的 NaN、恢复输出变化、不同 batch 大小的加权误差、session 复用、标签顺序和单独验证集的全部样本计数。
 
 ## 10. Torch 默认位宽不生效
 
 - 位置：`aimet_torch/utils_rx.py`，默认分支直接使用 `default_bitwidth`，后续读取的却是 `weight_bitwidth/output_bitwidth`。
 - 复现：初始 8-bit，JSON 仅指定 `default_bitwidth={weight:16,output:16}`；Torch 仍为 8，ONNX 为 16。
-- 后续方案：共用默认字段规范化，不能把现有 Torch 缺陷作为期望行为复制到 ONNX。
+- 修复：两框架共用 `aimet_common.mixed_precision.default_layer_config`，将 weight/output 转成实际读取的 weight_bitwidth/input_bitwidth/output_bitwidth；output 同时作为已有激活输入、输出的默认位宽。
+- 保留精确名称、类型、通配符的既有优先级；默认值不会重新创建用户明确禁用的 Torch 输入槽。
+- 验证：初始 8-bit 时同时指定 16-bit、仅指定权重、仅指定激活，以及禁用输入的行为均通过真实 Torch/ONNX 小模型回归。
+
+## 11. 新发现：MobileNetV2 的 Po2 精度损失
+
+- 完整验证集评估结果：FP32 79.00%、PTQ 75.50%、Po2 51.50%、恢复后 51.50%，均为 200 个独立验证样本的完整 1000 类 Top-1。
+- Po2 比 PTQ 下降 24.00 个百分点，需要单独定位 Po2 scale 调整和算子网格对精度的影响；本轮没有调整量化策略或按验证集调参。
+- 恢复前后逐样本输出误差为 0，compiler 编码一致。与第 5 至 8 项完成时的 encodings 文件 SHA256 完全相同，表明完整评估暴露了已有精度损失。
+- 编码 SHA256：`d96775d6576468d892b6aa1aca7c76ccb80c9f71150589d653cee37a1ff39e68`。
+- 后续分析应先做逐算子 Po2 敏感性对照，再核对 scale 策略和硬件网格约束；恢复一致和覆盖率通过不代表量化精度达标。
 
 ## 接口核对结论
 
@@ -126,7 +142,7 @@
 | --- | --- |
 | JSON1 和 Percentile | 两边均设置同一份 JSON1 和 99.99；统计内核的数值等价性未验证 |
 | 混合精度 | 已共用解析、校验和匹配；类型、参数和量化器定位保留适配 |
-| 校准 | 保留各框架执行方式，共用参数和结果检查规范 |
+| 校准与评估 | 保留框架执行方式；ONNX 已检查独立验证集、任务精度和全部恢复输出 |
 | Po2 | 已共用选 scale 和整数网格计算，ONNX 无效 scale 直接拒绝 |
 | bias | 已共用安全检查，各框架适配读取真实参数及写回 |
 | QAT/冻结 BN | ONNX PTQ 不执行合理，不需要模拟 Torch 训练流程 |
@@ -170,8 +186,8 @@
 
 ### 剩余限制
 
-- 第 9 项的完整验证集评估和第 10 项继续待办；第 9 项的非有限值检查已经修复。
-- 未重新训练完整 KWS，也未新增 MobileNetV2 的任务精度基准；Torch 相关回归已通过。
+- 原始第 1 至 10 项已完成；第 11 项 Po2 精度损失仍需单独分析。
+- 未重新训练完整 KWS；Torch 相关回归已通过，MobileNetV2 的独立验证集精度已记录。
 - 当前恢复使用底层支持的原生 encoding 0.6.1/1.0.0 格式，真实运行使用默认 1.0.0；2.0.0 的恢复不在本轮支持范围。
 - 前四项修复按参数配置、bias/网格校验、恢复验证分阶段提交，并补充根目录 CHANGELOG。
 - 本轮没有修改 `packaging/` 或 `rx-lm-quant`，未重新打包或安装。
@@ -184,3 +200,13 @@
 - 真实模型产物：`.release/validation/onnx-ptq-alignment/followup/`。
 - 已分阶段提交：`0b97a40` 参数配置、`f54b832` bias/网格校验、`9b87454` 恢复验证、`2aea946` Po2 整数网格、`14747fc` JSON2 规则和冲突处理；最后一组提交输入 dtype、回归测试和本文更新。
 - 所有修复均补充根目录 `CHANGELOG.md`。未推送，未重新打包或安装。
+
+## 第 9、10 项验证记录
+
+- 129 项 unittest 全部通过，包括新增 `tests/test_ptq_evaluation.py` 和准备脚本、前序量化及 KWS 回归。
+- 日志：`.release/validation/onnx-ptq-final/tests.log`。
+- 从原始 ONNX/parquet 重新准备 200 个 calib 和 200 个 val，保留不重叠的分层抽样及正确 ImageNet-1k 标签。
+- 完整示例运行结果：FP32 79.00%、PTQ 75.50%、Po2/恢复后 51.50%；覆盖率 276/276，全部整数 scale 为 Po2，clean ONNX 和量化恢复均在全部 200 个验证样本上误差为 0。
+- 产物与 metadata：`.release/validation/onnx-ptq-final/`。原始输入和用户原有预处理目录均未覆盖。
+- 默认位宽修复提交：`852b1e1`；完整验证集评估单独提交，均补充 CHANGELOG。
+- 未修改 `packaging/`、未推送、未重新打包或安装。

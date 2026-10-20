@@ -82,6 +82,9 @@ class PrepareOnnxPtqDataTest(unittest.TestCase):
         self.assertEqual(manifest['input_name'], 'image')
         self.assertEqual(manifest['input_shape'], [1, 3, 224, 224])
         self.assertFalse(set(manifest['calib_indices']) & set(manifest['val_indices']))
+        self.assertEqual(manifest['validation_label_space'], 'imagenet-1k')
+        self.assertEqual(manifest['val_labels'],
+            [prepare.IMAGENETTE_TO_IMAGENET[index % 2] for index in manifest['val_indices']])
         for split in ('calib', 'val'):
             files = sorted((data / split).glob('*.npy'))
             self.assertEqual(len(files), 2)
