@@ -27,6 +27,8 @@
 > 或指定镜像文件 `--runtime-image /path/to/runtime.tar.gz`。
 
 默认安装位置为 `$HOME/.local/share/rx-met/@BUNDLE_NAME@`。
+同版本重新安装或修复损坏的安装时，执行 `./install.sh --replace`：新安装自检通过后
+替换同名目录，替换失败时恢复原安装；其他版本和用户工作目录保留。
 
 ## 步骤 2：准备数据和工作目录
 
