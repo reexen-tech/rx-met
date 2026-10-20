@@ -1,9 +1,4 @@
-"""ONNX 输入 PTQ 主线要复用的 RX 量化原文。
-
-只收这条主线用到的、且不依赖 Torch / ONNX quantizer API 的原函数：
-选 Po2 scale、改 scale 后重算 min/max、以及 ``Sb = Sx * Sw`` 的范围。
-不要把 QuantGRU、QAT freeze、导出后处理等其它路径塞进来。
-"""
+"""Shared RX Po2 arithmetic and bias-grid validation, independent of frontends."""
 
 import math
 from typing import Optional, Tuple, Union
@@ -196,14 +191,45 @@ def compute_aligned_bias_range(
     原文来自 ``aimet_torch.utils_rx._align_conv_bias_scale`` 步骤 2-3：
     ``Sb = Sx * Sw``，再按对称整数域算新的浮点范围。
     """
+    Qmin, Qmax = validate_bias_bitwidth(bias_bitwidth)
+    if not all(math.isfinite(value) and value > 0 for value in (input_scale, weight_scale)):
+        raise ValueError("bias input/weight scales must be finite and positive")
     # ===== 步骤 2: 计算新的 bias scale =====
     Sb_new = float(input_scale) * float(weight_scale)
+    if not math.isfinite(Sb_new) or Sb_new <= 0:
+        raise ValueError("bias accumulator scale must be finite and positive")
 
     # ===== 步骤 3: 计算新的浮点表示范围 =====
     # 计算量化整数范围（对称量化）
-    Qmax = 2 ** (bias_bitwidth - 1) - 1
-    Qmin = -2 ** (bias_bitwidth - 1)
-
     fmin_new = Qmin * Sb_new
     fmax_new = Qmax * Sb_new
+    if not math.isfinite(fmin_new) or not math.isfinite(fmax_new):
+        raise ValueError("bias accumulator range must be finite")
     return Sb_new, Qmin, Qmax, fmin_new, fmax_new
+
+
+def validate_bias_bitwidth(bitwidth: int) -> Tuple[int, int]:
+    """Return the supported signed bias bounds shared by both frontends."""
+    if type(bitwidth) is not int or not 2 <= bitwidth <= 32:
+        raise ValueError("bias_bitwidth must be an integer between 2 and 32")
+    return -(2 ** (bitwidth - 1)), 2 ** (bitwidth - 1) - 1
+
+
+def validate_bias_values(bias_values, scales, bitwidth: int, *, name: str = "bias") -> None:
+    """Reject bias values that cannot be represented on the accumulator grid."""
+    import numpy as np
+
+    qmin, qmax = validate_bias_bitwidth(bitwidth)
+    bias = np.asarray(bias_values, dtype=np.float64).reshape(-1)
+    scale = np.asarray(scales, dtype=np.float64).reshape(-1)
+    if not bias.size or scale.size not in (1, bias.size):
+        raise ValueError(f"{name}: bias alignment requires scalar or output-channel scales")
+    if not np.all(np.isfinite(scale) & (scale > 0)):
+        raise ValueError(f"{name}: bias accumulator scale must be finite and positive")
+    with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
+        codes = np.rint(bias / scale)
+    if not np.all(np.isfinite(codes) & (codes >= qmin) & (codes <= qmax)):
+        raise ValueError(
+            f"{name}: bias is not representable at Sx*Sw with signed {bitwidth}-bit range; "
+            "use a supported wider bias width or revise the input/weight grid"
+        )

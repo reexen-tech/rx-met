@@ -1252,9 +1252,9 @@ def _align_conv_bias_scale(model, verbose: bool = True, bias_bitwidth: int = 32)
     import torch
     import torch.nn as nn
     from aimet_torch.v2.nn import QuantizationMixin
+    from aimet_common.power_of_2 import validate_bias_bitwidth, validate_bias_values
 
-    if type(bias_bitwidth) is not int or not 2 <= bias_bitwidth <= 32:
-        raise ValueError("bias_bitwidth must be an integer between 2 and 32")
+    validate_bias_bitwidth(bias_bitwidth)
     stats = {'total_conv': 0, 'modified_conv': 0, 'skipped': [], 'scale_changes': []}
     conv_types = (nn.Conv1d, nn.Conv2d, nn.Conv3d, nn.ConvTranspose1d,
                   nn.ConvTranspose2d, nn.ConvTranspose3d, nn.Linear)
@@ -1278,15 +1278,8 @@ def _align_conv_bias_scale(model, verbose: bool = True, bias_bitwidth: int = 32)
         if sx.numel() != 1 or sw.numel() not in (1, module.bias.numel()):
             raise ValueError(f"{name}: bias alignment requires scalar input and output-channel weight scales")
         target = (sx.reshape(()) * sw.reshape(-1)).to(module.bias.device)
-        if not torch.all(torch.isfinite(target) & (target > 0)):
-            raise ValueError(f"{name}: bias accumulator scale must be finite and positive")
-        codes = torch.round(module.bias.detach().double().reshape(-1) / target.double())
-        qmin, qmax = -(2 ** (bias_bitwidth - 1)), 2 ** (bias_bitwidth - 1) - 1
-        if not torch.all(torch.isfinite(codes) & (codes >= qmin) & (codes <= qmax)):
-            raise ValueError(
-                f"{name}: bias is not representable at Sx*Sw with signed {bias_bitwidth}-bit range; "
-                "use a supported wider bias width or revise the input/weight grid"
-            )
+        validate_bias_values(module.bias.detach().double().cpu().numpy(),
+                             target.double().cpu().numpy(), bias_bitwidth, name=name)
 
         aligned = copy.deepcopy(bias_q)
         aligned.bitwidth = bias_bitwidth

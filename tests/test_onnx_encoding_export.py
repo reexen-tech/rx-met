@@ -12,6 +12,7 @@ import numpy as np
 import onnx
 
 from aimet_common.compiler_encodings import normalize_compiler_encodings, validate_compiler_encodings
+from aimet_common.defs import QuantizationDataType
 from aimet_onnx.rx_ptq.compiler_encodings import CompilerEncodingConverter
 from aimet_onnx.rx_ptq import pipeline
 
@@ -36,6 +37,9 @@ class OnnxGridAdapterTest(unittest.TestCase):
     def convert(self, entries, *, symmetric=True, unsigned=False, strict=False):
         quantizer = SimpleNamespace(enabled=True, use_symmetric_encodings=symmetric,
                                     use_unsigned_symmetric=unsigned, use_strict_symmetric=strict,
+                                    data_type=QuantizationDataType.int,
+                                    get_encodings=lambda: [SimpleNamespace(delta=e['scale'], min=e['min'],
+                                        max=e['max'], offset=e['offset']) for e in entries],
                                     export_encodings=lambda version: entries)
         sim = SimpleNamespace(qc_quantize_op_dict={'w': quantizer}, quant_args={})
         payload, coverage = CompilerEncodingConverter(sim, graph()).convert()

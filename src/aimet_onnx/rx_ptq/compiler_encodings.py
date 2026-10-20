@@ -11,6 +11,7 @@ import onnx
 
 from aimet_common.compiler_encodings import compact_encoding_records, normalize_compiler_encodings
 from aimet_common.quantsim_config.compute_ops import is_grid_preserving_op
+from .validation import validate_quantizer_state
 
 
 @dataclass(frozen=True)
@@ -155,6 +156,7 @@ class CompilerEncodingConverter:
                     changed = True
 
     def convert(self) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+        validate_quantizer_state(self.sim)
         tensor_encodings: Dict[str, Dict[str, Any]] = {}
         enabled_activations: List[str] = []
         for name, quantizer in self.sim.qc_quantize_op_dict.items():
@@ -194,6 +196,7 @@ class CompilerEncodingConverter:
         }
         report = {
             "enabled_quantizers": len(self.mapped),
+            "enabled_quantizer_names": sorted(self.mapped),
             "mapped_quantizers": len(self.mapped),
             "unmapped_quantizers": sorted(self.unmapped),
             "propagated_tensors": self.propagated,
