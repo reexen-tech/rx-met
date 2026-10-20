@@ -16,6 +16,7 @@
 
 ### Fixed
 
+- Torch/ONNX Po2 共用整数 offset 与范围计算，修复非对称编码的 min/max 不一致；保留零点可表示性，并修正 strict symmetric 编码的整数域和原生重载范围。
 - ONNX PTQ 示例和通用入口重建 QuantSim、恢复并冻结原生 encodings，检查保存前后的量化输出及 compiler encodings；拒绝缺失或篡改的编码、非有限输出和不一致的 clean ONNX。
 - Torch/ONNX 导出共用 compiler encodings 规范化，保留 `export_onnx_json` 兼容接口，并正确转换 ONNX TfEncoding 的 additive offset，避免对称参数导出非零 zero point。
 - Torch/ONNX 共用 bias 位宽和可表示性检查；ONNX 仅恢复校准期间临时关闭的 bias，统一写回有符号对称网格，并在全部候选检查通过后更新。

@@ -3,6 +3,8 @@
 import math
 from typing import Optional, Tuple, Union
 
+import numpy as np
+
 
 def is_power_of_2(value: float, relative_tolerance: float = 0.02) -> bool:
     """
@@ -139,47 +141,17 @@ def recompute_min_max_for_new_scale(
     offset: Optional[float],
     symmetric: bool,
 ) -> Tuple[Optional[float], float, float, float, float]:
-    """
-    原文来自 ``aimet_torch.power_of_2_quantization.modify_quantizer_to_power_of_2``
-    标量分支：保持 Qmin, Qmax 不变，按新 scale 重算 rmin / rmax / offset。
-    """
-    # ！！！新策略：保持 Qmin, Qmax 不变，修改 rmin, rmax！！！
-    # 1. 修改 scale 为 power-of-2
-    # 2. 保持 Qmin, Qmax 不变（量化域固定）
-    # 3. 对称量化（权重）：offset 保持不变（通常为0），重新计算 rmin, rmax
-    # 4. 非对称量化（激活）：重新计算 offset, rmin, rmax
-
+    """Return consistent integer-offset grids for scalar or NumPy-array scales."""
+    if not np.all(np.isfinite(new_scale)) or not np.all(np.asarray(new_scale) > 0):
+        raise ValueError("Scale must be finite and positive")
     if symmetric or offset is None:
-        # 对称量化：保持 qmin, qmax, offset 不变，重新计算 rmin, rmax
-        new_qmin_val = qmin  # 保持不变
-        new_qmax_val = qmax  # 保持不变
-
-        if offset is not None:
-            old_offset_val = offset
-            new_offset = offset  # 保持不变
-            # 重新计算 rmin, rmax
-            new_min_val = new_scale * (new_qmin_val + old_offset_val)
-            new_max_val = new_scale * (new_qmax_val + old_offset_val)
-        else:
-            new_offset = None
-            new_min_val = new_scale * new_qmin_val
-            new_max_val = new_scale * new_qmax_val
+        new_offset = offset
     else:
-        # 非对称量化：保持 qmin, qmax 不变，保持 rmin 不变，调整 rmax
-        new_qmin_val = qmin  # 保持不变
-        new_qmax_val = qmax  # 保持不变
-
-        # 保持 rmin 不变，重新计算 offset
-        # rmin = scale * (qmin + offset)
-        # offset = rmin / scale - qmin
-        new_offset = rmin / new_scale - qmin
-
-        # 重新计算 rmax（会变大，因为 scale 变大了）
-        # rmax = scale * (qmax + offset)
-        new_max_val = new_scale * (qmax + new_offset)
-        new_min_val = rmin  # 保持不变
-
-    return new_offset, new_min_val, new_max_val, new_qmin_val, new_qmax_val
+        new_offset = np.clip(np.rint(np.asarray(rmin) / new_scale - qmin), -qmax, -qmin)
+    effective_offset = 0 if new_offset is None else new_offset
+    new_min = new_scale * (qmin + effective_offset)
+    new_max = new_scale * (qmax + effective_offset)
+    return new_offset, new_min, new_max, qmin, qmax
 
 
 def compute_aligned_bias_range(

@@ -60,6 +60,7 @@ def align_encoding_values(
     real_max: float,
     bitwidth: int,
     symmetric: bool,
+    strict_symmetric: bool = False,
     method: str = "cover_range",
     tolerance: float = 0.02,
 ) -> Dict[str, Any]:
@@ -67,6 +68,8 @@ def align_encoding_values(
     # TfEncoding 约定 qmin=0、qmax=2^bw-1；选 scale / 重算范围都走 RX 原文。
     qmin = 0
     qmax = (1 << int(bitwidth)) - 1
+    if symmetric and strict_symmetric and offset < 0:
+        qmax -= 1
     new_scale, exponent = find_closest_power_of_2_scale(
         float(scale),
         method=method,
@@ -146,6 +149,7 @@ def _align_quantizer(
             real_max=float(encoding.max),
             bitwidth=int(encoding.bw),
             symmetric=symmetric,
+            strict_symmetric=bool(getattr(quantizer, "use_strict_symmetric", False)),
             method=method,
             tolerance=tolerance,
         )

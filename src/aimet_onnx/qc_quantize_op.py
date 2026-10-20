@@ -460,7 +460,10 @@ class QcQuantizeOp:
             enc = libpymo.TfEncoding()
             enc.bw = encoding_dict["bw"]
             enc_min = scale * offsets[idx]
-            enc_max = scale * (2 ** encoding_dict["bw"] - 1 + offsets[idx])
+            qmax = 2 ** encoding_dict["bw"] - 1
+            if is_symmetric and is_strict_symmetric and offsets[idx] < 0:
+                qmax -= 1
+            enc_max = scale * (qmax + offsets[idx])
             enc.delta, enc.max, enc.min, enc.offset = (
                 scale,
                 enc_max,

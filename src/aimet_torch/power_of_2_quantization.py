@@ -177,7 +177,7 @@ def apply_power_of_2_quantization(model, method: str = "round", tolerance: float
     2. 保持 Qmin, Qmax 不变（量化域固定）
     3. 反向调整 rmin, rmax:
        - 对称量化（权重）：围绕中心点调整 rmin 和 rmax
-       - 非对称量化（激活）：保持 rmin 不变，调整 rmax
+       - 非对称量化（激活）：将 offset 取整，重算 rmin 和 rmax
        
     效果：自动平衡"量化空间浪费"和"极端值裁剪"，选择误差最小的方案
     
@@ -252,7 +252,7 @@ def modify_quantizer_to_power_of_2(quantizer, quantizer_name: str, method: str =
     3. 保持 Qmin, Qmax 不变（量化域固定）
     4. 反向调整 rmin, rmax:
        - 对称量化（权重）：围绕中心点调整 rmin 和 rmax
-       - 非对称量化（激活）：保持 rmin 不变，调整 rmax
+       - 非对称量化（激活）：将 offset 取整，重算 rmin 和 rmax
        
     效果：
     - 如果 scale 向上调整 → rmax 变大（浪费少量量化空间）
@@ -364,83 +364,20 @@ def modify_quantizer_to_power_of_2(quantizer, quantizer_name: str, method: str =
                 print(f"  新的 scale: {new_scale_val:.8f} (1/2^{n})")
                 print(f"  Scale 调整方向: {scale_direction} ({scale_change_ratio:+.1f}%)")
         
-        # ！！！新策略：保持 Qmin, Qmax 不变，修改 rmin, rmax！！！
-        # 1. 修改 scale 为 power-of-2
-        # 2. 保持 Qmin, Qmax 不变（量化域固定）
-        # 3. 对称量化（权重）：offset 保持不变（通常为0），重新计算 rmin, rmax
-        # 4. 非对称量化（激活）：重新计算 offset, rmin, rmax
-        
-        if isinstance(new_scale, torch.Tensor):
-            # Per-channel情况
-            if symmetric or old_offset is None:
-                # 对称量化：保持 qmin, qmax, offset 不变，重新计算 rmin, rmax
-                new_qmin_val = qmin  # 保持不变
-                new_qmax_val = qmax  # 保持不变
-                new_offset = old_offset  # 保持不变（通常为0）
-                
-                # 重新计算 rmin, rmax
-                # rmin = scale * (qmin + offset)
-                # rmax = scale * (qmax + offset)
-                if new_offset is not None:
-                    new_min = new_scale * (new_qmin_val + new_offset)
-                    new_max = new_scale * (new_qmax_val + new_offset)
-                else:
-                    new_min = new_scale * new_qmin_val
-                    new_max = new_scale * new_qmax_val
-            else:
-                # 非对称量化：保持 qmin, qmax 不变，保持 rmin 不变，调整 rmax
-                new_qmin_val = qmin  # 保持不变
-                new_qmax_val = qmax  # 保持不变
-                
-                # 保持 rmin 不变，重新计算 offset
-                # rmin = scale * (qmin + offset)
-                # offset = rmin / scale - qmin
-                new_offset = old_min / new_scale - qmin
-                
-                # 重新计算 rmax（会变大，因为 scale 变大了）
-                # rmax = scale * (qmax + offset)
-                new_max = new_scale * (qmax + new_offset)
-                new_min = old_min  # 保持不变
-        else:
-            # Scalar情况
-            old_min_val = old_min.item() if hasattr(old_min, 'item') else old_min
-            old_max_val = old_max.item() if hasattr(old_max, 'item') else old_max
-            new_scale_val = new_scale.item() if hasattr(new_scale, 'item') else new_scale
-            
-            if symmetric or old_offset is None:
-                # 对称量化：保持 qmin, qmax, offset 不变，重新计算 rmin, rmax
-                new_qmin_val = qmin  # 保持不变
-                new_qmax_val = qmax  # 保持不变
-                
-                if old_offset is not None:
-                    old_offset_val = old_offset.item() if hasattr(old_offset, 'item') else old_offset
-                    new_offset = old_offset  # 保持不变
-                    # 重新计算 rmin, rmax
-                    new_min_val = new_scale_val * (new_qmin_val + old_offset_val)
-                    new_max_val = new_scale_val * (new_qmax_val + old_offset_val)
-                else:
-                    new_offset = None
-                    new_min_val = new_scale_val * new_qmin_val
-                    new_max_val = new_scale_val * new_qmax_val
-                
-                new_min = torch.tensor(new_min_val, dtype=old_scale.dtype)
-                new_max = torch.tensor(new_max_val, dtype=old_scale.dtype)
-            else:
-                # 非对称量化：保持 qmin, qmax 不变，保持 rmin 不变，调整 rmax
-                new_qmin_val = qmin  # 保持不变
-                new_qmax_val = qmax  # 保持不变
-                
-                # 保持 rmin 不变，重新计算 offset
-                # rmin = scale * (qmin + offset)
-                # offset = rmin / scale - qmin
-                new_offset_val = old_min_val / new_scale_val - qmin
-                new_offset = torch.tensor(new_offset_val, dtype=old_scale.dtype)
-                
-                # 重新计算 rmax（会变大，因为 scale 变大了）
-                # rmax = scale * (qmax + offset)
-                new_max_val = new_scale_val * (qmax + new_offset_val)
-                new_min = old_min  # 保持不变
-                new_max = torch.tensor(new_max_val, dtype=old_scale.dtype)
+        from aimet_common.power_of_2 import recompute_min_max_for_new_scale
+
+        def as_numpy(value):
+            return value.detach().cpu().numpy() if isinstance(value, torch.Tensor) else value
+
+        grid = recompute_min_max_for_new_scale(
+            as_numpy(new_scale), qmin, qmax, as_numpy(old_min), as_numpy(old_offset), symmetric
+        )
+        new_offset = None if grid[0] is None else torch.as_tensor(
+            grid[0], dtype=old_scale.dtype, device=old_scale.device
+        )
+        new_min = torch.as_tensor(grid[1], dtype=old_scale.dtype, device=old_scale.device)
+        new_max = torch.as_tensor(grid[2], dtype=old_scale.dtype, device=old_scale.device)
+        new_qmin_val, new_qmax_val = grid[3:]
         
         # 修改 scale, qmin, qmax, offset, min, max
         with torch.no_grad():
@@ -492,9 +429,9 @@ def modify_quantizer_to_power_of_2(quantizer, quantizer_name: str, method: str =
                     new_rmax = verify_max.max().item()
                     rmax_change = ((new_rmax - old_rmax) / old_rmax) * 100 if old_rmax != 0 else 0
                     if new_rmax > old_rmax:
-                        print(f"  → 非对称量化：rmin 保持不变，rmax 调大 ({rmax_change:+.1f}%，浪费部分量化空间）")
+                        print(f"  → 非对称量化：offset 取整，rmax 调大 ({rmax_change:+.1f}%，浪费部分量化空间）")
                     elif new_rmax < old_rmax:
-                        print(f"  → 非对称量化：rmin 保持不变，rmax 调小 ({rmax_change:.1f}%，裁剪极端值）")
+                        print(f"  → 非对称量化：offset 取整，rmax 调小 ({rmax_change:.1f}%，裁剪极端值）")
                     else:
                         print(f"  → 非对称量化：rmin 和 rmax 保持不变（完美匹配！）")
             else:
@@ -515,9 +452,9 @@ def modify_quantizer_to_power_of_2(quantizer, quantizer_name: str, method: str =
                     new_rmax = verify_max.item()
                     rmax_change = ((new_rmax - old_rmax) / old_rmax) * 100 if old_rmax != 0 else 0
                     if new_rmax > old_rmax:
-                        print(f"  → 非对称量化：rmin 保持不变，rmax 调大 ({rmax_change:+.1f}%，浪费部分量化空间）")
+                        print(f"  → 非对称量化：offset 取整，rmax 调大 ({rmax_change:+.1f}%，浪费部分量化空间）")
                     elif new_rmax < old_rmax:
-                        print(f"  → 非对称量化：rmin 保持不变，rmax 调小 ({rmax_change:.1f}%，裁剪极端值）")
+                        print(f"  → 非对称量化：offset 取整，rmax 调小 ({rmax_change:.1f}%，裁剪极端值）")
                     else:
                         print(f"  → 非对称量化：rmin 和 rmax 保持不变（完美匹配！）")
         
