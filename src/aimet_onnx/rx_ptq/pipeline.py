@@ -14,6 +14,7 @@ import onnx
 
 from aimet_common.compiler_encodings import normalize_compiler_encodings
 from aimet_common.evaluation import classification_accuracy, compare_outputs
+from aimet_common.onnx_shapes import save_onnx_with_shapes, validate_onnx_shapes
 from .calibration import inspect_model_input_dtypes, inspect_model_inputs, iter_calibration_feeds
 from .compiler_encodings import CompilerEncodingConverter
 from .evaluation import evaluate_onnx_dataset, load_onnx_validation_inputs
@@ -178,17 +179,18 @@ def export_onnx_json(
     sim.export(str(output_dir), filename_prefix, export_model=True)
 
     onnx_output_path = output_dir / f"{filename_prefix}.onnx"
+    shape_report = save_onnx_with_shapes(onnx_output_path)
     compiler_encodings_path = output_dir / f"{filename_prefix}.encodings"
     compiler_encodings_path.write_text(
         json.dumps(payload, indent=2, ensure_ascii=False) + "\n",
         encoding="utf-8",
     )
-    onnx.checker.check_model(str(onnx_output_path))
     return {
         "onnx": onnx_output_path,
         "encodings": compiler_encodings_path,
         "aimet_encodings": raw_encodings_path,
         "coverage": coverage,
+        "onnx_shapes": shape_report,
     }
 
 
@@ -215,6 +217,8 @@ def verify_onnx_ptq_artifacts(
     if (validation_feeds is None) != (expected_validation_outputs is None):
         raise ValueError("Validation feeds and expected outputs must be supplied together")
     model = onnx.load(str(artifacts["onnx"]))
+    validate_onnx_shapes(model)
+    onnx.checker.check_model(str(artifacts["onnx"]), full_check=True)
     with tempfile.TemporaryDirectory(prefix="rx-met-onnx-reload-") as work_dir:
         restored = create_onnx_ptq_sim(
             model, feed, config_file=config_file, param_type=param_type,
@@ -412,6 +416,7 @@ def run_onnx_ptq(
             "all_power_of_2": po2_report["all_power_of_2"],
             "not_power_of_2": po2_report["not_power_of_2"],
             "coverage": artifacts["coverage"],
+            "onnx_shapes": artifacts["onnx_shapes"],
             "sim_vs_fp32": sim_report,
             "clean_onnx_vs_fp32": clean_report,
             "restored_quantized_vs_pre_export": reload_report,

@@ -357,7 +357,7 @@ def main() -> None:
         )
         print_compare_report("恢复后的量化输出 vs 保存前", reload_report)
         print_accuracy_report("恢复验证", reload_report[0])
-        print("✅ 量化输出和 compiler encodings 恢复验证通过")
+        print("✅ ONNX 维度、量化输出和 compiler encodings 恢复验证通过")
 
     metadata_path = write_onnx_ptq_metadata(
         OUTPUT_DIR,
@@ -377,6 +377,7 @@ def main() -> None:
             "align_bias_scale": ALIGN_BIAS_SCALE,
             "bias_bitwidth": BIAS_BITWIDTH,
             "coverage": artifacts["coverage"],
+            "onnx_shapes": artifacts["onnx_shapes"],
             "ptq_vs_fp32": ptq_report,
             "po2_vs_fp32": po2_eval,
             "bias_align": po2_report["bias_align"],

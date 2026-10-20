@@ -4,7 +4,7 @@
 
 核对入口：`examples/quick_start_kws.py` 与 `examples/quick_start_onnx_ptq.py`。
 前者已有较多使用验证，但不将旧实现的所有行为直接视为正确规范。
-原始第 1 至 10 项及后续补查的第 12 项均已修复并完成回归验证。
+原始第 1 至 10 项及后续补查的第 12、13 项均已修复并完成回归验证。
 第 11 项仅保留 Po2 精度评估结果：按用户要求，精度变化本身不视为实现缺陷，不作为待修任务。
 
 ## 修复进度
@@ -23,6 +23,7 @@
 | 10 | P2 | Torch 的 default_bitwidth 未转换成实际读取的字段 | 已修复，两框架默认位宽回归通过 |
 | 11 | - | 真实 MobileNetV2 的 Po2 精度变化 | 评估记录，不作为缺陷 |
 | 12 | P1 | 显式关闭 GRU/LSTM 量化后仍被要求提供编码，导出失败 | 已修复，6 种状态组合通过 |
+| 13 | P1 | ONNX 产物未显式保存中间张量维度，编译器无法直接读取 | 已修复，104 个中间张量全部有固定维度 |
 
 ## 1. 输入配置覆盖参数配置
 
@@ -162,6 +163,21 @@
 | GRU/LSTM | Torch 原生循环算子有内部配置；ONNX 当前忽略，不代表能力等价 |
 | 导出 | `0446ccd` 已共用 compiler encoding 规范化，公开名沿用 export_onnx_json |
 | 恢复验证 | 已检查恢复量化状态后的输出一致，保留框架专属恢复实现 |
+
+## 13. ONNX 中间张量维度未保存
+
+- 原始下载、预处理输入和旧导出模型的 `graph.value_info` 均为 0；有维度的是模型输入和最终输出，量化校准通过运行时张量收集统计，并不要求文件事先保存中间维度。
+- 当前 MobileNetV2 共 105 个节点、104 个中间输出；标准 ONNX 形状推导可补出大部分信息，但末尾 Reshape_103 的输出张量 472 缺少 rank/shape。
+- 修复：`aimet_common.onnx_shapes` 先执行标准形状推导，信息不足时复用 ONNX Runtime 的符号形状推导，不猜测未知 rank，不用单个校准样本固化动态维度。
+- 只将 tensor type/shape 标注写回原图，保留计算节点、属性、连接、初始化张量和外部权重引用；覆盖标量、零长度张量、动态符号维度和控制流子图。
+- ONNX PTQ 的 `export_onnx_json` 自动补全并保存，再检查磁盘中的实际产物；`verify_onnx_ptq_artifacts` 在重建 QuantSim 前独立检查已保存维度和 ONNX 结构，不自动修复被删除的标注。
+- 缺少 dtype、rank、维度或不能推导的中间输出时导出/校验报错；动态维度可显式保留符号。`onnx_shapes` 返回并记录 tensor_count/intermediate_tensors/symbolic_dimensions。
+- 新增 `tests/test_onnx_shapes.py`，覆盖元数据之外的内容不变、形状子图/Reshape、动态维度、标量、零长度、控制流、外部权重、无法推导时拒绝，以及删除已保存标注后的产物回读失败。
+- 151 项相关回归通过，包含原 142 项和新增 9 项。日志：`.release/validation/onnx-ptq-shapes/tests.log`。
+- 真实模型结果：value_info 从 0 条补到 104 条；tensor_count=106、intermediate_tensors=104、symbolic_dimensions=0，Reshape_103 输出 `[1,1280]`。
+- 与旧导出相比，节点及其顺序、初始化张量、输入输出定义均完全一致，compiler encodings 文件也完全一致。200 个验证样本上的 clean ONNX 和量化恢复输出误差均为 0。
+- 新验证产物：`.release/validation/onnx-ptq-shapes/mobilenetv2_ptq.onnx`，配套 encodings、metadata 和 run.log 均位于同一目录；未覆盖用户现有模型。
+- 本轮只实现维度补全和产物检查，前面讨论的示例主线精简仍暂停，未修改 `packaging/` 或用户安装目录。
 
 ## 本轮验证记录
 

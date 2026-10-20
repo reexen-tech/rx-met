@@ -4,7 +4,7 @@
 `export_onnx_json` 入口名，分别位于 `aimet_onnx.rx_ptq` 和
 `aimet_torch.rx_export`，共用 `aimet_common.compiler_encodings` 中的格式和校验规则。
 PyTorch 保留原参数、默认值及两个字符串路径的元组返回值；ONNX PTQ 返回包含
-`onnx`、`encodings`、`aimet_encodings` 路径和 `coverage` 的字典。
+`onnx`、`encodings`、`aimet_encodings` 路径、`coverage` 和 `onnx_shapes` 的字典。
 旧 ONNX 入口 `export_onnx_compiler_artifacts` 保留原参数及字典返回值。
 
 ## 术语
@@ -78,11 +78,16 @@ ONNX 适配器将 `TfEncoding.offset` 转为对应整数域的加性偏移；例
 
 每次运行生成：
 
-- `<prefix>.onnx`：移除 AIMET `QcQuantizeOp` 的 clean ONNX；
+- `<prefix>.onnx`：移除 AIMET `QcQuantizeOp` 并显式保存中间张量 shape/dtype 的 clean ONNX；
 - `<prefix>.encodings`：compiler-native schema，包含 node-level `input/output`
   和 parameter encodings；
 - `<prefix>.aimet.encodings`：AIMET 原始 encodings；
 - `<prefix>.meta.json`：输入 shape、校准数量、Po2 变化、覆盖率和 FP32 对比。
+
+导出自动补全 `graph.value_info`，不改写计算节点或权重。动态维度保留符号，
+标量使用合法的零维 shape；不能推导的 dtype、rank 或维度直接报错。
+产物回读先检查磁盘文件中已保存的标注，再执行量化恢复；检查过程不会补写缺失信息。
+`onnx_shapes` 记录张量数、中间张量数及符号维度数，示例和通用入口会将其写入 metadata。
 
 默认量化规则与本项目的 PyTorch 导出流程保持一致：
 
