@@ -4,7 +4,7 @@
 
 核对入口：`examples/quick_start_kws.py` 与 `examples/quick_start_onnx_ptq.py`。
 前者已有较多使用验证，但不将旧实现的所有行为直接视为正确规范。
-第一轮修复第 1 至 4 项并完成验证；本轮继续修复第 5 至 8 项。
+第一轮修复第 1 至 4 项，本轮修复第 5 至 8 项，均已完成回归验证。
 第 9 项的完整验证集评估和第 10 项保留为后续工作。
 
 ## 修复进度
@@ -15,10 +15,10 @@
 | 2 | P1 | bias 对齐缺少范围检查，覆盖用户禁用意图 | 已修复，回归通过 |
 | 3 | P1 | 无效 scale 被关闭后仍可能通过 Po2 和覆盖率检查 | 已修复，回归通过 |
 | 4 | P1 | 重新加载验证没有恢复 encodings | 已修复，真实模型验证通过 |
-| 5 | P2 | 非对称 Po2 的整数 offset 与 min/max 不一致 | 待后续修复 |
-| 6 | P2 | 相邻层共用 ONNX 张量量化器，配置冲突静默覆盖 | 待后续修复 |
-| 7 | P2 | JSON2 类型映射、字段支持和未知类型检查不完整 | 待后续修复 |
-| 8 | P2 | 校准输入全部强制转换成 float32 | 待后续修复 |
+| 5 | P2 | 非对称 Po2 的整数 offset 与 min/max 不一致 | 已修复，共用网格规则，回归通过 |
+| 6 | P2 | 相邻层共用 ONNX 张量量化器，配置冲突静默覆盖 | 已修复，冲突在写入前报错 |
+| 7 | P2 | JSON2 类型映射、字段支持和未知类型检查不完整 | 已修复，共用配置规则，回归通过 |
+| 8 | P2 | 校准输入全部强制转换成 float32 | 已修复，真实多输入模型验证通过 |
 | 9 | P2 | 只评估首个校准样本，NaN 可能被当作验证成功 | 已拒绝 NaN/Inf；完整验证集待后续处理 |
 | 10 | P2 | Torch 的 default_bitwidth 未转换成实际读取的字段 | 待后续修复 |
 
@@ -69,13 +69,18 @@
 - 位置：`po2.py:align_encoding_values`。
 - 原因：公共范围计算得到小数 offset，ONNX 将 offset 取整后未同步重算 min/max。
 - 复现：旧 scale=0.01、offset=-13、min=-0.13、max=2.42；Po2 后 scale=0.015625、offset=-8，却仍写 min=-0.13，整数网格应为 -0.125。Torch 的有效网格为 -0.125。
-- 后续方案：统一整数网格数值规则，包括 strict/unsigned symmetric；不直接复制当前标量公式。
+- 修复：`aimet_common.power_of_2.recompute_min_max_for_new_scale` 同时供 Torch/ONNX 使用，先取整并约束 affine offset，再重算真实范围，确保零可表示。
+- ONNX INT8 strict signed symmetric 使用 254 个间隔，unsigned symmetric 保留完整 255 个间隔；原生重载同步修正 strict 范围，避免恢复后多出一个码位。
+- 验证：普通非对称、逐通道、strict/unsigned、scale 缩小时的零点约束，以及真实 QuantSim 导出恢复均通过。Torch 原来重复的范围计算已删除。
 
 ## 6. 相邻层配置冲突
 
 - 位置：`mixed_precision.py:_apply_layer_config`。
 - 复现：前层输出要求 16-bit、后层输入要求 8-bit，两者实际引用同一 quantizer，最终为 8-bit。
-- 后续方案：在 ONNX 适配层检测共享张量上的请求冲突，明确报错或定义插入重定量化的支持方式；不可依靠遍历顺序决定。
+- 修复：公共 `QuantizerConfigPlan` 收集设置，ONNX 适配层在实际写入前检查全部共享量化器请求。
+- 两处显式的位宽、对称性、启用状态或逐通道要求不一致时报错，消息包含来源层和字段；默认值仅作为回退，不覆盖显式要求。
+- 验证：反转遍历顺序仍报同类冲突，失败后量化器不改变；一致的两处请求和显式覆盖默认值可正常应用。
+- 当前选择报错，不自动插入重定量化节点。需要不同输入/输出网格的同一条边仍需图级适配，不能静默选择其中一个。
 
 ## 7. JSON2 支持和错误检查不完整
 
@@ -85,13 +90,21 @@
 - `per_channel_quantization` 在 Torch 文档中宣称支持，但 JSON2 的两个实现均没有处理，是共同缺口。
 - 名称匹配优先级当前实现相同：精确名称 > 类型 > 通配符 > 默认。Torch 部分说明与实现不一致，不能据此认定两框架优先级不同。
 - `QuantizedPad` 的整数形状操作与 ONNX 空间 Pad 不等价，不应机械映射。
-- 后续方案：共用配置解析、规范化和校验；类型识别和参数/激活定位保留框架适配。
+- 修复：公共 `aimet_common.mixed_precision` 负责读取 JSON2、字段/类型/位宽校验和精确名称 > 类型 > 通配符的匹配；框架保留类型识别及量化器写回。
+- ONNX 补齐本文列出的 MatMul、BatchNorm、Softmax、Log、Clamp 及常见归一化映射；Conv 按权重维度区分 1d/2d/3d。MatMul 专属配置优先，Linear 仅在没有专属配置且权重静态时回退适配。
+- 同一 ONNX 类型的别名配置冲突会报错，注释不参与比较，精确层名仍可覆盖类型配置。
+- 已知映射但图中没有的类型可以忽略；Var/Snake2d 没有单节点等价适配，记录于 `unsupported_types` 并在详细输出中说明。未识别或未支持的其它类型报错，不再静默吞掉配置。
+- `param_bitwidth/param_symmetric` 应用于普通 weight/bias 之外的参数；逐通道设置用于权重，两框架均在校准前实际调整。Torch 保留 percentile 等分析器参数；无法安全支持的量化器或通道布局明确报错。
+- 验证：真实 Log/Clip/Softmax 和 BatchNorm 图、Conv 维度、MatMul 专属配置、别名冲突、仓库实际 JSON2、两框架逐通道设置，以及 KWS 原有精度回归通过。
 
 ## 8. 校准输入 dtype 丢失
 
 - 位置：`calibration.py:_validate_feed`。
 - 复现：INT64 输入 `[1,2]` 被转换成 float32，不能正确用于 Gather 等索引输入；BOOL/FLOAT16 也受影响。
-- 后续方案：读取 ONNX 输入的 shape 和 dtype，依据声明验证或转换；静态 shape 限制属于当前明确支持范围。
+- 修复：保留 `inspect_model_inputs` 的 shape 返回格式，新增 `inspect_model_input_dtypes`；通用入口将声明的 dtype 传给校准读取器。
+- INT64/BOOL/FLOAT16 保持模型要求的类型；浮点到整数不静默截断，整数缩窄先检查范围，浮点转换溢出及非有限输入报错。只提供 shape 的旧调用保留文件自身 dtype；标量输入保持标量形状。
+- 验证：真实 Gather+Where 模型同时使用 INT64 索引、BOOL mask、FLOAT16 数组，NPZ 加载和 ONNX Runtime 推理通过；整数范围、浮点溢出、FLOAT64 到 FLOAT32、标量和旧调用分别有回归覆盖。
+- 静态 shape、数值/布尔类型为当前明确支持范围；字符串及其它未支持的输入类型报错。
 - 额外风险：全部校准数据一次性读入内存，多输入 NPY 配对仍含 IMU/audio 特例；后续按需求扩展。
 
 ## 9. 评估覆盖和非有限值
@@ -112,14 +125,14 @@
 | 环节 | 当前判断 |
 | --- | --- |
 | JSON1 和 Percentile | 两边均设置同一份 JSON1 和 99.99；统计内核的数值等价性未验证 |
-| 混合精度 | 配置规则适合共用；类型、参数和量化器定位需要适配 |
+| 混合精度 | 已共用解析、校验和匹配；类型、参数和量化器定位保留适配 |
 | 校准 | 保留各框架执行方式，共用参数和结果检查规范 |
-| Po2 | 已共用选 scale 的部分函数，网格计算与失败策略仍不一致 |
-| bias | Sb=Sx*Sw 公式相同，安全检查与状态管理需要对齐 |
+| Po2 | 已共用选 scale 和整数网格计算，ONNX 无效 scale 直接拒绝 |
+| bias | 已共用安全检查，各框架适配读取真实参数及写回 |
 | QAT/冻结 BN | ONNX PTQ 不执行合理，不需要模拟 Torch 训练流程 |
 | GRU/LSTM | Torch 原生循环算子有内部配置；ONNX 当前忽略，不代表能力等价 |
 | 导出 | `0446ccd` 已共用 compiler encoding 规范化，公开名沿用 export_onnx_json |
-| 恢复验证 | 应统一“恢复量化状态后输出一致”的契约，保留框架专属恢复实现 |
+| 恢复验证 | 已检查恢复量化状态后的输出一致，保留框架专属恢复实现 |
 
 ## 本轮验证记录
 
@@ -157,8 +170,17 @@
 
 ### 剩余限制
 
-- 第 5 至 10 项按本文件记录继续处理；第 9 项仅提前修复恢复验证依赖的非有限值检查。
+- 第 9 项的完整验证集评估和第 10 项继续待办；第 9 项的非有限值检查已经修复。
 - 未重新训练完整 KWS，也未新增 MobileNetV2 的任务精度基准；Torch 相关回归已通过。
 - 当前恢复使用底层支持的原生 encoding 0.6.1/1.0.0 格式，真实运行使用默认 1.0.0；2.0.0 的恢复不在本轮支持范围。
 - 前四项修复按参数配置、bias/网格校验、恢复验证分阶段提交，并补充根目录 CHANGELOG。
 - 本轮没有修改 `packaging/` 或 `rx-lm-quant`，未重新打包或安装。
+
+## 第 5 至 8 项验证记录
+
+- 107 项 unittest 全部通过，包含前一轮回归，新增 `tests/test_onnx_ptq_remaining.py`，以及 `test_kws_power_precision`、`test_kws_conv_precision` 两个原有 KWS 精度回归。
+- 日志：`.release/validation/onnx-ptq-alignment/tests-followup.log`。
+- MobileNetV2 使用仓库实际 JSON2 和 200 个校准样本再次完整运行成功；覆盖率 276/276，全部 scale 为 Po2，恢复量化输出的最大绝对误差和 RMSE 都为 0，compiler encoding 对比通过。
+- 真实模型产物：`.release/validation/onnx-ptq-alignment/followup/`。
+- 已分阶段提交：`0b97a40` 参数配置、`f54b832` bias/网格校验、`9b87454` 恢复验证、`2aea946` Po2 整数网格、`14747fc` JSON2 规则和冲突处理；最后一组提交输入 dtype、回归测试和本文更新。
+- 所有修复均补充根目录 `CHANGELOG.md`。未推送，未重新打包或安装。

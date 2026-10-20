@@ -13,7 +13,7 @@ import numpy as np
 import onnx
 
 from aimet_common.compiler_encodings import normalize_compiler_encodings
-from .calibration import inspect_model_inputs, iter_calibration_feeds
+from .calibration import inspect_model_input_dtypes, inspect_model_inputs, iter_calibration_feeds
 from .compiler_encodings import CompilerEncodingConverter
 from .mixed_precision import apply_onnx_mixed_precision_bitwidth
 from .po2 import apply_power_of_2_workflow, disable_onnx_bias_quantizers
@@ -120,6 +120,7 @@ def load_onnx_ptq_inputs(
             calibration_dir,
             input_shapes,
             limit=calibration_limit,
+            input_dtypes=inspect_model_input_dtypes(original_model),
         )
     )
     if not feeds:

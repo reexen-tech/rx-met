@@ -1,6 +1,6 @@
 """Direct ONNX PTQ and compiler-compatible artifact export."""
 
-from .calibration import iter_calibration_feeds, inspect_model_inputs
+from .calibration import iter_calibration_feeds, inspect_model_inputs, inspect_model_input_dtypes
 from .compiler_encodings import CompilerEncodingConverter
 from .mixed_precision import apply_onnx_mixed_precision_bitwidth
 from .pipeline import (
@@ -49,6 +49,7 @@ __all__ = [
     "export_onnx_json",
     "force_model_io_quantizers",
     "inspect_model_inputs",
+    "inspect_model_input_dtypes",
     "iter_calibration_feeds",
     "load_onnx_ptq_inputs",
     "run_onnx_feed",
