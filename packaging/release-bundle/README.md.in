@@ -30,20 +30,20 @@
 
 ## 步骤 2：准备数据和工作目录
 
-按需要选择一个示例，准备相应输入。数据默认放在 `~/rx-met-user/datasets/`，
-已有数据目录也可在步骤 3 中直接指定。该目录在容器内对应 `/datasets`：
+按需要选择一个示例，准备相应输入。模型目录挂载到容器的 `/models`，
+数据目录挂载到 `/datasets`：
 
-| 示例 | 数据目录中需要包含 |
-| --- | --- |
-| KWS（GRU / LSTM） | 已解压的 `speech_commands_v0.02/`，包含 `yes/`、`no/`、`_background_noise_/` 等目录 |
-| ONNX PTQ | `mobilenetv2/mobilenetv2-12.onnx` 和 `mobilenetv2/calib/` 中与模型输入匹配的 NPY/NPZ 校准数据 |
+| 示例 | 模型目录内容 | 数据目录内容 |
+| --- | --- | --- |
+| KWS（GRU / LSTM） | 无需准备 | 已解压的 `speech_commands_v0.02/`，包含 `yes/`、`no/`、`_background_noise_/` 等目录 |
+| ONNX PTQ | `mobilenetv2-12.onnx` | `imagenette2-320.parquet` |
 
 没有现成数据时，可按 [examples/README.md](examples/README.md) 准备公开示例输入。
 
 第一次使用时，在宿主机的应用包目录创建个人工作目录，并复制示例：
 
 ```bash
-mkdir -p ~/rx-met-user/datasets
+mkdir -p ~/rx-met-user
 cp -a examples ~/rx-met-user/
 ```
 
@@ -52,10 +52,9 @@ cp -a examples ~/rx-met-user/
 
 ## 步骤 3：进入容器并运行
 
-以下命令已按本包 `@VARIANT@` 生成，应用目录与 runtime 镜像配套使用。
-安装器自动校验并准备镜像标签 `@RUNTIME_IMAGE_TAG@`，无需填写镜像 SHA-256。
 在宿主机执行时，按实际情况调整 GPU 和宿主机路径。
-将 `/path/to/datasets` 替换为数据目录的绝对路径。
+将 `/path/to/models`、`/path/to/datasets` 替换为实际宿主机目录的绝对路径，
+并提前在宿主机创建这些目录。
 
 ```bash
 docker run --rm -it --pull=never --shm-size=2g \
@@ -66,6 +65,7 @@ docker run --rm -it --pull=never --shm-size=2g \
   -e PYTHONPATH=/opt/rx-met/python \
   --gpus device=0 \
   -v "$HOME/.local/share/rx-met/@BUNDLE_NAME@:/opt/rx-met:ro" \
+  -v "/path/to/models:/models:ro" \
   -v "/path/to/datasets:/datasets:ro" \
   -v "$HOME/rx-met-user:/workspace" \
   @RUNTIME_IMAGE_TAG@ bash
@@ -80,25 +80,32 @@ docker run --rm -it --pull=never --shm-size=2g \
 python3 /workspace/examples/quick_start_kws.py --rnn_type gru
 ```
 
-运行 LSTM 时，把 `gru` 改为 `lstm` 即可。示例依次完成浮点训练、PTQ、Power-of-2、
-QAT、导出和重新加载验证，默认浮点训练和 QAT 各运行 1 epoch。
-输出“量化流程完成（已通过加载验证）”且退出码为 0，表示运行成功。
+运行 LSTM 时将 `gru` 改为 `lstm`，默认浮点训练和 QAT 各运行 1 epoch。
 
 ### ONNX PTQ
 
+首次先预处理，再量化；两步保持在 `/workspace` 中执行：
+
 ```bash
-python3 /workspace/examples/onnx_ptq_quick_start.py
+# 数据预处理
+python3 /workspace/examples/prepare_onnx_ptq_data.py \
+  --onnx /models/mobilenetv2-12.onnx \
+  --parquet /datasets/imagenette2-320.parquet
+
+# 量化
+python3 /workspace/examples/quick_start_onnx_ptq.py
 ```
 
-示例使用准备好的 ONNX 模型和校准数据完成 PTQ、Power-of-2、导出和重新加载验证。
-输出“量化流程完成”及 metadata 路径且退出码为 0，表示运行成功。
+后续输入不变时，可直接执行量化命令。
 
 ### 查看结果和再次运行
 
+两个示例的日志包含“量化流程完成”且退出码为 0，即表示运行成功。
+
 | 示例 | 宿主机输出目录 |
 | --- | --- |
-| KWS GRU / LSTM | `~/rx-met-user/examples/output/quick_start_kws/gru/` 或 `lstm/` |
-| ONNX PTQ | `~/rx-met-user/examples/output/onnx_ptq_quick_start/` |
+| KWS GRU / LSTM | `~/rx-met-user/output/quick_start_kws/gru/` 或 `lstm/` |
+| ONNX PTQ | `~/rx-met-user/output/onnx_ptq_quick_start/` |
 
 目录内保存 ONNX、配套 encodings、检查点或运行 metadata。详细说明见
 [examples/README.md](examples/README.md)，量化配置说明见
@@ -106,5 +113,3 @@ python3 /workspace/examples/onnx_ptq_quick_start.py
 
 退出后容器自动删除，工作目录中的
 配置和结果仍保留。
-
-升级时安装新应用包，并使用新版本 README 中的启动命令。
