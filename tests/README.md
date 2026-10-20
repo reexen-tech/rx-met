@@ -24,6 +24,14 @@ python3 -m unittest -v tests/test_dependencies.py
 
 ## 循环算子与客户示例
 
+`test_prepare_onnx_ptq_data.py` 使用真实的小型 ONNX/parquet 文件，在 CPU 上验证
+模型、图片和标签检查、模型与数据分离的默认输出布局、样本预处理、重复生成的旧
+样本清理以及原始文件保护。需要 runtime 中的 ONNX、PyArrow、Pillow 和 NumPy：
+
+```bash
+python3 -m unittest -v tests/test_prepare_onnx_ptq_data.py
+```
+
 `test_quant_lstm_integration.py` 使用随机小模型验证 LSTM 的校准、实际 QAT 更新、
 参数锁、Po2、GRU/LSTM 共存和 ONNX 编码。`test_kws_example.py` 调用客户 KWS
 主入口，使用小尺寸网络和随机音频验证 GRU/LSTM 两种模式的完整流程、导出节点及

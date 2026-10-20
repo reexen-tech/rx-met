@@ -1,4 +1,4 @@
-"""Reusable ONNX PTQ steps shared by the CLI and examples/onnx_ptq_quick_start.py."""
+"""Reusable ONNX PTQ steps shared by the CLI and examples/quick_start_onnx_ptq.py."""
 
 from __future__ import annotations
 

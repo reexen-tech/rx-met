@@ -1,7 +1,7 @@
 # AIMET 量化配置
 
 本文档说明 rx-met 当前使用的 QuantSim 和混合精度配置。完整可运行流程位于
-`examples/quick_start_kws.py`，ONNX PTQ 流程位于 `examples/onnx_ptq_quick_start.py`。
+`examples/quick_start_kws.py`，ONNX PTQ 流程位于 `examples/quick_start_onnx_ptq.py`。
 
 ## 配置文件
 

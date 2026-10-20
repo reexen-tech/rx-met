@@ -91,7 +91,7 @@ QuantGRU 与其他模块共享同一次 `compute_encodings` 前向过程。Quant
 
 ## 5. ONNX PTQ 流程
 
-标准入口位于 [`examples/onnx_ptq_quick_start.py`](../examples/onnx_ptq_quick_start.py)，
+标准入口位于 [`examples/quick_start_onnx_ptq.py`](../examples/quick_start_onnx_ptq.py)，
 主要实现位于 [`src/aimet_onnx/rx_ptq`](../src/aimet_onnx/rx_ptq/)。
 
 ```mermaid

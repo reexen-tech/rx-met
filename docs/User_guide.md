@@ -22,7 +22,7 @@ runtime 镜像提供第三方环境，项目代码由应用包安装后挂载。
 | 工作流 | 适用对象 | 底层引擎 | 入口 | 对应章节 |
 |--------|----------|----------|------|----------|
 | **普通模型量化** | CNN / RNN / KWS 等中小模型（PyTorch） | `aimet_torch` | `examples/quick_start_kws.py` | [第 5.2 节](#52-运行示例脚本) |
-| **ONNX 直量化 PTQ** | 已有 ONNX、无 PyTorch 训练图 | `aimet_onnx` | `examples/onnx_ptq_quick_start.py` | [第 5.4 节](#54-已有-onnx-模型的-ptq) |
+| **ONNX 直量化 PTQ** | 已有 ONNX、无 PyTorch 训练图 | `aimet_onnx` | `examples/quick_start_onnx_ptq.py` | [第 5.4 节](#54-已有-onnx-模型的-ptq) |
 
 选择原则：
 
@@ -76,6 +76,7 @@ docker run --gpus device=0 --rm -it \
   -e PYTHONPATH=/opt/rx-met/python \
   -v /path/to/installed-version:/opt/rx-met:ro \
   -v /path/to/workspace:/workspace \
+  -v /path/to/models:/models:ro \
   -v /path/to/datasets:/datasets:ro \
   -w /workspace \
   "$RUNTIME_IMAGE_ID" bash
@@ -102,9 +103,10 @@ python3 -c "import torch, aimet_torch, aimet_onnx, quant_gru, quant_lstm; print(
 | 变量 / 路径 | 作用 | 适用流程 |
 |-------------|------|----------|
 | `RX_MET_SPEECH_COMMANDS_ROOT` | Speech Commands 数据集根目录，默认 `/datasets/speech_commands_v0.02` | 普通模型 |
-| `RX_MET_ONNX_PTQ_ROOT` | ONNX 示例数据集根目录，默认 `/datasets` | ONNX PTQ |
+| `RX_MET_ONNX_PTQ_ROOT` | 校准数据根目录，默认 `./output/onnx_ptq_quick_start/datasets` | ONNX PTQ |
 | `RX_MET_ONNX_PTQ_EXAMPLE` | 示例名称，默认 `mobilenetv2` | ONNX PTQ |
 | `RX_MET_ONNX_PTQ_MODEL` / `RX_MET_ONNX_PTQ_CALIB` | 覆盖模型与校准目录 | ONNX PTQ |
+| `RX_MET_ONNX_PTQ_OUTPUT_DIR` | 输出目录，默认当前运行目录下的 `output/onnx_ptq_quick_start` | ONNX PTQ |
 | `RX_MET_ONNX_PTQ_DEVICE` | `cuda`（默认）或显式设置为 `cpu` | ONNX PTQ |
 | 镜像内示例目录 | `/opt/rx-met/examples` | 两者 |
 | 推荐输出目录 | volume 挂载的 `/workspace` | 两者 |
@@ -196,7 +198,7 @@ KWS 示例使用 `QuantizableBatchNorm2d`，在 prepare 阶段展开为 Sub/Div/
 
 ### 5.4 已有 ONNX 模型的 PTQ
 
-已有 ONNX 模型的 PTQ 入口是 `examples/onnx_ptq_quick_start.py`。该示例与
+已有 ONNX 模型的 PTQ 入口是 `examples/quick_start_onnx_ptq.py`。该示例与
 `quick_start_kws.py` 使用相同的步骤编号和 `apply_power_of_2_workflow` 实现，其余
 步骤调用 `aimet_onnx.rx_ptq`。
 
@@ -212,14 +214,21 @@ KWS 示例使用 `QuantizableBatchNorm2d`，在 prepare 阶段展开为 Sub/Div/
 ```bash
 cp -a /opt/rx-met/examples /workspace/rx-met-examples
 cd /workspace/rx-met-examples
-python3 onnx_ptq_quick_start.py
+python3 quick_start_onnx_ptq.py
 ```
 
-命令退出码为 0，并输出“量化流程完成”以及 metadata 路径，即表示示例成功。本示例
-使用 MobileNetV2。`examples/prepare_onnx_ptq_data.py` 将 Zoo 的动态 batch 模型
-转换为静态 batch=1 模型，并按 ImageNet 预处理生成 calib/val npy。数据根目录默认
-`/datasets/mobilenetv2`。换用其他模型时，通过
-`RX_MET_ONNX_PTQ_MODEL` 和 `RX_MET_ONNX_PTQ_CALIB` 指定模型与校准目录。制品和限制
+命令退出码为 0，并输出“量化流程完成”以及 metadata 路径，即表示示例成功。
+通用入口只读取用户已准备的静态 ONNX 和校准 NPY/NPZ；使用自己的模型时，通过
+`RX_MET_ONNX_PTQ_MODEL` 和 `RX_MET_ONNX_PTQ_CALIB` 指定输入，预处理由用户负责。
+
+复现 MobileNetV2 + ImageNette 公开演示时，另运行专用的
+`examples/prepare_onnx_ptq_data.py`。它只需 `--onnx` 和 `--parquet`，将原始模型
+转换为静态 batch=1 模型，并按 ImageNet 协议生成 calib/val NPY，分别写入当前
+运行目录的 `output/onnx_ptq_quick_start/models/`、`datasets/`。原始模型和数据
+挂载始终可为只读；在同一容器、同一运行目录执行第二步量化，示例默认读取准备
+结果，无需设置输入路径变量。
+可选 `--out-root DIR` 指定另一可写输出根目录。完整两步示例见
+[`examples/README.md`](../examples/README.md)。制品和限制
 说明见 [`ONNX_PTQ_COMPILER.md`](./ONNX_PTQ_COMPILER.md)。
 
 当前 ONNX 流程适用于 PTQ；QAT 使用 PyTorch 流程。编译器 encodings 是 rx-met 的

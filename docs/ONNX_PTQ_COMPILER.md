@@ -21,8 +21,7 @@
 标准入口与 `examples/quick_start_kws.py` 的使用方式对应：
 
 ```bash
-cd examples
-python3 onnx_ptq_quick_start.py
+python3 /examples/quick_start_onnx_ptq.py
 ```
 
 ## 运行前提
@@ -36,18 +35,27 @@ python3 onnx_ptq_quick_start.py
 
 ## MobileNetV2
 
-先用 `examples/prepare_onnx_ptq_data.py` 生成静态 batch=1 的 ONNX 和 calib npy，
-再通过环境变量指定模型和校准目录运行标准示例：
+通用量化入口只接收用户准备好的 ONNX 和 NPY/NPZ 校准数据，不执行模型专属预处理。
+复现 MobileNetV2 + ImageNette 公开演示时，模型目录 `/models`、数据目录 `/datasets`
+保持只读，在可写工作目录中执行以下两步：
 
 ```bash
-cd examples
-RX_MET_ONNX_PTQ_MODEL=/datasets/mobilenetv2/mobilenetv2-12.onnx \
-RX_MET_ONNX_PTQ_CALIB=/datasets/mobilenetv2/calib \
-python3 onnx_ptq_quick_start.py
+python3 /examples/prepare_onnx_ptq_data.py \
+  --onnx /models/mobilenetv2-12.onnx \
+  --parquet /datasets/imagenette2-320.parquet
+python3 /examples/quick_start_onnx_ptq.py
 ```
 
+准备脚本仅适用于这组公开模型和数据。它先验证输入，再将静态模型和 NPY 分别写入
+当前运行目录的 `output/onnx_ptq_quick_start/models/`、`datasets/`，保留原始文件。
+量化示例默认读取这些准备结果，两步在同一运行目录执行，无需设置输入路径变量。
+可选 `--out-root DIR` 指定另一可写根目录，并打印第二步所需的模型和校准路径。
+用户自己的模型和数据由用户按相应协议处理后，直接通过 `RX_MET_ONNX_PTQ_MODEL`、
+`RX_MET_ONNX_PTQ_CALIB` 指定输入，无需调用此准备脚本。
+
 输入名从 ONNX 图自动读取。多输入模型可用同一 sample 前缀的 npy，或改用 npz。
-产物默认写入 `examples/output/onnx_ptq_quick_start/`。
+产物默认写入当前运行目录下的 `output/onnx_ptq_quick_start/`，可用
+`RX_MET_ONNX_PTQ_OUTPUT_DIR` 覆盖。
 
 命令退出码为 0，日志输出“量化流程完成”及 metadata 路径，并生成下述四类文件，
 即表示标准示例完成。`<prefix>.meta.json` 中的 `coverage`、`all_power_of_2` 和

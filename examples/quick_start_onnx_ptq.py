@@ -16,12 +16,17 @@ main() 只编排已有模块，不复制量化规则。
 
 运行（先进入 examples/）：
 
-    python onnx_ptq_quick_start.py
+    python quick_start_onnx_ptq.py
 
-跑 MobileNetV2 示例。先用 `prepare_onnx_ptq_data.py` 从 ImageNette
-parquet 生成 calib/val npy。模型、校准目录和输出目录可分别用
+本入口只读取用户准备好的静态 ONNX 和 NPY/NPZ 校准数据，不执行模型专属预处理。
+复现 MobileNetV2 + ImageNette 演示时，先单独运行 `prepare_onnx_ptq_data.py`，
+再按其打印的命令执行本入口。模型、校准目录和输出目录可分别用
 `RX_MET_ONNX_PTQ_MODEL`、`RX_MET_ONNX_PTQ_CALIB` 和
 `RX_MET_ONNX_PTQ_OUTPUT_DIR` 覆盖。
+
+默认模型: ./output/onnx_ptq_quick_start/models/mobilenetv2/mobilenetv2-12.onnx
+默认校准: ./output/onnx_ptq_quick_start/datasets/imagenette2-320/calib
+默认输出: 当前运行目录下的 output/onnx_ptq_quick_start
 """
 
 from __future__ import annotations
@@ -57,11 +62,12 @@ from aimet_onnx.rx_ptq import (
 # ============================================================================
 EXAMPLE = os.environ.get("RX_MET_ONNX_PTQ_EXAMPLE", "mobilenetv2")
 
-_DATA = Path(os.environ.get("RX_MET_ONNX_PTQ_ROOT", "/datasets"))
+_PREPARED_ROOT = Path.cwd() / "output" / "onnx_ptq_quick_start"
+_DATA = Path(os.environ.get("RX_MET_ONNX_PTQ_ROOT", str(_PREPARED_ROOT / "datasets")))
 EXAMPLES = {
     "mobilenetv2": {
-        "model": _DATA / "mobilenetv2" / "mobilenetv2-12.onnx",
-        "calib_dir": _DATA / "mobilenetv2" / "calib",
+        "model": _PREPARED_ROOT / "models" / "mobilenetv2" / "mobilenetv2-12.onnx",
+        "calib_dir": _DATA / "imagenette2-320" / "calib",
         "prefix": "mobilenetv2_ptq",
     },
 }
@@ -83,7 +89,7 @@ BITWIDTH_CONFIG_FILE = _HERE / "config" / "quick_start_full_quant.json"
 OUTPUT_DIR = Path(
     os.environ.get(
         "RX_MET_ONNX_PTQ_OUTPUT_DIR",
-        str(_HERE / "output" / "onnx_ptq_quick_start"),
+        str(_PREPARED_ROOT),
     )
 )
 DEVICE = os.environ.get("RX_MET_ONNX_PTQ_DEVICE", "cuda").strip().lower()

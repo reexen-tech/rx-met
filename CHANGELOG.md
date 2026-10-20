@@ -9,6 +9,8 @@
 ### Changed
 
 - KWS 示例默认输出到当前运行目录下的 `output/quick_start_kws/<gru|lstm>/`，与 ONNX PTQ 保持一致，仍支持环境变量和 `--output-dir` 覆盖。
+- ONNX PTQ 示例入口重命名为 `quick_start_onnx_ptq.py`，与 `quick_start_kws.py` 命名保持一致。
+- MobileNetV2 + ImageNette 专用准备脚本仅需模型和 parquet 路径，验证后将静态模型及校准、验证 NPY 写入运行目录的 `output/onnx_ptq_quick_start/models/`、`datasets/`，`--out-root` 改为可选；原始挂载保持只读。ONNX PTQ 示例默认读取准备结果，不执行预处理，两步在同一容器、同一目录完成，无需指定输入路径；量化输出也跟随当前运行目录。
 - QuantGRU 的全部内部量化点默认使用对称量化，与 QuantLSTM 保持一致；新建实例的 JSON 遗漏算子或对称性字段时保持对称，激活仍支持显式非对称配置。
 - 撤回 KWS 波形至 Log 的 FP32 回退配置，恢复原有整数 QDQ 约束。Log 前小信号归零与定义域问题重新进入分析，尚无新的量化修复。
 
