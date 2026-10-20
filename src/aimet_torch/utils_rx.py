@@ -598,17 +598,10 @@ def load_mixed_precision_config(config_file: str) -> Dict[str, Any]:
     Returns:
         配置字典
     """
-    config_path = Path(config_file)
-    if not config_path.exists():
-        raise FileNotFoundError(f"配置文件不存在: {config_file}")
-    
-    with open(config_path, 'r', encoding='utf-8') as f:
-        config = json.load(f)
-    
-    return config
+    from aimet_common.mixed_precision import load_mixed_precision_config as load_config
+    return load_config(config_file)
 
 
-_LAYER_TYPE_CONFIG_COMMENT_KEYS = frozenset({"comment", "examples"})
 _LAYER_TYPE_CONFIG_JSON_ALIASES = frozenset(
     {
         "QuantizedSign",
@@ -617,7 +610,8 @@ _LAYER_TYPE_CONFIG_JSON_ALIASES = frozenset(
 
 
 def _is_layer_type_config_comment(key: str) -> bool:
-    return str(key).startswith("_") or key in _LAYER_TYPE_CONFIG_COMMENT_KEYS
+    from aimet_common.mixed_precision import is_config_comment
+    return is_config_comment(key)
 
 
 def known_layer_type_config_keys() -> Set[str]:
@@ -660,6 +654,42 @@ def classify_unused_layer_type_config_keys(
 
 
 
+def _set_weight_granularity(module, per_channel, name):
+    import copy
+    import torch.nn as nn
+    from aimet_torch.v2.quantization.affine import QuantizeDequantize
+
+    quantizers = getattr(module, 'param_quantizers', {})
+    quantizer = quantizers['weight'] if 'weight' in quantizers else None
+    if quantizer is None:
+        return
+    shape = ()
+    if per_channel:
+        transposed = isinstance(module, (nn.ConvTranspose1d, nn.ConvTranspose2d, nn.ConvTranspose3d))
+        supported = isinstance(module, (nn.Linear, nn.Conv1d, nn.Conv2d, nn.Conv3d)) or transposed
+        if not supported or (transposed and module.groups != 1):
+            raise ValueError(f'{name}: unsupported per-channel weight configuration')
+        axis = 1 if transposed else 0
+        shape = tuple(size if index == axis else 1 for index, size in enumerate(module.weight.shape))
+    if quantizer.shape == shape:
+        return
+    if type(quantizer) is not QuantizeDequantize or quantizer.block_size is not None:
+        raise ValueError(f'{name}: unsupported weight quantizer granularity change')
+    if quantizer.is_initialized():
+        raise ValueError(f'{name}: configure per_channel_quantization before calibration')
+    analyzer = copy.deepcopy(quantizer.encoding_analyzer)
+    analyzer.observer.shape = shape
+    analyzer.observer.reset_stats()
+    parameter = next(quantizer.parameters())
+    replacement = QuantizeDequantize(
+        shape, qmin=quantizer.qmin, qmax=quantizer.qmax, symmetric=quantizer.symmetric,
+        encoding_analyzer=analyzer, zero_point_shift=quantizer.zero_point_shift,
+    ).to(device=parameter.device, dtype=parameter.dtype)
+    replacement.train(quantizer.training)
+    replacement.requires_grad_(parameter.requires_grad)
+    module.param_quantizers['weight'] = replacement
+
+
 def apply_mixed_precision_bitwidth(sim_model, config_file: str, verbose: bool = True) -> Dict[str, int]:
     """
     根据 JSON 配置文件应用混合精度位宽设置
@@ -693,8 +723,8 @@ def apply_mixed_precision_bitwidth(sim_model, config_file: str, verbose: bool = 
     
     配置优先级：
     1. layer_name_config - 精确匹配（优先级最高）
-    2. layer_name_config - 模式匹配
-    3. layer_type_config（按类型匹配）
+    2. layer_type_config（按类型匹配）
+    3. layer_name_config - 模式匹配
     4. default_bitwidth（默认值）
     
     Args:
@@ -714,7 +744,7 @@ def apply_mixed_precision_bitwidth(sim_model, config_file: str, verbose: bool = 
             sim_model, config_file, verbose=verbose
         )
 
-    import fnmatch
+    from aimet_common.mixed_precision import is_config_comment, select_layer_config
     
     # 加载配置
     config = load_mixed_precision_config(config_file)
@@ -726,7 +756,7 @@ def apply_mixed_precision_bitwidth(sim_model, config_file: str, verbose: bool = 
     
     # 过滤掉注释字段
     layer_name_config = {k: v for k, v in layer_name_config.items() 
-                        if not k.startswith('_') and k not in ['examples', 'comment']}
+                        if not is_config_comment(k)}
     
     # 检查默认配置是否要求禁用量化
     default_disable_quantization = default_config.get('disable_quantization', False)
@@ -792,27 +822,13 @@ def apply_mixed_precision_bitwidth(sim_model, config_file: str, verbose: bool = 
         match_type = None
         matched_pattern = None
 
-        # 1. 尝试按名称精确匹配
-        if name in layer_name_config:
-            layer_config = layer_name_config[name]
-            match_type = 'name'
+        layer_config, match_type, matched_pattern = select_layer_config(
+            name, module_type, layer_type_config, layer_name_config
+        )
+        if match_type in ('name', 'pattern'):
             stats['name_matched_count'] += 1
-
-        # 2. 尝试按类型匹配（优先于通配符模式，避免宽泛模式意外覆盖）
-        if layer_config is None and module_type in layer_type_config:
-            layer_config = layer_type_config[module_type]
-            match_type = 'type'
+        elif match_type == 'type':
             stats['type_matched_count'] += 1
-
-        # 3. 尝试按模式匹配（支持通配符 *，仅在无类型配置时生效）
-        if layer_config is None:
-            for pattern, config in layer_name_config.items():
-                if '*' in pattern and fnmatch.fnmatch(name, pattern):
-                    layer_config = config
-                    match_type = 'pattern'
-                    matched_pattern = pattern
-                    stats['name_matched_count'] += 1
-                    break
 
         # 4. 对于未匹配的模块，检查是否需要禁用量化
         if layer_config is None:
@@ -836,6 +852,9 @@ def apply_mixed_precision_bitwidth(sim_model, config_file: str, verbose: bool = 
                 _disable_quantization(module, name, verbose)
                 stats['disabled_count'] += 1
                 continue
+
+            if 'per_channel_quantization' in layer_config:
+                _set_weight_granularity(module, layer_config['per_channel_quantization'], name)
 
             # 设置权重量化参数
             if hasattr(module, 'param_quantizers') and 'weight' in module.param_quantizers:

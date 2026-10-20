@@ -16,6 +16,8 @@
 
 ### Fixed
 
+- 混合精度 JSON2 共用字段校验和匹配规则；ONNX 在写入前检测共享量化器的位宽、对称性和启用状态冲突，默认值作为回退，避免按遍历顺序覆盖显式配置。
+- 补齐 ONNX 的 MatMul、BatchNorm、Softmax、Log、Clamp 等类型适配和通用参数设置，区分已知不适用类型与未知配置；两框架实际应用逐通道权重设置，并保留校准分析器配置。
 - Torch/ONNX Po2 共用整数 offset 与范围计算，修复非对称编码的 min/max 不一致；保留零点可表示性，并修正 strict symmetric 编码的整数域和原生重载范围。
 - ONNX PTQ 示例和通用入口重建 QuantSim、恢复并冻结原生 encodings，检查保存前后的量化输出及 compiler encodings；拒绝缺失或篡改的编码、非有限输出和不一致的 clean ONNX。
 - Torch/ONNX 导出共用 compiler encodings 规范化，保留 `export_onnx_json` 兼容接口，并正确转换 ONNX TfEncoding 的 additive offset，避免对称参数导出非零 zero point。
