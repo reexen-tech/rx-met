@@ -15,6 +15,7 @@ from .pipeline import (
     load_onnx_ptq_inputs,
     run_onnx_feed,
     run_onnx_ptq,
+    verify_onnx_ptq_artifacts,
     write_onnx_ptq_metadata,
 )
 
@@ -52,5 +53,6 @@ __all__ = [
     "load_onnx_ptq_inputs",
     "run_onnx_feed",
     "run_onnx_ptq",
+    "verify_onnx_ptq_artifacts",
     "write_onnx_ptq_metadata",
 ]

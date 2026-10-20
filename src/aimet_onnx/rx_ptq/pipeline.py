@@ -5,16 +5,19 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import tempfile
 from pathlib import Path
 from typing import Any, Dict, List, Sequence
 
 import numpy as np
 import onnx
 
+from aimet_common.compiler_encodings import normalize_compiler_encodings
 from .calibration import inspect_model_inputs, iter_calibration_feeds
 from .compiler_encodings import CompilerEncodingConverter
 from .mixed_precision import apply_onnx_mixed_precision_bitwidth
 from .po2 import apply_power_of_2_workflow, disable_onnx_bias_quantizers
+from .validation import validate_quantizer_state
 
 _EXAMPLES_CONFIG = Path(__file__).resolve().parent / "config"
 if not _EXAMPLES_CONFIG.is_dir():
@@ -85,6 +88,8 @@ def compare_outputs(
             raise RuntimeError(
                 f"输出 {index} shape 不一致: {ref.shape} vs {value.shape}"
             )
+        if not np.all(np.isfinite(ref)) or not np.all(np.isfinite(value)):
+            raise ValueError(f"输出 {index} 含 NaN 或 Inf")
         diff = np.asarray(value, dtype=np.float64) - np.asarray(ref, dtype=np.float64)
         report.append(
             {
@@ -193,13 +198,13 @@ def export_onnx_json(
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
+    payload, coverage = CompilerEncodingConverter(sim, original_model).convert()
     raw_encodings_path = output_dir / f"{filename_prefix}.aimet.encodings"
     sim._export_encodings(str(raw_encodings_path))
     sim.export(str(output_dir), filename_prefix, export_model=True)
 
     onnx_output_path = output_dir / f"{filename_prefix}.onnx"
     compiler_encodings_path = output_dir / f"{filename_prefix}.encodings"
-    payload, coverage = CompilerEncodingConverter(sim, original_model).convert()
     compiler_encodings_path.write_text(
         json.dumps(payload, indent=2, ensure_ascii=False) + "\n",
         encoding="utf-8",
@@ -211,6 +216,54 @@ def export_onnx_json(
         "aimet_encodings": raw_encodings_path,
         "coverage": coverage,
     }
+
+
+def verify_onnx_ptq_artifacts(
+    artifacts: Dict[str, Any],
+    feed: Dict[str, np.ndarray],
+    expected_outputs: Sequence[np.ndarray],
+    *,
+    config_file: str | None,
+    param_type: str = "int8",
+    activation_type: str = "int8",
+    quant_scheme: str = "percentile",
+    percentile_value: float = 99.99,
+    providers: Sequence[str] = ("CPUExecutionProvider",),
+    atol: float = 1e-5,
+    rtol: float = 1e-4,
+) -> List[Dict[str, Any]]:
+    """Restore saved quantization, verify compiler grids, and compare outputs."""
+    from aimet_onnx.quantsim import load_encodings_to_sim
+
+    model = onnx.load(str(artifacts["onnx"]))
+    with tempfile.TemporaryDirectory(prefix="rx-met-onnx-reload-") as work_dir:
+        restored = create_onnx_ptq_sim(
+            model, feed, config_file=config_file, param_type=param_type,
+            activation_type=activation_type, quant_scheme=quant_scheme,
+            percentile_value=percentile_value, providers=providers, work_dir=work_dir,
+        )
+        restored._rx_expected_quantizers = frozenset(
+            artifacts["coverage"]["enabled_quantizer_names"]
+        )
+        load_encodings_to_sim(
+            restored, str(artifacts["aimet_encodings"]), strict=False,
+            allow_overwrite=False, disable_missing_quantizers=True,
+        )
+        validate_quantizer_state(restored)
+        loaded_payload, _ = CompilerEncodingConverter(restored, model).convert()
+        saved_payload = normalize_compiler_encodings(
+            json.loads(Path(artifacts["encodings"]).read_text(encoding="utf-8")), require_po2=True
+        )
+        if loaded_payload != saved_payload:
+            raise RuntimeError("Restored quantizers do not match the saved compiler encodings")
+        outputs = run_onnx_feed(restored, feed, providers)
+        report = compare_outputs(expected_outputs, outputs)
+        for index, (expected, actual) in enumerate(zip(expected_outputs, outputs)):
+            if not np.allclose(actual, expected, atol=atol, rtol=rtol):
+                raise RuntimeError(
+                    f"Restored quantized output {index} differs from its pre-export value: {report[index]}"
+                )
+    return report
 
 
 def export_onnx_compiler_artifacts(
@@ -288,7 +341,8 @@ def run_onnx_ptq(
             sim, bitwidth_config_file, verbose=False
         )
         force_model_io_quantizers(sim, original_model)
-    disable_onnx_bias_quantizers(sim)
+    if align_bias_scale:
+        disable_onnx_bias_quantizers(sim)
     sim.compute_encodings(feeds)
     po2_report = apply_power_of_2_workflow(
         sim,
@@ -299,12 +353,20 @@ def run_onnx_ptq(
         bias_bitwidth=bias_bitwidth,
     )
     reference_outputs = run_onnx_feed(model_path, feeds[0], providers)
-    sim_report = evaluate_onnx_outputs(sim, feeds[0], reference_outputs, providers)
+    quantized_outputs = run_onnx_feed(sim, feeds[0], providers)
+    sim_report = compare_outputs(reference_outputs, quantized_outputs)
     artifacts = export_onnx_json(
         sim, original_model, output_dir, filename_prefix
     )
     clean_report = evaluate_onnx_outputs(
         artifacts["onnx"], feeds[0], reference_outputs, providers
+    )
+    if any(item["max_abs"] > 0 for item in clean_report):
+        raise RuntimeError("Exported clean ONNX differs from the original floating-point model")
+    reload_report = verify_onnx_ptq_artifacts(
+        artifacts, feeds[0], quantized_outputs, config_file=config_file,
+        param_type=param_type, activation_type=activation_type, quant_scheme=quant_scheme,
+        percentile_value=percentile_value, providers=providers,
     )
     metadata_path = write_onnx_ptq_metadata(
         output_dir,
@@ -333,6 +395,7 @@ def run_onnx_ptq(
             "coverage": artifacts["coverage"],
             "sim_vs_fp32": sim_report,
             "clean_onnx_vs_fp32": clean_report,
+            "restored_quantized_vs_pre_export": reload_report,
             "raw_aimet_encodings": str(artifacts["aimet_encodings"]),
             "compiler_encodings": str(artifacts["encodings"]),
             "onnx": str(artifacts["onnx"]),

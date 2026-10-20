@@ -9,7 +9,7 @@ RX-MET ONNX PTQ 演示 — 标准用法
         → sim.compute_encodings 校准 (PTQ)
         → apply_power_of_2_workflow（RX cover_range + Sb=Sx*Sw，算法在 aimet_common）
         → export_onnx_json（clean ONNX + compiler encodings）
-        → 重建 clean ONNX session，对比 FP32
+        → 重建 QuantSim，恢复 encodings，对比保存前的量化输出
 
 ONNX 没有 PyTorch 权重可训，因此没有 QAT 微调；其余步骤与 quick_start_kws.py 对应。
 main() 只编排已有模块，不复制量化规则。
@@ -46,6 +46,7 @@ if str(_SRC) not in sys.path:
 from aimet_onnx.rx_ptq import (
     apply_mixed_precision_bitwidth,
     apply_power_of_2_workflow,
+    compare_outputs,
     create_onnx_ptq_sim,
     disable_onnx_bias_quantizers,
     evaluate_onnx_outputs,
@@ -53,6 +54,7 @@ from aimet_onnx.rx_ptq import (
     force_model_io_quantizers,
     load_onnx_ptq_inputs,
     run_onnx_feed,
+    verify_onnx_ptq_artifacts,
     write_onnx_ptq_metadata,
 )
 
@@ -250,7 +252,7 @@ def main() -> None:
             sim, config_file=str(BITWIDTH_CONFIG_FILE), verbose=True
         )
         force_model_io_quantizers(sim, original_model)
-        disabled_biases = disable_onnx_bias_quantizers(sim)
+        disabled_biases = disable_onnx_bias_quantizers(sim) if ALIGN_BIAS_SCALE else []
         print(f"quantizer 数量: {len(sim.qc_quantize_op_dict)}")
         print(
             f"校准前关闭 {len(disabled_biases)} 个 bias quantizer；"
@@ -283,7 +285,8 @@ def main() -> None:
             verbose=True,
             bias_bitwidth=BIAS_BITWIDTH,
         )
-        po2_eval = evaluate_onnx_outputs(sim, feeds[0], fp32_outputs, providers)
+        quantized_outputs = run_onnx_feed(sim, feeds[0], providers)
+        po2_eval = compare_outputs(fp32_outputs, quantized_outputs)
         print_compare_report("Po2 vs FP32", po2_eval)
 
     # ------------------------------------------------------------------
@@ -313,17 +316,23 @@ def main() -> None:
 
     # ------------------------------------------------------------------
     # 步骤 8: 重新加载并验证
-    #   对应重建 sim + load encodings。这里加载 clean ONNX，确认图契约未变。
+    #   同时检查浮点图、恢复后的量化输出和 compiler encodings。
     # ------------------------------------------------------------------
     with stage("步骤 8: 重新加载并验证", timings):
-        reload_report = evaluate_onnx_outputs(
+        clean_report = evaluate_onnx_outputs(
             artifacts["onnx"], feeds[0], fp32_outputs, providers
         )
-        print_compare_report("clean ONNX vs FP32", reload_report)
-        if any(item["rmse"] > 0 for item in reload_report):
-            print("⚠️  clean ONNX 与 FP32 不一致，请检查 export 是否改图")
-        else:
-            print("✅ clean ONNX 与 FP32 输出一致，加载验证通过")
+        print_compare_report("clean ONNX vs FP32", clean_report)
+        if any(item["max_abs"] > 0 for item in clean_report):
+            raise RuntimeError("clean ONNX 与 FP32 不一致，请检查 export 是否改图")
+        reload_report = verify_onnx_ptq_artifacts(
+            artifacts, feeds[0], quantized_outputs, config_file=str(CONFIG_FILE),
+            param_type=PARAM_TYPE, activation_type=ACTIVATION_TYPE,
+            quant_scheme=QUANT_SCHEME, percentile_value=PERCENTILE_VALUE,
+            providers=providers,
+        )
+        print_compare_report("恢复后的量化输出 vs 保存前", reload_report)
+        print("✅ 量化输出和 compiler encodings 恢复验证通过")
 
     metadata_path = write_onnx_ptq_metadata(
         OUTPUT_DIR,
@@ -344,7 +353,8 @@ def main() -> None:
             "po2_vs_fp32": po2_eval,
             "bias_align": po2_report["bias_align"],
             "all_power_of_2": po2_report.get("all_power_of_2"),
-            "clean_onnx_vs_fp32": reload_report,
+            "clean_onnx_vs_fp32": clean_report,
+            "restored_quantized_vs_pre_export": reload_report,
             "onnx": str(artifacts["onnx"]),
             "compiler_encodings": str(artifacts["encodings"]),
             "aimet_encodings": str(artifacts["aimet_encodings"]),

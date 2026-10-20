@@ -16,6 +16,8 @@
 
 ### Fixed
 
+- ONNX PTQ 示例和通用入口重建 QuantSim、恢复并冻结原生 encodings，检查保存前后的量化输出及 compiler encodings；拒绝缺失或篡改的编码、非有限输出和不一致的 clean ONNX。
+- Torch/ONNX 导出共用 compiler encodings 规范化，保留 `export_onnx_json` 兼容接口，并正确转换 ONNX TfEncoding 的 additive offset，避免对称参数导出非零 zero point。
 - Torch/ONNX 共用 bias 位宽和可表示性检查；ONNX 仅恢复校准期间临时关闭的 bias，统一写回有符号对称网格，并在全部候选检查通过后更新。
 - ONNX Po2 遇到非正或非有限 scale 时直接报错；导出核对必需量化器和待恢复 bias，防止关闭量化器后仍报告覆盖成功。
 - ONNX 混合精度配置区分激活与参数，防止输入位宽和对称性覆盖权重、bias；补齐 MatMul+Add 的 bias 参数识别，并保留缺失激活量化器的输入槽位。
