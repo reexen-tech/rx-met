@@ -140,7 +140,7 @@ python3 quick_start_kws.py --rnn_type lstm
 脚本会依次打印 8 个步骤的耗时与精度汇总（浮点 / PTQ / Po2 / QAT / 重载）。命令
 退出码为 0，并输出“量化流程完成（已通过加载验证）”，即表示示例成功。生成文件位于
 `RX_MET_KWS_OUTPUT_DIR` 指定的根目录下，再按 `gru/`、`lstm/` 分开；未设置时使用
-`examples/output/quick_start_kws/<gru|lstm>/`。也可使用 `--output-dir` 指定根目录。
+当前运行目录下的 `output/quick_start_kws/<gru|lstm>/`。也可使用 `--output-dir` 指定根目录。
 默认各训练 1 epoch，仅用于学习流程。校准使用无随机增强的训练集，测试集只用于评估。
 检查点记录网络类型，恢复时严格检查权重、同批样本输出与测试精度；失败返回非零退出码。
 可独立阅读并随包交付的完整说明见 [examples/README.md](../examples/README.md)。

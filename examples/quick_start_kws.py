@@ -27,12 +27,12 @@ RX-MET 量化演示 — kws_streaming att_mh_rnn + QuantGRU / QuantLSTM
 运行（先进入 examples/）：
 
     export RX_MET_SPEECH_COMMANDS_ROOT=/datasets/speech_commands_v0.02
-    export RX_MET_KWS_OUTPUT_DIR=/workspace/output/quick_start_kws
     python quick_start_kws.py --rnn_type gru
     python quick_start_kws.py --rnn_type lstm
 
 两种模式共用 config/quick_start_full_quant.json，分别读取 GRU_config / LSTM_config。
-输出自动分到输出根目录的 gru/ 或 lstm/ 下。默认各训练 1 epoch，用于学习流程；
+默认输出到运行目录的 output/quick_start_kws/，再分到 gru/ 或 lstm/ 下。
+默认各训练 1 epoch，用于学习流程；
 精度取决于训练轮数和配置，不代表上游论文成绩。完整说明见同目录 README.md。
 """
 
@@ -141,7 +141,7 @@ CONFIG_FILE = _HERE / "config" / "mrnn_quantsim_config_custom_mixed_precision_v2
 BITWIDTH_CONFIG_FILE = _HERE / "config" / "quick_start_full_quant.json"
 OUTPUT_DIR = Path(
     os.environ.get(
-        "RX_MET_KWS_OUTPUT_DIR", str(_HERE / "output" / "quick_start_kws")
+        "RX_MET_KWS_OUTPUT_DIR", str(Path.cwd() / "output" / "quick_start_kws")
     )
 )
 

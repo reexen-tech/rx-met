@@ -2,7 +2,9 @@
 import contextlib
 import io
 import json
+import os
 from pathlib import Path
+import runpy
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -19,6 +21,26 @@ from tests.test_quant_lstm_integration import (
 
 
 class KwsExampleConfigurationTest(unittest.TestCase):
+    def test_output_directory_uses_cwd_and_respects_overrides(self):
+        with tempfile.TemporaryDirectory() as directory, patch.dict(os.environ, {}):
+            root = Path(directory)
+            original_cwd = Path.cwd()
+            try:
+                os.chdir(root)
+                os.environ.pop('RX_MET_KWS_OUTPUT_DIR', None)
+                namespace = runpy.run_path(kws.__file__, run_name='kws_output_test')
+                for rnn_type in ('gru', 'lstm'):
+                    args = namespace['parse_args'](['--rnn_type', rnn_type])
+                    self.assertEqual(args.output_dir / args.rnn_type,
+                                     root / 'output/quick_start_kws' / rnn_type)
+                os.environ['RX_MET_KWS_OUTPUT_DIR'] = str(root / 'env-output')
+                namespace = runpy.run_path(kws.__file__, run_name='kws_output_test')
+                self.assertEqual(namespace['parse_args']([]).output_dir, root / 'env-output')
+                args = namespace['parse_args'](['--output-dir', str(root / 'cli-output')])
+                self.assertEqual(args.output_dir, root / 'cli-output')
+            finally:
+                os.chdir(original_cwd)
+
     def test_example_uses_custom_batchnorm(self):
         from aimet_torch.quantizable_batchnorm import QuantizableBatchNorm2d
         block = kws.ConvActBN(1, 4, (5, 1))

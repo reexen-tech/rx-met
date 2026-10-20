@@ -8,6 +8,7 @@
 
 ### Changed
 
+- KWS 示例默认输出到当前运行目录下的 `output/quick_start_kws/<gru|lstm>/`，与 ONNX PTQ 保持一致，仍支持环境变量和 `--output-dir` 覆盖。
 - QuantGRU 的全部内部量化点默认使用对称量化，与 QuantLSTM 保持一致；新建实例的 JSON 遗漏算子或对称性字段时保持对称，激活仍支持显式非对称配置。
 - 撤回 KWS 波形至 Log 的 FP32 回退配置，恢复原有整数 QDQ 约束。Log 前小信号归零与定义域问题重新进入分析，尚无新的量化修复。
 
