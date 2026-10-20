@@ -16,6 +16,7 @@
 
 ### Fixed
 
+- GRU/LSTM 显式关闭量化后可正常导出，禁用状态从 QuantSim 传给最终校验并写入 `excluded_layers`；保留节点名称、类型和已启用层的严格编码检查，拒绝伪造排除名单及禁用层的残留编码。
 - ONNX PTQ 在完整验证集上报告 FP32、PTQ、Po2 和恢复后的 Top-1 及累计误差，复用推理 session；准备脚本保存 ImageNette 到 ImageNet-1k 的验证标签，恢复验证逐样本检查输出和分类精度。
 - Torch/ONNX 共用 JSON2 默认位宽转换，使 `default_bitwidth.weight/output` 在 Torch 中实际生效；默认激活位宽同时用于已有输入、输出量化器，并保留显式禁用的输入槽及具体层配置的优先级。
 - ONNX 校准按模型声明保留或转换输入 dtype，支持 INT64 索引、BOOL mask 和 FLOAT16 数据；拒绝浮点索引截断、整数范围溢出及非有限输入，并保持标量输入形状。

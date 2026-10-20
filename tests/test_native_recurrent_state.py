@@ -8,6 +8,7 @@ import unittest
 from pathlib import Path
 
 import onnx
+import numpy as np
 import torch
 from torch import nn
 from quant_gru import QuantGRU
@@ -157,7 +158,103 @@ class NativeRecurrentStateTest(unittest.TestCase):
                     for name in flags:
                         self.assertEqual(sum(node.name == name and node.op_type == name.upper()
                                              for node in graph.graph.node), 1)
-                    self.assert_native_entries(json.loads(Path(enc_path).read_text()), flags)
+                    document = json.loads(Path(enc_path).read_text())
+                    self.assert_native_entries(document, flags)
+                    excluded = set(document.get('excluded_layers') or [])
+                    for name, enabled in flags.items():
+                        self.assertEqual(name in excluded, not enabled)
+                    if not any(flags.values()):
+                        import onnxruntime as ort
+                        floating = sim.get_original_model(sim.model, qdq_weights=False).cpu().eval()
+                        for name, reference_type in (('gru', nn.GRU), ('lstm', nn.LSTM)):
+                            native = getattr(floating, name)
+                            reference_layer = reference_type(
+                                native.input_size, native.hidden_size, num_layers=native.num_layers,
+                                bias=native.bias, batch_first=native.batch_first,
+                                bidirectional=native.bidirectional,
+                            ).eval()
+                            with torch.no_grad():
+                                for param_name, parameter in reference_layer.named_parameters():
+                                    parameter.copy_(getattr(native, param_name).detach().cpu())
+                            setattr(floating, name, reference_layer)
+                        with torch.no_grad():
+                            reference = floating(self.x.cpu()).numpy()
+                        session = ort.InferenceSession(graph_path, providers=['CPUExecutionProvider'])
+                        actual = session.run(None, {session.get_inputs()[0].name: self.x.cpu().numpy()})[0]
+                        np.testing.assert_allclose(actual, reference, atol=1e-6, rtol=1e-5)
+
+    def corrupt_recurrent_export(self, mutate):
+        exporter = importlib.import_module('aimet_torch.rx_export.export_onnx_json')
+        original = exporter.export_recurrent_encodings
+        def corrupt(model, graph_path, enc_path):
+            original(model, graph_path, enc_path)
+            mutate(Path(graph_path), Path(enc_path))
+        return patch.object(exporter, 'export_recurrent_encodings', side_effect=corrupt)
+
+    def test_disabled_uncalibrated_recurrent_layers_can_export(self):
+        sim = self.sim(False, False)
+        with torch.no_grad(), compute_encodings(sim.model):
+            sim.model(self.x)
+        for name in ('gru', 'lstm'):
+            getattr(sim.model, name).reset_calibration()
+            self.assertFalse(getattr(sim.model, name).is_calibrated())
+        _, enc_path = export_onnx_json(sim, str(self.directory), 'uncalibrated', tuple(self.x.shape))
+        document = json.loads(Path(enc_path).read_text())
+        self.assert_native_entries(document, {'gru': False, 'lstm': False})
+        self.assertTrue({'gru', 'lstm'} <= set(document['excluded_layers']))
+
+    def test_disabled_layer_requires_exclusion_metadata(self):
+        sim = self.sim(False, True)
+        with torch.no_grad(), compute_encodings(sim.model):
+            sim.model(self.x)
+        def remove(_graph_path, path):
+            document = json.loads(path.read_text())
+            document['excluded_layers'].remove('gru')
+            path.write_text(json.dumps(document))
+        with self.corrupt_recurrent_export(remove), self.assertRaisesRegex(RuntimeError, 'gru.*excluded_layers'):
+            export_onnx_json(sim, str(self.directory), 'missing-exclusion', tuple(self.x.shape))
+
+    def test_exclusion_metadata_cannot_disable_an_enabled_layer(self):
+        for remove_encoding in (False, True):
+            with self.subTest(remove_encoding=remove_encoding):
+                sim = self.sim(True, True)
+                with torch.no_grad(), compute_encodings(sim.model):
+                    sim.model(self.x)
+                def corrupt(_graph_path, path):
+                    document = json.loads(path.read_text())
+                    document['excluded_layers'] = ['gru']
+                    if remove_encoding:
+                        del document['activation_encodings']['gru']
+                    path.write_text(json.dumps(document))
+                with self.corrupt_recurrent_export(corrupt), self.assertRaisesRegex(RuntimeError, 'gru'):
+                    export_onnx_json(sim, str(self.directory), 'fake-exclusion', tuple(self.x.shape))
+
+    def test_disabled_layer_cannot_export_stale_quantization_encodings(self):
+        sim = self.sim(True, True)
+        with torch.no_grad(), compute_encodings(sim.model):
+            sim.model(self.x)
+        from aimet_torch.rx_export.validation import collect_expected_encodings
+        stale = collect_expected_encodings(sim.model)['activation_encodings']['gru']
+        sim.model.gru.use_quantization = False
+        def corrupt(_graph_path, path):
+            document = json.loads(path.read_text())
+            document['activation_encodings']['gru'] = stale
+            path.write_text(json.dumps(document))
+        with self.corrupt_recurrent_export(corrupt), self.assertRaisesRegex(RuntimeError, 'gru.*has quantization encodings'):
+            export_onnx_json(sim, str(self.directory), 'stale-disabled', tuple(self.x.shape))
+
+    def test_disabled_layer_still_requires_its_named_onnx_operator(self):
+        sim = self.sim(False, False)
+        with torch.no_grad(), compute_encodings(sim.model):
+            sim.model(self.x)
+        def rename(path, _enc_path):
+            graph = onnx.load(path)
+            for node in graph.graph.node:
+                if node.name == 'gru' and node.op_type == 'GRU':
+                    node.name = 'renamed_gru'
+            onnx.save(graph, path)
+        with self.corrupt_recurrent_export(rename), self.assertRaisesRegex(RuntimeError, 'gru: expected one ONNX GRU'):
+            export_onnx_json(sim, str(self.directory), 'renamed-disabled', tuple(self.x.shape))
 
     def test_export_rejects_missing_native_encodings(self):
         exporter = importlib.import_module('aimet_torch.rx_export.export_onnx_json')

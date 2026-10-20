@@ -112,12 +112,16 @@ def export_recurrent_encodings(model, onnx_path, encodings_path):
     with open(encodings_path, encoding="utf-8") as stream:
         encodings = json.load(stream)
     registrations = {}
+    excluded_layers = list(encodings.get("excluded_layers") or [])
     for name, module, op in modules:
         if module.use_quantization and not module.is_calibrated():
             raise RuntimeError(f"{op.module_type.__name__} is not calibrated: {name}")
         if module.use_quantization:
             module.export_quant_params_to_aimet_format(encodings, module_name=name)
+        elif name not in excluded_layers:
+            excluded_layers.append(name)
         registrations[op.package] = op
+    encodings["excluded_layers"] = excluded_layers
     with open(encodings_path, "w", encoding="utf-8") as stream:
         json.dump(encodings, stream, indent=2, ensure_ascii=False)
     for op in registrations.values():

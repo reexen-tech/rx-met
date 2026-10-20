@@ -39,7 +39,9 @@ from aimet_torch.optimized_quantizable_gru import OptimizedQuantizableGRU
 STATIC_DUMMY_INPUT_SHAPE: Tuple[int, int, int] = (1, 16000, 1)
 
 
-from aimet_torch.native_recurrent import recurrent_export_mode, export_recurrent_encodings
+from aimet_torch.native_recurrent import (
+    named_native_recurrent, recurrent_export_mode, export_recurrent_encodings,
+)
 
 # ---------- Internal helpers ----------
 def _is_truthy_env(name: str) -> bool:
@@ -174,6 +176,10 @@ def export_onnx_json(
         raise RuntimeError("sim 没有 get_original_model()，无法走 sim.export 链路")
 
     with ExitStack() as export_stack:
+        disabled_recurrent = {
+            name: op.onnx_type for name, module, op in named_native_recurrent(sim.model)
+            if not module.use_quantization
+        }
         original_model = sim.get_original_model(sim.model, qdq_weights=False)
         original_model = original_model.cpu().eval()
         linear_names = prepare_linear_export(original_model)
@@ -252,6 +258,7 @@ def export_onnx_json(
         validate_exported_artifacts(
             onnx_path, enc_out_path, expected_encodings,
             scalar_inputs=scalar_inputs, reference_graph=reference_graph,
+            disabled_recurrent=disabled_recurrent,
         )
 
         return onnx_path, enc_out_path
