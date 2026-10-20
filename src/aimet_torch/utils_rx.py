@@ -744,7 +744,7 @@ def apply_mixed_precision_bitwidth(sim_model, config_file: str, verbose: bool = 
             sim_model, config_file, verbose=verbose
         )
 
-    from aimet_common.mixed_precision import is_config_comment, select_layer_config
+    from aimet_common.mixed_precision import default_layer_config, is_config_comment, select_layer_config
     
     # 加载配置
     config = load_mixed_precision_config(config_file)
@@ -842,7 +842,7 @@ def apply_mixed_precision_bitwidth(sim_model, config_file: str, verbose: bool = 
                 stats['disabled_count'] += 1
                 continue
             elif has_quantizers:
-                layer_config = default_bitwidth
+                layer_config = default_layer_config(default_bitwidth)
                 match_type = 'default'
                 stats['default_count'] += 1
 
@@ -951,7 +951,8 @@ def apply_mixed_precision_bitwidth(sim_model, config_file: str, verbose: bool = 
                     # 标量输入槽（构造期已判定为“无 shape”并移除量化器）不得重建，否则会破坏
                     # 训练/reload 的量化器集合一致性，并使导出 encodings 重新包含标量路参数。
                     _is_scalar_slot = idx in getattr(module, "_scalar_input_slots", set())
-                    if input_quantizer is None and idx == 0 and input_bw is not None and not _is_scalar_slot:
+                    if (input_quantizer is None and idx == 0 and input_bw is not None
+                            and match_type != 'default' and not _is_scalar_slot):
                         try:
                             from aimet_torch.v2.quantization.affine import QuantizeDequantize
                             import torch.nn as _nn

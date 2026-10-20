@@ -9,7 +9,8 @@ from __future__ import annotations
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from aimet_common.mixed_precision import (
-    QuantizerConfigPlan, is_config_comment, load_mixed_precision_config, select_layer_config,
+    QuantizerConfigPlan, default_layer_config, is_config_comment,
+    load_mixed_precision_config, select_layer_config,
 )
 
 # JSON 2 的 Torch 类名 → 当前图里可能出现的 ONNX op_type。
@@ -301,11 +302,7 @@ def apply_onnx_mixed_precision_bitwidth(
                 if action == "disabled":
                     stats["disabled_ops"] += 1
                 continue
-            layer_config = {
-                "weight_bitwidth": default_bitwidth.get("weight"),
-                "output_bitwidth": default_bitwidth.get("output"),
-                "input_bitwidth": default_bitwidth.get("output"),
-            }
+            layer_config = default_layer_config(default_bitwidth)
             match = "default"
             stats["default_ops"] += 1
 

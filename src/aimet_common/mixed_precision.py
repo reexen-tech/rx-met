@@ -87,6 +87,15 @@ def select_layer_config(name, layer_type, type_configs, name_configs):
     return None, None, None
 
 
+def default_layer_config(default_bitwidth):
+    """Translate JSON2 defaults to the settings consumed by both adapters."""
+    return {
+        'weight_bitwidth': default_bitwidth.get('weight'),
+        'input_bitwidth': default_bitwidth.get('output'),
+        'output_bitwidth': default_bitwidth.get('output'),
+    }
+
+
 class QuantizerConfigPlan:
     """Collect compatible settings before either adapter mutates quantizers."""
 
