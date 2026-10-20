@@ -130,14 +130,22 @@ def runtime_requirement(record, url=''):
             'checksum_url': url + '.sha256' if url else ''}
 
 
-def assemble(args, matrix, variant, runtime, build, runtime_record, archive, wheel_dir, compatibility, *, version, changelog):
-    env_version = matrix['environment_version']
-    runtime_tag = common.image_ref('runtime', variant)
+def bundle_destination(args, variant, version, env_version):
     name = f'rx-met-v{version}-{env_version}-{variant}-linux-amd64'
     output = args.output_dir / name
     packed = args.output_dir / (name + '.tar.gz')
-    if (output.exists() or packed.exists()) and not args.replace:
-        raise RuntimeError(f'应用产物已存在: {output}；开发时可显式 --replace')
+    if not args.replace:
+        for path in (output, packed):
+            if path.exists():
+                raise RuntimeError(f'应用产物已存在: {path}；开发时可显式 --replace')
+    return output, packed
+
+
+def assemble(args, matrix, variant, runtime, build, runtime_record, archive, wheel_dir, compatibility, *, version, changelog):
+    env_version = matrix['environment_version']
+    runtime_tag = common.image_ref('runtime', variant)
+    output, packed = bundle_destination(args, variant, version, env_version)
+    name = output.name
     wheel_version = f'{version}+{variant}'
     wheels = inspect_wheels(wheel_dir, wheel_version, compatibility['python_version'])
     revision = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=ROOT).decode().strip()
@@ -173,7 +181,8 @@ def assemble(args, matrix, variant, runtime, build, runtime_record, archive, whe
         checksums = ''.join(f'{sha256(path)}  {path.relative_to(staged).as_posix()}\n' for path in sorted(staged.rglob('*')) if path.is_file())
         (staged / 'SHA256SUMS').write_text(checksums)
         run('bash', '-n', staged / 'install.sh')
-        run(staged / 'install.sh', '--offline', '--prefix', args.install_prefix)
+        install_prefix = args.install_prefix if args.install_prefix is not None else Path(temporary) / 'install'
+        run(staged / 'install.sh', '--offline', '--prefix', install_prefix)
         with tarfile.open(packed.with_name(packed.name + '.partial'), 'w:gz', compresslevel=1) as tar:
             tar.add(staged, arcname=name)
         if output.exists():
@@ -217,7 +226,7 @@ def main():
     parser.add_argument('--build-env-dir', type=Path, help='本地缺少 build 镜像时，从此目录校验并导入归档')
     parser.add_argument('--runtime-env-dir', type=Path, help='runtime 镜像导入及交付归档目录；默认 .release/runtime-images/<环境版本>')
     parser.add_argument('--runtime-base-url', default=os.environ.get('RX_MET_RUNTIME_BASE_URL', ''))
-    parser.add_argument('--install-prefix', type=Path, default=ROOT / '.release/installed')
+    parser.add_argument('--install-prefix', type=Path, help='保留安装验收结果的根目录；默认使用临时目录并自动清理')
     parser.add_argument('--with-images', action='store_true', help='附带 runtime 归档到交付目录 images/；归档缺失时从本机匹配镜像自动导出')
     parser.add_argument('--skip-build', action='store_true', help='只重新组装源码和环境身份未变的已有 wheels')
     parser.add_argument('--replace', action='store_true', help='替换本机尚未发布的应用产物；不覆盖安装目录和 runtime')
@@ -245,8 +254,11 @@ def main():
     args.runtime_env_dir = (args.runtime_env_dir or ROOT / '.release/runtime-images' / env_version).resolve()
     if args.build_env_dir is not None:
         args.build_env_dir = args.build_env_dir.resolve()
-    args.install_prefix = args.install_prefix.resolve()
+    if args.install_prefix is not None:
+        args.install_prefix = args.install_prefix.resolve()
     if args.action == 'build':
+        for variant in targets:
+            bundle_destination(args, variant, version, env_version)
         changelog = release_changelog(version)
         args.output_dir.mkdir(parents=True, exist_ok=True)
     for variant in targets:

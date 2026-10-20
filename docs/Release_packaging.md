@@ -24,7 +24,11 @@
 
 脚本核对公共环境配置和精确镜像 ID，在对应 build 环境中生成三个项目 wheel，
 组装应用包，并在纯 runtime 中实际离线安装、自检。默认不生成 images/，不执行 docker save。
-输出目录为 `.release/export/rx-quant-env-v1/v<VERSION>/`，安装验收目录默认为 `.release/installed/`。
+输出目录为 `.release/export/rx-quant-env-v1/v<VERSION>/`。每个应用包默认在独立临时目录
+完成安装验收，成功或失败后自动清理，不受已有安装目录影响。
+
+未指定 `--replace` 时，启动前检查所有所选变体；同名应用包目录或压缩包已存在则立即退出，
+不会调用 Docker、编译 wheel 或导出镜像。
 
 应用包包含 install.sh、README、当前版本 CHANGELOG、manifest、SHA256SUMS、wheels、examples。
 用户运行 install.sh 后按 README 使用原生 Docker 命令，不提供 run.sh。
@@ -93,9 +97,9 @@ Docker/OCI 配置、清单和层摘要；不会执行归档中的其他镜像。
 - `--with-images`：附带镜像到交付目录 `images/`，缺少归档时自动导出；默认关闭。
 - `--jobs N`：编译并行数，默认 8。
 - `--output-dir DIR`：应用交付目录。
-- `--install-prefix DIR`：此次安装验收的根目录。
+- `--install-prefix DIR`：指定并保留安装验收目录；默认使用临时目录并自动清理。
 - `--skip-build`：源码和 build/runtime 身份完全匹配时复用已有编译产物，重新组装交付文档。
-- `--replace`：替换未发布候选应用包；不覆盖已有安装目录或公共环境，修改后的候选使用新安装目录。
+- `--replace`：替换未发布候选应用包；默认临时安装验收，不覆盖已有安装目录或公共环境。
 - `--runtime-base-url https://...`：预留固定归档下载地址，当前留空、离线交付。
 
 根 CHANGELOG 保留历史；打包前按 VERSION 校验并提取唯一且非空的当前版本，
@@ -103,8 +107,12 @@ Docker/OCI 配置、清单和层摘要；不会执行归档中的其他镜像。
 
 ## 验证
 
+需要保留安装结果用于 GPU 或示例验证时，构建时显式指定验收目录。
+已有不同内容的目录不会被覆盖，请使用新目录：
+
 ```bash
-./scripts/release/verify_bundle.sh --install-prefix .release/installed --gpu --gpu-device 0 cu126
+./scripts/release/build.sh cu126 --replace --install-prefix .release/installed-validation
+./scripts/release/verify_bundle.sh --install-prefix .release/installed-validation --gpu --gpu-device 0 cu126
 ```
 
 构建时自检使用非 root、断网、只读应用挂载；GPU 验证单独运行。发布前还需运行真实 examples，

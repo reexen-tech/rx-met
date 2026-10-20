@@ -1,0 +1,194 @@
+"""Check build-time installation isolation and artifact publication boundaries."""
+from argparse import Namespace
+import importlib.util
+from pathlib import Path
+import subprocess
+import tempfile
+import unittest
+from unittest.mock import patch
+
+ROOT = Path(__file__).resolve().parents[1]
+SPEC = importlib.util.spec_from_file_location('release_build_artifacts', ROOT / 'scripts/release/artifacts.py')
+artifacts = importlib.util.module_from_spec(SPEC)
+SPEC.loader.exec_module(artifacts)
+
+
+class ReleaseBuildTest(unittest.TestCase):
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory(prefix='rx-met-build-test-')
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+        self.output = self.root / 'export'
+        self.output.mkdir()
+        self.name = 'rx-met-v1.1.0-v1-cu118-linux-amd64'
+        self.args = Namespace(output_dir=self.output, replace=True, runtime_base_url='', install_prefix=None)
+        self.prefixes = []
+        self.fail_install = False
+        self.revision = b'first-revision'
+        self.wheel_dir = self.root / 'wheels'
+        self.wheel_dir.mkdir()
+        (self.wheel_dir / 'example.whl').write_bytes(b'wheel fixture')
+        for relative in (
+            'examples/README.md', 'packaging/release-bundle/README.md.in',
+            'scripts/release/verify_install.py', 'scripts/release/verify_runtime_archive.py',
+        ):
+            path = self.root / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text('fixture\n')
+        (self.root / 'packaging/release-bundle/install.sh.in').write_text('#!/bin/bash\n@BOOTSTRAP@\n')
+        for target, options in (
+            ('ROOT', {'new': self.root}),
+            ('inspect_wheels', {'return_value': [{'filename': 'example.whl', 'unpacked_size_bytes': 1}]}),
+            ('source_digest', {'return_value': 'source-digest'}),
+            ('delivery_digest', {'return_value': 'delivery-digest'}),
+            ('run', {'side_effect': self.run_command}),
+        ):
+            patcher = patch.object(artifacts, target, **options)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        patcher = patch.object(artifacts.subprocess, 'check_output', side_effect=self.git_output)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def git_output(self, command, **kwargs):
+        return self.revision if command[1] == 'rev-parse' else b''
+
+    def run_command(self, *command, **kwargs):
+        if command[0] == 'bash':
+            return
+        prefix = Path(command[command.index('--prefix') + 1])
+        self.prefixes.append(prefix)
+        destination = prefix / self.name
+        manifest = Path(command[0]).parent / 'manifest.json'
+        if destination.exists() and (destination / 'manifest.json').read_bytes() != manifest.read_bytes():
+            raise subprocess.CalledProcessError(1, command, stderr='existing installation differs')
+        destination.mkdir(parents=True, exist_ok=True)
+        (destination / 'manifest.json').write_bytes(manifest.read_bytes())
+        if self.fail_install:
+            raise subprocess.CalledProcessError(1, command, stderr='injected verification failure')
+
+    def assemble(self):
+        record = dict(schema_version=1, environment_name='rx-quant-env', environment_version='v1',
+                      variant='cu118', config_sha256='config', image_id='runtime', filename='runtime.tar.gz')
+        artifacts.assemble(self.args, {'environment_version': 'v1'}, 'cu118', {'Id': 'runtime'},
+                           {'Id': 'build'}, record, self.root / 'runtime.tar.gz', self.wheel_dir,
+                           {'python_version': '3.10'}, version='1.1.0', changelog='# Changelog\n')
+
+    def test_replacing_changed_bundle_uses_fresh_installation_and_cleans_up(self):
+        previous = self.root / '.release/installed' / self.name
+        previous.mkdir(parents=True)
+        (previous / 'manifest.json').write_text('old installation')
+        self.assemble()
+        self.revision = b'second-revision'
+        self.assemble()
+        self.assertEqual(len(set(self.prefixes)), 2)
+        self.assertTrue(all(not prefix.exists() for prefix in self.prefixes))
+        self.assertEqual((previous / 'manifest.json').read_text(), 'old installation')
+        self.assertIn('second-revision', (self.output / self.name / 'manifest.json').read_text())
+        self.assertTrue((self.output / (self.name + '.tar.gz')).is_file())
+        self.assertFalse(list(self.output.glob('.bundle-*')))
+
+    def test_failed_temporary_verification_preserves_previous_artifacts(self):
+        self.assemble()
+        manifest = (self.output / self.name / 'manifest.json').read_bytes()
+        packed = (self.output / (self.name + '.tar.gz')).read_bytes()
+        self.revision = b'failed-revision'
+        self.fail_install = True
+        with self.assertRaises(subprocess.CalledProcessError):
+            self.assemble()
+        self.assertFalse(self.prefixes[-1].exists())
+        self.assertEqual((self.output / self.name / 'manifest.json').read_bytes(), manifest)
+        self.assertEqual((self.output / (self.name + '.tar.gz')).read_bytes(), packed)
+        self.assertFalse(list(self.output.glob('.bundle-*')))
+
+    def test_explicit_install_prefix_is_retained_and_not_overwritten(self):
+        self.args.install_prefix = self.root / 'retained installation'
+        self.assemble()
+        installed = self.args.install_prefix / self.name / 'manifest.json'
+        manifest = installed.read_bytes()
+        self.assertEqual(self.prefixes, [self.args.install_prefix])
+        self.revision = b'changed-revision'
+        with self.assertRaises(subprocess.CalledProcessError):
+            self.assemble()
+        self.assertEqual(installed.read_bytes(), manifest)
+        self.assertFalse(list(self.output.glob('.bundle-*')))
+
+
+class ReleaseBuildPreflightTest(unittest.TestCase):
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory(prefix='rx-met-preflight-test-')
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+        (self.root / 'VERSION').write_text('1.1.0\n')
+        self.output = self.root / '.release/export/rx-quant-env-v1/v1.1.0'
+        matrix = {'environment_version': 'v1', 'variants': {'cu118': {}, 'cu126': {}, 'cu130': {}}}
+        for obj, target, options in (
+            (artifacts, 'ROOT', {'new': self.root}),
+            (artifacts.dependencies, 'load_matrix', {'return_value': matrix}),
+            (artifacts.dependencies, 'check_generated_artifacts', {}),
+            (artifacts, 'release_changelog', {'return_value': '# Changelog\n'}),
+        ):
+            patcher = patch.object(obj, target, **options)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        patcher = patch.object(artifacts.common, 'load_record', return_value={})
+        self.load_record = patcher.start()
+        self.addCleanup(patcher.stop)
+        patcher = patch.object(artifacts.environment_archives, 'ensure_image',
+                               side_effect=RuntimeError('Docker work started'))
+        self.ensure_image = patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def existing(self, variant, *, archive=False):
+        path = self.output / f'rx-met-v1.1.0-v1-{variant}-linux-amd64'
+        if archive:
+            path = path.with_name(path.name + '.tar.gz')
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(b'existing archive')
+        else:
+            path.mkdir(parents=True)
+        return path
+
+    def assert_conflict_before_docker(self, path, *options):
+        with patch('sys.argv', ['artifacts.py', 'build', *options]), \
+                self.assertRaisesRegex(RuntimeError, '--replace') as raised:
+            artifacts.main()
+        self.assertIn(str(path), str(raised.exception))
+        self.load_record.assert_not_called()
+        self.ensure_image.assert_not_called()
+        self.assertFalse((self.root / '.release/wheels').exists())
+        self.assertFalse((self.root / '.release/runtime-images').exists())
+
+    def test_existing_directory_is_rejected_before_docker(self):
+        path = self.existing('cu118')
+        self.assert_conflict_before_docker(path, 'cu118')
+
+    def test_later_archive_in_custom_output_blocks_all_selected_variants(self):
+        self.output = self.root / 'custom output'
+        path = self.existing('cu126', archive=True)
+        self.assert_conflict_before_docker(path, 'cu118', 'cu126', '--with-images',
+                                          '--output-dir', str(self.output))
+        self.assertEqual(path.read_bytes(), b'existing archive')
+        self.assertEqual(list(self.output.iterdir()), [path])
+
+    def test_default_targets_are_all_checked_before_starting(self):
+        path = self.existing('cu130')
+        self.assert_conflict_before_docker(path)
+
+    def test_replace_allows_existing_outputs_to_reach_environment_validation(self):
+        self.existing('cu118')
+        with patch('sys.argv', ['artifacts.py', 'build', 'cu118', '--replace']), \
+                self.assertRaisesRegex(RuntimeError, 'Docker work started'):
+            artifacts.main()
+        self.ensure_image.assert_called_once()
+
+    def test_unselected_variant_does_not_block_build(self):
+        self.existing('cu130')
+        with patch('sys.argv', ['artifacts.py', 'build', 'cu118']), \
+                self.assertRaisesRegex(RuntimeError, 'Docker work started'):
+            artifacts.main()
+        self.ensure_image.assert_called_once()
+
+
+if __name__ == '__main__':
+    unittest.main()
