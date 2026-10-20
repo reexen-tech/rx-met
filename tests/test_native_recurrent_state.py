@@ -120,6 +120,8 @@ class NativeRecurrentStateTest(unittest.TestCase):
                     module(self.x + 2)
                 document = module.export_quant_params_to_aimet_format({}, module_name='rnn')
                 layer = document['activation_encodings']['rnn']
+                from aimet_common.compiler_encodings import validate_compiler_encodings
+                validate_compiler_encodings(document)
                 self.assertEqual(layer['input'][0]['is_symmetric'], 'False')
                 self.assertEqual(layer['output'][0]['is_symmetric'], 'True')
 

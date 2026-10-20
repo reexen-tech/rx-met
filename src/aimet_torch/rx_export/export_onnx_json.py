@@ -20,11 +20,13 @@ from collections import Counter
 
 import onnx
 import torch
+from aimet_common.compiler_encodings import normalize_compiler_encodings
 from .custom_gru_onnx import (
     ensure_custom_gru_op_registered,
     replace_optimized_gru_modules,
 )
 from .postprocess import postprocess_all
+from .postprocess.io_utils import load_encodings, save_encodings
 from .parameter_names import restore_parameter_names
 from .linear import prepare_linear_export, restore_linear_names
 from .validation import (
@@ -160,6 +162,7 @@ def export_onnx_json(
     - ONNX 保持“干净”：不导出 Q/DQ/fakequant（固定为 sidecar encodings）
     - torch.onnx.export 强制 legacy：dynamo=False
     - 返回前统一校验最终 ONNX 及启用量化器的编码；缺失或不一致时抛出 RuntimeError
+    - 保留既有接口：返回 (onnx_path, encodings_path) 字符串元组
     """
     os.makedirs(export_dir, exist_ok=True)
     # if tuple(dummy_input_shape) != STATIC_DUMMY_INPUT_SHAPE:
@@ -239,6 +242,11 @@ def export_onnx_json(
             input_shape=dummy_input_shape,
         )
 
+        try:
+            encodings = normalize_compiler_encodings(load_encodings(enc_out_path))
+        except ValueError as exc:
+            raise RuntimeError(f"Export artifact validation failed: {exc}") from exc
+        save_encodings(encodings, enc_out_path)
         export_recurrent_encodings(sim.model, onnx_path, enc_out_path)
         restore_parameter_names(onnx_path, original_model, expected_encodings)
         validate_exported_artifacts(

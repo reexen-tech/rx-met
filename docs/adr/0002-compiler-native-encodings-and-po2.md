@@ -14,8 +14,10 @@ Conv、Gemm 和 MatMul 的 bias 需要满足 `Sb = Sx * Sw`，才能与输入和
 
 ## 决策
 
-最终 `.encodings` 使用 `src/aimet_onnx/rx_ptq/compiler_encodings.py` 实现的编译器
-格式。AIMET 原始 encodings 作为独立文件保留，用于调试、重载和结果追溯。
+最终 `.encodings` 使用公共编译器格式；其字段规范化和校验由
+`src/aimet_common/compiler_encodings.py` 实现，各框架负责源网格转换及图映射，
+详见 [统一编码导出接口](0003-shared-compiler-encodings.md)。
+AIMET 原始 encodings 作为独立文件保留，用于调试、重载和结果追溯。
 
 Power-of-2 对齐修改实际量化器中的 scale，`n` 从修改后的 scale 计算。默认 ONNX
 流程使用项目 PyTorch 导出流程相同的 `cover_range` 规则。Conv、Gemm 和 MatMul

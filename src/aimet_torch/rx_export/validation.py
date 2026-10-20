@@ -16,6 +16,7 @@ import onnx
 import torch
 
 from aimet_common.quantsim_config.compute_ops import is_compute_op
+from aimet_common.compiler_encodings import validate_compiler_encodings
 from aimet_torch.native_recurrent import named_native_recurrent
 from aimet_torch.v2.utils import flatten_nn_module_list
 from .postprocess.encodings_ops import postprocess_encodings_inplace
@@ -174,24 +175,10 @@ def _compare(expected, actual, path: str, errors: list[str]) -> None:
 
 
 def _check_scales(value, path: str, errors: list[str]) -> None:
-    if isinstance(value, dict):
-        for key, child in value.items():
-            if key == 'scale':
-                def check_scale(scale, location):
-                    if isinstance(scale, list):
-                        if not scale:
-                            errors.append(f'{location}: empty scale')
-                        for index, element in enumerate(scale):
-                            check_scale(element, f'{location}[{index}]')
-                    elif (not isinstance(scale, (int, float)) or isinstance(scale, bool)
-                          or not math.isfinite(scale) or scale <= 0):
-                        errors.append(f'{location}: scale must be positive and finite')
-                check_scale(child, f'{path}.{key}')
-            else:
-                _check_scales(child, f'{path}.{key}', errors)
-    elif isinstance(value, list):
-        for index, child in enumerate(value):
-            _check_scales(child, f'{path}[{index}]', errors)
+    try:
+        validate_compiler_encodings(value)
+    except ValueError as exc:
+        errors.append(f'{path}: {exc}')
 
 
 def _io_encoding(entry, index):

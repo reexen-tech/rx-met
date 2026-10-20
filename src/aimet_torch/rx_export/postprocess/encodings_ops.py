@@ -1,8 +1,14 @@
 from __future__ import annotations
 
 import logging
-import math
 from typing import Any, Dict, List, Tuple
+
+from aimet_common.compiler_encodings import (
+    compact_per_channel_param_encodings,
+    flatten_activation_io_index_dict,
+    normalize_quant_fields_add_n,
+    normalize_dtype_with_bitwidth,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -57,57 +63,6 @@ def merge_gru_bias_param_encodings(enc: Dict[str, Any], verbose: bool = True) ->
         changed = True
 
     enc["param_encodings"] = pe
-    return enc, changed
-
-
-def compact_per_channel_param_encodings(enc: Dict[str, Any], verbose: bool = True) -> Tuple[Dict[str, Any], bool]:
-    if "param_encodings" not in enc or not isinstance(enc["param_encodings"], dict):
-        return enc, False
-
-    pe: Dict[str, Any] = enc["param_encodings"]
-    changed = False
-    always_list_fields = {"min", "max", "offset", "scale"}
-
-    for k, v in list(pe.items()):
-        if not (isinstance(v, list) and v and all(isinstance(e, dict) for e in v)):
-            continue
-
-        entries: List[Dict[str, Any]] = v  # type: ignore[assignment]
-        keys = set(entries[0].keys())
-        for e in entries[1:]:
-            keys &= set(e.keys())
-        if not keys:
-            continue
-
-        common: Dict[str, Any] = {}
-        per_ch: Dict[str, List[Any]] = {}
-        for kk in sorted(keys):
-            vals = [e.get(kk) for e in entries]
-            if kk in always_list_fields:
-                per_ch[kk] = vals
-                continue
-            all_same = all(val == vals[0] for val in vals)
-            if all_same:
-                common[kk] = vals[0]
-            else:
-                per_ch[kk] = vals
-
-        all_keys = set().union(*(set(e.keys()) for e in entries))
-        extra_keys = all_keys - keys
-        for kk in sorted(extra_keys):
-            per_ch[kk] = [e.get(kk) for e in entries]
-
-        compacted: Dict[str, Any] = {}
-        compacted.update(common)
-        compacted.update(per_ch)
-
-        pe[k] = compacted
-        changed = True
-
-    if changed:
-        if verbose:
-            logger.info("✅ 已将 param_encodings 中的 per-channel list[dict] 压缩为 dict 格式")
-        enc["param_encodings"] = pe
     return enc, changed
 
 
@@ -281,186 +236,6 @@ def add_gru_input_from_internal_ops(enc: Dict[str, Any], verbose: bool = True) -
 
     if changed:
         enc["activation_encodings"] = act
-    return enc, changed
-
-
-def flatten_activation_io_index_dict(enc: Dict[str, Any], verbose: bool = True) -> Tuple[Dict[str, Any], bool]:
-    if "activation_encodings" not in enc or not isinstance(enc["activation_encodings"], dict):
-        return enc, False
-
-    act: Dict[str, Any] = enc["activation_encodings"]
-    changed = False
-
-    def _is_index_dict(x: Any) -> bool:
-        if not isinstance(x, dict) or not x:
-            return False
-        return all(isinstance(k, str) and k.isdigit() for k in x.keys())
-
-    def _to_index_dict(v: Any) -> Any:
-        if _is_index_dict(v):
-            return {k: v[k] for k in sorted(v.keys(), key=lambda s: int(s))}
-        if isinstance(v, dict):
-            return {"0": v}
-        if isinstance(v, list):
-            return {str(idx): item for idx, item in enumerate(v)}
-        return v
-
-    def _normalize_entry_io(entry: Dict[str, Any]) -> bool:
-        local_changed = False
-        for io_key in ("input", "output"):
-            if io_key not in entry:
-                continue
-            before = entry[io_key]
-            after = _to_index_dict(before)
-            if after != before:
-                entry[io_key] = after
-                local_changed = True
-
-        for ops_field in ("internal_ops", "internal_ops_reverse"):
-            internal = entry.get(ops_field)
-            if isinstance(internal, dict):
-                for _, op_entry in internal.items():
-                    if isinstance(op_entry, dict):
-                        if _normalize_entry_io(op_entry):
-                            local_changed = True
-        return local_changed
-
-    for op_name, entry in list(act.items()):
-        if not isinstance(entry, dict):
-            continue
-        if _normalize_entry_io(entry):
-            changed = True
-        act[op_name] = entry
-
-    if changed:
-        enc["activation_encodings"] = act
-        if verbose:
-            logger.info("✅ 已规范化 activation_encodings 的 input/output 为 index dict，保留 '0'/'1' 等输入输出编号")
-    return enc, changed
-
-
-def normalize_quant_fields_add_n(enc: Dict[str, Any], verbose: bool = True) -> Tuple[Dict[str, Any], bool]:
-    changed = False
-
-    def _to_n(scale_val: Any) -> Any:
-        if isinstance(scale_val, list):
-            return [_to_n(x) for x in scale_val]
-        try:
-            s = float(scale_val)
-        except Exception:  # noqa: BLE001
-            return None
-        if s <= 0:
-            return None
-        n_f = -math.log2(s)
-        n_i = int(round(n_f))
-        if abs(n_f - n_i) > 1e-6 and verbose:
-            logger.warning("scale=%s 得到的 n 非整数：%s（将 round 为 %d）", scale_val, n_f, n_i)
-        return n_i
-
-    def _norm_dict(d: Dict[str, Any]) -> bool:
-        local_changed = False
-        if "scale" in d and "n" not in d:
-            n_val = _to_n(d.get("scale"))
-            if n_val is not None:
-                d["n"] = n_val
-                local_changed = True
-
-        rename_map = {
-            "offset": "zero_point",
-            "min": "real_min",
-            "max": "real_max",
-        }
-        for old, new in rename_map.items():
-            if old in d and new not in d:
-                d[new] = d.pop(old)
-                local_changed = True
-            elif old in d and new in d:
-                d.pop(old, None)
-                local_changed = True
-        return local_changed
-
-    def _is_index_dict(x: Any) -> bool:
-        return isinstance(x, dict) and bool(x) and all(isinstance(k, str) and k.isdigit() for k in x.keys())
-
-    def _visit(obj: Any) -> None:
-        nonlocal changed
-        if obj is None:
-            return
-        if isinstance(obj, list):
-            for it in obj:
-                _visit(it)
-            return
-        if isinstance(obj, dict):
-            if _is_index_dict(obj):
-                for k in sorted(obj.keys(), key=lambda s: int(s)):
-                    _visit(obj[k])
-                return
-            if any(k in obj for k in ("scale", "offset", "min", "max", "zero_point", "real_min", "real_max")):
-                if _norm_dict(obj):
-                    changed = True
-            for v in obj.values():
-                _visit(v)
-            return
-
-    _visit(enc.get("activation_encodings"))
-    _visit(enc.get("param_encodings"))
-
-    if changed and verbose:
-        logger.info(
-            "✅ 已新增 n=-log2(scale)，并重命名字段 offset/min/max -> zero_point/real_min/real_max"
-        )
-    return enc, changed
-
-
-def normalize_dtype_with_bitwidth(enc: Dict[str, Any], verbose: bool = True) -> Tuple[Dict[str, Any], bool]:
-    changed = False
-
-    def _norm_one(d: Dict[str, Any]) -> bool:
-        if "dtype" not in d or "bitwidth" not in d:
-            return False
-        dt = d.get("dtype")
-        bw = d.get("bitwidth")
-        if not isinstance(dt, str):
-            return False
-        try:
-            bw_i = int(bw)
-        except Exception:  # noqa: BLE001
-            return False
-        dt_up = dt.upper()
-        base = dt_up.rstrip("0123456789")
-        dt_new = f"{base}{bw_i}"
-        if dt_new != dt:
-            d["dtype"] = dt_new
-            return True
-        return False
-
-    def _is_index_dict(x: Any) -> bool:
-        return isinstance(x, dict) and bool(x) and all(isinstance(k, str) and k.isdigit() for k in x.keys())
-
-    def _visit(obj: Any) -> None:
-        nonlocal changed
-        if obj is None:
-            return
-        if isinstance(obj, list):
-            for it in obj:
-                _visit(it)
-            return
-        if isinstance(obj, dict):
-            if _is_index_dict(obj):
-                for k in sorted(obj.keys(), key=lambda s: int(s)):
-                    _visit(obj[k])
-                return
-            if _norm_one(obj):
-                changed = True
-            for v in obj.values():
-                _visit(v)
-            return
-
-    _visit(enc.get("activation_encodings"))
-    _visit(enc.get("param_encodings"))
-
-    if changed and verbose:
-        logger.info("✅ 已规范化 dtype：转大写并拼接 bitwidth（如 INT8/INT16/INT32）")
     return enc, changed
 
 

@@ -8,7 +8,7 @@ RX-MET ONNX PTQ 演示 — 标准用法
         → apply_mixed_precision_bitwidth（JSON 2，与 quick_start_kws.py 同一份）
         → sim.compute_encodings 校准 (PTQ)
         → apply_power_of_2_workflow（RX cover_range + Sb=Sx*Sw，算法在 aimet_common）
-        → export_onnx_compiler_artifacts（clean ONNX + compiler encodings）
+        → export_onnx_json（clean ONNX + compiler encodings）
         → 重建 clean ONNX session，对比 FP32
 
 ONNX 没有 PyTorch 权重可训，因此没有 QAT 微调；其余步骤与 quick_start_kws.py 对应。
@@ -49,7 +49,7 @@ from aimet_onnx.rx_ptq import (
     create_onnx_ptq_sim,
     disable_onnx_bias_quantizers,
     evaluate_onnx_outputs,
-    export_onnx_compiler_artifacts,
+    export_onnx_json,
     force_model_io_quantizers,
     load_onnx_ptq_inputs,
     run_onnx_feed,
@@ -296,10 +296,10 @@ def main() -> None:
 
     # ------------------------------------------------------------------
     # 步骤 7: 保存量化产物
-    #   对应 export_onnx_json：clean ONNX + compiler encodings + RX-MET raw。
+    #   与 Torch 共用导出入口名：clean ONNX + compiler encodings + RX-MET raw。
     # ------------------------------------------------------------------
     with stage("步骤 7: 保存量化产物", timings):
-        artifacts = export_onnx_compiler_artifacts(
+        artifacts = export_onnx_json(
             sim, original_model, OUTPUT_DIR, filename_prefix
         )
         print(f"ONNX:              {artifacts['onnx']}")

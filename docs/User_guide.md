@@ -165,7 +165,13 @@ python3 quick_start_kws.py --rnn_type lstm
 重建 QuantSim 时，`prepare_model` 参数、两份配置、默认位宽和量化方案必须与训练侧
 一致；否则量化器名称或参数会错位。
 
-`export_onnx_json()` 在所有图后处理和循环算子编码合并完成后，强制校验最终 ONNX
+两侧统一使用 `export_onnx_json()`：PyTorch 入口位于 `aimet_torch.rx_export`，保留
+原参数、默认值和 `(onnx_path, encodings_path)` 字符串元组返回值；ONNX PTQ 入口
+位于 `aimet_onnx.rx_ptq`，返回包含 `onnx`、`encodings`、`aimet_encodings` 和
+`coverage` 的字典。旧 ONNX 名称 `export_onnx_compiler_artifacts()` 也保留原字典
+返回值。两侧共用编译器编码规范化和校验，框架相关的图处理分别维护。
+
+导出器在所有图后处理和循环算子编码合并完成后，强制校验最终 ONNX
 及 encodings，通过后才返回文件路径。校验以 `sim.model` 中启用的量化器为基准，检查：
 
 - 输入、输出和权重量化编码是否完整，包括输入编号、每个通道及原生 GRU/LSTM 内部编码。

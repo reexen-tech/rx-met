@@ -99,6 +99,15 @@ class TorchExportValidationTest(unittest.TestCase):
     def test_normal_export(self):
         self.export(self.sim())
 
+    def test_export_preserves_string_tuple_and_repeatable_encodings(self):
+        sim = self.sim()
+        result = exporter.export_onnx_json(sim, self.tmp.name, 'first', tuple(self.x.shape))
+        self.assertIsInstance(result, tuple)
+        self.assertTrue(all(isinstance(path, str) and Path(path).is_file() for path in result))
+        _, legacy_path = self.export(sim)
+        self.assertEqual(json.loads(Path(result[1]).read_text()),
+                         json.loads(Path(legacy_path).read_text()))
+
     def test_disabled_quantizer_needs_no_encoding(self):
         sim = self.sim()
         sim.model.module_add.output_quantizers[0] = None

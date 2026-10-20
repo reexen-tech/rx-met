@@ -183,7 +183,7 @@ def evaluate_onnx_outputs(
     return compare_outputs(reference, run_onnx_feed(source, feed, providers))
 
 
-def export_onnx_compiler_artifacts(
+def export_onnx_json(
     sim: Any,
     original_model: onnx.ModelProto,
     output_dir: str | Path,
@@ -211,6 +211,16 @@ def export_onnx_compiler_artifacts(
         "aimet_encodings": raw_encodings_path,
         "coverage": coverage,
     }
+
+
+def export_onnx_compiler_artifacts(
+    sim: Any,
+    original_model: onnx.ModelProto,
+    output_dir: str | Path,
+    filename_prefix: str,
+) -> Dict[str, Any]:
+    """Compatibility entry point; preserves the original artifact dictionary."""
+    return export_onnx_json(sim, original_model, output_dir, filename_prefix)
 
 
 def write_onnx_ptq_metadata(
@@ -290,7 +300,7 @@ def run_onnx_ptq(
     )
     reference_outputs = run_onnx_feed(model_path, feeds[0], providers)
     sim_report = evaluate_onnx_outputs(sim, feeds[0], reference_outputs, providers)
-    artifacts = export_onnx_compiler_artifacts(
+    artifacts = export_onnx_json(
         sim, original_model, output_dir, filename_prefix
     )
     clean_report = evaluate_onnx_outputs(

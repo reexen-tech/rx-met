@@ -3,79 +3,14 @@
 from __future__ import annotations
 
 import copy
-import math
 from collections import defaultdict
 from dataclasses import dataclass
-from typing import Any, Dict, Iterable, List, Tuple
+from typing import Any, Dict, List, Tuple
 
 import onnx
 
+from aimet_common.compiler_encodings import compact_encoding_records, normalize_compiler_encodings
 from aimet_common.quantsim_config.compute_ops import is_grid_preserving_op
-
-
-_VECTOR_FIELDS = {"scale", "n", "zero_point", "real_min", "real_max"}
-
-
-def _po2_exponent(scale: float) -> int:
-    if not math.isfinite(scale) or scale <= 0:
-        raise ValueError(f"scale 必须为正数且有限: {scale}")
-    exponent = int(round(-math.log2(scale)))
-    expected = 2.0 ** (-exponent)
-    if not math.isclose(scale, expected, rel_tol=1e-5, abs_tol=1e-12):
-        raise ValueError(f"scale 不是 Po2: {scale}")
-    return exponent
-
-
-def _map_recursive(value: Any, fn) -> Any:
-    if isinstance(value, list):
-        return [_map_recursive(item, fn) for item in value]
-    return fn(value)
-
-
-def _normalize_encoding(entry: Dict[str, Any]) -> Dict[str, Any]:
-    bitwidth = int(entry["bitwidth"])
-    dtype = str(entry.get("dtype", "int")).upper()
-    if dtype == "INT":
-        dtype = f"INT{bitwidth}"
-    elif dtype == "FLOAT":
-        dtype = f"FLOAT{bitwidth}"
-
-    scale = entry.get("scale")
-    if scale is None:
-        raise KeyError(f"encoding 缺少 scale: {entry}")
-    result: Dict[str, Any] = {
-        "bitwidth": bitwidth,
-        "dtype": dtype,
-        "is_symmetric": str(entry.get("is_symmetric", "False")),
-        "scale": scale,
-        "n": _map_recursive(scale, lambda item: _po2_exponent(float(item))),
-    }
-
-    zero_point = entry.get("zero_point", entry.get("offset", 0))
-    result["zero_point"] = zero_point
-    result["real_min"] = entry.get("real_min", entry.get("min"))
-    result["real_max"] = entry.get("real_max", entry.get("max"))
-    if result["real_min"] is None or result["real_max"] is None:
-        raise KeyError(f"encoding 缺少 real_min/real_max: {entry}")
-    return result
-
-
-def _compact_encodings(entries: Iterable[Dict[str, Any]]) -> Dict[str, Any]:
-    normalized = [_normalize_encoding(entry) for entry in entries]
-    if not normalized:
-        raise ValueError("不能压缩空 encoding 列表")
-    if len(normalized) == 1:
-        return normalized[0]
-
-    keys = set().union(*(entry.keys() for entry in normalized))
-    result: Dict[str, Any] = {}
-    for key in sorted(keys):
-        values = [entry.get(key) for entry in normalized]
-        if key in _VECTOR_FIELDS or any(value != values[0] for value in values[1:]):
-            result[key] = values
-        else:
-            result[key] = values[0]
-    return result
 
 
 @dataclass(frozen=True)
@@ -153,7 +88,27 @@ class CompilerEncodingConverter:
         raw = quantizer.export_encodings("0.6.1")
         if raw is None:
             raise RuntimeError(f"enabled quantizer 没有 encoding: {name}")
-        return _compact_encodings(raw)
+        symmetric = bool(getattr(quantizer, "use_symmetric_encodings", False))
+        unsigned = not symmetric or (
+            bool(getattr(quantizer, "use_unsigned_symmetric", False))
+            and all(entry.get("offset", 0) == 0 for entry in raw)
+        )
+        strict = bool(getattr(quantizer, "use_strict_symmetric", False))
+        entries = []
+        for entry in raw:
+            entry = dict(entry)
+            if str(entry.get("dtype", "")).lower() == "int":
+                bits = int(entry["bitwidth"])
+                qmin = -(1 << (bits - 1)) + int(strict) if not unsigned else 0
+                # TfEncoding uses an unsigned index grid. Translate its additive
+                # offset to the effective compiler integer grid, preserving QDQ.
+                offset = entry.pop("offset")
+                if offset != int(offset):
+                    raise ValueError(f"{name}: TfEncoding offset must be an integer")
+                entry["zero_point"] = int(offset) - qmin
+                entry["dtype"] = f"{'UINT' if unsigned else 'INT'}{bits}"
+            entries.append(entry)
+        return compact_encoding_records(entries, force_list=name in self.graph.initializers)
 
     def _propagate_grid_preserving(
         self, tensor_encodings: Dict[str, Dict[str, Any]]
@@ -246,4 +201,4 @@ class CompilerEncodingConverter:
             "param_entries": len(self.params),
             "initializer_count": len(self.graph.initializers),
         }
-        return payload, report
+        return normalize_compiler_encodings(payload, require_po2=True), report

@@ -1,7 +1,11 @@
 # ONNX PTQ 编译器产物
 
-这条流程通过 `aimet_onnx` 直接读取已有 ONNX，入口独立于
-`aimet_torch.rx_export.export_onnx_json`。
+这条流程通过 `aimet_onnx` 直接读取已有 ONNX。两种框架都使用
+`export_onnx_json` 入口名，分别位于 `aimet_onnx.rx_ptq` 和
+`aimet_torch.rx_export`，共用 `aimet_common.compiler_encodings` 中的格式和校验规则。
+PyTorch 保留原参数、默认值及两个字符串路径的元组返回值；ONNX PTQ 返回包含
+`onnx`、`encodings`、`aimet_encodings` 路径和 `coverage` 的字典。
+旧 ONNX 入口 `export_onnx_compiler_artifacts` 保留原参数及字典返回值。
 
 ## 术语
 
@@ -9,7 +13,8 @@
   契约，量化参数由外部 encodings 文件提供。
 - **AIMET 原始 encodings**：由 `aimet_onnx` 导出的原生量化参数，用于调试和重载。
 - **编译器 encodings**：目标编译器直接读取的节点级量化参数，包含节点输入、输出和
-  参数映射。格式由 `src/aimet_onnx/rx_ptq/compiler_encodings.py` 实现。
+  参数映射。公共格式由 `src/aimet_common/compiler_encodings.py` 实现，各框架适配器
+  负责源量化网格及节点映射。
 - **校准清单**：记录校准样本、模型输入名、样本配对关系和文件校验值的可复现输入
   清单。
 - **Po2 scale**：通过 `cover_range` 规则选择并实际写入量化器的 `1/2^n` scale。
@@ -62,6 +67,14 @@ python3 /examples/quick_start_onnx_ptq.py
 `clean_onnx_vs_fp32` 用于进一步确认制品完整性和输出一致性。
 
 ## 输出
+
+为兼容已有 PyTorch 编译器格式，普通算子记录的 `zero_point` 是加性偏移：
+`real = scale * (q + zero_point)`，与标准 ONNX Q/DQ 零点的符号相反。
+ONNX 适配器将 `TfEncoding.offset` 转为对应整数域的加性偏移；例如有符号 INT8
+的 `-128` 转为 `0`，INT32 bias 的 `-2147483648` 转为 `0`。
+非对称量化保留实际偏移，不能统一置零。无符号编码使用 `UINT8` 等明确 dtype。
+参数编码的通道字段统一为数组，单通道也保留数组结构。
+原生 GRU/LSTM 的专用编码保留算子库拥有的字段、列表结构和网格约定，不由通用层重写。
 
 每次运行生成：
 
