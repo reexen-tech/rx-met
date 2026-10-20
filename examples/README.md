@@ -3,14 +3,14 @@
 在宿主机的应用包目录执行：
 
 ```bash
-mkdir -p ~/rx-met-user
-cp -a examples ~/rx-met-user/
+mkdir -p "$HOME/rx-met-user"
+cp -a examples "$HOME/rx-met-user/"
 ```
 
 按应用包 README 启动 GPU 容器，工作目录使用以下挂载：
 
 ```bash
-  -v "~/rx-met-user:/workspace" \
+  -v "$HOME/rx-met-user:/workspace" \
   -w /workspace \
 ```
 

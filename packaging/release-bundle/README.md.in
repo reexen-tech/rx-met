@@ -26,7 +26,7 @@
 
 > 或指定镜像文件 `--runtime-image /path/to/runtime.tar.gz`。
 
-默认安装位置为 `~/.local/share/rx-met/@BUNDLE_NAME@`。
+默认安装位置为 `$HOME/.local/share/rx-met/@BUNDLE_NAME@`。
 
 ## 步骤 2：准备数据和工作目录
 
@@ -43,11 +43,11 @@
 第一次使用时，在宿主机的应用包目录创建个人工作目录，并复制示例：
 
 ```bash
-mkdir -p ~/rx-met-user
-cp -a examples ~/rx-met-user/
+mkdir -p "$HOME/rx-met-user"
+cp -a examples "$HOME/rx-met-user/"
 ```
 
-示例和量化配置位于 `~/rx-met-user/examples/`。需要调整参数时，编辑这里的脚本或
+示例和量化配置位于 `$HOME/rx-met-user/examples/`。需要调整参数时，编辑这里的脚本或
 `config/` 下的 JSON；模型和数据路径使用下文的容器内路径。
 
 ## 步骤 3：进入容器并运行
@@ -104,8 +104,8 @@ python3 /workspace/examples/quick_start_onnx_ptq.py
 
 | 示例 | 宿主机输出目录 |
 | --- | --- |
-| KWS GRU / LSTM | `~/rx-met-user/output/quick_start_kws/gru/` 或 `lstm/` |
-| ONNX PTQ | `~/rx-met-user/output/onnx_ptq_quick_start/` |
+| KWS GRU / LSTM | `$HOME/rx-met-user/output/quick_start_kws/gru/` 或 `lstm/` |
+| ONNX PTQ | `$HOME/rx-met-user/output/onnx_ptq_quick_start/` |
 
 目录内保存 ONNX、配套 encodings、检查点或运行 metadata。详细说明见
 [examples/README.md](examples/README.md)，量化配置说明见
