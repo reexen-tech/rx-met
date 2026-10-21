@@ -42,7 +42,7 @@ class NativeQdqAlignmentTest(unittest.TestCase):
             native.enable_per_channel_quantization()
         encodings = [grid(bits, scale, offset) for scale in scales]
         native.load_encodings(encodings)
-        reference = QuantizeDequantize(shape, bits, symmetric)
+        reference = QuantizeDequantize(shape, bits, symmetric, signed=symmetric)
         reference.set_range(torch.tensor([e.min for e in encodings]).reshape(shape),
                             torch.tensor([e.max for e in encodings]).reshape(shape))
         reference._reparametrize_to_scale_offset()

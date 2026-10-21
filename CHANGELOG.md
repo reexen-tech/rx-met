@@ -8,6 +8,8 @@
 
 ### Changed
 
+- Torch/ONNX 整数量化的符号与对称性解耦，缺省固定使用 INT，显式 `signed=False` 使用 UINT；JSON2 增加 `weight/bias/param/input/output_signed`、`input_signeds` 和 `default_config.signed`。修改对称性或位宽不再隐式改变整数域；UINT 对称校准将负值截为零。编译器导出和重载共用 `aimet_common.quantization_grid`，保持 dtype、实际整数范围、scale 与标准零点。
+- Torch 原始 AIMET legacy 编码恢复 `offset_internal + qmin` 的索引域约定，并保存显式 signedness 和范围元数据；RX 适配层继续兼容旧的目标整数域 offset。INT32 offset 平移使用整数运算，避免丢失非零零点；原生 GRU/LSTM 编码不变。
 - 编译器 encodings 升级为 `schema_version=4`，普通 Torch/ONNX 算子与原生 GRU/LSTM 统一采用标准减性零点 `real=scale*(q-zero_point)`。公共模块转换源 offset、验证整数域和真实范围；Torch 重载兼容无版本及 schema 1/2/3 的旧文件，仅迁移普通算子的加性零点。对称网格的零点仍为 0，实际 scale、整数码及量化结果保持不变；非对称文件的消费者需按版本区分新旧符号。
 - 统一整数 encodings 元数据：普通 Torch/ONNX 算子补齐真实量化粒度 `enc_type`，QuantGRU/QuantLSTM 的输入输出、参数和正反向内部量化点补齐 `n`；循环层顶层 `input/output` 使用 `{"0": {...}}`，内部 `output` 保留单元素列表。算子加载接口兼容旧列表和缺少 `n` 的编码，并校验已有指数，不改变实际量化网格。
 - KWS 示例默认输出到当前运行目录下的 `output/quick_start_kws/<gru|lstm>/`，与 ONNX PTQ 保持一致，仍支持环境变量和 `--output-dir` 覆盖。
@@ -18,6 +20,7 @@
 
 ### Fixed
 
+- 修复编译器编码重载根据对称性推断 INT/UINT、忽略明确 dtype 导致 UINT 对称范围错误和 INT 非对称整数码平移的问题；编译器、原始 AIMET 和阶段编码共用精确网格恢复，避免从 INT32 浮点 min/max 反推时丢失零点。共享量化器的 signedness 冲突在应用配置前报错，ONNX 严格原始编码重载检查 signedness，防止静默改变整数域。
 - ONNX 编译器编码传播按数据端口和真实 dtype 过滤，修复 Gather 的 INT64 索引及其生成节点被错误写入激活量化网格的问题，并排除 TopK/MaxPool 索引、Dropout mask 和非数据控制端口。模型整数/布尔输入输出保持原类型；导出拒绝挂在非浮点张量或端口上的量化器，恢复校验拒绝追加到索引端口的错误 sidecar 编码。
 - Torch 为 FX 展开 BN、自定义模块自动补建的参数量化器复用普通参数的 `_V2LazyQuantizer`，实际遵循所选校准方案、数据类型和位宽，修复固定使用 MinMax 导致 Percentile/TfEnhanced 选择丢失的问题；百分位设置和重新校准也覆盖这些参数。移除为匹配旧错误默认而添加的 ONNX 参数校准 metadata 适配。
 - ONNX GRU 后的普通计算输入在实际消费位置校准，避免中间帧复用整段序列网格及 GRU 输出的重复量化；普通计算分支后的 Concat 使用独立、共享的输入网格。混合精度、bias 对齐、编译器映射和原生编码重载共用端口解析，恢复前拒绝共享量化器的冲突编码，clean ONNX 保留原图。

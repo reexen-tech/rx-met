@@ -744,7 +744,9 @@ def apply_mixed_precision_bitwidth(sim_model, config_file: str, verbose: bool = 
             sim_model, config_file, verbose=verbose
         )
 
-    from aimet_common.mixed_precision import default_layer_config, is_config_comment, select_layer_config
+    from aimet_common.mixed_precision import (
+        QuantizerConfigPlan, default_layer_config, is_config_comment, select_layer_config,
+    )
     
     # 加载配置
     config = load_mixed_precision_config(config_file)
@@ -805,6 +807,31 @@ def apply_mixed_precision_bitwidth(sim_model, config_file: str, verbose: bool = 
     from aimet_torch.native_recurrent import named_native_recurrent
     recurrent_modules = list(named_native_recurrent(sim_model))
     recurrent_names = {name for name, _, _ in recurrent_modules}
+
+    domain_plan = QuantizerConfigPlan()
+    for name, module in sim_model.named_modules():
+        if any(name == native or name.startswith(native + '.') for native in recurrent_names):
+            continue
+        settings, _, _ = select_layer_config(name, type(module).__name__, layer_type_config, layer_name_config)
+        if settings is None and default_disable_quantization:
+            continue
+        settings = settings or {}
+        if settings.get('disable_quantization', False):
+            continue
+        bindings = [(role if role in ('weight', 'bias') else 'param', None, q)
+                    for role, q in getattr(module, 'param_quantizers', {}).items()]
+        bindings += [(role, index, q) for role in ('input', 'output')
+                     for index, q in enumerate(getattr(module, f'{role}_quantizers', []))]
+        for role, index, quantizer in bindings:
+            domain_plan.request(quantizer, 'signed', default_config.get('signed'),
+                                f'default_config.{name}.{role}', fallback=True)
+            signs = settings.get('input_signeds') if role == 'input' else None
+            signed = ((signs[index] if index < len(signs) else None) if signs is not None
+                      else settings.get(f'{role}_signed'))
+            domain_plan.request(quantizer, 'signed', signed, f'{name}.{role}[{index}]')
+    for quantizer, settings in domain_plan.entries():
+        if 'signed' in settings and hasattr(quantizer, 'signed'):
+            quantizer.signed = settings['signed']
 
     # 遍历所有模块
     for name, module in sim_model.named_modules():
@@ -919,12 +946,6 @@ def apply_mixed_precision_bitwidth(sim_model, config_file: str, verbose: bool = 
                         changes = []
                         if param_bw is not None:
                             param_quantizer.bitwidth = param_bw
-                            if hasattr(param_quantizer, 'symmetric') and param_quantizer.symmetric:
-                                param_quantizer.qmin = -(2 ** (param_bw - 1))
-                                param_quantizer.qmax = 2 ** (param_bw - 1) - 1
-                            else:
-                                param_quantizer.qmin = 0
-                                param_quantizer.qmax = 2 ** param_bw - 1
                             changes.append(f"{param_bw}-bit")
                         if param_sym is not None:
                             param_quantizer.symmetric = param_sym
@@ -957,7 +978,11 @@ def apply_mixed_precision_bitwidth(sim_model, config_file: str, verbose: bool = 
                             from aimet_torch.v2.quantization.affine import QuantizeDequantize
                             import torch.nn as _nn
                             sym = input_sym if input_sym is not None else True
-                            new_q = QuantizeDequantize(shape=(), bitwidth=input_bw, symmetric=sym)
+                            signed = layer_config.get('input_signed', default_config.get('signed', True))
+                            signs = layer_config.get('input_signeds')
+                            if signs is not None and idx < len(signs) and signs[idx] is not None:
+                                signed = signs[idx]
+                            new_q = QuantizeDequantize(shape=(), bitwidth=input_bw, symmetric=sym, signed=signed)
                             q_device = _infer_quant_module_device(module)
                             if q_device is not None:
                                 new_q = new_q.to(q_device)
@@ -978,23 +1003,10 @@ def apply_mixed_precision_bitwidth(sim_model, config_file: str, verbose: bool = 
 
                         if input_bw:
                             input_quantizer.bitwidth = input_bw
-                            if hasattr(input_quantizer, 'symmetric') and input_quantizer.symmetric:
-                                input_quantizer.qmin = -(2 ** (input_bw - 1))
-                                input_quantizer.qmax = 2 ** (input_bw - 1) - 1
-                            else:
-                                input_quantizer.qmin = 0
-                                input_quantizer.qmax = 2 ** input_bw - 1
                             changes.append(f"{input_bw}-bit")
 
                         if input_sym is not None:
                             input_quantizer.symmetric = input_sym
-                            bw = input_bw if input_bw else input_quantizer.bitwidth
-                            if input_sym:
-                                input_quantizer.qmin = -(2 ** (bw - 1))
-                                input_quantizer.qmax = 2 ** (bw - 1) - 1
-                            else:
-                                input_quantizer.qmin = 0
-                                input_quantizer.qmax = 2 ** bw - 1
                             changes.append(f"{'sym' if input_sym else 'asym'}")
 
                         if verbose and changes:
@@ -1014,7 +1026,8 @@ def apply_mixed_precision_bitwidth(sim_model, config_file: str, verbose: bool = 
                         from aimet_torch.v2.quantization.affine import QuantizeDequantize
                         import torch.nn as _nn
                         sym = output_sym if output_sym is not None else True
-                        new_q = QuantizeDequantize(shape=(), bitwidth=output_bw, symmetric=sym)
+                        signed = layer_config.get('output_signed', default_config.get('signed', True))
+                        new_q = QuantizeDequantize(shape=(), bitwidth=output_bw, symmetric=sym, signed=signed)
                         slots = list(module.output_quantizers)
                         slots[0] = new_q
                         module.output_quantizers = _nn.ModuleList(slots)
@@ -1031,29 +1044,11 @@ def apply_mixed_precision_bitwidth(sim_model, config_file: str, verbose: bool = 
                     # 位宽
                     if output_bw:
                         output_quantizer.bitwidth = output_bw
-                        # 🔧 FIX: 更新 qmin 和 qmax 以匹配新的位宽
-                        if hasattr(output_quantizer, 'symmetric') and output_quantizer.symmetric:
-                            # 对称量化
-                            output_quantizer.qmin = -(2 ** (output_bw - 1))
-                            output_quantizer.qmax = 2 ** (output_bw - 1) - 1
-                        else:
-                            # 非对称量化
-                            output_quantizer.qmin = 0
-                            output_quantizer.qmax = 2 ** output_bw - 1
                         changes.append(f"{output_bw}-bit")
                     
                     # 对称性
                     if output_sym is not None:
                         output_quantizer.symmetric = output_sym
-                        # 🔧 FIX: 如果改变了对称性，需要重新计算 qmin/qmax
-                        # 使用配置的位宽或当前的位宽
-                        bw = output_bw if output_bw else output_quantizer.bitwidth
-                        if output_sym:
-                            output_quantizer.qmin = -(2 ** (bw - 1))
-                            output_quantizer.qmax = 2 ** (bw - 1) - 1
-                        else:
-                            output_quantizer.qmin = 0
-                            output_quantizer.qmax = 2 ** bw - 1
                         changes.append(f"{'sym' if output_sym else 'asym'}")
                     
                     if verbose and changes:

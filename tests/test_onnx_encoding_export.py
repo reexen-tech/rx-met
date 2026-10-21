@@ -34,11 +34,12 @@ def graph():
 
 
 class OnnxGridAdapterTest(unittest.TestCase):
-    def convert(self, entries, *, symmetric=True, unsigned=False, strict=False, enc_type=None):
+    def convert(self, entries, *, symmetric=True, unsigned=False, strict=False, enc_type=None, signed=True):
         enc_type = enc_type or (EncodingType.PER_CHANNEL if len(entries) > 1 else EncodingType.PER_TENSOR)
         quantizer = SimpleNamespace(enabled=True, use_symmetric_encodings=symmetric,
                                     use_unsigned_symmetric=unsigned, use_strict_symmetric=strict,
                                     data_type=QuantizationDataType.int,
+                                    signed=signed,
                                     get_encodings=lambda: [SimpleNamespace(delta=e['scale'], min=e['min'],
                                         max=e['max'], offset=e['offset']) for e in entries],
                                     export_encodings=lambda version: entries,
@@ -62,14 +63,14 @@ class OnnxGridAdapterTest(unittest.TestCase):
 
     def test_asymmetric_parameters_use_subtractive_zero_point(self):
         raw = dict(raw_encoding(offset=-7), is_symmetric='False')
-        result = self.convert([raw], symmetric=False)
+        result = self.convert([raw], symmetric=False, signed=False)
         expected = normalize_compiler_encodings({'param_encodings': {'w': [raw]}}, require_po2=True)
         self.assertEqual(result, expected['param_encodings']['w'])
         self.assertEqual(result['dtype'], 'UINT8')
         self.assertEqual(result['zero_point'], [7])
 
     def test_unsigned_symmetric_parameters(self):
-        result = self.convert([raw_encoding(offset=0)], unsigned=True)
+        result = self.convert([raw_encoding(offset=0)], unsigned=True, signed=False)
         self.assertEqual(result['dtype'], 'UINT8')
         self.assertEqual(result['zero_point'], [0])
 

@@ -12,6 +12,7 @@ import onnx
 from aimet_common.compiler_encodings import (
     COMPILER_SCHEMA_VERSION, compact_encoding_records, normalize_compiler_encodings,
 )
+from aimet_common.quantization_grid import IntegerGrid, integer_bounds
 from aimet_common.quantsim_config.compute_ops import is_grid_preserving_op
 from .validation import validate_quantizer_state
 
@@ -127,10 +128,7 @@ class CompilerEncodingConverter:
         if raw is None:
             raise RuntimeError(f"enabled quantizer 没有 encoding: {name}")
         symmetric = bool(getattr(quantizer, "use_symmetric_encodings", False))
-        unsigned = not symmetric or (
-            bool(getattr(quantizer, "use_unsigned_symmetric", False))
-            and all(entry.get("offset", 0) == 0 for entry in raw)
-        )
+        signed = getattr(quantizer, 'signed', True)
         strict = bool(getattr(quantizer, "use_strict_symmetric", False))
         enc_type = quantizer._encoding_type().name
         entries = []
@@ -139,14 +137,19 @@ class CompilerEncodingConverter:
             entry["enc_type"] = enc_type
             if str(entry.get("dtype", "")).lower() == "int":
                 bits = int(entry["bitwidth"])
-                qmin = -(1 << (bits - 1)) + int(strict) if not unsigned else 0
+                qmin, qmax = integer_bounds(bits, signed, strict=strict and symmetric)
                 # TfEncoding uses an unsigned index grid. Convert its additive
                 # offset to a subtractive zero point in the compiler's code domain.
                 offset = entry.pop("offset")
                 if offset != int(offset):
                     raise ValueError(f"{name}: TfEncoding offset must be an integer")
-                entry["zero_point"] = qmin - int(offset)
-                entry["dtype"] = f"{'UINT' if unsigned else 'INT'}{bits}"
+                grid = IntegerGrid.from_offset(entry['scale'], offset, bits, signed,
+                    index_domain=True, qmin=qmin, qmax=qmax)
+                entry["zero_point"] = grid.zero_point
+                entry["dtype"] = grid.dtype
+                entry.pop('signed', None)
+                if (qmin, qmax) != integer_bounds(bits, signed):
+                    entry['qmin'], entry['qmax'] = qmin, qmax
             entries.append(entry)
         return compact_encoding_records(entries, force_list=name in self.graph.initializers)
 

@@ -41,17 +41,20 @@ class OnnxRemainingTest(unittest.TestCase):
         import torch
         from aimet_torch.v2.quantization.affine import QuantizeDequantize
         from aimet_torch.power_of_2_quantization import modify_quantizer_to_power_of_2
-        quantizer = QuantizeDequantize((2, 1), bitwidth=8, symmetric=False)
-        quantizer.set_range(torch.tensor([[-.13], [-.07]]), torch.tensor([[2.42], [1.2]]))
-        before = [value.detach().flatten().tolist() for value in
-                  (quantizer.get_scale(), quantizer.get_offset(), quantizer.get_min(), quantizer.get_max())]
-        expected = [align_encoding_values(scale=s, offset=int(o), real_min=low, real_max=high,
-                     bitwidth=8, symmetric=False) for s, o, low, high in zip(*before)]
-        self.assertTrue(modify_quantizer_to_power_of_2(quantizer, 'test', method='cover_range', verbose=False))
-        for index, value in enumerate(expected):
-            self.assertEqual(quantizer.get_offset().flatten()[index].item(), value['offset'])
-            self.assertEqual(quantizer.get_min().flatten()[index].item(), value['real_min'])
-            self.assertEqual(quantizer.get_max().flatten()[index].item(), value['real_max'])
+        for signed in (True, False):
+            with self.subTest(signed=signed):
+                quantizer = QuantizeDequantize((2, 1), bitwidth=8, symmetric=False, signed=signed)
+                quantizer.set_range(torch.tensor([[-.13], [-.07]]), torch.tensor([[2.42], [1.2]]))
+                before = [value.detach().flatten().tolist() for value in
+                    (quantizer.get_scale(), quantizer.get_offset(), quantizer.get_min(), quantizer.get_max())]
+                expected = [align_encoding_values(scale=s, offset=int(o)+quantizer.qmin,
+                    real_min=low, real_max=high, bitwidth=8, symmetric=False)
+                    for s, o, low, high in zip(*before)]
+                self.assertTrue(modify_quantizer_to_power_of_2(quantizer, 'test', method='cover_range', verbose=False))
+                for index, value in enumerate(expected):
+                    self.assertEqual(quantizer.get_offset().flatten()[index].item()+quantizer.qmin, value['offset'])
+                    self.assertEqual(quantizer.get_min().flatten()[index].item(), value['real_min'])
+                    self.assertEqual(quantizer.get_max().flatten()[index].item(), value['real_max'])
 
     def test_common_grid_keeps_zero_representable_when_rounding_shrinks_scale(self):
         offset, low, high, _, _ = recompute_min_max_for_new_scale(.5, 0, 255, -200., -200, False)

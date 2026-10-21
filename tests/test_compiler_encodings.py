@@ -3,8 +3,10 @@ import copy
 import importlib.util
 from pathlib import Path
 import unittest
+import sys
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / 'src'))
 SPEC = importlib.util.spec_from_file_location(
     'compiler_encodings', ROOT / 'src/aimet_common/compiler_encodings.py')
 shared = importlib.util.module_from_spec(SPEC)

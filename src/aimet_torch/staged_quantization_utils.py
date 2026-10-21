@@ -563,21 +563,21 @@ def _adapt_quantizer_to_encoding(enc_entry: dict, quantizer, verbose: bool) -> t
             if file_bw < 1:
                 return False, f"无效的 bitwidth: {file_bw}"
 
-        # AIMET affine encoding 的约定：对称量化使用 signed grid，
-        # 非对称量化使用 unsigned grid。encoding 是 reload 时的权威配置。
+        dtype = entry.get('dtype')
+        if dtype in (f'INT{file_bw}', f'UINT{file_bw}'):
+            from aimet_common.quantization_grid import integer_bounds
+            low, high = integer_bounds(file_bw, dtype.startswith('INT'))
+            if (entry.get('qmin', low), entry.get('qmax', high)) != (low, high):
+                return False, 'Torch QuantSim does not support narrow integer ranges'
         if file_bw is not None and hasattr(quantizer, "bitwidth"):
             quantizer.bitwidth = file_bw
+        if dtype in (f'INT{file_bw}', f'UINT{file_bw}'):
+            quantizer.qmin = entry.get('qmin', low)
+            quantizer.qmax = entry.get('qmax', high)
 
         if file_sym is not None:
             if file_bw is None:
                 file_bw = int(getattr(quantizer, "bitwidth"))
-            if hasattr(quantizer, "qmin") and hasattr(quantizer, "qmax"):
-                if bool(file_sym):
-                    quantizer.qmin = -(2 ** (file_bw - 1))
-                    quantizer.qmax = 2 ** (file_bw - 1) - 1
-                else:
-                    quantizer.qmin = 0
-                    quantizer.qmax = 2 ** file_bw - 1
             if hasattr(quantizer, "symmetric"):
                 quantizer.symmetric = bool(file_sym)
 
@@ -659,6 +659,8 @@ def _apply_aimet_encoding_to_quantizer(
     if enc_entry is not None:
         ok, msg = _adapt_quantizer_to_encoding(enc_entry, quantizer, verbose)
         if not ok:
+            if 'zero_point' in enc_entry:
+                raise ValueError(f'Cannot restore compiler integer grid: {msg}')
             if verbose:
                 print(f"  ⚠️ 跳过（无法按 encoding 调整量化器）: {msg}")
             return False
@@ -678,8 +680,14 @@ def _apply_aimet_encoding_to_quantizer(
             max_t = _align_tensor_to_shape(max_t, q_max_shape)
 
         quantizer.set_range(min_t, max_t)
+        if enc_entry is not None and 'zero_point' in enc_entry:
+            from aimet_common.quantization_grid import IntegerGrid
+            grid = IntegerGrid.from_compiler_record(enc_entry)
+            quantizer.set_integer_grid(grid, symmetric=quantizer.symmetric)
         return True
     except Exception as e:
+        if enc_entry is not None and 'zero_point' in enc_entry:
+            raise ValueError(f'Cannot restore compiler integer grid: {e}') from e
         if verbose:
             print(f"  ⚠️ set_range 失败: {e}")
         return False
@@ -714,7 +722,8 @@ def _apply_encoding_to_quantizer(quantizer, encoding_info: Dict):
         raise ValueError("Stage encoding scale must be positive")
     if not torch.equal(offset, offset.round()):
         raise ValueError("Stage encoding offset must be integral")
-    if symmetric and not (offset == -round((qmin + qmax) / 2)).all():
+    from aimet_common.quantization_grid import symmetric_offset
+    if symmetric and not (offset == symmetric_offset(qmin, qmax)).all():
         raise ValueError("Stage encoding offset does not match the symmetric grid")
     if not symmetric and ((offset < -qmax) | (offset > -qmin)).any():
         raise ValueError("Stage encoding grid must represent zero")
@@ -722,17 +731,10 @@ def _apply_encoding_to_quantizer(quantizer, encoding_info: Dict):
         if not torch.allclose(tensor(field), (offset + code) * scale, rtol=1e-6, atol=0):
             raise ValueError(f"Stage encoding {field} disagrees with scale/offset/grid")
 
-    # Min/max alone loses the bitwidth and can perturb a non-Po2 scale by an ULP.
-    # Use the same scale/offset parametrization as the Po2 workflow. Re-entering
-    # min/max first also resets symmetry correctly for already-loaded quantizers.
-    quantizer._reparametrize_to_min_max()
-    quantizer.qmin, quantizer.qmax = qmin, qmax
-    quantizer.symmetric = symmetric
-    quantizer._reparametrize_to_scale_offset()
-    with torch.no_grad():
-        quantizer.scale.copy_(scale)
-        if not symmetric:
-            quantizer.offset.copy_(offset)
+    from aimet_common.quantization_grid import IntegerGrid
+    grid = IntegerGrid.from_offset(scale.detach().cpu().tolist(), offset.detach().cpu().tolist(),
+        (qmax-qmin).bit_length(), qmin < 0, qmin=qmin, qmax=qmax)
+    quantizer.set_integer_grid(grid, symmetric=symmetric)
     if not torch.equal(quantizer.get_scale(), scale):
         raise ValueError("Stage encoding scale is below the quantizer's supported minimum")
 

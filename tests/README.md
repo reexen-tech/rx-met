@@ -37,6 +37,11 @@ python3 -m unittest discover -s tests -p test_percentile_calibration.py -v
 
 ## 文件说明
 
+`test_quantization_grid.py` 验证无框架依赖的 INT/UINT 范围、标准零点、两种源 offset
+转换、通道数组和窄范围。`test_integer_domains.py` 覆盖 INT/UINT 与对称/非对称四种
+组合的真实校准、JSON2 配置、精确重载、CPU/CUDA ORT 导出与恢复、原始 AIMET
+协议互换、INT32 非零 offset、共享网格冲突，以及严格重载的符号检查。
+
 `test_standard_zero_point.py` 检查 compiler schema 4 的统一减性零点、无版本及旧版本
 混合普通/循环编码迁移、重复规范化、全部 UINT8 整数码和有符号多位宽网格等价，
 并用真实 Torch 导出与重载验证非零零点，拒绝未知版本、字段冲突和错误符号。

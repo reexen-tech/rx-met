@@ -26,6 +26,8 @@ def update_stats(quantizer, array):
     if not array.flags.c_contiguous or not array.flags.writeable:
         array = np.array(array, copy=True, order="C")
     tensor = torch.from_numpy(array).to(getattr(quantizer, "_rx_calibration_device", "cpu"))
+    if quantizer.use_symmetric_encodings and not quantizer.signed:
+        tensor = tensor.clamp_min(0)
     shape = tuple(quantizer._tensor_quantizer.getShape())
     if quantizer.quant_info.blockSize:
         axis = quantizer.quant_info.blockAxis
@@ -47,19 +49,15 @@ def compute_encodings(quantizer):
     # the resulting grid to the native runtime's additive-offset convention.
     num_steps = (1 << quantizer.bitwidth) - 1
     symmetric = quantizer.use_symmetric_encodings
-    signed_steps = num_steps - int(symmetric and quantizer.use_strict_symmetric)
-    minimum, maximum = calibrator.compute_encodings(signed_steps, symmetric)
-    unsigned = None
-    if symmetric and quantizer.use_unsigned_symmetric:
-        unsigned = calibrator.compute_encodings(num_steps, False)
+    signed_symmetric = symmetric and quantizer.signed
+    signed_steps = num_steps - int(signed_symmetric and quantizer.use_strict_symmetric)
+    minimum, maximum = calibrator.compute_encodings(signed_steps, signed_symmetric)
     encodings = []
     for index, (low, high) in enumerate(zip(minimum.flatten(), maximum.flatten())):
-        signed_grid = symmetric
+        signed_grid = signed_symmetric
         steps = signed_steps
-        if unsigned is not None and unsigned[0].flatten()[index] >= 0:
-            low, high = (bound.flatten()[index] for bound in unsigned)
-            signed_grid = False
-            steps = num_steps
+        if symmetric and not quantizer.signed:
+            low = torch.zeros_like(low)
         if signed_grid:
             offset = -((steps + 1) // 2)
         else:
@@ -114,7 +112,8 @@ class _CalibrationSession:
 @contextmanager
 def calibration_context(sim, quantizers):
     selected = {name: q for name, q in quantizers.items()
-                if uses_shared_percentile(q) and not q.is_encoding_frozen()}
+                if (uses_shared_percentile(q) or
+                    (q.use_symmetric_encodings and not q.signed)) and not q.is_encoding_frozen()}
     if not selected:
         yield
         return

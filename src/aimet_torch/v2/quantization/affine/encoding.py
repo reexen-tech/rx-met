@@ -344,9 +344,7 @@ class AffineEncoding(EncodingBase, _GridMixin):
         if enc_type is None:
             raise ValueError(f"Unsupported encoding granularity: {self.granularity}")
 
-        # Keep the additive Torch offset in the source format. Compiler export
-        # converts it to the standard subtractive zero point.
-        offset = self.offset.flatten()
+        offset = self.offset.flatten().to(torch.int64) + self.qmin
 
         return [
             {
@@ -354,6 +352,10 @@ class AffineEncoding(EncodingBase, _GridMixin):
                 "max": float(max_),
                 "scale": float(scale_),
                 "offset": int(offset_),
+                "offset_domain": "unsigned_index",
+                "signed": self.signed,
+                "qmin": self.qmin,
+                "qmax": self.qmax,
                 "bitwidth": self.bitwidth,
                 "dtype": "int",
                 "is_symmetric": str(self.symmetry),
@@ -407,10 +409,11 @@ class AffineEncoding(EncodingBase, _GridMixin):
             }
 
             # Compute signed offset if necessary
-            offset = self.offset
-            if self.signed:
-                offset = offset - 2 ** (self.bitwidth - 1)
-            encoding_dict["offset"] = offset.to(torch.int).flatten().tolist()
+            offset = self.offset.to(torch.int64) + self.qmin
+            encoding_dict["offset"] = offset.flatten().tolist()
+            encoding_dict["signed"] = self.signed
+            encoding_dict["qmin"] = self.qmin
+            encoding_dict["qmax"] = self.qmax
             if self.zero_point_shift != 0.0:
                 assert self.zero_point_shift == 0.5
                 assert self.symmetry

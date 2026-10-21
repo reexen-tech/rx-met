@@ -2773,6 +2773,12 @@ def log_and_catch_mismatched_encodings(
                     f"{mismatched_encoding_info.bitwidth_mismatch[1]}"
                 )
 
+            if mismatched_encoding_info.signed_mismatch:
+                logging_strings.append(
+                    f'\tsigned: {mismatched_encoding_info.signed_mismatch[0]}, '
+                    f'loaded encoding signed: {mismatched_encoding_info.signed_mismatch[1]}'
+                )
+
             if mismatched_encoding_info.is_symmetric_mismatch:
                 logging_strings.append(
                     f"\tsymmetric: "

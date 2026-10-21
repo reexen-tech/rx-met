@@ -156,7 +156,7 @@ def _apply_layer_config(sim: Any, op: Any, layer_config: Dict[str, Any],
     weight_is_operand = (matmul_operands and weight is not None
                          and any(q is weight for q in inputs)
                          and not any(layer_config.get(field) is not None
-                                     for field in ("weight_bitwidth", "weight_symmetric")))
+                                     for field in ("weight_bitwidth", "weight_symmetric", "weight_signed")))
     def request(quantizer, field, value, role):
         plan.request(quantizer, field, value, f"{op.name}.{role}", fallback=fallback)
 
@@ -174,6 +174,7 @@ def _apply_layer_config(sim: Any, op: Any, layer_config: Dict[str, Any],
         prefix = role if role in {"weight", "bias"} else "param"
         request(quantizer, "bitwidth", layer_config.get(f"{prefix}_bitwidth"), role)
         request(quantizer, "symmetric", layer_config.get(f"{prefix}_symmetric"), role)
+        request(quantizer, "signed", layer_config.get(f"{prefix}_signed"), role)
     granularity = layer_config.get("per_channel_quantization")
     if weight_is_operand and granularity is None:
         granularity = False
@@ -192,12 +193,16 @@ def _apply_layer_config(sim: Any, op: Any, layer_config: Dict[str, Any],
         )
         request(quantizer, "bitwidth", bitwidth, f"input[{index}]")
         request(quantizer, "symmetric", input_sym, f"input[{index}]")
+        signs = layer_config.get('input_signeds')
+        signed = (signs[index] if index < len(signs) else None) if signs is not None else layer_config.get('input_signed')
+        request(quantizer, 'signed', signed, f'input[{index}]')
 
     output_bw = layer_config.get("output_bitwidth")
     output_sym = layer_config.get("output_symmetric")
     for quantizer in outputs:
         request(quantizer, "bitwidth", output_bw, "output")
         request(quantizer, "symmetric", output_sym, "output")
+        request(quantizer, "signed", layer_config.get('output_signed'), "output")
     return "applied"
 
 
@@ -241,6 +246,8 @@ def _apply_plan(plan):
             raise ValueError("Configure operand calibration roles before calibration")
     for quantizer, settings in entries:
         _set_bitwidth(quantizer, settings.get("bitwidth"))
+        if 'signed' in settings:
+            quantizer.signed = settings['signed']
         _set_symmetric(quantizer, settings.get("symmetric"))
         if "per_channel_quantization" in settings:
             enabled = settings["per_channel_quantization"]
@@ -304,6 +311,9 @@ def apply_onnx_mixed_precision_bitwidth(
     }
 
     plan = QuantizerConfigPlan()
+    for name, quantizer in sim.qc_quantize_op_dict.items():
+        plan.request(quantizer, 'signed', config.get('default_config', {}).get('signed'),
+                     f'default_config.{name}', fallback=True)
     for op in ops:
         if op.name in getattr(sim, "_rx_native_grus", {}):
             continue

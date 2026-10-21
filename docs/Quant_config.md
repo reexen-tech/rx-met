@@ -74,7 +74,7 @@ apply_mixed_precision_bitwidth(
 | `layer_type_config` | 按量化模块类名设置规则，例如 `QuantizedConv2d` |
 | `layer_name_config` | 按完整模块名或 `*` 通配符设置规则 |
 | `GRU_config` | 配置 QuantGRU 的量化开关和内部算子 |
-| `default_config` | 控制未匹配模块，支持 `disable_quantization` |
+| `default_config` | 支持未匹配模块的 `disable_quantization`，以及整数符号回退值 `signed` |
 
 普通量化模块支持以下配置项：
 
@@ -87,8 +87,33 @@ apply_mixed_precision_bitwidth(
 | `weight_symmetric`、`bias_symmetric` | 权重和偏置的对称性 |
 | `input_symmetric`、`output_symmetric` | 输入和输出的对称性 |
 | `param_symmetric` | 其他参数的对称性 |
+| `weight_signed`、`bias_signed`、`param_signed` | 权重、偏置及其他参数的整数符号，`true` 为 INT，`false` 为 UINT |
+| `input_signed`、`input_signeds`、`output_signed` | 全部输入、按输入编号或输出的整数符号；列表中 `null` 不施加局部覆盖 |
 | `per_channel_quantization` | 是否使用逐通道参数量化 |
 | `disable_quantization` | 是否禁用匹配模块的量化器 |
+
+Torch 和 ONNX 的整数量化默认使用 INT，符号与对称性独立，`*_symmetric` 只调整
+校准策略，修改位宽保留当前符号。UINT 对称网格使用零点 0、范围 `[0, 2^bitwidth-1]`，
+校准及推理将负值截为零；INT 对称网格使用零点 0 和完整有符号范围。
+显式层设置优先于 `default_config.signed`。例如：
+
+```json
+{
+  "default_config": {"signed": true},
+  "layer_type_config": {
+    "QuantizedLinear": {
+      "input_signed": false,
+      "input_symmetric": true,
+      "weight_signed": true,
+      "weight_symmetric": false,
+      "output_signed": true
+    }
+  }
+}
+```
+
+该示例表示 UINT 对称输入、INT 非对称权重和 INT 输出。当前下游编译器仅支持对称
+量化，部署配置仍须满足其限制。GRU/LSTM 的内部配置继续由各算子包维护。
 
 当前实现按以下顺序选择规则：
 

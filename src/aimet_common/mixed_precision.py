@@ -11,7 +11,7 @@ _BITWIDTH_FIELDS = frozenset({
 _BOOL_FIELDS = frozenset({
     'weight_symmetric', 'bias_symmetric', 'param_symmetric', 'input_symmetric',
     'output_symmetric', 'disable_quantization', 'per_channel_quantization',
-})
+}) | frozenset(f'{role}_signed' for role in ('weight', 'bias', 'param', 'input', 'output'))
 
 
 def is_config_comment(key):
@@ -46,6 +46,8 @@ def load_mixed_precision_config(config_file):
     if ('disable_quantization' in default_config
             and type(default_config['disable_quantization']) is not bool):
         raise ValueError('default_config.disable_quantization must be a boolean')
+    if 'signed' in default_config and type(default_config['signed']) is not bool:
+        raise ValueError('default_config.signed must be a boolean')
     for section in ('layer_type_config', 'layer_name_config'):
         layers = config.get(section, {})
         if not isinstance(layers, dict):
@@ -70,6 +72,10 @@ def load_mixed_precision_config(config_file):
                     for index, bitwidth in enumerate(value):
                         if bitwidth is not None:
                             _validate_bitwidth(bitwidth, f'{location}[{index}]')
+                elif key == 'input_signeds':
+                    if not isinstance(value, list) or any(
+                            item is not None and type(item) is not bool for item in value):
+                        raise ValueError(f'{location} must be a list of booleans or null')
                 else:
                     raise ValueError(f'Unknown mixed-precision field: {location}')
     return config

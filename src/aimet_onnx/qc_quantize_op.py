@@ -55,6 +55,7 @@ from aimet_common import libquant_info
 from aimet_common.utils import deprecated
 from aimet_common.quantsim import calculate_delta_offset, create_encoding_from_min_max
 from aimet_onnx import lpbq_utils
+from aimet_common.quantization_grid import integer_bounds
 
 
 OpMode = libpymo.TensorQuantizerOpMode
@@ -90,6 +91,7 @@ class QcQuantizeOp:
         bitwidth: int = 8,
         use_symmetric_encodings: bool = False,
         tensor_quantizer_params: Union[TensorQuantizerParams, None] = None,
+        signed: bool = True,
     ):
         """
         Args:
@@ -108,6 +110,7 @@ class QcQuantizeOp:
         self.quant_scheme = quant_scheme
         self.rounding_mode = rounding_mode
         self._is_encoding_frozen = False
+        self.signed = signed
         self.op_mode = op_mode
         self.use_symmetric_encodings = use_symmetric_encodings
         self.enabled = True
@@ -120,6 +123,22 @@ class QcQuantizeOp:
     def is_encoding_frozen(self) -> bool:
         """Returns is_encoding_frozen var"""
         return self._is_encoding_frozen
+
+    @property
+    def signed(self):
+        return self._signed
+
+    @signed.setter
+    def signed(self, value):
+        integer_bounds(self.bitwidth, value)
+        if not value and self.use_strict_symmetric:
+            raise ValueError('Strict symmetric requires a signed integer domain')
+        if self._is_encoding_frozen and value != self._signed:
+            raise RuntimeError('Cannot change signedness of frozen encodings')
+        if getattr(self, '_signed', None) == value:
+            return
+        self._signed = value
+        self.use_unsigned_symmetric = not value
 
     def freeze_encodings(self):
         """Sets encodings to frozen"""
@@ -283,6 +302,8 @@ class QcQuantizeOp:
         Sets the useStrictSymmetric associated with the Tensor Quantizer
         :param use_strict_symmetric: True if strict symmetric mode is to be used, False otherwise
         """
+        if use_strict_symmetric and not self.signed:
+            raise ValueError('Strict symmetric requires a signed integer domain')
         self._tensor_quantizer.setStrictSymmetric(use_strict_symmetric)
         self._reset_encodings()
 
@@ -300,6 +321,16 @@ class QcQuantizeOp:
         Sets the useUnsignedSymmetric associated with the Tensor Quantizer
         :param use_unsigned_symmetric: True if unsigned symmetric mode is to be used, False otherwise
         """
+        if type(use_unsigned_symmetric) is not bool:
+            raise ValueError('unsigned symmetric must be a boolean')
+        if use_unsigned_symmetric and self.use_strict_symmetric:
+            raise ValueError('Strict symmetric requires a signed integer domain')
+        if self._is_encoding_frozen and use_unsigned_symmetric != (not self.signed):
+            raise RuntimeError('Cannot change signedness of frozen encodings')
+        if self._tensor_quantizer.getUnsignedSymmetric() == use_unsigned_symmetric:
+            self._signed = not use_unsigned_symmetric
+            return
+        self._signed = not use_unsigned_symmetric
         self._tensor_quantizer.setUnsignedSymmetric(use_unsigned_symmetric)
         self._reset_encodings()
 
@@ -415,6 +446,7 @@ class QcQuantizeOp:
 
     def _load_encodings_dict(self, encoding_dict: dict, allow_overwrite: bool = True):
         self.bitwidth = encoding_dict["bw"]
+        self.signed = encoding_dict.get('signed', self.signed)
         data_type = (
             QuantizationDataType.int
             if encoding_dict["dtype"] == QuantizationDataType.int.name.upper()
@@ -448,12 +480,7 @@ class QcQuantizeOp:
         self.use_symmetric_encodings = is_symmetric
         if self.use_symmetric_encodings:
             self.use_strict_symmetric = is_strict_symmetric
-        # is_unsigned_symmetric is a special case since the flag could be enabled but the encoding can be signed
-        # if the observed tensor had negative values.
-        # To err on the side of caution, only set self.use_unsigned_symmetric if we know for sure that the encodings
-        # were unsigned.
-        if self.use_symmetric_encodings and is_unsigned_symmetric:
-            self.use_unsigned_symmetric = is_unsigned_symmetric
+        self.use_unsigned_symmetric = not self.signed
 
         libpymo_encodings = []
         scales = encoding_dict["scale"]
@@ -683,6 +710,7 @@ class QcQuantizeOp:
                     "bitwidth": encoding.bw,
                     "is_symmetric": str(self.use_symmetric_encodings),
                     "dtype": "int",
+                    "signed": self.signed,
                 }
                 encodings.append(enc_dict)
             return encodings
@@ -714,6 +742,7 @@ class QcQuantizeOp:
 
         if self.data_type == QuantizationDataType.int:
             enc_dict["is_sym"] = self.use_symmetric_encodings
+            enc_dict["signed"] = self.signed
             encodings = self.get_encodings()
             enc_dict["scale"] = [enc.delta for enc in encodings]
             enc_dict["offset"] = [enc.offset for enc in encodings]
@@ -740,7 +769,7 @@ class QcQuantizeOp:
             # In any case, this corresponds to no-encoding in encoding_version 2.0.0
             return None
 
-        signed = self.use_symmetric_encodings
+        signed = self.signed
         bw = encodings[0].bw
 
         output_dtype = f"int{bw}" if signed else f"uint{bw}"
@@ -803,6 +832,8 @@ class QcQuantizeOp:
 
         :param tensor: Tensor to use for updating the encodings stats
         """
+        if self.use_symmetric_encodings and not self.signed:
+            tensor = np.maximum(tensor, 0)
         from .percentile import uses_shared_percentile, update_stats
         if uses_shared_percentile(self):
             update_stats(self, tensor)
@@ -903,6 +934,8 @@ class QcQuantizeOp:
                     encoding_dict["dtype"],
                 )
             if self.data_type == QuantizationDataType.int:
+                if 'signed' in encoding_dict and self.signed != encoding_dict['signed']:
+                    encoding_mismatch_info.signed_mismatch = (self.signed, encoding_dict['signed'])
                 if self.use_symmetric_encodings != is_symmetric:
                     encoding_mismatch_info.is_symmetric_mismatch = (
                         self.use_symmetric_encodings,
@@ -978,6 +1011,8 @@ class QcQuantizeOp:
                 f"{other._encoding_min_max_fixed_vals}"
             )
 
+        if self.signed != other.signed:
+            raise ValueError('Cannot merge quantizers with different signedness')
         self.bitwidth = min(self.bitwidth, other.bitwidth)
         self.use_symmetric_encodings |= other.use_symmetric_encodings
         self.use_unsigned_symmetric |= other.use_unsigned_symmetric
@@ -1278,7 +1313,12 @@ def _get_symmetric_properties(
     # Note: Even if the original quantizer had is_unsigned_symmetric set to True, if any observed values were negative,
     # the resulting encodings will look signed. This logic can only perform a best effort check to return True only if
     # any encoding showed unsigned symmetric properties.
-    is_unsigned_symmetric = is_symmetric and encodings["offset"][0] == 0
+    if 'signed' in encodings:
+        if type(encodings['signed']) is not bool:
+            raise ValueError('signed must be a boolean')
+        is_unsigned_symmetric = is_symmetric and not encodings['signed']
+    else:
+        is_unsigned_symmetric = is_symmetric and encodings["offset"][0] == 0
 
     return is_symmetric, is_strict_symmetric, is_unsigned_symmetric
 
@@ -1294,6 +1334,7 @@ class _EncodingMismatchInfo:
     enabled_mismatch: Optional[Tuple] = None
     dtype_mismatch: Optional[Tuple] = None
     bitwidth_mismatch: Optional[Tuple] = None
+    signed_mismatch: Optional[Tuple] = None
     is_symmetric_mismatch: Optional[Tuple] = None
     is_strict_symmetric_mismatch: Optional[Tuple] = None
     is_unsigned_symmetric_mismatch: Optional[Tuple] = None
@@ -1309,6 +1350,7 @@ class _EncodingMismatchInfo:
             self.enabled_mismatch is not None
             or self.dtype_mismatch is not None
             or self.bitwidth_mismatch is not None
+            or self.signed_mismatch is not None
             or self.is_symmetric_mismatch is not None
             or self.is_strict_symmetric_mismatch is not None
             or self.is_unsigned_symmetric_mismatch is not None

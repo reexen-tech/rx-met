@@ -11,6 +11,7 @@ import copy
 import logging
 import math
 from typing import Any, Iterable
+from aimet_common.quantization_grid import IntegerGrid, integer_bounds
 
 logger = logging.getLogger(__name__)
 COMPILER_SCHEMA_VERSION = 4
@@ -93,7 +94,19 @@ def _standardize_zero_points(document):
             if version < COMPILER_SCHEMA_VERSION and not native:
                 zero_point = _map_values(zero_point, lambda value: -value)
         if 'offset' in entry:
-            from_offset = _map_values(entry['offset'], lambda value: -point(value))
+            offset = _map_values(entry['offset'], point)
+            domain = entry.get('offset_domain')
+            index_domain = domain == 'unsigned_index'
+            if domain not in (None, 'unsigned_index', 'target'):
+                raise ValueError(f'{path}: unsupported offset domain')
+            if domain is not None:
+                grid = IntegerGrid.from_offset(entry['scale'], offset, entry['bitwidth'],
+                    entry['signed'], index_domain=index_domain,
+                    qmin=entry.get('qmin'), qmax=entry.get('qmax'))
+                from_offset = grid.zero_point
+                entry['dtype'] = grid.dtype
+            else:
+                from_offset = _map_values(offset, lambda value: -value)
             if zero_point is not None and zero_point != from_offset:
                 raise ValueError(f'{path}: offset and zero_point describe different grids')
             zero_point = from_offset
@@ -103,6 +116,13 @@ def _standardize_zero_points(document):
     for entry, zero_point in updates:
         changed |= 'offset' in entry or entry.get('zero_point') != zero_point
         entry.pop('offset', None)
+        entry.pop('offset_domain', None)
+        signed = entry.pop('signed', None)
+        if signed is not None:
+            low, high = integer_bounds(entry['bitwidth'], signed)
+            if entry.get('qmin') == low and entry.get('qmax') == high:
+                entry.pop('qmin')
+                entry.pop('qmax')
         entry['zero_point'] = zero_point
     document['schema_version'] = COMPILER_SCHEMA_VERSION
     return changed
@@ -286,9 +306,11 @@ def validate_compiler_encodings(enc: dict, *, require_po2: bool = False) -> None
                 raise ValueError('n: exponent does not match scale')
             if any(low > high for low, high in zip(fields['real_min'], fields['real_max'])):
                 raise ValueError('range: real_min exceeds real_max')
-            signed = dtype.startswith('INT')
-            qmin = -(1 << (bits - 1)) if signed else 0
-            qmax = (1 << (bits - int(signed))) - 1
+            grid_record = dict(entry)
+            if version < COMPILER_SCHEMA_VERSION and not native:
+                grid_record['zero_point'] = _map_values(entry['zero_point'], lambda value: -value)
+            grid = IntegerGrid.from_compiler_record(grid_record)
+            qmin, qmax = grid.qmin, grid.qmax
             tolerance = max(1e-5, max(abs(qmin), abs(qmax)) * 1e-6)
             for index, step in enumerate(scales):
                 low, high = fields['real_min'][index], fields['real_max'][index]

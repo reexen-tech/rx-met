@@ -70,15 +70,24 @@ python3 /examples/quick_start_onnx_ptq.py
 
 编译器 encodings 使用 `schema_version=4`，普通算子和原生 GRU/LSTM 均采用标准零点：
 `real = scale * (q - zero_point)`，即实数 0 对应的整数码为 `zero_point`。
-Torch 源 offset 转为 `-offset`；ONNX 的 `TfEncoding.offset` 属于无符号索引域，
-需转为 `qmin - offset`。例如对称 INT8 的 `offset=-128` 与 `qmin=-128`
+公共网格由 `aimet_common.quantization_grid.IntegerGrid` 表示，显式记录 dtype、
+实际 qmin/qmax、scale 与标准零点，不按对称性选择整数符号。
+Torch 原生量化器内部 offset 转为 `-offset`；原始 AIMET 文件和 ONNX 的
+`TfEncoding.offset` 属于无符号索引域，转为 `qmin - offset`。
+例如对称 INT8 的原始文件 `offset=-128` 与 `qmin=-128`
 得到 `zero_point=0`，INT32 bias 同理。原生 GRU/LSTM 已使用标准零点，保持原值。
 非对称量化保留实际零点，不能统一置零；无符号编码使用 `UINT8` 等明确 dtype。
 当前编译器只支持对称量化，输入编译器的配置应保持对称；此修正不扩大编译器的量化支持范围。
 
 旧文件（缺少 schema_version 或版本为 1/2/3）的普通算子使用加性零点，原生循环算子
 已采用减性零点。公共规范化及 Torch 编码重载按版本迁移普通记录，重复处理 schema 4
-不会再次取反。框架内部 offset、AIMET 原始 encodings 和实际量化网格保持不变。
+不会再次取反。Torch 新的原始 legacy 记录通过 `offset_domain=unsigned_index`、
+`signed` 和 qmin/qmax 标注索引域；旧 RX 目标域 offset 仍由兼容路径读取。
+原始 Torch 编码重载使用保存的 scale/offset 精确恢复网格；无域标记的旧记录依据
+保存的 scale、offset 与真实边界验证唯一解释，不一致或存在不同有效解释时拒绝。
+ONNX 原始文件保存 `signed`，严格重载检查其与量化器配置一致；旧文件没有该字段时
+保留本次显式配置的整数符号。编译器文件沿用 schema 4，只保留标准 zero_point；
+非完整整数范围另保存 qmin/qmax，避免重载时扩大截断范围。
 参数编码的通道字段统一为数组，单通道也保留数组结构。
 普通算子和原生 GRU/LSTM 的整数记录均包含 `enc_type` 与 `n`，n 的形状与 scale 一致。
 Po2 scale 满足 `scale = 2^(-n)`；非 Po2 scale 的 n 是舍入指数，实际网格以 scale 为准。
@@ -103,6 +112,7 @@ Po2 scale 满足 `scale = 2^(-n)`；非 Po2 scale 的 n 是舍入指数，实际
 
 - 校准：`percentile=99.99`，在 `compute_encodings` 前设置。Torch/ONNX 共用 `aimet_common.percentile` 的 2048 桶动态直方图、样本计数和百分位取点，后续批次超出范围时扩容并合并历史统计；默认 100 保留完整观测范围。
 - 激活和权重使用对称量化；Percentile PTQ 按 JSON2 的 `bias_bitwidth` 统计校准普通 bias，全零通道也保留有效网格；Po2 阶段再按 `Sb = Sx * Sw` 推导，默认位宽为 INT32。旧原生统计路径仍延后 bias 对齐，避免近零通道产生 `scale=0`。
+- 默认整数类型固定为 INT；可通过 JSON2 `*_signed=false` 选择 UINT。整数符号与 `*_symmetric` 独立，UINT 对称模式将负值截为零，不自动退回 INT。
 - Power-of-2 使用与 `src/aimet_torch/power_of_2_quantization.py` 相同的 `cover_range`（容差 2%）
 - 权重默认 per-channel；Gemm 保持 per-channel；无 Conv+Relu supergroup
 
