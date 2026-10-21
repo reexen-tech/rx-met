@@ -38,6 +38,7 @@
 
 
 #include "trim_functions.hpp"
+#include "quantize_dequantize.hpp"
 #include "DlQuantization/Quantization.hpp"
 #include "tensor_utils.hpp"
 #include <algorithm>
@@ -172,13 +173,23 @@ inline void dequantizeValueCpu(DTYPE* out, DTYPE encoding_delta, DTYPE encoding_
 }
 
 template <typename DTYPE>
+inline DTYPE quantizeDequantizeValueCpu(DTYPE value, DTYPE minimum, DTYPE maximum, DTYPE scale,
+                                       RoundingMode rounding_mode)
+{
+    if (rounding_mode != ROUND_NEAREST && rounding_mode != ROUND_STOCHASTIC)
+        throw runtime_error("Unknown rounding mode.");
+    const bool stochastic = rounding_mode == ROUND_STOCHASTIC;
+    const DTYPE noise = stochastic ? static_cast<DTYPE>(randUniformCpu()) : DTYPE(0);
+    return stableQuantizeDequantize(value, minimum, maximum, scale, stochastic, noise);
+}
+
+template <typename DTYPE>
 void quantizeDequantizeCpu(const DTYPE* in, uint64_t cnt, const TfEncoding& encoding, DTYPE* out, RoundingMode rounding_mode)
 {
     for (uint64_t i = 0; i < cnt; ++i)
     {
-        quantizeValueCpu<DTYPE>(&in[i], &out[i], encoding.min, encoding.max, encoding.delta, encoding.offset,
-                                rounding_mode);
-        dequantizeValueCpu<DTYPE>(&out[i], encoding.delta, encoding.offset);
+        out[i] = quantizeDequantizeValueCpu(in[i], DTYPE(encoding.min), DTYPE(encoding.max),
+                                          DTYPE(encoding.delta), rounding_mode);
     }
 }
 
@@ -649,13 +660,10 @@ void quantizeDequantizeBroadcastCpu(const DTYPE* in, DTYPE* out, const Encodings
         }
 
         auto delta  = encodings[encodingIdx].delta;
-        auto offset = encodings[encodingIdx].offset;
         auto min    = encodings[encodingIdx].min;
         auto max    = encodings[encodingIdx].max;
 
-        quantizeValueCpu<DTYPE>(in + i, out + i, min, max, delta, offset, ROUND_NEAREST);
-
-        dequantizeValueCpu<DTYPE>(out + i, delta, offset);
+        out[i] = quantizeDequantizeValueCpu(in[i], DTYPE(min), DTYPE(max), DTYPE(delta), ROUND_NEAREST);
     }
 }
 
@@ -668,9 +676,8 @@ void quantizeDequantizePerChannelCpu(const DTYPE* in, int numChannel, int numEle
     for (uint64_t i = 0; i < numElement; ++i)
     {
         int channelIdx = (i / numElementPerChannel) % numChannel;
-        quantizeValueCpu<DTYPE>(&in[i], &out[i], encodingMin[channelIdx], encodingMax[channelIdx],
-                                encodingDelta[channelIdx], encodingOffset[channelIdx], roundingMode);
-        dequantizeValueCpu<DTYPE>(&out[i], encodingDelta[channelIdx], encodingOffset[channelIdx]);
+        out[i] = quantizeDequantizeValueCpu(in[i], encodingMin[channelIdx], encodingMax[channelIdx],
+                                          encodingDelta[channelIdx], roundingMode);
     }
 }
 

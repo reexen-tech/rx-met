@@ -19,6 +19,8 @@ python3 tests/verify_kws_ptq_roundtrip.py \
 默认每类取 20 条训练校准及验证样本，输出到运行目录的
 `output/kws_ptq_roundtrip/<时间>/`。`torch_ptq/`、`onnx_ptq/` 保存两轮产物，
 `comparison.json` 逐项记录 ONNX、编码、GRU 编码和验证结果，`report.md` 提供摘要。
+`quantized_outputs.npz` 保存两框架 PTQ/Po2 的逐样本 logits；报告同时记录跨框架的
+输出误差和预测差异，Po2 另从最终保存的编码恢复后与 Torch 逐样本核对。
 产物不一致时仍保存完整报告并返回 1；`--report-only` 可只生成报告而返回 0。
 已有输出目录拒绝覆盖，可用 `--output-dir` 指定新目录。
 
@@ -27,12 +29,22 @@ python3 tests/verify_kws_ptq_roundtrip.py \
 `test_percentile_calibration.py` 使用真实量化器和 ORT session，核对 Torch/ONNX 的动态
 直方图与网格，覆盖后续大值、批次顺序、常量和零、微小初始范围、逐通道与分块、
 重复校准、冻结编码，以及回调异常后的 session 恢复。CUDA 可用时同时核对 CPU/CUDA。
+另检查同一设备上最终 Percentile scale 与 Torch 逐值相等。
 
 ```bash
 python3 -m unittest discover -s tests -p test_percentile_calibration.py -v
 ```
 
 ## 文件说明
+
+`test_native_qdq_alignment.py` 使用实际原生量化器及 ORT CPU/CUDA，核对 INT32 小整数码、
+逐通道、ties-to-even、非零 offset、非 Po2 倒数和 NaN/Inf 饱和；需使用新构建的 AIMET 原生库。
+`test_onnx_ptq_alignment.py` 同时检查 Percentile PTQ 的 bias 启用状态和配置位宽，
+以及 Po2 后 INT32 bias 的导出恢复。
+
+```bash
+python3 -m unittest discover -s tests -p test_native_qdq_alignment.py -v
+```
 
 `test_onnx_operand_precision.py` 验证经过 Transpose 的输入配置、常量 MatMul 的位宽和
 输入编号、逐张量网格、Linear/显式权重配置优先级，以及共享网格冲突的原子拒绝。
@@ -41,6 +53,9 @@ python3 -m unittest discover -s tests -p test_percentile_calibration.py -v
 ```bash
 python3 -m unittest discover -s tests -p test_onnx_operand_precision.py -v
 ```
+
+`test_onnx_input_quantization.py` 检查 Concat 的独立共享输入网格、校准顺序、配置冲突和
+编码重载；`test_onnx_gru_native.py` 覆盖 GRU 中间帧按实际消费位置校准及端口编码导出。
 
 `test_dependencies.py` 验证依赖管理配置和生成结果。该测试检查以下内容：
 

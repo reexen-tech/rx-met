@@ -268,17 +268,17 @@ def main() -> None:
             sim, config_file=str(BITWIDTH_CONFIG_FILE), verbose=True
         )
         force_model_io_quantizers(sim, original_model)
-        disabled_biases = disable_onnx_bias_quantizers(sim) if ALIGN_BIAS_SCALE else []
+        disabled_biases = disable_onnx_bias_quantizers(
+            sim, preserve_shared_percentile=True) if ALIGN_BIAS_SCALE else []
         print(f"quantizer 数量: {len(sim.qc_quantize_op_dict)}")
         print(
-            f"校准前关闭 {len(disabled_biases)} 个 bias quantizer；"
-            "Sb=Sx*Sw 在步骤 5 写入"
+            f"延后至 Po2 对齐的 bias quantizer: {len(disabled_biases)}"
         )
 
     # ------------------------------------------------------------------
     # 步骤 4: 校准 (PTQ)
     #   对应 aimet.nn.compute_encodings。
-    #   bias 不参与统计校准：近零 per-channel scale=0 会向后续图注入 Inf。
+    #   Percentile 按配置校准 bias；旧原生统计路径的 bias 延后到 Po2 对齐。
     # ------------------------------------------------------------------
     with stage("步骤 4: 校准 (PTQ)", timings):
         sim.compute_encodings(feeds)

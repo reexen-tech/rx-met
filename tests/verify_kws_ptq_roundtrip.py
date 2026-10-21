@@ -18,6 +18,7 @@ from pathlib import Path
 import pkgutil
 import random
 import sys
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path[:0] = [str(ROOT / "src"), str(ROOT)]
@@ -31,9 +32,13 @@ import onnx
 import torch
 
 from examples import quick_start_kws as kws
-from aimet_common.evaluation import classification_accuracy
-from aimet_onnx.rx_ptq import run_onnx_ptq
+from aimet_common.evaluation import classification_accuracy, compare_output_batches
+from aimet_onnx.rx_ptq import run_onnx_ptq, create_onnx_ptq_sim
+from aimet_onnx.rx_ptq import pipeline as ptq_pipeline
 from aimet_onnx.rx_ptq.calibration import iter_calibration_feeds
+from aimet_onnx.rx_ptq.evaluation import evaluate_onnx_dataset
+from aimet_onnx.rx_ptq.mixed_precision import apply_onnx_mixed_precision_bitwidth
+from aimet_onnx.quantsim import load_encodings_to_sim
 
 ENCODING_FIELDS = ("bitwidth", "dtype", "is_symmetric", "scale", "zero_point", "real_min", "real_max")
 
@@ -95,7 +100,7 @@ def load_feeds(directory):
                 input_dtypes={"input": np.dtype("float32")}))
 
 
-def evaluate(model, feeds, labels):
+def evaluate(model, feeds, labels, *, return_outputs=False):
     model.eval()
     outputs = []
     with torch.no_grad():
@@ -104,7 +109,8 @@ def evaluate(model, feeds, labels):
             if not np.isfinite(value).all():
                 raise RuntimeError("Nonfinite KWS output")
             outputs.append([value])
-    return classification_accuracy(outputs, labels)
+    metrics = classification_accuracy(outputs, labels)
+    return (metrics, outputs) if return_outputs else metrics
 
 
 def encoding_records(value, path=()):
@@ -219,6 +225,8 @@ def write_summary(output, report):
             "| Check | Result |", "| --- | --- |",
             f"| ONNX file identical | {report['onnx']['file_equal']} |",
             f"| Encoding JSON identical | {report['encodings']['json_equal']} |",
+            f"| Torch/ONNX Po2 outputs identical | {report['functional_match']} |",
+            f"| PTQ prediction differences | {report['torch_vs_onnx_ptq']['prediction_differences']} |",
             f"| Floating weights unchanged by PTQ | {report['weights_unchanged_by_ptq']} |",
             f"| Calibration / validation samples | {report['calibration_count']} / {report['validation_count']} |"]
     for section in ("activation_encodings", "param_encodings"):
@@ -227,6 +235,10 @@ def write_summary(output, report):
         rows.append(f"| {section}: changed common records | {len(part['changed_records'])} |")
     for name, part in report["encodings"]["gru_equal"].items():
         rows.append(f"| {name}: full native encodings identical | {part['activation'] and all(part['parameters'].values())} |")
+    metrics = report["evaluation"]
+    rows.extend(["", "## Top-1", "", "| Stage | Torch | ONNX |", "| --- | --- | --- |",
+                 f"| PTQ | {metrics['torch_ptq']['top1_accuracy']:.2%} | {metrics['onnx']['ptq']['top1_accuracy']:.2%} |",
+                 f"| Po2 | {metrics['torch_po2']['top1_accuracy']:.2%} | {metrics['onnx']['po2']['top1_accuracy']:.2%} |"])
     rows.extend(["", "## Operand Precision Differences", "",
                  "| Input | Torch | ONNX |", "| --- | --- | --- |"])
     for change in report["operand_differences"]:
@@ -281,9 +293,9 @@ def run(args):
             sim.model(torch.from_numpy(feed["input"]).to(kws.DEVICE))
             if index % 64 == 0:
                 print(f"  calibrated {index}/{len(feeds)}", flush=True)
-    ptq = evaluate(sim.model, validation, labels)
+    ptq, torch_ptq_outputs = evaluate(sim.model, validation, labels, return_outputs=True)
     kws.apply_power_of_2_workflow(sim.model, align_bias_scale=True, verbose=False)
-    po2 = evaluate(sim.model, validation, labels)
+    po2, torch_po2_outputs = evaluate(sim.model, validation, labels, return_outputs=True)
     after = state_fingerprint(sim.get_original_model(sim.model, qdq_weights=False))
     if before != after:
         raise RuntimeError("PTQ unexpectedly changed the floating weights or buffers")
@@ -293,19 +305,53 @@ def run(args):
         dummy_input_shape=(1, kws.TARGET_LEN), opset=18)
 
     print("3. Feed the first exported ONNX into ONNX PTQ with the same JSON/data", flush=True)
-    second = run_onnx_ptq(model_path=first_onnx, calibration_dir=data_dir / "calib",
-        validation_dir=data_dir / "val", output_dir=args.output_dir / "onnx_ptq",
-        filename_prefix="att_mh_rnn_kws", config_file=str(configs[0]),
-        bitwidth_config_file=str(configs[1]), quant_scheme=kws.QUANT_SCHEME,
-        percentile_value=kws.PERCENTILE_VALUE, providers=("CUDAExecutionProvider", "CPUExecutionProvider"))
+    stage_outputs = []
+    evaluator = ptq_pipeline.evaluate_onnx_dataset
+    def capture_evaluation(source, *values, **options):
+        outputs, metrics = evaluator(source, *values, **options)
+        if hasattr(source, "qc_quantize_op_dict"):
+            stage_outputs.append(outputs)
+        return outputs, metrics
+    with patch.object(ptq_pipeline, "evaluate_onnx_dataset", side_effect=capture_evaluation):
+        second = run_onnx_ptq(model_path=first_onnx, calibration_dir=data_dir / "calib",
+            validation_dir=data_dir / "val", output_dir=args.output_dir / "onnx_ptq",
+            filename_prefix="att_mh_rnn_kws", config_file=str(configs[0]),
+            bitwidth_config_file=str(configs[1]), quant_scheme=kws.QUANT_SCHEME,
+            percentile_value=kws.PERCENTILE_VALUE, providers=("CUDAExecutionProvider", "CPUExecutionProvider"))
+    if len(stage_outputs) < 2:
+        raise RuntimeError("Missing ONNX PTQ/Po2 evaluation stages")
+    ptq_comparison = compare_output_batches(torch_ptq_outputs, stage_outputs[0])
+    ptq_prediction_differences = sum(
+        int(np.argmax(left[0]) != np.argmax(right[0]))
+        for left, right in zip(torch_ptq_outputs, stage_outputs[0]))
+    np.savez_compressed(args.output_dir / "quantized_outputs.npz",
+        torch_ptq=np.concatenate([batch[0] for batch in torch_ptq_outputs]),
+        onnx_ptq=np.concatenate([batch[0] for batch in stage_outputs[0]]),
+        torch_po2=np.concatenate([batch[0] for batch in torch_po2_outputs]),
+        onnx_po2=np.concatenate([batch[0] for batch in stage_outputs[1]]), labels=labels)
+    restored = create_onnx_ptq_sim(onnx.load(first_onnx), feeds[0], config_file=str(configs[0]),
+        quant_scheme=kws.QUANT_SCHEME, percentile_value=kws.PERCENTILE_VALUE,
+        providers=("CUDAExecutionProvider", "CPUExecutionProvider"))
+    apply_onnx_mixed_precision_bitwidth(restored, str(configs[1]), verbose=False)
+    load_encodings_to_sim(restored, str(second["aimet_encodings"]), strict=False,
+        allow_overwrite=False, disable_missing_quantizers=True)
+    restored_outputs, cross_evaluation = evaluate_onnx_dataset(restored, validation,
+        reference=torch_po2_outputs, labels=labels)
+    cross_evaluation["prediction_differences"] = sum(
+        int(np.argmax(left[0]) != np.argmax(right[0]))
+        for left, right in zip(torch_po2_outputs, restored_outputs))
+    functional_match = all(item["max_abs"] == 0 for item in cross_evaluation["comparison"])
     first = json.loads(Path(first_enc).read_text())
     second_enc = json.loads(second["encodings"].read_text())
     metadata = json.loads(second["metadata"].read_text())
     onnx_comparison = compare_models(first_onnx, second["onnx"])
     enc_comparison = compare_encodings(first, second_enc)
-    identical = onnx_comparison["file_equal"] and enc_comparison["json_equal"]
+    identical = onnx_comparison["file_equal"] and enc_comparison["json_equal"] and functional_match
     report = {
         "status": "identical" if identical else "different", "qat_steps": 0,
+        "functional_match": functional_match, "torch_vs_onnx_po2": cross_evaluation,
+        "torch_vs_onnx_ptq": {"comparison": ptq_comparison,
+                              "prediction_differences": ptq_prediction_differences},
         "fp_checkpoint": str(args.fp_checkpoint.resolve()), "input_fingerprints": fingerprints,
         "float_state_before_ptq": before, "float_state_after_ptq": after,
         "weights_unchanged_by_ptq": before == after, "seed": args.seed,
@@ -328,6 +374,7 @@ def run(args):
     write_summary(args.output_dir, report)
     print(f"ONNX identical: {onnx_comparison['file_equal']}", flush=True)
     print(f"Encoding JSON identical: {enc_comparison['json_equal']}", flush=True)
+    print(f"Torch/ONNX Po2 outputs identical: {functional_match}", flush=True)
     print(f"Comparison: {report['status'].upper()}", flush=True)
     print(f"Report: {args.output_dir.resolve() / 'comparison.json'}", flush=True)
     return 0 if identical or args.report_only else 1

@@ -17,18 +17,21 @@ from aimet_common.power_of_2 import (
     verify_power_of_2_scale,
 )
 from .validation import validate_quantizer_state
+from .input_quantization import input_quantizer
 
 
 _ANALYTIC_BIAS_OPS = frozenset({"Conv", "ConvTranspose", "Gemm", "MatMul"})
 
 
-def disable_onnx_bias_quantizers(sim: Any) -> List[str]:
+def disable_onnx_bias_quantizers(sim: Any, *, preserve_shared_percentile: bool = False) -> List[str]:
     """Turn off Conv/Gemm/MatMul bias fake-quant before activation calibration.
 
     AIMET ONNX per-channel INT8/INT32 bias encodings use ``scale = max/qmax``.
     A near-zero bias channel gets ``scale=0``, and fake-quant then injects Inf
     into the rest of the graph.  RX bias encodings are not statistically
-    calibrated; ``align_onnx_bias_scale`` writes ``Sb = Sx * Sw`` afterwards.
+    calibrated by that legacy path; ``align_onnx_bias_scale`` writes ``Sb = Sx * Sw`` afterwards.
+    With ``preserve_shared_percentile``, the shared statistical analyzer keeps
+    bias enabled at its configured PTQ precision, including zero-only channels.
     """
     disabled: List[str] = []
     pending = set(getattr(sim, "_rx_calibration_bias_quantizers", ()))
@@ -45,6 +48,10 @@ def disable_onnx_bias_quantizers(sim: Any) -> List[str]:
         if (quantizer is None or not quantizer.enabled
                 or quantizer.data_type != QuantizationDataType.int):
             continue
+        if preserve_shared_percentile:
+            from aimet_onnx.percentile import uses_shared_percentile
+            if uses_shared_percentile(quantizer):
+                continue
         quantizer.enabled = False
         pending.add(bias.name)
         disabled.append(bias.name)
@@ -214,17 +221,17 @@ def align_onnx_bias_scale(sim: Any, *, bias_bitwidth: int = 32) -> Dict[str, Any
         ):
             raise ValueError(f"{bias.name}: weight quantizer missing or uninitialized")
         try:
-            input_quantizer = get_input_quantizer(op.inputs[0].name)
+            input_q = input_quantizer(sim, op, 0)
         except KeyError:
-            input_quantizer = None
+            input_q = None
         if (
-            input_quantizer is None
-            or not input_quantizer.enabled
-            or not input_quantizer.is_initialized()
+            input_q is None
+            or not input_q.enabled
+            or not input_q.is_initialized()
         ):
             raise ValueError(f"{bias.name}: input quantizer missing or uninitialized")
 
-        input_scale = _scalar_scale(input_quantizer.get_encodings())
+        input_scale = _scalar_scale(input_q.get_encodings())
         weight_encodings = weight_quantizer.get_encodings()
         if not weight_encodings:
             raise ValueError(f"{bias.name}: weight encodings empty")

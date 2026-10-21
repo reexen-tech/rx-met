@@ -10,7 +10,7 @@ import torch
 
 from aimet_common import libpymo
 from aimet_common.defs import QuantizationDataType, QuantScheme
-from aimet_common.percentile import PercentileCalibrator, adjust_min_max
+from aimet_common.percentile import PercentileCalibrator
 from aimet_onnx.utils import OrtInferenceSession, add_hook_to_get_activation
 
 
@@ -25,7 +25,7 @@ def update_stats(quantizer, array):
     array = np.asarray(array, dtype=np.float32)
     if not array.flags.c_contiguous or not array.flags.writeable:
         array = np.array(array, copy=True, order="C")
-    tensor = torch.from_numpy(array)
+    tensor = torch.from_numpy(array).to(getattr(quantizer, "_rx_calibration_device", "cpu"))
     shape = tuple(quantizer._tensor_quantizer.getShape())
     if quantizer.quant_info.blockSize:
         axis = quantizer.quant_info.blockAxis
@@ -46,19 +46,28 @@ def compute_encodings(quantizer):
     # Frontends share the statistics/range calculation; TfEncoding only adapts
     # the resulting grid to the native runtime's additive-offset convention.
     num_steps = (1 << quantizer.bitwidth) - 1
-    minimum, maximum = calibrator.compute_encodings(num_steps, False)
+    symmetric = quantizer.use_symmetric_encodings
+    signed_steps = num_steps - int(symmetric and quantizer.use_strict_symmetric)
+    minimum, maximum = calibrator.compute_encodings(signed_steps, symmetric)
+    unsigned = None
+    if symmetric and quantizer.use_unsigned_symmetric:
+        unsigned = calibrator.compute_encodings(num_steps, False)
     encodings = []
-    for low, high in zip(minimum.flatten(), maximum.flatten()):
-        symmetric = quantizer.use_symmetric_encodings and not (
-            quantizer.use_unsigned_symmetric and low >= 0)
-        steps = num_steps - int(symmetric and quantizer.use_strict_symmetric)
-        low, high = adjust_min_max(low, high, steps, symmetric)
-        if symmetric:
-            positive, negative = steps // 2, (steps + 1) // 2
-            delta = torch.maximum(high / positive, -low / negative).item()
-            offset = -negative
+    for index, (low, high) in enumerate(zip(minimum.flatten(), maximum.flatten())):
+        signed_grid = symmetric
+        steps = signed_steps
+        if unsigned is not None and unsigned[0].flatten()[index] >= 0:
+            low, high = (bound.flatten()[index] for bound in unsigned)
+            signed_grid = False
+            steps = num_steps
+        if signed_grid:
+            offset = -((steps + 1) // 2)
         else:
-            delta = ((high - low) / steps).item()
+            offset = None
+        # The shared analyzer has already aligned symmetric bounds. Recover
+        # scale from that range, as Torch does, without a second float32 rounding.
+        delta = ((high - low) / steps).item()
+        if offset is None:
             offset = round(low.item() / delta)
         encoding = libpymo.TfEncoding()
         encoding.bw = quantizer.bitwidth
@@ -111,15 +120,26 @@ def calibration_context(sim, quantizers):
         return
     original = sim.session
     modes = {name: q.op_mode for name, q in selected.items()}
+    device = "cpu"
+    for provider in sim.providers:
+        name, options = provider if isinstance(provider, tuple) else (provider, {})
+        if name == "CUDAExecutionProvider":
+            device = f"cuda:{options.get('device_id', 0)}"
+            break
     initializers = {value.name: value for value in sim.model.model.graph.initializer}
     activations = {}
     try:
         for name, quantizer in selected.items():
+            # Keep histogram/range arithmetic on the same device as Torch.
+            # CPU and CUDA scalar division can differ by one float32 ULP.
+            quantizer._rx_calibration_device = device
             if name in sim.param_names:
                 if name not in initializers:
                     raise RuntimeError(f"Percentile parameter has no constant initializer: {name}")
                 quantizer.update_encoding_stats(numpy_helper.to_array(initializers[name]))
                 quantizer.compute_encodings()
+                if getattr(quantizer, "_rx_calibration_passthrough", False):
+                    quantizer.op_mode = libpymo.TensorQuantizerOpMode.passThrough
             else:
                 quantizer.op_mode = libpymo.TensorQuantizerOpMode.passThrough
                 activations[name] = quantizer

@@ -8,6 +8,8 @@ from onnx import helper, numpy_helper, TensorProto
 
 from aimet_onnx.rx_ptq import pipeline
 from aimet_onnx.rx_ptq.po2 import apply_power_of_2_workflow
+from aimet_common.defs import QuantScheme
+from aimet_onnx.quantsim import compute_encodings
 import test_onnx_ptq_alignment as fixtures
 
 
@@ -19,7 +21,7 @@ class OnnxOperandPrecisionTest(unittest.TestCase):
         self.path = self.fixture.path
         self.index = 0
 
-    def model(self, nodes, input_shapes, output_shapes, constants=None):
+    def model(self, nodes, input_shapes, output_shapes, constants=None, *, quant_scheme="tf"):
         def infos(shapes):
             return [helper.make_tensor_value_info(name, TensorProto.FLOAT, shape)
                     for name, shape in shapes.items()]
@@ -31,7 +33,7 @@ class OnnxOperandPrecisionTest(unittest.TestCase):
                  for name, shape in input_shapes.items()}
         self.index += 1
         sim = pipeline.create_onnx_ptq_sim(model, feeds, config_file=str(self.fixture.config),
-                                          quant_scheme="tf", work_dir=self.path / f"graph{self.index}")
+                                          quant_scheme=quant_scheme, work_dir=self.path / f"graph{self.index}")
         return sim, model, feeds
 
     def apply(self, sim, config):
@@ -95,6 +97,42 @@ class OnnxOperandPrecisionTest(unittest.TestCase):
         self.assertEqual(sim.qc_quantize_op_dict["x"].bitwidth, 8)
         self.assertEqual(sim.qc_quantize_op_dict["w"].bitwidth, 16)
         self.assertFalse(sim.qc_quantize_op_dict["w"].use_symmetric_encodings)
+
+    def test_constant_matmul_operand_is_passthrough_during_calibration(self):
+        feed = {"x": np.array([[1., 0., 0., 0.]], dtype=np.float32)}
+        weight = np.array([[.01337, -.02], [.00456, .00789],
+                           [.01234, .01029], [-.00312, .0199]], dtype=np.float32)
+        for kind in ("QuantizedMatMul", "QuantizedLinear"):
+            with self.subTest(kind=kind):
+                sim, _, _ = self.model([helper.make_node("MatMul", ["x", "w"], ["y"], name="fc")],
+                    {"x": [1, 4]}, {"y": [1, 2]}, {"w": weight})
+                for q in sim.qc_quantize_op_dict.values():
+                    q.set_quant_scheme(QuantScheme.post_training_percentile)
+                    q.set_percentile_value(99.99)
+                settings = {"input_bitwidth": 16, "output_bitwidth": 8}
+                if kind == "QuantizedLinear":
+                    settings.update(weight_bitwidth=16, per_channel_quantization=False)
+                self.apply(sim, {"layer_type_config": {kind: settings}})
+                with compute_encodings(sim):
+                    actual = sim.session.run(None, feed)[0]
+                if kind == "QuantizedMatMul":
+                    np.testing.assert_array_equal(actual, feed["x"] @ weight)
+                else:
+                    self.assertFalse(np.array_equal(actual, feed["x"] @ weight))
+                    quantized = sim.qc_quantize_op_dict["w"].quantize_dequantize(weight)
+                    np.testing.assert_array_equal(actual, feed["x"] @ quantized)
+                self.assertTrue(sim.qc_quantize_op_dict["w"].is_initialized())
+
+    def test_shared_constant_cannot_mix_parameter_and_operand_calibration(self):
+        sim, _, _ = self.model([
+            helper.make_node("MatMul", ["x1", "w"], ["y1"], name="left"),
+            helper.make_node("MatMul", ["x2", "w"], ["y2"], name="right"),
+        ], {"x1": [1, 4], "x2": [1, 4]}, {"y1": [1, 2], "y2": [1, 2]},
+            {"w": np.ones((4, 2), dtype=np.float32)})
+        with self.assertRaisesRegex(ValueError, "Conflicting shared quantizer calibration_passthrough"):
+            self.apply(sim, {"layer_type_config": {"QuantizedMatMul": {"input_bitwidth": 8}},
+                             "layer_name_config": {"right": {"weight_bitwidth": 8,
+                                                              "input_bitwidth": 8}}})
 
     def test_named_matmul_input_settings_override_defaults(self):
         sim, _ = self.fixture.sim(bias=False)

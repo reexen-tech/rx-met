@@ -20,6 +20,7 @@ from .compiler_encodings import CompilerEncodingConverter
 from .evaluation import evaluate_onnx_dataset, load_onnx_validation_inputs
 from .mixed_precision import apply_onnx_mixed_precision_bitwidth
 from .po2 import apply_power_of_2_workflow, disable_onnx_bias_quantizers
+from .execution import ptq_execution_providers
 from .validation import validate_quantizer_state
 
 _EXAMPLES_CONFIG = Path(__file__).resolve().parent / "config"
@@ -46,7 +47,8 @@ def force_model_io_quantizers(sim: Any, model: onnx.ModelProto) -> None:
     missing = []
     added = False
     for name in sorted(input_names | output_names):
-        if name in getattr(sim, "_rx_native_io", ()):
+        if (name in getattr(sim, "_rx_native_io", ())
+                or name in getattr(sim, "_rx_input_owned_io", ())):
             continue
         quantizer = sim.qc_quantize_op_dict.get(name)
         if quantizer is None:
@@ -110,9 +112,9 @@ def create_onnx_ptq_sim(
     work_dir: str | Path | None = None,
 ) -> Any:
     """Create QuantSim, force IO quantizers, then set RX percentile."""
-    from aimet_onnx import QuantizationSimModel
+    from .input_quantization import InputQuantizationSim
 
-    sim_type = QuantizationSimModel
+    sim_type = InputQuantizationSim
     if any(node.op_type == "GRU" and not node.domain for node in original_model.graph.node):
         from .recurrent import NativeGRUSim
         sim_type = NativeGRUSim
@@ -122,7 +124,7 @@ def create_onnx_ptq_sim(
         activation_type=activation_type,
         quant_scheme=quant_scheme,
         config_file=config_file,
-        providers=list(providers),
+        providers=ptq_execution_providers(providers),
         path=None if work_dir is None else str(work_dir),
         dummy_input=dummy_input,
     )
@@ -149,7 +151,7 @@ def run_onnx_feed(
         return source.run(None, feed)
     import onnxruntime as ort
 
-    session = ort.InferenceSession(str(source), providers=list(providers))
+    session = ort.InferenceSession(str(source), providers=ptq_execution_providers(providers))
     return session.run(None, feed)
 
 
@@ -321,6 +323,7 @@ def run_onnx_ptq(
     validation_labels: Sequence[int] | None = None,
 ) -> Dict[str, Path]:
     """Run PTQ and emit clean ONNX plus compiler-native encodings."""
+    providers = ptq_execution_providers(providers)
     model_path = Path(model_path).resolve()
     output_dir = Path(output_dir).resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -357,7 +360,7 @@ def run_onnx_ptq(
         )
         force_model_io_quantizers(sim, original_model)
     if align_bias_scale:
-        disable_onnx_bias_quantizers(sim)
+        disable_onnx_bias_quantizers(sim, preserve_shared_percentile=True)
     sim.compute_encodings(feeds)
     _, ptq_evaluation = evaluate_onnx_dataset(
         sim, evaluation_feeds, reference=reference_batches, labels=validation_labels, providers=providers

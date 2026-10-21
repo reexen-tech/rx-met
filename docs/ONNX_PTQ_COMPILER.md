@@ -92,15 +92,23 @@ ONNX 适配器将 `TfEncoding.offset` 转为对应整数域的加性偏移；例
 默认量化规则与本项目的 PyTorch 导出流程保持一致：
 
 - 校准：`percentile=99.99`，在 `compute_encodings` 前设置。Torch/ONNX 共用 `aimet_common.percentile` 的 2048 桶动态直方图、样本计数和百分位取点，后续批次超出范围时扩容并合并历史统计；默认 100 保留完整观测范围。
-- 激活和权重使用对称量化；Conv/Gemm/MatMul 的 bias scale 在激活和权重校准后按 `Sb = Sx * Sw` 推导，默认位宽为 INT32。该流程绕过 AIMET ONNX 对近零 bias 通道生成的 `scale=0`，防止校准期 fake-quant 向后续激活传播 Inf 或全 0。
+- 激活和权重使用对称量化；Percentile PTQ 按 JSON2 的 `bias_bitwidth` 统计校准普通 bias，全零通道也保留有效网格；Po2 阶段再按 `Sb = Sx * Sw` 推导，默认位宽为 INT32。旧原生统计路径仍延后 bias 对齐，避免近零通道产生 `scale=0`。
 - Power-of-2 使用与 `src/aimet_torch/power_of_2_quantization.py` 相同的 `cover_range`（容差 2%）
 - 权重默认 per-channel；Gemm 保持 per-channel；无 Conv+Relu supergroup
 
 ONNX 适配器仅在校准期间使用临时 session 采集中间张量，并将公共模块计算出的网格
-写回原生量化器。公共模块使用 Torch 张量运算，支持 CPU/CUDA；当前 ONNX 适配器将
-观测值取回 CPU，增加校准阶段的传输和内存开销，每批处理后释放观测值，不保存全部样本。
+写回原生量化器。公共模块使用 Torch 张量运算，统计与范围计算跟随 CPU/CUDA provider，
+避免跨设备标量运算的末位差异。观测值经主机缓冲区传输，增加校准阶段的传输和内存开销，
+每批处理后释放观测值，不保存全部样本。
 推理和导出仍使用原 session 与原图。支持 `session.run` 的迭代器、回调和校准上下文入口；
 校准期间暂不支持 IO binding、OrtValue 或异步执行。原生 GRU 内部仍调用 QuantGRU 自身的校准接口。
+
+原生 CPU/CUDA QDQ 共用居中整数网格计算，nearest 使用 ties-to-even。
+INT32 不经过 float32 的 `2^31` 平移，避免小整数码丢失；这需要重新构建原生库，
+encoding 的 scale、offset/zero_point 和保存格式保持不变。非 Po2 scale 使用正确舍入的
+倒数乘法；最小范围保护仅在公共 Percentile 模块按目标整数域应用一次。
+CUDA provider 默认设置 `use_tf32=0`，使校准、评价和恢复使用完整 FP32 矩阵计算；
+显式传入的 provider 选项保持优先。
 
 配置与 `examples/quick_start_kws.py` 相同：
 
@@ -114,12 +122,17 @@ ONNX 适配器仅在校准期间使用临时 session 采集中间张量，并将
 输入网格；常量仍存入 `param_encodings`。显式 `weight_*` 字段保留参数配置的优先级；
 只使用 `QuantizedLinear` 映射 MatMul 时，权重仍与激活输入分开配置。共享网格收到
 不兼容的显式请求时，在修改量化器前报错。
+常量 MatMul 输入在统计校准期间透传，普通权重仍执行参数 QDQ；同一共享量化器不能
+同时承担这两种校准角色。
 
 ## GRU 原生适配
 
 `create_onnx_ptq_sim` 自动识别标准 GRU，调用 `quant_gru` 算子包中的 ONNX 适配器。
 门内统计、量化前向、Po2、编码打包和恢复均由现有 QuantGRU 负责；普通层继续使用
 ONNX QuantSim。GRU 后的普通计算层保留自己的输入网格，用于混合精度和 bias 对齐。
+这些输入在 Gather/Reshape 等操作之后采样，不在整个 GRU 输出上追加通用 QDQ；
+普通计算分支后的 Concat 单独共享输入网格，保留各分支的输出网格。
+运行时输入别名仅用于仿真和原始编码重载，编译器编码映射回原节点输入端口，clean ONNX 不增加节点。
 
 运行时需要包含 `quant_gru_onnx` 和 `quant_gru_onnx_runtime` 的更新版 QuantGRU wheel。
 桥接节点仅存在于仿真图；导出仍保存原标准 ONNX GRU、权重及张量名称，并合并

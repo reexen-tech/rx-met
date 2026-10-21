@@ -262,6 +262,35 @@ class OnnxAlignmentTest(unittest.TestCase):
                     metadata['restored_quantized_vs_pre_export']))
                 self.assertIn('b', metadata['coverage']['enabled_quantizer_names'])
 
+    def test_percentile_ptq_keeps_configured_bias_quantization(self):
+        model = make_graph()
+        model.graph.initializer[-1].CopyFrom(
+            numpy_helper.from_array(np.array([0., .125], dtype=np.float32), 'b'))
+        model_path = self.path / 'percentile-input.onnx'
+        onnx.save(model, model_path)
+        calibration_dir = self.path / 'percentile-calib'
+        calibration_dir.mkdir()
+        np.save(calibration_dir / 'sample.npy', self.feed['x'])
+        mixed = self.path / 'percentile-mixed.json'
+        mixed.write_text(json.dumps({'layer_type_config': {'QuantizedLinear': {
+            'weight_bitwidth': 8, 'bias_bitwidth': 16,
+            'input_bitwidth': 8, 'output_bitwidth': 8}}}))
+        observed = []
+        evaluate = pipeline.evaluate_onnx_dataset
+        def capture(source, *args, **kwargs):
+            if hasattr(source, 'qc_quantize_op_dict'):
+                bias = source.qc_quantize_op_dict['b']
+                observed.append((bias.enabled, bias.bitwidth))
+                if bias.enabled:
+                    self.assertTrue(all(np.isfinite(e.delta) and e.delta > 0 for e in bias.get_encodings()))
+            return evaluate(source, *args, **kwargs)
+        with patch.object(pipeline, 'evaluate_onnx_dataset', side_effect=capture):
+            pipeline.run_onnx_ptq(model_path=model_path, calibration_dir=calibration_dir,
+                output_dir=self.path / 'percentile-run', filename_prefix='model',
+                config_file=str(self.config), bitwidth_config_file=str(mixed),
+                quant_scheme='percentile')
+        self.assertEqual(observed[:2], [(True, 16), (True, 32)])
+
     def test_missing_native_encoding_is_rejected(self):
         artifacts, expected = self.artifacts()
         path = artifacts['aimet_encodings']

@@ -2645,6 +2645,21 @@ def validate_encodings_to_load(
     :param encodings_to_load: Encodings to load
     :param quant_sim_model: Quantsim model to check for encoding names.
     """
+    # A shared runtime quantizer cannot restore two different saved grids.
+    # Check before loading/freezing the first alias, which would hide a conflict.
+    shared_encodings = {}
+    for encoding in itertools.chain(
+        encodings_to_load["activation_encodings"], encodings_to_load["param_encodings"]
+    ):
+        name = encoding["name"]
+        quantizer = quant_sim_model.qc_quantize_op_dict.get(name)
+        if quantizer is None:
+            continue
+        grid = {key: value for key, value in encoding.items() if key != "name"}
+        if quantizer in shared_encodings and shared_encodings[quantizer] != grid:
+            raise ValueError(f"Conflicting encodings for shared quantizer: {name}")
+        shared_encodings[quantizer] = grid
+
     # Check that all encoding names in the encodings to load are found in the model. This check only works for verifying
     # that names in encodings_to_load are valid. The reverse check will not work, since quantizers which are disabled
     # will not show up in encodings_to_load.

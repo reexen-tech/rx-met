@@ -16,6 +16,12 @@
 
 ### Fixed
 
+- ONNX GRU 后的普通计算输入在实际消费位置校准，避免中间帧复用整段序列网格及 GRU 输出的重复量化；普通计算分支后的 Concat 使用独立、共享的输入网格。混合精度、bias 对齐、编译器映射和原生编码重载共用端口解析，恢复前拒绝共享量化器的冲突编码，clean ONNX 保留原图。
+- ONNX Percentile 按最终 min/max 范围恢复 scale，并在对应 CPU/CUDA 设备上执行公共统计与范围计算，消除重复对称化及跨设备标量运算导致的 float32 scale 差别。
+- 原生 CPU/CUDA QDQ 共用居中网格算术，消除 INT32 在 float32 中平移到 `2^31` 导致的低位丢失；统一 nearest 为 ties-to-even，覆盖逐张量、逐通道和广播执行，保留 NaN 与正确的 Inf 饱和边界，不修改 encoding 格式或退回浮点计算。
+- ONNX 默认 Percentile PTQ 保留配置位宽的 bias 统计量化，包含全零通道；Po2 阶段再按 `Sb=Sx*Sw` 对齐到 INT32，与 Torch 的阶段顺序一致。旧原生统计器仍保留延后 bias 校准的保护。
+- ONNX PTQ 的校准、评价和产物恢复默认关闭 CUDA TF32，保持完整 FP32 矩阵计算，显式 provider 选项仍可覆盖。非 Po2 QDQ 统一采用正确舍入的倒数乘法，避免半格附近的一格偏差。
+- Percentile 适配按目标整数域一次应用最小范围保护，避免零值、极小 bias 的 scale 被二次扩张；常量 MatMul 输入在校准期间透传，与普通权重的 QDQ 校准角色区分，并拒绝共享量化器的角色冲突。
 - ONNX 混合精度输入配置通过 QuantSim 有效网格追踪穿过 Transpose/Reshape 等数据搬运算子，避免 INT16 请求静默丢失；`QuantizedMatMul` 的常量矩阵按原输入编号应用位宽、对称性和默认逐张量网格，保留 `QuantizedLinear` 权重语义及显式 `weight_*` 配置优先级，并在写入前检测共享网格冲突。
 - Torch/ONNX Percentile 校准共用动态直方图、样本计数与百分位规则，修复 ONNX 固定首批三倍范围导致后续大值漏统计；保留常量、微小范围和非首维逐通道的历史计数，支持重复校准及冻结编码。ONNX 校准通过临时 session 采集中间张量，原生推理和导出保持原接口，GRU 内部校准继续由算子库负责。
 - ONNX GRU PTQ 接入 QuantGRU 原生校准、量化前向、Po2 与编码恢复，实际应用 `GRU_config`；适配方向、门顺序及常量 W/R/B，保留双向门内编码和逐通道参数，拒绝缺失内部编码或不支持的 GRU 属性。仿真使用算子包提供的 ORT 桥接，导出保持原标准 ONNX GRU。

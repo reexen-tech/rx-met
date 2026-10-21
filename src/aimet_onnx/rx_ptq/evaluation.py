@@ -5,6 +5,7 @@ from pathlib import Path
 
 from aimet_common.evaluation import classification_accuracy, compare_output_batches, compare_outputs
 from .calibration import inspect_model_input_dtypes, inspect_model_inputs, iter_calibration_feeds
+from .execution import ptq_execution_providers
 
 
 def load_onnx_validation_inputs(model, directory, *, labels=None):
@@ -37,7 +38,7 @@ def evaluate_onnx_dataset(source, feeds, *, reference=None, labels=None,
         session = source
     else:
         import onnxruntime as ort
-        session = ort.InferenceSession(str(source), providers=list(providers))
+        session = ort.InferenceSession(str(source), providers=ptq_execution_providers(providers))
     outputs = []
     for feed in feeds:
         values = session.run(None, feed)

@@ -80,7 +80,10 @@ class CompilerEncodingConverter:
     def _map_activation(self, tensor_name: str, encoding: Dict[str, Any]) -> bool:
         mapped = False
         for node_index, input_index in self.graph.consumers.get(tensor_name, []):
-            self._add_activation(node_index, "input", input_index, encoding)
+            port = (self.graph.node_names[node_index], input_index)
+            alias = getattr(self.sim, "_rx_input_quantizers", {}).get(port)
+            if alias is None or not self.sim.qc_quantize_op_dict[alias].enabled:
+                self._add_activation(node_index, "input", input_index, encoding)
             mapped = True
         for node_index, output_index in self.graph.producers.get(tensor_name, []):
             self._add_activation(node_index, "output", output_index, encoding)
@@ -160,11 +163,18 @@ class CompilerEncodingConverter:
     def convert(self) -> Tuple[Dict[str, Any], Dict[str, Any]]:
         validate_quantizer_state(self.sim)
         tensor_encodings: Dict[str, Dict[str, Any]] = {}
+        port_encodings: Dict[str, Dict[str, Any]] = {}
+        ports = getattr(self.sim, "_rx_input_quantizers", {})
+        port_names = set(ports.values())
         enabled_activations: List[str] = []
         for name, quantizer in self.sim.qc_quantize_op_dict.items():
             if not quantizer.enabled:
                 continue
             encoding = self._encoding_from_quantizer(name, quantizer)
+            if name in port_names:
+                port_encodings[name] = encoding
+                self.mapped.add(name)
+                continue
             if name in self.graph.initializers:
                 self.params[name] = encoding
                 self.mapped.add(name)
@@ -188,6 +198,11 @@ class CompilerEncodingConverter:
                 continue
             if name in enabled_activations:
                 self.unmapped.append(name)
+
+        node_indices = {name: index for index, name in self.graph.node_names.items()}
+        for (node_name, input_index), alias in ports.items():
+            if alias in port_encodings:
+                self._add_activation(node_indices[node_name], "input", input_index, port_encodings[alias])
 
         if self.unmapped:
             raise RuntimeError(

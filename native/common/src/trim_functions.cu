@@ -51,11 +51,8 @@ __global__ void quantizeDequantizeKernel(const DTYPE* in, uint64_t cnt, DTYPE* o
 {
     CUDA_KERNEL_LOOP(i, cnt)
     {
-        quantizeToFxpDevice<DTYPE>(in + i, out + i,
-                                   encoding_min, encoding_max,
-                                   encoding_delta, encoding_offset,
-                                   rounding_mode, i);
-        dequantizeFromFxpDevice<DTYPE>(out + i, encoding_delta, encoding_offset);
+        out[i] = quantizeDequantizeValueDevice(in[i], encoding_min, encoding_max, encoding_delta,
+                                              rounding_mode, i);
     }
 }
 
@@ -83,11 +80,8 @@ __global__ void quantizeDequantizePerChannelKernel(const DTYPE* in, int numChann
     CUDA_KERNEL_LOOP(i, numElement)
     {
         int channelIdx = (i / numElementPerChannel) % numChannel;
-        quantizeToFxpDevice<DTYPE>(in + i, out + i,
-                                   *(encodingMin + channelIdx), *(encodingMax + channelIdx),
-                                   *(encodingDelta + channelIdx), *(encodingOffset + channelIdx),
-                                   roundingMode, i);
-        dequantizeFromFxpDevice<DTYPE>(out + i, *(encodingDelta + channelIdx), *(encodingOffset + channelIdx));
+        out[i] = quantizeDequantizeValueDevice(in[i], encodingMin[channelIdx], encodingMax[channelIdx],
+                                              encodingDelta[channelIdx], roundingMode, i);
     }
 }
 
@@ -112,12 +106,10 @@ __global__ void quantizeDequantizeBroadcastKernel(const DTYPE* in, DTYPE* out, i
         }
 
         auto delta  = *(encodingDelta + encodingIdx);
-        auto offset = *(encodingOffset + encodingIdx);
         auto min    = *(encodingMin + encodingIdx);
         auto max    = *(encodingMax + encodingIdx);
 
-        quantizeToFxpDevice<DTYPE>(in + i, out + i, min, max, delta, offset, ROUND_NEAREST, i);
-        dequantizeFromFxpDevice<DTYPE>(out + i, delta, offset);
+        out[i] = quantizeDequantizeValueDevice(in[i], min, max, delta, ROUND_NEAREST, i);
     }
 }
 

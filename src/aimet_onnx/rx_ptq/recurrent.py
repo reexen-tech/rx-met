@@ -2,13 +2,12 @@
 
 from __future__ import annotations
 
-import copy
 import json
 from pathlib import Path
 
 import onnx
 
-from aimet_onnx.quantsim import QuantizationSimModel
+from .input_quantization import InputQuantizationSim
 
 
 def native_grus(sim):
@@ -52,7 +51,7 @@ def restore_native_encodings(sim, payload, *, allow_overwrite):
         adapter.load_encodings(saved, allow_overwrite=allow_overwrite)
 
 
-class NativeGRUSim(QuantizationSimModel):
+class NativeGRUSim(InputQuantizationSim):
     """Keep generic QuantSim behavior while delegating GRU to its native package."""
 
     def __init__(self, model, **kwargs):
@@ -71,7 +70,6 @@ class NativeGRUSim(QuantizationSimModel):
                 break
         if device is None:
             raise RuntimeError("Native ONNX GRU calibration requires CUDAExecutionProvider")
-        self._rx_original_onnx = copy.deepcopy(model)
         initializers = {value.name: value for value in model.graph.initializer}
         nodes = [node for node in model.graph.node if node.op_type == "GRU" and not node.domain]
         if len({node.name for node in nodes}) != len(nodes):
@@ -107,6 +105,7 @@ class NativeGRUSim(QuantizationSimModel):
         self.session._rx_native_grus = self._rx_native_grus
 
     def _prepare_runtime_model(self):
+        super()._prepare_runtime_model()
         self._ort_session_options.register_custom_ops_library(self._rx_native_library)
         for node in self.model.model.graph.node:
             if node.name in self._rx_native_grus and node.op_type == "GRU":
@@ -143,13 +142,6 @@ class NativeGRUSim(QuantizationSimModel):
         payload = json.loads(path.read_text())
         payload["native_recurrent_encodings"] = export_native_encodings(self)
         path.write_text(json.dumps(payload, indent=2) + "\n")
-
-    def export(self, path, filename_prefix, export_model=True):
-        super().export(path, filename_prefix, export_model=False)
-        if export_model:
-            model = copy.deepcopy(self._rx_original_onnx)
-            onnx.external_data_helper.convert_model_from_external_data(model)
-            onnx.save_model(model, str(Path(path) / f"{filename_prefix}.onnx"))
 
     def _to_onnx_qdq(self, **kwargs):
         raise NotImplementedError("Native GRU requires clean ONNX plus sidecar encodings; use export_onnx_json")

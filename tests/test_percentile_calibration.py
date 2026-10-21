@@ -18,6 +18,7 @@ from aimet_onnx.quantsim import QuantizationSimModel, compute_encodings
 from aimet_torch.v2.quantization.encoding_analyzer import (
     PercentileEncodingAnalyzer, TfEnhancedEncodingAnalyzer,
 )
+from aimet_torch.v2.quantization.affine import QuantizeDequantize
 
 
 def quantizer(*, percentile=99.99, symmetric=True, shape=None, channel=None):
@@ -35,6 +36,24 @@ def quantizer(*, percentile=99.99, symmetric=True, shape=None, channel=None):
 
 
 class SharedPercentileTest(unittest.TestCase):
+    def test_calibrated_scale_is_bit_exact_with_torch(self):
+        devices = ["cpu", "cuda"] if torch.cuda.is_available() else ["cpu"]
+        values = np.linspace(-.37, 1.23, 1024, dtype=np.float32)
+        for device in devices:
+            for bits in (8, 16, 32):
+                with self.subTest(device=device, bits=bits):
+                    native = quantizer()
+                    native.set_bitwidth(bits)
+                    native._rx_calibration_device = device
+                    reference = QuantizeDequantize((), bits, True,
+                        encoding_analyzer=PercentileEncodingAnalyzer((), percentile=99.99)).to(device)
+                    with reference.compute_encodings():
+                        for factor in (1., .25, 3.):
+                            batch = values * factor
+                            native.update_encoding_stats(batch)
+                            reference(torch.from_numpy(batch).to(device))
+                    self.assertEqual(native.compute_encodings()[0].delta, reference.get_scale().item())
+
     def test_later_large_batch_and_order(self):
         small = np.linspace(0, 1, 1024, dtype=np.float32)
         large = np.linspace(0, 100, 1024, dtype=np.float32)
@@ -65,6 +84,22 @@ class SharedPercentileTest(unittest.TestCase):
             state.reset_stats()
             with self.assertRaises(RuntimeError):
                 state.compute_encodings(255, True)
+
+    def test_minimum_range_is_applied_once(self):
+        for bits in (8, 16, 32):
+            for values in (np.zeros(16, dtype=np.float32),
+                           np.linspace(-1e-9, 1e-9, 16, dtype=np.float32),
+                           np.linspace(0, 100, 1024, dtype=np.float32)):
+                with self.subTest(bits=bits, maximum=values.max()):
+                    q = quantizer()
+                    q.set_bitwidth(bits)
+                    q.update_encoding_stats(values)
+                    reference = PercentileEncodingAnalyzer((), percentile=99.99)
+                    reference.update_stats(torch.from_numpy(values))
+                    low, high = reference.compute_encodings((1 << bits) - 1, True)
+                    expected = ((high - low) / ((1 << bits) - 1)).item()
+                    actual = q.compute_encodings()[0].delta
+                    self.assertAlmostEqual(actual, expected, delta=expected * 1e-6)
 
     def test_per_channel_and_asymmetric_ranges_match_torch(self):
         for symmetric in (False, True):

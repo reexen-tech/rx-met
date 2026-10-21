@@ -12,6 +12,7 @@ from aimet_common.mixed_precision import (
     QuantizerConfigPlan, default_layer_config, is_config_comment,
     load_mixed_precision_config, select_layer_config,
 )
+from .input_quantization import input_quantizer
 
 # JSON 2 的 Torch 类名 → 当前图里可能出现的 ONNX op_type。
 # 没有对应节点的项在 apply 时跳过。
@@ -100,18 +101,6 @@ def map_json2_types_to_onnx(
     return mapped, ignored
 
 
-def _input_quantizer(sim: Any, product: Any):
-    quantizer = sim.qc_quantize_op_dict.get(product.name)
-    if quantizer is not None:
-        return quantizer
-    # Transpose/Reshape do not own a quantizer. Configure the existing grid
-    # that actually supplies their data, using QuantSim's invariant-op walk.
-    resolver = getattr(sim, "_get_enabled_quantizer", None)
-    if resolver is not None and product.name in sim.connected_graph.get_all_products():
-        return resolver(product.name)
-    return None
-
-
 def _quantizers_for_op(sim: Any, op: Any, *, matmul_operands: bool = False
                        ) -> Tuple[List[Any], List[Any], Dict[str, Any]]:
     params = {
@@ -130,8 +119,8 @@ def _quantizers_for_op(sim: Any, op: Any, *, matmul_operands: bool = False
             params["bias"] = sim.qc_quantize_op_dict.get(bias.name)
     # Keep empty activation slots so input_bitwidths retains its input indices.
     inputs = [
-        _input_quantizer(sim, product)
-        for product in op.inputs
+        input_quantizer(sim, op, index)
+        for index, product in enumerate(op.inputs)
         if matmul_operands or (not product.is_parm and product.name not in parameter_names)
     ]
     outputs = [sim.qc_quantize_op_dict.get(product.name) for product in op.outputs]
@@ -180,6 +169,7 @@ def _apply_layer_config(sim: Any, op: Any, layer_config: Dict[str, Any],
         for quantizer in inputs + outputs + list(params.values()):
             if quantizer is not None and quantizer.enabled:
                 request(quantizer, "enabled", True, "quantization")
+    request(weight, "calibration_passthrough", weight_is_operand, "weight_calibration")
     for role, quantizer in params.items():
         prefix = role if role in {"weight", "bias"} else "param"
         request(quantizer, "bitwidth", layer_config.get(f"{prefix}_bitwidth"), role)
@@ -245,6 +235,10 @@ def _apply_plan(plan):
             if (quantizer.quant_info.usePerChannelMode != settings["per_channel_quantization"]
                     and quantizer.is_initialized()):
                 raise ValueError("Configure per_channel_quantization before calibration")
+        if ("calibration_passthrough" in settings and quantizer.is_initialized()
+                and bool(getattr(quantizer, "_rx_calibration_passthrough", False))
+                != settings["calibration_passthrough"]):
+            raise ValueError("Configure operand calibration roles before calibration")
     for quantizer, settings in entries:
         _set_bitwidth(quantizer, settings.get("bitwidth"))
         _set_symmetric(quantizer, settings.get("symmetric"))
@@ -254,6 +248,8 @@ def _apply_plan(plan):
                 quantizer.enable_per_channel_quantization(enabled)
         if "enabled" in settings:
             quantizer.enabled = settings["enabled"]
+        if "calibration_passthrough" in settings:
+            quantizer._rx_calibration_passthrough = settings["calibration_passthrough"]
 
 
 def apply_onnx_mixed_precision_bitwidth(

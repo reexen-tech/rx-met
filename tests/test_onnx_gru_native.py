@@ -136,8 +136,53 @@ class NativeOnnxGruTest(unittest.TestCase):
         from aimet_onnx.rx_ptq.po2 import disable_onnx_bias_quantizers
         disable_onnx_bias_quantizers(sim)
         self.calibrate(sim, feed)
-        self.assertTrue(sim.qc_quantize_op_dict["state"].is_initialized())
+        from aimet_onnx.rx_ptq.input_quantization import input_quantizer
+        self.assertFalse(sim.qc_quantize_op_dict["state"].enabled)
+        self.assertTrue(input_quantizer(sim, sim.connected_graph.get_all_ops()["fc"], 0).is_initialized())
         self.assertTrue(sim.qc_quantize_op_dict["fc_bias"].enabled)
+
+    def test_selected_native_frame_is_calibrated_at_its_consumer(self):
+        from aimet_onnx.quantsim import compute_encodings
+        from aimet_onnx.rx_ptq.input_quantization import input_quantizer
+        from test_percentile_calibration import quantizer
+
+        model, feed = graph()
+        model.graph.initializer.extend([
+            numpy_helper.from_array(np.array(1, dtype=np.int64), "frame_index"),
+            numpy_helper.from_array(np.array([1, 8], dtype=np.int64), "flat_shape"),
+            numpy_helper.from_array(np.full((2, 8), .1, dtype=np.float32), "fc_weight"),
+        ])
+        model.graph.node.extend([
+            helper.make_node("Gather", ["y", "frame_index"], ["frame"], name="select", axis=0),
+            helper.make_node("Reshape", ["frame", "flat_shape"], ["flat"], name="flatten"),
+            helper.make_node("Gemm", ["flat", "fc_weight"], ["scores"], name="fc", transB=1),
+            helper.make_node("Neg", ["y"], ["negated"], name="full_sequence"),
+        ])
+        model.graph.output.extend([
+            helper.make_tensor_value_info("scores", TensorProto.FLOAT, [1, 2]),
+            helper.make_tensor_value_info("negated", TensorProto.FLOAT, [4, 2, 2, 2]),
+        ])
+        sim = self.sim(model, feed)
+        apply_onnx_mixed_precision_bitwidth(sim, str(CONFIG / "quick_start_full_quant.json"), verbose=False)
+        ops = sim.connected_graph.get_all_ops()
+        selected = input_quantizer(sim, ops["fc"], 0)
+        full = input_quantizer(sim, ops["full_sequence"], 0)
+        self.assertIsNot(selected, full)
+        self.assertFalse(sim.qc_quantize_op_dict["y"].enabled)
+        expected = quantizer()
+        expected._rx_calibration_device = "cuda:0"
+        alias = sim._rx_input_quantizers["fc", 0]
+        with compute_encodings(sim):
+            for factor in (1, 3):
+                values = sim.session.run([alias], {name: array * factor for name, array in feed.items()})[0]
+                expected.update_encoding_stats(values)
+        self.assertEqual(selected.get_encodings()[0].delta, expected.compute_encodings()[0].delta)
+        self.assertNotEqual(selected.get_encodings()[0].delta, full.get_encodings()[0].delta)
+        apply_power_of_2_workflow(sim, verbose=False)
+        actual = sim.session.run(None, feed)
+        artifacts = pipeline.export_onnx_json(sim, model, self.path / "selected", "gru")
+        pipeline.verify_onnx_ptq_artifacts(artifacts, feed, actual,
+            config_file=str(CONFIG / "mrnn_quantsim_config_custom_mixed_precision_v2.json"), providers=PROVIDERS)
         artifacts = pipeline.export_onnx_json(sim, model, self.path / "consumer", "model")
         pipeline.verify_onnx_ptq_artifacts(artifacts, feed, sim.session.run(None, feed),
             config_file=str(CONFIG / "mrnn_quantsim_config_custom_mixed_precision_v2.json"), providers=PROVIDERS)
