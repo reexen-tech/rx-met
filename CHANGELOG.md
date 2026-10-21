@@ -16,6 +16,7 @@
 
 ### Fixed
 
+- Torch 为 FX 展开 BN、自定义模块自动补建的参数量化器复用普通参数的 `_V2LazyQuantizer`，实际遵循所选校准方案、数据类型和位宽，修复固定使用 MinMax 导致 Percentile/TfEnhanced 选择丢失的问题；百分位设置和重新校准也覆盖这些参数。移除为匹配旧错误默认而添加的 ONNX 参数校准 metadata 适配。
 - ONNX GRU 后的普通计算输入在实际消费位置校准，避免中间帧复用整段序列网格及 GRU 输出的重复量化；普通计算分支后的 Concat 使用独立、共享的输入网格。混合精度、bias 对齐、编译器映射和原生编码重载共用端口解析，恢复前拒绝共享量化器的冲突编码，clean ONNX 保留原图。
 - ONNX Percentile 按最终 min/max 范围恢复 scale，并在对应 CPU/CUDA 设备上执行公共统计与范围计算，消除重复对称化及跨设备标量运算导致的 float32 scale 差别。
 - 原生 CPU/CUDA QDQ 共用居中网格算术，消除 INT32 在 float32 中平移到 `2^31` 导致的低位丢失；统一 nearest 为 ties-to-even，覆盖逐张量、逐通道和广播执行，保留 NaN 与正确的 Inf 饱和边界，不修改 encoding 格式或退回浮点计算。

@@ -56,6 +56,9 @@ python3 -m unittest discover -s tests -p test_onnx_operand_precision.py -v
 
 `test_onnx_input_quantization.py` 检查 Concat 的独立共享输入网格、校准顺序、配置冲突和
 编码重载；`test_onnx_gru_native.py` 覆盖 GRU 中间帧按实际消费位置校准及端口编码导出。
+`test_fx_parameter_quantization.py` 检查展开 BN、自定义参数与普通 Conv 使用一致的校准
+方案，覆盖字符串/枚举、CPU/CUDA、百分位值调整后重新校准、整数/FP8/FP16，以及无
+参数校准 metadata 特殊适配的 ONNX 再校准、导出和恢复。
 
 `test_dependencies.py` 验证依赖管理配置和生成结果。该测试检查以下内容：
 

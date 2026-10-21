@@ -84,7 +84,7 @@ from aimet_torch.v2.nn import (
     QuantizedReLU,
 )
 from aimet_torch.v2.nn.fake_quant import _legacy_impl
-from aimet_torch.v2._builder import _V2LazyQuantizeWrapper
+from aimet_torch.v2._builder import _V2LazyQuantizeWrapper, _V2LazyQuantizer
 from aimet_torch.v2.quantization.base import QuantizerBase, EncodingBase
 from aimet_torch.v2.quantization.affine import AffineQuantizerBase
 from aimet_torch.v2.quantization.encoding_analyzer import PercentileEncodingAnalyzer
@@ -340,7 +340,8 @@ class QuantizationSimModel(_QuantizationSimModelBase):  # pylint: disable=missin
         # Parameter owners retained by FX need QDQ at get_attr reads.
         # 参考 nn.Conv2d 的机制，为所有 nn.Parameter 创建量化器
         # 但避免重复处理已有量化定义的模块
-        def _auto_create_param_quantizers_for_unquantized_modules(model, default_param_bw, default_data_type):
+        def _auto_create_param_quantizers_for_unquantized_modules(
+                model, default_param_bw, default_data_type, quant_scheme):
             """
             为被打散的模块（如自定义的 cfLN2D）的参数创建 param_quantizers
             
@@ -349,11 +350,12 @@ class QuantizationSimModel(_QuantizationSimModelBase):  # pylint: disable=missin
             2. 不处理已有量化定义的模块（QuantizationMixin）
             3. 为模块的参数创建 param_quantizers（像 Conv.weight 一样）
             """
-            from aimet_torch.v2.quantization.affine import QuantizeDequantize
-            from aimet_torch.v2.quantization.encoding_analyzer import MinMaxEncodingAnalyzer
             from aimet_torch.v2.nn import BaseQuantizationMixin
             from aimet_torch.v2.quantization.base import QuantizerBase
-            
+
+            if isinstance(quant_scheme, str):
+                quant_scheme = QuantScheme.from_str(quant_scheme)
+
             param_quantizers_created = 0
             
             for module_name, module in model.named_modules():
@@ -390,27 +392,11 @@ class QuantizationSimModel(_QuantizationSimModelBase):  # pylint: disable=missin
                     # =============================================
                     
                     if param_name not in module.param_quantizers:
-                        # 创建量化器（与 Conv.weight 相同的方式）
-                        if default_data_type == QuantizationDataType.int:
-                            encoding_analyzer = MinMaxEncodingAnalyzer(shape=())
-                            quantizer = QuantizeDequantize(
-                                shape=(),
-                                bitwidth=default_param_bw,
-                                symmetric=True,
-                                encoding_analyzer=encoding_analyzer,
-                            )
-                        else:
-                            from aimet_torch.v2.quantization.float import FloatQuantizeDequantize
-                            if default_param_bw == 16:
-                                quantizer = FloatQuantizeDequantize(dtype=torch.float16)
-                            else:
-                                from aimet_torch import fp_quantization as v1_fp_quantization
-                                mantissa_bits = v1_fp_quantization.NUM_MANTISSA_BITS
-                                exponent_bits = 7 - mantissa_bits
-                                encoding_analyzer = MinMaxEncodingAnalyzer(shape=())
-                                quantizer = FloatQuantizeDequantize(
-                                    exponent_bits, mantissa_bits, encoding_analyzer=encoding_analyzer
-                                )
+                        quantizer = _V2LazyQuantizer(
+                            default_param_bw, "nearest", quant_scheme,
+                            use_symmetric_encodings=True,
+                            enabled_by_default=True, data_type=default_data_type,
+                        ).realize()
                         
                         # 立即使用参数值初始化量化器
                         # 确保量化器在与参数相同的设备上
@@ -435,7 +421,8 @@ class QuantizationSimModel(_QuantizationSimModelBase):  # pylint: disable=missin
         _auto_create_param_quantizers_for_unquantized_modules(
             model, 
             default_param_bw,
-            default_data_type
+            default_data_type,
+            quant_scheme,
         )
         # ===== PATCH END =====
 

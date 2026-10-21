@@ -125,6 +125,10 @@ CUDA provider 默认设置 `use_tf32=0`，使校准、评价和恢复使用完�
 常量 MatMul 输入在统计校准期间透传，普通权重仍执行参数 QDQ；同一共享量化器不能
 同时承担这两种校准角色。
 
+Torch 的 FX 参数与普通参数复用同一套量化器创建规则。选择 Percentile 时，展开 BN
+和自定义模块的 weight/bias 同样按所设百分位校准。ONNX PTQ 按本次调用指定的方案
+校准，不通过 ONNX metadata 强制覆盖参数策略。
+
 ## GRU 原生适配
 
 `create_onnx_ptq_sim` 自动识别标准 GRU，调用 `quant_gru` 算子包中的 ONNX 适配器。
