@@ -21,7 +21,7 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / 'scripts'))
 import dependencies
 from environment import common
-from release import environment_archives
+from release import delivery, environment_archives
 
 
 def run(*args, **kwargs):
@@ -130,22 +130,13 @@ def runtime_requirement(record, url=''):
             'checksum_url': url + '.sha256' if url else ''}
 
 
-def bundle_destination(args, variant, version, env_version):
-    name = f'rx-met-v{version}-{env_version}-{variant}-linux-amd64'
-    output = args.output_dir / name
-    packed = args.output_dir / (name + '.tar.gz')
-    if not args.replace:
-        for path in (output, packed):
-            if path.exists():
-                raise RuntimeError(f'应用产物已存在: {path}；开发时可显式 --replace')
-    return output, packed
-
-
 def assemble(args, matrix, variant, runtime, build, runtime_record, archive, wheel_dir, compatibility, *, version, changelog):
     env_version = matrix['environment_version']
     runtime_tag = common.image_ref('runtime', variant)
-    output, packed = bundle_destination(args, variant, version, env_version)
-    name = output.name
+    name = f'rx-met-v{version}-{variant}-linux-amd64'
+    packed = args.output_dir / (name + '.tar.gz')
+    if packed.exists() and not args.replace:
+        raise RuntimeError(f'应用产物已存在: {packed}；开发时可显式 --replace')
     wheel_version = f'{version}+{variant}'
     wheels = inspect_wheels(wheel_dir, wheel_version, compatibility['python_version'])
     revision = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=ROOT).decode().strip()
@@ -156,7 +147,9 @@ def assemble(args, matrix, variant, runtime, build, runtime_record, archive, whe
                 'wheel_source_sha256': source_digest(), 'delivery_sources_sha256': delivery_digest(changelog), 'build_image_id': build['Id'],
                 'runtime': runtime_requirement(runtime_record, (args.runtime_base_url.rstrip('/') + '/' + archive.name) if args.runtime_base_url else ''),
                 'compatibility': compatibility, 'wheels': wheels}
-    with tempfile.TemporaryDirectory(prefix='.bundle-', dir=args.output_dir) as temporary:
+    staging = ROOT / '.release/staging'
+    staging.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix='.bundle-', dir=staging) as temporary:
         staged = Path(temporary) / name
         (staged / 'wheels').mkdir(parents=True)
         for wheel in wheels:
@@ -164,6 +157,7 @@ def assemble(args, matrix, variant, runtime, build, runtime_record, archive, whe
         shutil.copytree(ROOT / 'examples', staged / 'examples', ignore=shutil.ignore_patterns('__pycache__', 'output', '*.pyc'))
         write_json(staged / 'manifest.json', manifest)
         bootstrap = {'BUNDLE_NAME': name, 'MANIFEST_SHA256': sha256(staged / 'manifest.json'),
+                     'RUNTIME_ENV_DIR': f"{runtime_record['environment_name']}-{env_version}",
                      'RUNTIME_IMAGE_ID': runtime['Id'], 'RUNTIME_IMAGE_TAG': runtime_tag, 'RUNTIME_ARCHIVE': archive.name,
                      'RUNTIME_URL': manifest['runtime']['url'], 'RUNTIME_CHECKSUM_URL': manifest['runtime']['checksum_url'],
                      'APP_INSTALL_BYTES': str(max(512 * 1024**2, sum(w['unpacked_size_bytes'] for w in wheels) * 2))}
@@ -174,7 +168,7 @@ def assemble(args, matrix, variant, runtime, build, runtime_record, archive, whe
         (staged / 'install.sh').write_text(script)
         (staged / 'install.sh').chmod(0o755)
         readme = (ROOT / 'packaging/release-bundle/README.md.in').read_text()
-        for key, value in {'VERSION': version, 'ENV_VERSION': env_version, 'VARIANT': variant, 'BUNDLE_NAME': name, 'RUNTIME_IMAGE_TAG': runtime_tag}.items():
+        for key, value in {'VERSION': version, 'ENV_VERSION': env_version, 'ENV_DIRECTORY': f"{runtime_record['environment_name']}-{env_version}", 'VARIANT': variant, 'BUNDLE_NAME': name, 'RUNTIME_IMAGE_TAG': runtime_tag}.items():
             readme = readme.replace('@' + key + '@', value)
         (staged / 'README.md').write_text(readme)
         (staged / 'CHANGELOG.md').write_text(changelog, encoding='utf-8')
@@ -185,51 +179,23 @@ def assemble(args, matrix, variant, runtime, build, runtime_record, archive, whe
         run(staged / 'install.sh', '--offline', '--prefix', install_prefix)
         with tarfile.open(packed.with_name(packed.name + '.partial'), 'w:gz', compresslevel=1) as tar:
             tar.add(staged, arcname=name)
-        if output.exists():
-            shutil.rmtree(output)
-        shutil.move(staged, output)
         packed.with_name(packed.name + '.partial').replace(packed)
     print('Application bundle:', packed, packed.stat().st_size, 'bytes', flush=True)
-
-
-def write_release_index(directory, changelog):
-    archives = sorted(directory.glob('rx-met-v*.tar.gz'))
-    lines = ["# rx-met 离线交付", "",
-             "首次部署请提供应用包和 images/ 中对应的 runtime 归档；后续版本更新只需分发应用包。",
-             "将所选应用包解压到与 images/ 同级的位置，然后运行包内 ./install.sh。",
-             "运行时的 GPU、应用挂载、工作目录和数据目录参数见应用包 README。", "",
-             "| 变体 | 应用包 | 应用大小（MiB） | runtime 归档 |", "| --- | --- | ---: | --- |"]
-    for archive in archives:
-        manifest_path = directory / archive.name[:-7] / 'manifest.json'
-        if not manifest_path.is_file():
-            continue
-        manifest = json.loads(manifest_path.read_text())
-        runtime_name = manifest['runtime']['filename']
-        lines.append(f"| {manifest['variant']} | [{archive.name}]({archive.name}) | {archive.stat().st_size / 1024**2:.1f} | [{runtime_name}](images/{runtime_name}) |")
-    lines += ["", "顶层 SHA256SUMS 校验应用归档、runtime 归档、身份记录、使用说明和 CHANGELOG。",
-              "每个应用包另有自己的 SHA256SUMS，install.sh 会自动校验。", ""]
-    (directory / 'README.md').write_text('\n'.join(lines))
-    (directory / 'CHANGELOG.md').write_text(changelog, encoding='utf-8')
-    files = [directory / 'README.md', directory / 'CHANGELOG.md', *archives, *sorted((directory / 'images').glob('*'))]
-    checksums = ''.join(f'{sha256(path)}  {path.relative_to(directory).as_posix()}\n' for path in files if path.is_file())
-    with tempfile.NamedTemporaryFile(mode='w', dir=directory, prefix='.checksums-', delete=False) as stream:
-        stream.write(checksums)
-        temporary = Path(stream.name)
-    temporary.replace(directory / 'SHA256SUMS')
+    return manifest
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('action', choices=['build', 'export-runtime'])
     parser.add_argument('variants', nargs='*', choices=['cu118', 'cu126', 'cu130'])
-    parser.add_argument('--output-dir', type=Path)
+    parser.add_argument('--output-dir', type=Path, help='最终产品交付目录；环境附件放在其父目录下的 <环境名>-<环境版本>/')
     parser.add_argument('--build-env-dir', type=Path, help='本地缺少 build 镜像时，从此目录校验并导入归档')
-    parser.add_argument('--runtime-env-dir', type=Path, help='runtime 镜像导入及交付归档目录；默认 .release/runtime-images/<环境版本>')
+    parser.add_argument('--runtime-env-dir', type=Path, help='运行环境归档的导入、复用及导出缓存；默认 .release/runtime-images/<环境版本>')
     parser.add_argument('--runtime-base-url', default=os.environ.get('RX_MET_RUNTIME_BASE_URL', ''))
     parser.add_argument('--install-prefix', type=Path, help='保留安装验收结果的根目录；默认使用临时目录并自动清理')
-    parser.add_argument('--with-images', action='store_true', help='附带 runtime 归档到交付目录 images/；归档缺失时从本机匹配镜像自动导出')
+    parser.add_argument('--with-env', action='store_true', help='将公共运行环境归档导出或复用到产品目录平级的环境目录；不附带构建环境')
     parser.add_argument('--skip-build', action='store_true', help='只重新组装源码和环境身份未变的已有 wheels')
-    parser.add_argument('--replace', action='store_true', help='替换本机尚未发布的应用产物；不覆盖安装目录和 runtime')
+    parser.add_argument('--replace', action='store_true', help='按本次所选变体整体替换候选产品目录；不覆盖安装目录和公共环境')
     parser.add_argument('--jobs', type=int, default=8)
     args = parser.parse_intermixed_args()
     if args.action == 'export-runtime':
@@ -245,63 +211,53 @@ def main():
         parser.error('--jobs 必须大于零')
     for option, directory in [('--build-env-dir', args.build_env_dir), ('--runtime-env-dir', args.runtime_env_dir)]:
         if directory is not None and not directory.is_dir():
-            if option == '--runtime-env-dir' and args.with_images and not directory.exists():
+            if option == '--runtime-env-dir' and args.with_env and not directory.exists():
                 continue
             parser.error(f'{option} 目录不存在: {directory}')
     env_version = matrix['environment_version']
     version = (ROOT / 'VERSION').read_text().strip()
-    args.output_dir = (args.output_dir or ROOT / '.release/export' / f'rx-quant-env-{env_version}' / f'v{version}').resolve()
+    destination = (args.output_dir or ROOT / '.release/export' / f'rx-met-v{version}').resolve()
     args.runtime_env_dir = (args.runtime_env_dir or ROOT / '.release/runtime-images' / env_version).resolve()
     if args.build_env_dir is not None:
         args.build_env_dir = args.build_env_dir.resolve()
     if args.install_prefix is not None:
         args.install_prefix = args.install_prefix.resolve()
-    if args.action == 'build':
+    delivery.check_destination(destination, args.replace)
+    changelog = release_changelog(version)
+    with delivery.stage_release(destination, replace=args.replace) as args.output_dir:
+        bundles = []
         for variant in targets:
-            bundle_destination(args, variant, version, env_version)
-        changelog = release_changelog(version)
-        args.output_dir.mkdir(parents=True, exist_ok=True)
-    for variant in targets:
-        published = common.load_record(variant)
-        build_ref = common.image_ref('build', variant)
-        runtime = environment_archives.ensure_image('runtime', variant, published, args.runtime_env_dir)
-        build = environment_archives.ensure_image('build', variant, published, args.build_env_dir)
-        if runtime['Id'] != published['runtime_image_id'] or build['Id'] != published['build_image_id']:
-            raise RuntimeError('公共环境标签与已发布镜像身份不一致')
-        archive, record = environment_archives.runtime_archive(
-            variant, published, args.runtime_env_dir, export=args.with_images)
-        if args.with_images:
-            images = args.output_dir / 'images'
-            images.mkdir(exist_ok=True)
-            destination = images / archive.name
-            if not destination.exists():
-                try: os.link(archive, destination)
-                except OSError: shutil.copy2(archive, destination)
-            elif sha256(destination) != record['sha256']:
-                raise RuntimeError(f'交付目录 runtime 归档冲突: {destination}')
-            write_json(images / (archive.name + '.json'), record)
-            environment_archives.write_checksum(destination, record)
-        compatibility = runtime_compatibility(runtime['Id'], matrix, variant)
-        if runtime_compatibility(build['Id'], matrix, variant) != compatibility:
-            raise RuntimeError('build-env 与 runtime 的 Python ABI 或运行依赖不一致')
-        wheel_output = ROOT / '.release/wheels' / version / env_version / variant
-        fingerprint = {'source_sha256': source_digest(), 'build_image_id': build['Id'], 'runtime_image_id': runtime['Id']}
-        build_record = wheel_output / 'build.json'
-        if not args.skip_build:
-            run('docker', 'buildx', 'bake', '-f', ROOT / 'docker/docker-bake.hcl', '--progress=plain',
-                '--set', f'{variant}.args.JOBS={args.jobs}', '--set', f'{variant}.args.BUILD_ENV_IMAGE={build_ref}',
-                '--set', f'{variant}.output=type=local,dest={wheel_output}', variant, cwd=ROOT)
-            if image_info(build_ref, 'build', variant, env_version)['Id'] != build['Id']:
-                raise RuntimeError('构建过程中 build-env 身份发生变化')
-            if source_digest() != fingerprint['source_sha256']:
-                raise RuntimeError('构建过程中 wheel 源码发生变化')
-            write_json(build_record, fingerprint)
-        elif not build_record.is_file() or json.loads(build_record.read_text()) != fingerprint:
-            raise RuntimeError('--skip-build 的源码或环境身份与已有 wheels 不匹配')
-        assemble(args, matrix, variant, runtime, build, record, archive, wheel_output / 'wheels', compatibility, version=version, changelog=changelog)
-    if args.action == 'build':
-        write_release_index(args.output_dir, changelog)
-        print('Offline delivery:', args.output_dir)
+            published = common.load_record(variant)
+            build_ref = common.image_ref('build', variant)
+            runtime = environment_archives.ensure_image('runtime', variant, published, args.runtime_env_dir)
+            build = environment_archives.ensure_image('build', variant, published, args.build_env_dir)
+            if runtime['Id'] != published['runtime_image_id'] or build['Id'] != published['build_image_id']:
+                raise RuntimeError('公共环境标签与已发布镜像身份不一致')
+            archive, record = environment_archives.runtime_archive(
+                variant, published, args.runtime_env_dir, export=args.with_env)
+            if args.with_env:
+                environment = destination.parent / f"{record['environment_name']}-{record['environment_version']}"
+                delivery.publish_environment(archive, record, environment)
+            compatibility = runtime_compatibility(runtime['Id'], matrix, variant)
+            if runtime_compatibility(build['Id'], matrix, variant) != compatibility:
+                raise RuntimeError('build-env 与 runtime 的 Python ABI 或运行依赖不一致')
+            wheel_output = ROOT / '.release/wheels' / version / env_version / variant
+            fingerprint = {'source_sha256': source_digest(), 'build_image_id': build['Id'], 'runtime_image_id': runtime['Id']}
+            build_record = wheel_output / 'build.json'
+            if not args.skip_build:
+                run('docker', 'buildx', 'bake', '-f', ROOT / 'docker/docker-bake.hcl', '--progress=plain',
+                    '--set', f'{variant}.args.JOBS={args.jobs}', '--set', f'{variant}.args.BUILD_ENV_IMAGE={build_ref}',
+                    '--set', f'{variant}.output=type=local,dest={wheel_output}', variant, cwd=ROOT)
+                if image_info(build_ref, 'build', variant, env_version)['Id'] != build['Id']:
+                    raise RuntimeError('构建过程中 build-env 身份发生变化')
+                if source_digest() != fingerprint['source_sha256']:
+                    raise RuntimeError('构建过程中 wheel 源码发生变化')
+                write_json(build_record, fingerprint)
+            elif not build_record.is_file() or json.loads(build_record.read_text()) != fingerprint:
+                raise RuntimeError('--skip-build 的源码或环境身份与已有 wheels 不匹配')
+            bundles.append(assemble(args, matrix, variant, runtime, build, record, archive, wheel_output / 'wheels', compatibility, version=version, changelog=changelog))
+        delivery.write_release_index(args.output_dir, 'rx-met', version, changelog, bundles, with_env=args.with_env)
+    print('Product delivery:', destination)
 
 
 if __name__ == '__main__':

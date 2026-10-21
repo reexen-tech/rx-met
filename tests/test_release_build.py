@@ -4,6 +4,7 @@ import importlib.util
 from pathlib import Path
 import subprocess
 import tempfile
+import tarfile
 import unittest
 from unittest.mock import patch
 
@@ -20,7 +21,7 @@ class ReleaseBuildTest(unittest.TestCase):
         self.root = Path(temporary.name)
         self.output = self.root / 'export'
         self.output.mkdir()
-        self.name = 'rx-met-v1.1.0-v1-cu118-linux-amd64'
+        self.name = 'rx-met-v1.1.0-cu118-linux-amd64'
         self.args = Namespace(output_dir=self.output, replace=True, runtime_base_url='', install_prefix=None)
         self.prefixes = []
         self.fail_install = False
@@ -74,6 +75,10 @@ class ReleaseBuildTest(unittest.TestCase):
                            {'Id': 'build'}, record, self.root / 'runtime.tar.gz', self.wheel_dir,
                            {'python_version': '3.10'}, version='1.1.0', changelog='# Changelog\n')
 
+    def bundle_manifest(self):
+        with tarfile.open(self.output / (self.name + '.tar.gz')) as archive:
+            return archive.extractfile(self.name + '/manifest.json').read()
+
     def test_replacing_changed_bundle_uses_fresh_installation_and_cleans_up(self):
         previous = self.root / '.release/installed' / self.name
         previous.mkdir(parents=True)
@@ -84,22 +89,24 @@ class ReleaseBuildTest(unittest.TestCase):
         self.assertEqual(len(set(self.prefixes)), 2)
         self.assertTrue(all(not prefix.exists() for prefix in self.prefixes))
         self.assertEqual((previous / 'manifest.json').read_text(), 'old installation')
-        self.assertIn('second-revision', (self.output / self.name / 'manifest.json').read_text())
+        self.assertIn('second-revision', self.bundle_manifest().decode())
         self.assertTrue((self.output / (self.name + '.tar.gz')).is_file())
-        self.assertFalse(list(self.output.glob('.bundle-*')))
+        self.assertFalse(any(path.is_dir() for path in self.output.iterdir()))
+        self.assertFalse(list((self.root / '.release/staging').glob('.bundle-*')))
 
     def test_failed_temporary_verification_preserves_previous_artifacts(self):
         self.assemble()
-        manifest = (self.output / self.name / 'manifest.json').read_bytes()
+        manifest = self.bundle_manifest()
         packed = (self.output / (self.name + '.tar.gz')).read_bytes()
         self.revision = b'failed-revision'
         self.fail_install = True
         with self.assertRaises(subprocess.CalledProcessError):
             self.assemble()
         self.assertFalse(self.prefixes[-1].exists())
-        self.assertEqual((self.output / self.name / 'manifest.json').read_bytes(), manifest)
+        self.assertEqual(self.bundle_manifest(), manifest)
         self.assertEqual((self.output / (self.name + '.tar.gz')).read_bytes(), packed)
-        self.assertFalse(list(self.output.glob('.bundle-*')))
+        self.assertFalse(any(path.is_dir() for path in self.output.iterdir()))
+        self.assertFalse(list((self.root / '.release/staging').glob('.bundle-*')))
 
     def test_explicit_install_prefix_is_retained_and_not_overwritten(self):
         self.args.install_prefix = self.root / 'retained installation'
@@ -111,7 +118,8 @@ class ReleaseBuildTest(unittest.TestCase):
         with self.assertRaises(subprocess.CalledProcessError):
             self.assemble()
         self.assertEqual(installed.read_bytes(), manifest)
-        self.assertFalse(list(self.output.glob('.bundle-*')))
+        self.assertFalse(any(path.is_dir() for path in self.output.iterdir()))
+        self.assertFalse(list((self.root / '.release/staging').glob('.bundle-*')))
 
 
 class ReleaseBuildPreflightTest(unittest.TestCase):
@@ -120,7 +128,7 @@ class ReleaseBuildPreflightTest(unittest.TestCase):
         self.addCleanup(temporary.cleanup)
         self.root = Path(temporary.name)
         (self.root / 'VERSION').write_text('1.1.0\n')
-        self.output = self.root / '.release/export/rx-quant-env-v1/v1.1.0'
+        self.output = self.root / '.release/export/rx-met-v1.1.0'
         matrix = {'environment_version': 'v1', 'variants': {'cu118': {}, 'cu126': {}, 'cu130': {}}}
         for obj, target, options in (
             (artifacts, 'ROOT', {'new': self.root}),
@@ -140,7 +148,7 @@ class ReleaseBuildPreflightTest(unittest.TestCase):
         self.addCleanup(patcher.stop)
 
     def existing(self, variant, *, archive=False):
-        path = self.output / f'rx-met-v1.1.0-v1-{variant}-linux-amd64'
+        path = self.output / f'rx-met-v1.1.0-{variant}-linux-amd64'
         if archive:
             path = path.with_name(path.name + '.tar.gz')
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -153,7 +161,7 @@ class ReleaseBuildPreflightTest(unittest.TestCase):
         with patch('sys.argv', ['artifacts.py', 'build', *options]), \
                 self.assertRaisesRegex(RuntimeError, '--replace') as raised:
             artifacts.main()
-        self.assertIn(str(path), str(raised.exception))
+        self.assertIn(str(self.output), str(raised.exception))
         self.load_record.assert_not_called()
         self.ensure_image.assert_not_called()
         self.assertFalse((self.root / '.release/wheels').exists())
@@ -166,7 +174,7 @@ class ReleaseBuildPreflightTest(unittest.TestCase):
     def test_later_archive_in_custom_output_blocks_all_selected_variants(self):
         self.output = self.root / 'custom output'
         path = self.existing('cu126', archive=True)
-        self.assert_conflict_before_docker(path, 'cu118', 'cu126', '--with-images',
+        self.assert_conflict_before_docker(path, 'cu118', 'cu126', '--with-env',
                                           '--output-dir', str(self.output))
         self.assertEqual(path.read_bytes(), b'existing archive')
         self.assertEqual(list(self.output.iterdir()), [path])
@@ -182,12 +190,9 @@ class ReleaseBuildPreflightTest(unittest.TestCase):
             artifacts.main()
         self.ensure_image.assert_called_once()
 
-    def test_unselected_variant_does_not_block_build(self):
-        self.existing('cu130')
-        with patch('sys.argv', ['artifacts.py', 'build', 'cu118']), \
-                self.assertRaisesRegex(RuntimeError, 'Docker work started'):
-            artifacts.main()
-        self.ensure_image.assert_called_once()
+    def test_existing_product_directory_requires_explicit_replacement(self):
+        path = self.existing('cu130')
+        self.assert_conflict_before_docker(path, 'cu118')
 
 
 if __name__ == '__main__':

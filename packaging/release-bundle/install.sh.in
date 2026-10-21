@@ -170,11 +170,11 @@ elif docker image inspect "$RUNTIME_IMAGE_ID" >/dev/null 2>&1; then
     log '复用已存在且身份匹配的 runtime'
 else
     command -v gzip >/dev/null || die '缺少 gzip'
-    for candidate in "$BUNDLE_DIR/images/$RUNTIME_ARCHIVE" "$BUNDLE_DIR/../images/$RUNTIME_ARCHIVE" "$CACHE_DIR/$RUNTIME_ARCHIVE"; do
+    for candidate in "$BUNDLE_DIR/../$RUNTIME_ENV_DIR/$RUNTIME_ARCHIVE" "$BUNDLE_DIR/../../$RUNTIME_ENV_DIR/$RUNTIME_ARCHIVE" "$CACHE_DIR/$RUNTIME_ARCHIVE"; do
         if [[ -f "$candidate" ]]; then ARCHIVE="$candidate"; break; fi
     done
     if [[ -z "$ARCHIVE" ]]; then
-        ((OFFLINE == 0)) || die "离线模式缺少 runtime，请将 $RUNTIME_ARCHIVE 放入 images/ 或使用 --runtime-image"
+        ((OFFLINE == 0)) || die "离线模式缺少 runtime，请将 $RUNTIME_ENV_DIR 与产品目录平级放置，或使用 --runtime-image 指定 $RUNTIME_ARCHIVE"
         [[ -n "$RUNTIME_URL" ]] || die '本版本尚未配置下载地址，请提供离线 runtime 归档'
         [[ "$RUNTIME_URL" == https://* ]] || die 'runtime 下载地址必须使用 HTTPS'
         command -v curl >/dev/null || die '下载 runtime 需要 curl'

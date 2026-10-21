@@ -173,7 +173,7 @@ else:
             path.write_text(revision)
         bootstrap = {'BUNDLE_NAME': 'rx-met-test', 'MANIFEST_SHA256': hashlib.sha256(manifest.read_bytes()).hexdigest(),
                      'RUNTIME_IMAGE_ID': self.runtime_id, 'RUNTIME_IMAGE_TAG': self.env['FAKE_RUNTIME_TAG'],
-                     'RUNTIME_ARCHIVE': 'runtime.tar.gz',
+                     'RUNTIME_ENV_DIR': 'rx-quant-env-v1', 'RUNTIME_ARCHIVE': 'runtime.tar.gz',
                      'RUNTIME_URL': url, 'RUNTIME_CHECKSUM_URL': url + '.sha256' if url else '', 'APP_INSTALL_BYTES': '1'}
         script = (ROOT / 'packaging/release-bundle/install.sh.in').read_text()
         script = script.replace('@BOOTSTRAP@', '\n'.join(f'readonly {key}={shlex.quote(value)}' for key, value in bootstrap.items()))
@@ -377,16 +377,22 @@ os.execv(os.environ['REAL_MV'], ['mv', *sys.argv[1:]])
         self.env['DOCKER_HOST'] = 'ssh://example.invalid'
         self.assert_failed_with('本机 Docker daemon', self.invoke())
 
-    def test_local_attachment_is_verified_and_imported(self):
-        images = self.bundle / 'images'
+    def test_environment_next_to_product_directory_is_verified_and_imported(self):
+        product = self.root / 'product delivery'
+        product.mkdir()
+        relocated = product / self.bundle.name
+        self.bundle.rename(relocated)
+        self.bundle = relocated
+        self.installer = self.bundle / 'install.sh'
+        images = product.parent / 'rx-quant-env-v1'
         images.mkdir()
         (images / 'runtime.tar.gz').write_bytes(base64.b64decode(self.env['FAKE_ARCHIVE']))
         self.assert_failed_with('injected container failure', self.invoke('--offline'))
         self.assertTrue((self.root / 'image-loaded').is_file())
         self.assertFalse((self.prefix / 'rx-met-test').exists())
 
-    def test_adjacent_images_directory_is_used_by_default_install(self):
-        images = self.bundle.parent / 'images'
+    def test_environment_next_to_unpacked_bundle_is_used_by_default_install(self):
+        images = self.bundle.parent / 'rx-quant-env-v1'
         images.mkdir()
         (images / 'runtime.tar.gz').write_bytes(base64.b64decode(self.env['FAKE_ARCHIVE']))
         self.assert_failed_with('injected container failure', self.invoke())

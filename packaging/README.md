@@ -11,7 +11,7 @@
 | `release-bundle/README.md.in` | 安装、数据准备、Docker 挂载和示例运行说明模板 |
 
 发布包的 `CHANGELOG.md` 从仓库根目录提取当前版本内容。公共 runtime 可由本地镜像、
-离线 `images/` 或配置的固定 HTTPS 地址提供。构建流程见
+平级的公共环境目录 或配置的固定 HTTPS 地址提供。构建流程见
 [发布说明](../docs/Release_packaging.md)。
 
 ## 修改授权
