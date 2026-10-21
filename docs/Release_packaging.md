@@ -31,6 +31,10 @@
 使用 `--replace` 时按本次选择的变体重新组装整个产品目录，全部验收通过后才替换旧目录；
 构建失败保留原产品交付，其他产品版本和公共环境不会被替换，不继承旧目录中未选择的变体。
 展开的应用及临时验收内容位于 `.release/staging/`，完成后自动清理。
+产品发布和环境导出的互斥锁位于 `.release/locks/`，不写入 `export/` 或环境交付目录。
+锁按输出目录的规范绝对路径区分，构建结束自动释放，锁文件保留以供后续复用。
+自定义输出目录时优先复用上层的 `.release/locks/`；否则在输出父目录建立 `.release/locks/`。
+路径包含 `export/` 时，工作目录放在其外层，嵌套的交付目录也不会包含锁文件。
 
 应用包包含 install.sh、README、当前版本 CHANGELOG、manifest、SHA256SUMS、wheels、examples。
 用户运行 install.sh 后按 README 使用原生 Docker 命令，不提供 run.sh。

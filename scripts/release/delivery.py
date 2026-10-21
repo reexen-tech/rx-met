@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 import fcntl
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -10,6 +11,26 @@ import shutil
 import tempfile
 
 from environment import common
+
+
+def lock_path(directory):
+    """Share the same lock across repositories publishing to the same directory."""
+    directory = directory.resolve()
+    workspace = next((parent for parent in directory.parents if parent.name == '.release'), None)
+    if workspace is None:
+        export = next((parent for parent in directory.parents if parent.name == 'export'), None)
+        workspace = (export.parent if export is not None else directory.parent) / '.release'
+    identity = hashlib.sha256(os.fsencode(directory)).hexdigest()
+    return workspace / 'locks' / f'{directory.name}-{identity}.lock'
+
+
+@contextmanager
+def _publication_lock(directory):
+    path = lock_path(directory)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open('a') as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        yield
 
 
 def check_destination(directory, replace):
@@ -24,8 +45,7 @@ def stage_release(destination, *, replace):
     """Publish all selected variants together, retaining the previous release on failure."""
     check_destination(destination, replace)
     destination.parent.mkdir(parents=True, exist_ok=True)
-    with (destination.parent / f'.{destination.name}.lock').open('a') as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX)
+    with _publication_lock(destination):
         check_destination(destination, replace)
         temporary = Path(tempfile.mkdtemp(prefix=f'.{destination.name}-', dir=destination.parent))
         staged = temporary / destination.name
@@ -53,8 +73,7 @@ def stage_release(destination, *, replace):
 def publish_environment(archive, record, directory):
     """Attach a verified archive without replacing a published environment."""
     directory.mkdir(parents=True, exist_ok=True)
-    with (directory / '.export.lock').open('a') as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX)
+    with _publication_lock(directory):
         manifest_path = directory / 'manifest.json'
         document = {key: record[key] for key in
                     ('schema_version', 'environment_name', 'environment_version', 'config_sha256')}

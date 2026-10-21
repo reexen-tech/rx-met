@@ -49,6 +49,56 @@ class ReleaseDeliveryTest(unittest.TestCase):
                                 cwd=directory, capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
+    def probe_lock(self, directory):
+        return subprocess.run(['flock', '--nonblock', str(delivery.lock_path(directory)), 'true'],
+                              capture_output=True, timeout=5).returncode
+
+    def test_product_and_environment_locks_are_outside_export(self):
+        export = self.root / '.release/export'
+        product = export / self.destination.name
+        environment = export / self.environment.name
+        with delivery.stage_release(product, replace=False) as staged:
+            self.bundle(staged)
+        archive, record = self.archive()
+        delivery.publish_environment(archive, record, environment)
+        self.assertEqual(set(export.iterdir()), {product, environment})
+        self.assertFalse(list(export.rglob('*.lock')))
+        self.assertEqual(set((self.root / '.release/locks').iterdir()),
+                         {delivery.lock_path(product), delivery.lock_path(environment)})
+
+    def test_custom_output_lock_paths_use_the_canonical_target(self):
+        parent = self.root / 'custom output'
+        parent.mkdir()
+        alias = self.root / 'output alias'
+        alias.symlink_to(parent, target_is_directory=True)
+        target = parent / self.destination.name
+        self.assertEqual(delivery.lock_path(target).parent, parent / '.release/locks')
+        self.assertEqual(delivery.lock_path(target), delivery.lock_path(alias / target.name))
+        self.assertNotEqual(delivery.lock_path(target),
+                            delivery.lock_path(parent / 'other output' / target.name))
+        nested = self.root / '.release/export/nested' / target.name
+        self.assertEqual(delivery.lock_path(nested).parent, self.root / '.release/locks')
+        custom_export = parent / 'export/nested' / target.name
+        self.assertEqual(delivery.lock_path(custom_export).parent, parent / '.release/locks')
+
+    def test_product_lock_is_exclusive_and_released_after_publication(self):
+        with delivery.stage_release(self.destination, replace=False) as staged:
+            self.bundle(staged)
+            self.assertTrue(delivery.lock_path(self.destination).is_file())
+            self.assertEqual(self.probe_lock(self.destination), 1)
+        self.assertEqual(self.probe_lock(self.destination), 0)
+        self.assertTrue(delivery.lock_path(self.destination).is_file())
+
+    def test_environment_lock_is_exclusive_during_manifest_writes(self):
+        archive, record = self.archive()
+        write_json = delivery.common.write_json
+        def checked_write(path, document):
+            self.assertEqual(self.probe_lock(self.environment), 1)
+            return write_json(path, document)
+        with patch.object(delivery.common, 'write_json', side_effect=checked_write):
+            delivery.publish_environment(archive, record, self.environment)
+        self.assertEqual(self.probe_lock(self.environment), 0)
+
     def test_app_only_release_has_no_environment_links_or_directory(self):
         with delivery.stage_release(self.destination, replace=False) as staged:
             bundle = self.bundle(staged)
@@ -111,6 +161,7 @@ class ReleaseDeliveryTest(unittest.TestCase):
                 raise RuntimeError('second variant failed')
         self.assertEqual([path.name for path in self.destination.iterdir()], ['previous'])
         self.assertFalse(list(self.root.glob('.' + self.destination.name + '-*')))
+        self.assertEqual(self.probe_lock(self.destination), 0)
 
     def test_publish_failure_restores_previous_release(self):
         self.destination.mkdir()
