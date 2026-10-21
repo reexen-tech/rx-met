@@ -100,7 +100,20 @@ def map_json2_types_to_onnx(
     return mapped, ignored
 
 
-def _quantizers_for_op(sim: Any, op: Any) -> Tuple[List[Any], List[Any], Dict[str, Any]]:
+def _input_quantizer(sim: Any, product: Any):
+    quantizer = sim.qc_quantize_op_dict.get(product.name)
+    if quantizer is not None:
+        return quantizer
+    # Transpose/Reshape do not own a quantizer. Configure the existing grid
+    # that actually supplies their data, using QuantSim's invariant-op walk.
+    resolver = getattr(sim, "_get_enabled_quantizer", None)
+    if resolver is not None and product.name in sim.connected_graph.get_all_products():
+        return resolver(product.name)
+    return None
+
+
+def _quantizers_for_op(sim: Any, op: Any, *, matmul_operands: bool = False
+                       ) -> Tuple[List[Any], List[Any], Dict[str, Any]]:
     params = {
         role or name: sim.qc_quantize_op_dict.get(name)
         for name, (_product, role) in getattr(op, "parameters", {}).items()
@@ -117,9 +130,9 @@ def _quantizers_for_op(sim: Any, op: Any) -> Tuple[List[Any], List[Any], Dict[st
             params["bias"] = sim.qc_quantize_op_dict.get(bias.name)
     # Keep empty activation slots so input_bitwidths retains its input indices.
     inputs = [
-        sim.qc_quantize_op_dict.get(product.name)
+        _input_quantizer(sim, product)
         for product in op.inputs
-        if not product.is_parm and product.name not in parameter_names
+        if matmul_operands or (not product.is_parm and product.name not in parameter_names)
     ]
     outputs = [sim.qc_quantize_op_dict.get(product.name) for product in op.outputs]
     return inputs, outputs, params
@@ -145,8 +158,16 @@ def _set_symmetric(quantizer: Any, symmetric: Optional[bool]) -> None:
 
 
 def _apply_layer_config(sim: Any, op: Any, layer_config: Dict[str, Any],
-                        plan: QuantizerConfigPlan, *, fallback: bool = False) -> str:
-    inputs, outputs, params = _quantizers_for_op(sim, op)
+                        plan: QuantizerConfigPlan, *, fallback: bool = False,
+                        matmul_operands: bool = False) -> str:
+    inputs, outputs, params = _quantizers_for_op(sim, op, matmul_operands=matmul_operands)
+    weight = params.get("weight")
+    # MatMul's constant matrix is still an operand, despite ONNX storing it as
+    # an initializer. Explicit weight fields opt back into parameter semantics.
+    weight_is_operand = (matmul_operands and weight is not None
+                         and any(q is weight for q in inputs)
+                         and not any(layer_config.get(field) is not None
+                                     for field in ("weight_bitwidth", "weight_symmetric")))
     def request(quantizer, field, value, role):
         plan.request(quantizer, field, value, f"{op.name}.{role}", fallback=fallback)
 
@@ -163,13 +184,17 @@ def _apply_layer_config(sim: Any, op: Any, layer_config: Dict[str, Any],
         prefix = role if role in {"weight", "bias"} else "param"
         request(quantizer, "bitwidth", layer_config.get(f"{prefix}_bitwidth"), role)
         request(quantizer, "symmetric", layer_config.get(f"{prefix}_symmetric"), role)
-    request(params.get("weight"), "per_channel_quantization",
-            layer_config.get("per_channel_quantization"), "weight")
+    granularity = layer_config.get("per_channel_quantization")
+    if weight_is_operand and granularity is None:
+        granularity = False
+    request(weight, "per_channel_quantization", granularity, "weight")
 
     input_bws = layer_config.get("input_bitwidths")
     default_input_bw = layer_config.get("input_bitwidth")
     input_sym = layer_config.get("input_symmetric")
     for index, quantizer in enumerate(inputs):
+        if quantizer is weight and not weight_is_operand:
+            continue
         bitwidth = (
             input_bws[index]
             if input_bws is not None and index < len(input_bws)
@@ -308,7 +333,10 @@ def apply_onnx_mixed_precision_bitwidth(
             match = "default"
             stats["default_ops"] += 1
 
-        action = _apply_layer_config(sim, op, layer_config, plan, fallback=match == "default")
+        matmul_operands = (op.type == "MatMul" and (
+            "QuantizedMatMul" in layer_type_config or "QuantizedLinear" not in layer_type_config))
+        action = _apply_layer_config(sim, op, layer_config, plan, fallback=match == "default",
+                                     matmul_operands=matmul_operands)
         if action == "disabled":
             stats["disabled_ops"] += 1
         else:

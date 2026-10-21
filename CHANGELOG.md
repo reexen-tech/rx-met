@@ -16,6 +16,7 @@
 
 ### Fixed
 
+- ONNX 混合精度输入配置通过 QuantSim 有效网格追踪穿过 Transpose/Reshape 等数据搬运算子，避免 INT16 请求静默丢失；`QuantizedMatMul` 的常量矩阵按原输入编号应用位宽、对称性和默认逐张量网格，保留 `QuantizedLinear` 权重语义及显式 `weight_*` 配置优先级，并在写入前检测共享网格冲突。
 - Torch/ONNX Percentile 校准共用动态直方图、样本计数与百分位规则，修复 ONNX 固定首批三倍范围导致后续大值漏统计；保留常量、微小范围和非首维逐通道的历史计数，支持重复校准及冻结编码。ONNX 校准通过临时 session 采集中间张量，原生推理和导出保持原接口，GRU 内部校准继续由算子库负责。
 - ONNX GRU PTQ 接入 QuantGRU 原生校准、量化前向、Po2 与编码恢复，实际应用 `GRU_config`；适配方向、门顺序及常量 W/R/B，保留双向门内编码和逐通道参数，拒绝缺失内部编码或不支持的 GRU 属性。仿真使用算子包提供的 ORT 桥接，导出保持原标准 ONNX GRU。
 - ONNX PTQ 导出自动补全并保存所有中间张量的 shape/dtype，标准推导不足时使用符号形状推导；保持计算节点、权重及外部数据引用，产物回读校验拒绝缺失维度或 dtype 的文件，并在 metadata 中记录维度覆盖情况。

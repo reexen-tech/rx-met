@@ -34,6 +34,14 @@ python3 -m unittest discover -s tests -p test_percentile_calibration.py -v
 
 ## 文件说明
 
+`test_onnx_operand_precision.py` 验证经过 Transpose 的输入配置、常量 MatMul 的位宽和
+输入编号、逐张量网格、Linear/显式权重配置优先级，以及共享网格冲突的原子拒绝。
+覆盖真实校准、Po2 和 compiler encodings 导出：
+
+```bash
+python3 -m unittest discover -s tests -p test_onnx_operand_precision.py -v
+```
+
 `test_dependencies.py` 验证依赖管理配置和生成结果。该测试检查以下内容：
 
 - `pyproject.toml` 的兼容范围覆盖全部发布变体。

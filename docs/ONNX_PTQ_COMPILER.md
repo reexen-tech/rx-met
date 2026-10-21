@@ -109,6 +109,12 @@ ONNX 适配器仅在校准期间使用临时 session 采集中间张量，并将
 
 `src/aimet_common/quantsim_config/onnx_ptq_compiler_w8a8.json` 仍可作为 `--config` 覆盖项。
 
+输入经过 Transpose/Reshape 等数据搬运算子时，JSON2 输入设置作用于上游有效量化网格。
+`QuantizedMatMul` 的 `input_bitwidth` / `input_bitwidths` 包括常量矩阵，默认使用逐张量
+输入网格；常量仍存入 `param_encodings`。显式 `weight_*` 字段保留参数配置的优先级；
+只使用 `QuantizedLinear` 映射 MatMul 时，权重仍与激活输入分开配置。共享网格收到
+不兼容的显式请求时，在修改量化器前报错。
+
 ## GRU 原生适配
 
 `create_onnx_ptq_sim` 自动识别标准 GRU，调用 `quant_gru` 算子包中的 ONNX 适配器。
