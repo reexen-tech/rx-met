@@ -336,6 +336,13 @@ class AffineEncoding(EncodingBase, _GridMixin):
         min = self.min.flatten()
         max = self.max.flatten()
         scale = self.scale.flatten()
+        enc_type = {
+            "pertensor": EncodingType.PER_TENSOR.name,
+            "perchannel": EncodingType.PER_CHANNEL.name,
+            "blockwise": EncodingType.PER_BLOCK.name,
+        }.get(self.granularity)
+        if enc_type is None:
+            raise ValueError(f"Unsupported encoding granularity: {self.granularity}")
 
         # ✅ 修改：直接导出 zero_point，不加 qmin
         # 原始 AIMET 行为：offset = self.offset.flatten() + self.qmin（导出 -128）
@@ -351,6 +358,7 @@ class AffineEncoding(EncodingBase, _GridMixin):
                 "bitwidth": self.bitwidth,
                 "dtype": "int",
                 "is_symmetric": str(self.symmetry),
+                "enc_type": enc_type,
             }
             for min_, max_, scale_, offset_ in zip(min, max, scale, offset)
         ]

@@ -2544,10 +2544,12 @@ class QuantGRU(nn.Module):
         if "is_symmetric" in encoding and isinstance(encoding["is_symmetric"], bool):
             encoding["is_symmetric"] = "True" if encoding["is_symmetric"] else "False"
 
-        # scale-only 导出：清理历史 runtime 编码字段
+        # 清理执行编码，描述性 n 从真实 scale 重新派生。
         for legacy_key in ("multiplier", "shift", "scale_encoding", "n", "exp2_inv"):
             if legacy_key in encoding:
                 del encoding[legacy_key]
+        if "scale" in encoding:
+            encoding["n"] = _encoding_n(encoding["scale"])
         
         return encoding
 
@@ -2658,8 +2660,8 @@ class QuantGRU(nn.Module):
         if module_name not in encodings_dict["activation_encodings"]:
             encodings_dict["activation_encodings"][module_name] = {
                 "is_GRU": True,
-                "input": [],
-                "output": [],
+                "input": {},
+                "output": {},
                 "internal_ops": {
                     "add_final_hidden": {"output": []},
                     "mul_new_contribution": {"output": []},
@@ -2729,7 +2731,7 @@ class QuantGRU(nn.Module):
             data = self._fix_zero_point(operators["input"])
             data = self._convert_to_encoding_format(data)
             if isinstance(data, dict):
-                gru_encodings["input"] = [data]
+                gru_encodings["input"] = {"0": data}
             else:
                 gru_encodings["input"] = data
             if verbose:
@@ -2743,7 +2745,7 @@ class QuantGRU(nn.Module):
             data = self._fix_zero_point(operators["output"])
             data = self._convert_to_encoding_format(data)
             if isinstance(data, dict):
-                gru_encodings["output"] = [data]
+                gru_encodings["output"] = {"0": data}
             else:
                 gru_encodings["output"] = data
             if verbose:
@@ -3117,6 +3119,9 @@ class QuantGRU(nn.Module):
             return False
         
         gru_encodings = encodings_dict["activation_encodings"][module_name]
+        _validate_encoding_n(gru_encodings)
+        for suffix in ("weight_ih.weight", "weight_hh.weight", "bias"):
+            _validate_encoding_n(encodings_dict.get("param_encodings", {}).get(f"{module_name}.{suffix}"))
         
         # 检查 is_GRU 标记
         if gru_encodings.get("is_GRU") != True:
@@ -3133,7 +3138,9 @@ class QuantGRU(nn.Module):
         # input
         if "input" in gru_encodings:
             input_data = gru_encodings["input"]
-            if isinstance(input_data, list) and len(input_data) > 0:
+            if isinstance(input_data, dict) and "0" in input_data:
+                operators["input"] = input_data["0"]
+            elif isinstance(input_data, list) and len(input_data) > 0:
                 operators["input"] = input_data[0]
             elif isinstance(input_data, dict):
                 operators["input"] = input_data
@@ -3153,7 +3160,9 @@ class QuantGRU(nn.Module):
         # output
         if "output" in gru_encodings:
             output_data = gru_encodings["output"]
-            if isinstance(output_data, list) and len(output_data) > 0:
+            if isinstance(output_data, dict) and "0" in output_data:
+                operators["output"] = output_data["0"]
+            elif isinstance(output_data, list) and len(output_data) > 0:
                 operators["output"] = output_data[0]
             elif isinstance(output_data, dict):
                 operators["output"] = output_data
@@ -3901,6 +3910,35 @@ def _scalar_or_list(values: list):
     if len(values) == 1:
         return values[0]
     return values
+
+
+def _encoding_n(scale):
+    if isinstance(scale, list):
+        if not scale:
+            raise ValueError("Encoding scale cannot be empty")
+        return [_encoding_n(value) for value in scale]
+    if isinstance(scale, bool) or not isinstance(scale, (int, float)) or not math.isfinite(scale) or scale <= 0:
+        raise ValueError("Encoding scale must be positive and finite")
+    return int(round(-math.log2(scale)))
+
+
+def _validate_encoding_n(value):
+    def matches(actual, expected):
+        if isinstance(expected, list):
+            return (isinstance(actual, list) and len(actual) == len(expected)
+                    and all(matches(a, b) for a, b in zip(actual, expected)))
+        return isinstance(actual, int) and not isinstance(actual, bool) and actual == expected
+
+    if isinstance(value, dict):
+        if "scale" in value:
+            if "n" in value and not matches(value["n"], _encoding_n(value["scale"])):
+                raise ValueError("Encoding n does not match scale")
+        else:
+            for child in value.values():
+                _validate_encoding_n(child)
+    elif isinstance(value, list):
+        for child in value:
+            _validate_encoding_n(child)
 
 
 def _encode_mshift_py(scale: float) -> tuple:

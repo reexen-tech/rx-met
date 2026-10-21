@@ -28,6 +28,9 @@ def assert_public_encoding_document(test, document):
     def visit(value, root=False):
         if isinstance(value, dict):
             test.assertFalse(forbidden.intersection(value))
+            if str(value.get('dtype', '')).startswith(('INT', 'UINT')):
+                test.assertTrue({'bitwidth', 'dtype', 'is_symmetric', 'enc_type',
+                                 'scale', 'n', 'zero_point', 'real_min', 'real_max'}.issubset(value))
             if not root:
                 test.assertNotIn('schema_version', value)
             for item in value.values():
@@ -52,17 +55,19 @@ def assert_recurrent_encoding_bounds(test, record):
     for scale, zp, lo, hi in zip(*fields):
         test.assertTrue(math.isclose(lo, (qmin - zp) * scale, rel_tol=1e-6, abs_tol=1e-9))
         test.assertTrue(math.isclose(hi, (qmax - zp) * scale, rel_tol=1e-6, abs_tol=1e-9))
+    expected_n = [round(-math.log2(scale)) for scale in vector('scale')]
+    test.assertEqual(vector('n'), expected_n)
 
 
 def assert_recurrent_encoding_schema(test, layer):
     """One schema check applied to real QuantGRU and QuantLSTM exports."""
     fields = {'dtype', 'bitwidth', 'is_symmetric', 'enc_type',
-              'scale', 'zero_point', 'real_min', 'real_max'}
+              'scale', 'n', 'zero_point', 'real_min', 'real_max'}
     records = []
     for kind in ('input', 'output'):
-        test.assertIsInstance(layer[kind], list)
-        test.assertEqual(len(layer[kind]), 1)
-        records.extend(layer[kind])
+        test.assertIsInstance(layer[kind], dict)
+        test.assertEqual(set(layer[kind]), {'0'})
+        records.extend(layer[kind].values())
     for kind in ('internal_ops', 'internal_ops_reverse'):
         for operation in layer.get(kind, {}).values():
             test.assertIn('output', operation)
@@ -219,8 +224,8 @@ class QuantLSTMIntegrationTest(unittest.TestCase):
         self.assertEqual(enc['schema_version'], 3)
         for name in ('gru', 'lstm'):
             assert_recurrent_encoding_schema(self, enc['activation_encodings'][name])
-        self.assertEqual(set(enc['activation_encodings']['gru']['input'][0]),
-                         set(enc['activation_encodings']['lstm']['input'][0]))
+        self.assertEqual(set(enc['activation_encodings']['gru']['input']['0']),
+                         set(enc['activation_encodings']['lstm']['input']['0']))
         for record in enc['param_encodings'].values():
             assert_recurrent_encoding_bounds(self, record)
             self.assertIn('bitwidth', record)
@@ -367,7 +372,7 @@ class QuantLSTMIntegrationTest(unittest.TestCase):
                     tensor = initializers[key]
                     record = enc['param_encodings'][key]
                     self.assertEqual(record['enc_type'], 'PER_CHANNEL')
-                    for field in ('scale', 'zero_point', 'real_min', 'real_max'):
+                    for field in ('scale', 'n', 'zero_point', 'real_min', 'real_max'):
                         self.assertEqual(len(record[field]), tensor.dims[0] * tensor.dims[1])
                         self.assertTrue(all(isinstance(value, (int, float)) for value in record[field]))
                 fresh = self.sim(bidirectional, bias)

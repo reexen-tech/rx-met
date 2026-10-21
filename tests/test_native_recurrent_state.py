@@ -1,4 +1,5 @@
 """Shared GRU/LSTM quantization-state and Po2 regression tests (CUDA)."""
+import copy
 import json
 import importlib
 from unittest.mock import patch
@@ -89,8 +90,8 @@ class NativeRecurrentStateTest(unittest.TestCase):
                             module(self.x + 2)
                         document = module.export_quant_params_to_aimet_format({}, module_name='rnn')
                         layer = document['activation_encodings']['rnn']
-                        records = layer['input'] + layer['output']
-                        self.assertEqual(layer['input'][0]['bitwidth'], 16 if case == 'sparse' else 8)
+                        records = list(layer['input'].values()) + list(layer['output'].values())
+                        self.assertEqual(layer['input']['0']['bitwidth'], 16 if case == 'sparse' else 8)
                         for direction in ('internal_ops', 'internal_ops_reverse'):
                             for name, operation in layer.get(direction, {}).items():
                                 records.extend(operation['output'])
@@ -123,8 +124,8 @@ class NativeRecurrentStateTest(unittest.TestCase):
                 layer = document['activation_encodings']['rnn']
                 from aimet_common.compiler_encodings import validate_compiler_encodings
                 validate_compiler_encodings(document)
-                self.assertEqual(layer['input'][0]['is_symmetric'], 'False')
-                self.assertEqual(layer['output'][0]['is_symmetric'], 'True')
+                self.assertEqual(layer['input']['0']['is_symmetric'], 'False')
+                self.assertEqual(layer['output']['0']['is_symmetric'], 'True')
 
     def test_disabled_stage_roundtrip_and_onnx(self):
         for flags in ({'gru': False, 'lstm': False}, {'gru': True, 'lstm': False},
@@ -329,11 +330,11 @@ class NativeRecurrentStateTest(unittest.TestCase):
                     for module in (affine, native):
                         with module.calibration_context():
                             module(x)
-                    before = affine.export_quant_params_to_aimet_format({}, 'gru')['activation_encodings']['gru']['input'][0]
+                    before = affine.export_quant_params_to_aimet_format({}, 'gru')['activation_encodings']['gru']['input']['0']
                     affine.enable_pot2()
                     actual = affine.export_quant_params_to_aimet_format({}, 'gru')['activation_encodings']['gru']
                     expected = native.export_quant_params_to_aimet_format({}, 'gru')['activation_encodings']['gru']
-                    enc = actual['input'][0]
+                    enc = actual['input']['0']
                     self.assertEqual(enc['bitwidth'], bits)
                     self.assertEqual(enc['is_symmetric'], 'False')
                     self.assertEqual(enc['dtype'], f"{'U' if unsigned else ''}INT{bits}")
@@ -342,6 +343,67 @@ class NativeRecurrentStateTest(unittest.TestCase):
                     self.assertEqual(actual, expected)
                     affine.use_quantization = True
                     self.assertTrue(torch.isfinite(affine(x)[0]).all())
+
+    def test_public_schema_legacy_reload_and_invalid_exponents(self):
+        def records(value):
+            if isinstance(value, dict):
+                if 'scale' in value:
+                    yield value
+                else:
+                    for child in value.values():
+                        yield from records(child)
+            elif isinstance(value, list):
+                for child in value:
+                    yield from records(child)
+
+        for module_type in (QuantGRU, QuantLSTM):
+            for pot2 in (False, True):
+                with self.subTest(module=module_type.__name__, pot2=pot2):
+                    module = module_type(4, 3, batch_first=True, bidirectional=True).cuda()
+                    with torch.no_grad(), module.calibration_context():
+                        module(self.x)
+                    if pot2:
+                        module.enable_pot2()
+                    public = module.export_quant_params_to_aimet_format({}, 'rnn')
+                    layer = public['activation_encodings']['rnn']
+                    self.assertEqual(set(layer['input']), {'0'})
+                    self.assertEqual(set(layer['output']), {'0'})
+                    for record in records(public):
+                        self.assertIn('n', record)
+                        self.assertIn('enc_type', record)
+                        scales = record['scale'] if isinstance(record['scale'], list) else [record['scale']]
+                        exponents = record['n'] if isinstance(record['n'], list) else [record['n']]
+                        self.assertEqual(exponents, [round(-math.log2(value)) for value in scales])
+
+                    fresh = module_type(4, 3, batch_first=True, bidirectional=True).cuda()
+                    fresh.load_state_dict(module.state_dict())
+                    fresh.load_quant_params_from_aimet_format(public, 'rnn')
+                    before = fresh.export_quant_params_to_aimet_format({}, 'rnn')
+                    legacy = copy.deepcopy(public)
+                    for record in records(legacy):
+                        record.pop('n')
+                    old_layer = legacy['activation_encodings']['rnn']
+                    for kind in ('input', 'output'):
+                        old_layer[kind] = [old_layer[kind]['0']]
+                    fresh.load_quant_params_from_aimet_format(legacy, 'rnn')
+                    self.assertEqual(fresh.export_quant_params_to_aimet_format({}, 'rnn'), before)
+                    module.use_quantization = fresh.use_quantization = True
+                    with torch.no_grad():
+                        torch.testing.assert_close(fresh(self.x), module(self.x))
+
+                    for location in ('input', 'internal_ops_reverse', 'parameter'):
+                        with self.subTest(location=location):
+                            invalid = copy.deepcopy(public)
+                            if location == 'parameter':
+                                record = invalid['param_encodings']['rnn.weight_ih.weight']
+                            elif location == 'input':
+                                record = invalid['activation_encodings']['rnn']['input']['0']
+                            else:
+                                record = next(records(invalid['activation_encodings']['rnn'][location]))
+                            record['n'] = 999
+                            with self.assertRaisesRegex(ValueError, 'n.*scale'):
+                                fresh.load_quant_params_from_aimet_format(invalid, 'rnn')
+                            self.assertEqual(fresh.export_quant_params_to_aimet_format({}, 'rnn'), before)
 
 
 if __name__ == '__main__':

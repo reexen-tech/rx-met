@@ -173,11 +173,31 @@ class OnnxGRU:
             raise ValueError(f"GRU {self.name}: missing internal encodings")
         self.module.use_quantization = True
         self.module.set_quant_params_locked(not allow_overwrite)
-        restored = self.export_encodings()
+        try:
+            restored = self.export_encodings()
+        except ValueError as error:
+            raise ValueError(f"GRU {self.name}: incomplete or inconsistent internal encodings: {error}") from error
         expected = {
             "activation_encodings": {self.name: payload["activation_encodings"][self.name]},
             "param_encodings": {name: payload["param_encodings"][name] for name in self.parameter_names},
             "excluded_layers": [],
         }
+        def normalize_records(value):
+            if isinstance(value, dict):
+                if "scale" in value:
+                    return self.module._convert_to_encoding_format(value)
+                return {key: normalize_records(child) for key, child in value.items()}
+            if isinstance(value, list):
+                return [normalize_records(child) for child in value]
+            return value
+
+        expected = normalize_records(expected)
+        entry = expected["activation_encodings"][self.name]
+        for kind in ("input", "output"):
+            port = entry[kind]
+            if isinstance(port, list):
+                entry[kind] = {str(index): record for index, record in enumerate(port)}
+            elif isinstance(port, dict) and "scale" in port:
+                entry[kind] = {"0": port}
         if restored != expected:
             raise ValueError(f"GRU {self.name}: incomplete or inconsistent internal encodings")

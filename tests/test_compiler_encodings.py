@@ -12,7 +12,7 @@ SPEC.loader.exec_module(shared)
 
 
 def encoding(**updates):
-    result = dict(bitwidth=8, dtype='int', is_symmetric='True', scale=0.125,
+    result = dict(bitwidth=8, dtype='int', is_symmetric='True', enc_type='PER_TENSOR', scale=0.125,
                   offset=0, min=-16.0, max=15.875)
     result.update(updates)
     return result
@@ -31,6 +31,7 @@ class CompilerEncodingTest(unittest.TestCase):
         self.assertEqual(original, before)
         activation = result['activation_encodings']['conv']['input']['0']
         self.assertEqual(activation, dict(bitwidth=8, dtype='INT8', is_symmetric='True',
+                                         enc_type='PER_TENSOR',
                                          scale=0.125, n=3, zero_point=0,
                                          real_min=-16.0, real_max=15.875))
         parameter = result['param_encodings']['conv.weight']
@@ -100,6 +101,26 @@ class CompilerEncodingTest(unittest.TestCase):
                     'param_encodings': {'recurrent.weight_ih.weight': copy.deepcopy(grid)}}
                 result = shared.normalize_compiler_encodings(source)
                 self.assertEqual(result, source)
+
+    def test_native_recurrent_indexed_ports_and_internal_lists_are_preserved(self):
+        for kind in ('GRU', 'LSTM'):
+            with self.subTest(kind=kind):
+                grid = dict(bitwidth=8, dtype='INT8', is_symmetric='False', enc_type='PER_TENSOR',
+                            scale=0.125, n=3, zero_point=7, real_min=-16.875, real_max=15.0)
+                source = {'activation_encodings': {'recurrent': {
+                    f'is_{kind}': True, 'input': {'0': copy.deepcopy(grid)},
+                    'output': {'0': copy.deepcopy(grid)},
+                    'internal_ops': {'gate': {'output': [copy.deepcopy(grid)]}},
+                    'internal_ops_reverse': {'gate': {'output': [copy.deepcopy(grid)]}}}},
+                    'param_encodings': {'recurrent.weight_ih.weight': copy.deepcopy(grid)}}
+                self.assertEqual(shared.normalize_compiler_encodings(source, require_po2=True), source)
+
+    def test_invalid_encoding_type_and_affine_exponent_are_rejected(self):
+        for value in ('unknown', ['PER_TENSOR'], None):
+            with self.subTest(enc_type=value), self.assertRaisesRegex(ValueError, 'conv.*enc_type'):
+                shared.normalize_compiler_encodings(document(encoding(enc_type=value)))
+        with self.assertRaisesRegex(ValueError, 'conv.*n'):
+            shared.normalize_compiler_encodings(document(encoding(scale=0.1, n=4, min=-12.8, max=12.7)))
 
     def test_affine_scale_is_supported_but_po2_mode_rejects_it(self):
         source = document(encoding(scale=0.1, min=-12.8, max=12.7))

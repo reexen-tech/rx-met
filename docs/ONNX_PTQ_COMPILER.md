@@ -74,7 +74,11 @@ ONNX 适配器将 `TfEncoding.offset` 转为对应整数域的加性偏移；例
 的 `-128` 转为 `0`，INT32 bias 的 `-2147483648` 转为 `0`。
 非对称量化保留实际偏移，不能统一置零。无符号编码使用 `UINT8` 等明确 dtype。
 参数编码的通道字段统一为数组，单通道也保留数组结构。
-原生 GRU/LSTM 的专用编码保留算子库拥有的字段、列表结构和网格约定，不由通用层重写。
+普通算子和原生 GRU/LSTM 的整数记录均包含 `enc_type` 与 `n`，n 的形状与 scale 一致。
+Po2 scale 满足 `scale = 2^(-n)`；非 Po2 scale 的 n 是舍入指数，实际网格以 scale 为准。
+顶层 `input/output` 使用端口编号字典，如 `{"0": {...}}`。原生 GRU/LSTM 的
+`internal_ops` 和 `internal_ops_reverse` 仍采用 `算子名 -> output -> [encoding]`，
+其网格及字段由算子库生成，不由通用层重写。循环层加载接口兼容旧端口列表及缺少 n 的文件。
 
 每次运行生成：
 

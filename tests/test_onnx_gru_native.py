@@ -95,6 +95,25 @@ class NativeOnnxGruTest(unittest.TestCase):
         pipeline.verify_onnx_ptq_artifacts(artifacts, feed, actual,
             config_file=str(CONFIG / "mrnn_quantsim_config_custom_mixed_precision_v2.json"), providers=PROVIDERS)
 
+        def legacy_records(value):
+            if isinstance(value, dict):
+                return {key: legacy_records(child) for key, child in value.items() if key != "n"}
+            if isinstance(value, list):
+                return [legacy_records(child) for child in value]
+            return value
+
+        raw = json.loads(artifacts["aimet_encodings"].read_text())
+        raw["native_recurrent_encodings"] = legacy_records(raw["native_recurrent_encodings"])
+        for layer in raw["native_recurrent_encodings"]["activation_encodings"].values():
+            for kind in ("input", "output"):
+                layer[kind] = [layer[kind]["0"]]
+        legacy_path = self.path / "legacy.encodings"
+        legacy_path.write_text(json.dumps(raw))
+        restored = self.sim(model, feed)
+        load_encodings_to_sim(restored, str(legacy_path), strict=False)
+        for a, b in zip(restored.session.run(None, feed), actual):
+            np.testing.assert_array_equal(a, b)
+
     def test_missing_native_encodings_cannot_restore_generic_grids(self):
         model, feed = graph()
         sim = self.sim(model, feed)
@@ -225,8 +244,8 @@ class NativeOnnxGruTest(unittest.TestCase):
         sim.compute_encodings([feed])
         apply_power_of_2_workflow(sim, verbose=False)
         enc = sim._rx_native_grus["user/gru"].export_encodings()
-        self.assertEqual(enc["activation_encodings"]["user/gru"]["input"][0]["bitwidth"], 16)
-        self.assertEqual(enc["activation_encodings"]["user/gru"]["output"][0]["bitwidth"], 16)
+        self.assertEqual(enc["activation_encodings"]["user/gru"]["input"]["0"]["bitwidth"], 16)
+        self.assertEqual(enc["activation_encodings"]["user/gru"]["output"]["0"]["bitwidth"], 16)
         self.assertEqual(sim._rx_native_grus["user/gru"].module._bitwidth_config.W_granularity_, 1)
         scales = enc["param_encodings"]["custom_W"]["scale"]
         # Native public encodings expand gate grids to the packed channel view.

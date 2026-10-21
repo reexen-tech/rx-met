@@ -100,9 +100,11 @@ class CompilerEncodingConverter:
             and all(entry.get("offset", 0) == 0 for entry in raw)
         )
         strict = bool(getattr(quantizer, "use_strict_symmetric", False))
+        enc_type = quantizer._encoding_type().name
         entries = []
         for entry in raw:
             entry = dict(entry)
+            entry["enc_type"] = enc_type
             if str(entry.get("dtype", "")).lower() == "int":
                 bits = int(entry["bitwidth"])
                 qmin = -(1 << (bits - 1)) + int(strict) if not unsigned else 0
@@ -190,7 +192,7 @@ class CompilerEncodingConverter:
             if native_activation is not None:
                 for output in adapter.outputs:
                     if output:
-                        tensor_encodings.setdefault(output, native_activation["output"][0])
+                        tensor_encodings.setdefault(output, native_activation["output"]["0"])
         self._propagate_grid_preserving(tensor_encodings)
 
         for name, encoding in tensor_encodings.items():

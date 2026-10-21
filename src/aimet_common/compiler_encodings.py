@@ -215,6 +215,9 @@ def validate_compiler_encodings(enc: dict, *, require_po2: bool = False) -> None
     """Validate numbers, channel shapes and representable compiler integer grids."""
     for path, entry, native in _records(enc):
         try:
+            if 'enc_type' in entry and (not isinstance(entry['enc_type'], str) or
+                    entry['enc_type'] not in {'PER_TENSOR', 'PER_CHANNEL', 'PER_GATE', 'PER_BLOCK'}):
+                raise ValueError('enc_type: unsupported quantization granularity')
             bits = entry['bitwidth']
             if isinstance(bits, bool) or not isinstance(bits, int) or not 1 <= bits <= 64:
                 raise ValueError('bitwidth: expected an integer between 1 and 64')
@@ -240,7 +243,7 @@ def validate_compiler_encodings(enc: dict, *, require_po2: bool = False) -> None
                 if field in ('n', 'zero_point') and any(item != int(item) for item in values):
                     raise ValueError(f'{field}: expected integers')
                 fields[field] = values * len(scales) if len(values) == 1 else values
-            if require_po2 and 'n' in fields and fields['n'] != exponents:
+            if 'n' in fields and fields['n'] != exponents:
                 raise ValueError('n: exponent does not match scale')
             if any(low > high for low, high in zip(fields['real_min'], fields['real_max'])):
                 raise ValueError('range: real_min exceeds real_max')

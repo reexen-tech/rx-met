@@ -22,11 +22,22 @@ _PARAMETER_OPERATORS = {"weight_ih", "weight_hh", "bias_ih", "bias_hh"}
 _ENCODING_FIELDS = ("scale", "zero_point", "real_min", "real_max")
 
 
+def _encoding_n(scale):
+    if isinstance(scale, list):
+        if not scale:
+            raise ValueError("Encoding scale cannot be empty")
+        return [_encoding_n(value) for value in scale]
+    if isinstance(scale, bool) or not isinstance(scale, (int, float)) or not math.isfinite(scale) or scale <= 0:
+        raise ValueError("Encoding scale must be positive and finite")
+    return int(round(-math.log2(scale)))
+
+
 def _aimet_encoding(native):
     """Use the same scalar/vector record as QuantGRU's AIMET export."""
     encoding = deepcopy(native)
     encoding["bitwidth"] = int(encoding["dtype"].removeprefix("UINT").removeprefix("INT"))
     encoding["is_symmetric"] = "True" if encoding.pop("symmetric") else "False"
+    encoding["n"] = _encoding_n(encoding["scale"])
     return encoding
 
 
@@ -81,6 +92,14 @@ def _native_encoding(record, name):
     if symmetric not in ("True", "False"):
         raise ValueError(f"Invalid encoding symmetry: {name}")
     try:
+        if "n" in record:
+            def matches(actual, expected):
+                if isinstance(expected, list):
+                    return (isinstance(actual, list) and len(actual) == len(expected)
+                            and all(matches(a, b) for a, b in zip(actual, expected)))
+                return isinstance(actual, int) and not isinstance(actual, bool) and actual == expected
+            if not matches(record["n"], _encoding_n(record["scale"])):
+                raise ValueError(f"Encoding n does not match scale: {name}")
         return {"dtype": dtype, "symmetric": symmetric == "True",
                 "enc_type": record["enc_type"],
                 **{field: deepcopy(record[field]) for field in _ENCODING_FIELDS}}
@@ -241,8 +260,8 @@ class LSTMAimetIntegration:
             # Match GRU's single forward input/output records. These do not
             # enumerate ONNX ports. State grids remain scalar in each
             # direction's internal_ops (output for h, cell_state for c).
-            "input": [_aimet_encoding(ops["input"])],
-            "output": [_aimet_encoding(ops["output"])],
+            "input": {"0": _aimet_encoding(ops["input"])},
+            "output": {"0": _aimet_encoding(ops["output"])},
             "internal_ops": _internal_encodings(ops),
         }
         if "operators_reverse" in doc:
@@ -325,9 +344,16 @@ class LSTMAimetIntegration:
         }
         if self.bidirectional:
             document["operators_reverse"] = operators[1]
-        if (entry.get("input") != [_aimet_encoding(operators[0]["input"])]
-                or entry.get("output") != [_aimet_encoding(operators[0]["output"])]):
-            raise ValueError(f"LSTM input/output encodings disagree with internal grids: {name}")
+        for kind in ("input", "output"):
+            port = entry.get(kind)
+            if isinstance(port, dict) and set(port) == {"0"}:
+                record = port["0"]
+            elif isinstance(port, list) and len(port) == 1:
+                record = port[0]
+            else:
+                raise ValueError(f"Expected one LSTM {kind} encoding: {name}")
+            if _native_encoding(record, f"{name}.{kind}") != operators[0][kind]:
+                raise ValueError(f"LSTM input/output encodings disagree with internal grids: {name}")
         self.load_quant_params(document)
         return True
 

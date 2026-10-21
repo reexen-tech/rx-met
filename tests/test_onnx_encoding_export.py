@@ -12,13 +12,13 @@ import numpy as np
 import onnx
 
 from aimet_common.compiler_encodings import normalize_compiler_encodings, validate_compiler_encodings
-from aimet_common.defs import QuantizationDataType
+from aimet_common.defs import EncodingType, QuantizationDataType
 from aimet_onnx.rx_ptq.compiler_encodings import CompilerEncodingConverter
 from aimet_onnx.rx_ptq import pipeline
 
 
 def raw_encoding(bits=8, offset=-128, scale=0.125):
-    return dict(bitwidth=bits, dtype='int', is_symmetric='True', scale=scale,
+    return dict(bitwidth=bits, dtype='int', is_symmetric='True', enc_type='PER_TENSOR', scale=scale,
                 offset=offset, min=offset * scale, max=(offset + (1 << bits) - 1) * scale)
 
 
@@ -34,13 +34,15 @@ def graph():
 
 
 class OnnxGridAdapterTest(unittest.TestCase):
-    def convert(self, entries, *, symmetric=True, unsigned=False, strict=False):
+    def convert(self, entries, *, symmetric=True, unsigned=False, strict=False, enc_type=None):
+        enc_type = enc_type or (EncodingType.PER_CHANNEL if len(entries) > 1 else EncodingType.PER_TENSOR)
         quantizer = SimpleNamespace(enabled=True, use_symmetric_encodings=symmetric,
                                     use_unsigned_symmetric=unsigned, use_strict_symmetric=strict,
                                     data_type=QuantizationDataType.int,
                                     get_encodings=lambda: [SimpleNamespace(delta=e['scale'], min=e['min'],
                                         max=e['max'], offset=e['offset']) for e in entries],
-                                    export_encodings=lambda version: entries)
+                                    export_encodings=lambda version: entries,
+                                    _encoding_type=lambda: enc_type)
         sim = SimpleNamespace(qc_quantize_op_dict={'w': quantizer}, quant_args={})
         payload, coverage = CompilerEncodingConverter(sim, graph()).convert()
         self.assertEqual(coverage['mapped_quantizers'], 1)
@@ -87,6 +89,27 @@ class OnnxGridAdapterTest(unittest.TestCase):
                 signed_q = unsigned_q - 128
                 actual = (signed_q + result['zero_point'][index]) * result['scale'][index]
                 self.assertEqual(actual, (unsigned_q + entry['offset']) * entry['scale'])
+
+    def test_single_channel_granularity_comes_from_quantizer(self):
+        for kind in (EncodingType.PER_TENSOR, EncodingType.PER_CHANNEL):
+            with self.subTest(enc_type=kind.name):
+                result = self.convert([raw_encoding()], enc_type=kind)
+                self.assertEqual(result['scale'], [0.125])
+                self.assertEqual(result['enc_type'], kind.name)
+
+
+class TorchEncodingMetadataTest(unittest.TestCase):
+    def test_legacy_export_retains_tensor_channel_and_block_granularity(self):
+        import torch
+        from aimet_torch.v2.quantization.affine.encoding import AffineEncoding
+        for shape, block_size, kind in (((), None, 'PER_TENSOR'), ((1,), None, 'PER_CHANNEL'),
+                                         ((2,), None, 'PER_CHANNEL'), ((2, 2), (1, 2), 'PER_BLOCK')):
+            with self.subTest(shape=shape, block_size=block_size):
+                encoding = AffineEncoding(torch.full(shape, 0.125), torch.zeros(shape),
+                                          8, True, True, block_size=block_size)
+                records = encoding.to_qnn_encoding_dict('0.6.1')
+                self.assertTrue(records)
+                self.assertEqual({entry['enc_type'] for entry in records}, {kind})
 
 
 class ExportEntryPointTest(unittest.TestCase):
@@ -138,6 +161,7 @@ class ExportEntryPointTest(unittest.TestCase):
             encoded = json.loads(result['encodings'].read_text())
             self.assertEqual(set(encoded['param_encodings']['w']['zero_point']), {0})
             self.assertEqual(encoded['param_encodings']['w']['dtype'], 'INT8')
+            self.assertEqual(encoded['param_encodings']['w']['enc_type'], 'PER_CHANNEL')
             clean = onnx.load(result['onnx'])
             self.assertFalse(any(node.op_type == 'QcQuantizeOp' for node in clean.graph.node))
             validate_compiler_encodings(encoded, require_po2=True)
