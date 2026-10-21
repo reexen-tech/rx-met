@@ -105,18 +105,16 @@ def write_release_index(directory, product, version, changelog, bundles, *, with
              '在本目录内解压所选应用包，然后运行包内 ./install.sh。',
              '首次离线部署时，将所需公共环境目录与本产品目录平级放置。',
              '安装和运行参数见应用包 README。', '',
-             '| 变体 | 应用包 | 应用大小（MiB） | 所需公共环境 | 环境附件 |',
-             '| --- | --- | ---: | --- | --- |']
+             '| 变体 | 应用包 | 应用大小（MiB） | 所需公共环境 |',
+             '| --- | --- | ---: | --- |']
     entries = []
     for manifest in bundles:
         filename = manifest['bundle_name'] + '.tar.gz'
         archive = directory / filename
         runtime = manifest['runtime']
         environment = f"{runtime['environment_name']}-{runtime['environment_version']}"
-        runtime_path = f'../{environment}/{runtime["filename"]}'
-        attachment = f'[已附带]({runtime_path})' if with_env else '未附带，需另行准备'
         lines.append(f"| {manifest['variant']} | [{filename}]({filename}) | "
-                     f"{archive.stat().st_size / 1024**2:.1f} | {environment} | {attachment} |")
+                     f"{archive.stat().st_size / 1024**2:.1f} | {runtime['filename']} |")
         entries.append({'variant': manifest['variant'], 'filename': filename,
                         'sha256': common.sha256(archive), 'size_bytes': archive.stat().st_size,
                         'runtime': runtime, 'environment_directory': f'../{environment}',
