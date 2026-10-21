@@ -91,11 +91,16 @@ ONNX 适配器将 `TfEncoding.offset` 转为对应整数域的加性偏移；例
 
 默认量化规则与本项目的 PyTorch 导出流程保持一致：
 
-- 校准：`percentile=99.99`（必须在 `compute_encodings` 前设置，native 默认 100 等于 min-max）
+- 校准：`percentile=99.99`，在 `compute_encodings` 前设置。Torch/ONNX 共用 `aimet_common.percentile` 的 2048 桶动态直方图、样本计数和百分位取点，后续批次超出范围时扩容并合并历史统计；默认 100 保留完整观测范围。
 - 激活和权重使用对称量化；Conv/Gemm/MatMul 的 bias scale 在激活和权重校准后按 `Sb = Sx * Sw` 推导，默认位宽为 INT32。该流程绕过 AIMET ONNX 对近零 bias 通道生成的 `scale=0`，防止校准期 fake-quant 向后续激活传播 Inf 或全 0。
 - Power-of-2 使用与 `src/aimet_torch/power_of_2_quantization.py` 相同的 `cover_range`（容差 2%）
 - 权重默认 per-channel；Gemm 保持 per-channel；无 Conv+Relu supergroup
 
+ONNX 适配器仅在校准期间使用临时 session 采集中间张量，并将公共模块计算出的网格
+写回原生量化器。公共模块使用 Torch 张量运算，支持 CPU/CUDA；当前 ONNX 适配器将
+观测值取回 CPU，增加校准阶段的传输和内存开销，每批处理后释放观测值，不保存全部样本。
+推理和导出仍使用原 session 与原图。支持 `session.run` 的迭代器、回调和校准上下文入口；
+校准期间暂不支持 IO binding、OrtValue 或异步执行。原生 GRU 内部仍调用 QuantGRU 自身的校准接口。
 
 配置与 `examples/quick_start_kws.py` 相同：
 

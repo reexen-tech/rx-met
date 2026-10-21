@@ -114,6 +114,8 @@ class QcQuantizeOp:
         self.data_type = QuantizationDataType.int
         self.tensor_quantizer_params = tensor_quantizer_params
         self._encoding_min_max_fixed_vals = None
+        self._percentile_value = 100.0
+        self._percentile_calibrator = None
 
     def is_encoding_frozen(self) -> bool:
         """Returns is_encoding_frozen var"""
@@ -529,6 +531,7 @@ class QcQuantizeOp:
         reset the stats of tensor quantizer
         """
         if not self._is_encoding_frozen:
+            self._percentile_calibrator = None
             self._tensor_quantizer.resetEncodingStats()
             self._reset_encodings()
 
@@ -558,15 +561,13 @@ class QcQuantizeOp:
         self.reset_encoding_stats()
 
     def set_percentile_value(self, percentile_value: float):
-        """Set percentile used by the C++ encoding analyzer.
-
-        No-op unless this quantizer uses ``QuantScheme.post_training_percentile``.
-        The native analyzer defaults to 100 (plain min/max) until this is called.
-        """
+        """Set the shared percentile policy, also retained by rebuilt quantizers."""
         if self.quant_scheme != QuantScheme.post_training_percentile:
             return
-        if not 50.0 < float(percentile_value) <= 100.0:
-            raise ValueError(f"percentile 必须在 (50, 100]，得到: {percentile_value}")
+        from aimet_common.percentile import validate_percentile
+        self._percentile_value = validate_percentile(percentile_value)
+        if self._percentile_calibrator is not None:
+            self._percentile_calibrator.percentile = self._percentile_value
         tensor_quantizer = self._tensor_quantizer
         if not hasattr(tensor_quantizer, "setPercentileValue"):
             raise RuntimeError(
@@ -584,9 +585,13 @@ class QcQuantizeOp:
         if not self.enabled:
             return None
 
-        encodings = self._tensor_quantizer.computeEncodings(
-            self.use_symmetric_encodings
-        )
+        from .percentile import uses_shared_percentile, compute_encodings
+        if uses_shared_percentile(self):
+            encodings = compute_encodings(self)
+        else:
+            encodings = self._tensor_quantizer.computeEncodings(
+                self.use_symmetric_encodings
+            )
 
         if self._encoding_min_max_fixed_vals:
             min_val, max_val = self._encoding_min_max_fixed_vals
@@ -798,7 +803,11 @@ class QcQuantizeOp:
 
         :param tensor: Tensor to use for updating the encodings stats
         """
-        self._tensor_quantizer.updateStats(tensor)
+        from .percentile import uses_shared_percentile, update_stats
+        if uses_shared_percentile(self):
+            update_stats(self, tensor)
+        else:
+            self._tensor_quantizer.updateStats(tensor)
 
     def quantize_dequantize(self, input_tensor: np.ndarray) -> np.ndarray:
         """

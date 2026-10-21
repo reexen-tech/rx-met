@@ -325,12 +325,17 @@ def compute_encodings(sim: "QuantizationSimModel"):
         }
         for op_name, qc_op in enabled_quantizers.items():
             qc_op.reset_encoding_stats()
-            if op_name in sim.activation_names:
+            if qc_op.is_encoding_frozen():
+                qc_op.op_mode = OpMode.quantizeDequantize
+            elif op_name in sim.activation_names:
                 qc_op.op_mode = OpMode.updateStats
             else:
                 qc_op.op_mode = OpMode.oneShotQuantizeDequantize
                 if qc_op.is_encoding_frozen():
                     qc_op.op_mode = OpMode.quantizeDequantize
+
+        from .percentile import calibration_context
+        stack.enter_context(calibration_context(sim, enabled_quantizers))
 
         yield
 
@@ -1184,9 +1189,7 @@ class QuantizationSimModel:
     def _compute_encodings_from_callback(
         self, forward_pass_callback, forward_pass_callback_args=_NOT_SPECIFIED
     ):
-        if forward_pass_callback_args is _NOT_SPECIFIED:
-            args = (self.session,)
-        else:
+        if forward_pass_callback_args is not _NOT_SPECIFIED:
             warnings.warn(
                 _red(
                     "Support for calling compute_encodings() with forward_pass_callback_args is deprecated and will be removed in the future. "
@@ -1194,9 +1197,9 @@ class QuantizationSimModel:
                 DeprecationWarning,
                 stacklevel=3,
             )
-            args = (self.session, forward_pass_callback_args)
-
         with compute_encodings(self):
+            args = ((self.session,) if forward_pass_callback_args is _NOT_SPECIFIED
+                    else (self.session, forward_pass_callback_args))
             forward_pass_callback(*args)
 
     def set_percentile_value(self, percentile_value: float):

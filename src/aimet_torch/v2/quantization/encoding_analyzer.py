@@ -41,26 +41,20 @@
 
 from abc import ABC, abstractmethod
 import math
-import numpy as np
 import warnings
 from dataclasses import dataclass
 from typing import TypeVar, Generic, Tuple, Optional, List
-import itertools
 import torch
 from aimet_common.quantsim import _get_minimum_scale
-from aimet_torch.v2.utils import reduce, StatisticsNotFoundError, _is_expandable
+from aimet_common.percentile import (
+    Histogram as _Histogram, HistogramObserver as _HistogramObserver,
+    adjust_min_max, percentile_ranges,
+)
+from aimet_torch.v2.utils import reduce, StatisticsNotFoundError
 
 
 @dataclass
 class _MinMaxRange:
-    min: Optional[torch.Tensor] = None
-    max: Optional[torch.Tensor] = None
-
-
-@dataclass
-class _Histogram:
-    histogram: torch.Tensor = None
-    bin_edges: torch.Tensor = None
     min: Optional[torch.Tensor] = None
     max: Optional[torch.Tensor] = None
 
@@ -135,231 +129,6 @@ class _MinMaxObserver(_Observer[_MinMaxRange]):
         return self.stats
 
 
-class _HistogramObserver(_Observer[_Histogram]):
-    """
-    Observer for Histogram based calibration techniques (percentile, MSE)
-    """
-
-    def __init__(
-        self, shape: tuple, num_bins: int, growth_limit: Optional[float] = None
-    ):
-        super().__init__(shape)
-        self.num_bins = num_bins
-        self.stats = [_Histogram() for _ in range(np.prod(self.shape, dtype=np.int32))]
-
-        if growth_limit is None:
-            growth_limit = float("inf")
-
-        if growth_limit < 1.0:
-            raise RuntimeError
-
-        self.growth_limit = growth_limit
-        self._histogram_range_limit = None
-
-    # pylint: disable=too-many-locals
-    @torch.no_grad()
-    def collect_stats(self, input_tensor: torch.Tensor) -> List[_Histogram]:
-        if not _is_expandable(self.shape, input_tensor.shape):
-            raise RuntimeError(
-                f"Shape {self.shape} is incompatible with input of shape {input_tensor.shape}"
-            )
-
-        hist_stats = []
-        input_shape = tuple(input_tensor.shape)
-        histogram_shape = self.shape
-
-        padded_histogram_shape = (
-            *itertools.repeat(1, len(input_shape) - len(histogram_shape)),
-            *histogram_shape,
-        )
-
-        for i, _ in enumerate(self.stats):
-            hist_input = input_tensor
-
-            for axis, dim in enumerate(padded_histogram_shape):
-                if dim == 1:
-                    continue
-                # elements in current axis, ex: could be W*C, C, or 1 for input_shape [H, W, C]
-                numel = np.prod(padded_histogram_shape[axis + 1 :], dtype=np.int32)
-                # index where hist_input at current dimension will be sliced at
-                index = (i // numel) % dim
-                hist_input = torch.unsqueeze(
-                    torch.select(hist_input, axis, index), axis
-                )
-
-            hist_min, hist_max = self._get_min_max(hist_input)
-
-            bin_edges = self._create_bin_edges(
-                min_val=hist_min, max_val=hist_max, device=input_tensor.device
-            )
-            histogram = torch.histc(
-                hist_input.to(torch.float),
-                bins=self.num_bins,
-                min=bin_edges[0],
-                max=bin_edges[-1],
-            )
-
-            # clip inf values to hist_min and hist_max and adjust for any fp errors
-            histogram[0] += torch.sum(hist_input < bin_edges[0])
-            histogram[-1] += torch.sum(hist_input > bin_edges[-1])
-
-            hist_stats.append(_Histogram(histogram, bin_edges, hist_min, hist_max))
-
-        return hist_stats
-
-    def _get_min_max(
-        self, hist_input: torch.Tensor
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
-        isfinite = hist_input.isfinite()
-        min = torch.where(isfinite, hist_input, float("inf")).min()
-        max = torch.where(isfinite, hist_input, -float("inf")).max()
-        return min, max
-
-    def _create_bin_edges(self, min_val, max_val, device):
-        # Adjust min/max values to be in line with PyTorch's torch.histc implementation
-        min_val, max_val = (
-            torch.where(min_val == max_val, min_val - 0.5, min_val).float(),
-            torch.where(min_val == max_val, max_val + 0.5, max_val).float(),
-        )
-
-        step = (max_val - min_val) / self.num_bins
-        return torch.arange(0, self.num_bins + 1, device=device) * step + min_val
-
-    def _get_bin_num(self, bin_width, curr_min, data):
-        bin_tensor = torch.full(data.shape, self.num_bins - 1, device=data.device)
-        index_tensor = (data - curr_min) / bin_width
-        return torch.minimum(index_tensor.to(torch.int32), bin_tensor)
-
-    # pylint: disable=arguments-differ
-    # pylint: disable=too-many-locals
-    @torch.no_grad()
-    def merge_stats(self, new_stats_list: List[_Histogram], input_tensor: torch.Tensor):
-        if self.stats[0].histogram is None:
-            self.stats = new_stats_list
-
-            # Compute histogram range limit based on the first input and the growth limit factor
-            input0_min = reduce(
-                input_tensor, shape=self.shape, reduce_op=torch.min
-            ).values
-            input0_max = reduce(
-                input_tensor, shape=self.shape, reduce_op=torch.max
-            ).values
-
-            input0_range = input0_max - input0_min
-            
-            # 🔧 FIX: 处理 min == max 的情况（例如 bias per-channel 量化）
-            # 使用和 TF 相同的 minimum_scale 保护机制
-            minimum_scale = _get_minimum_scale(self.num_bins)
-            minimum_range = minimum_scale * self.num_bins
-            
-            # 如果范围太小（包括 = 0），使用最小范围
-            zero_range_mask = (input0_range.abs() < minimum_range) | torch.isnan(input0_range) | torch.isinf(input0_range)
-            if zero_range_mask.any():
-                # 对于范围为0的 channel，设置最小范围，确保 0 在范围内
-                input0_min_safe = torch.where(zero_range_mask, torch.minimum(input0_min, torch.zeros_like(input0_min)), input0_min)
-                input0_max_safe = torch.where(zero_range_mask, torch.maximum(input0_max, torch.zeros_like(input0_max)), input0_max)
-                input0_range = torch.where(zero_range_mask, 
-                                          torch.full_like(input0_range, minimum_range),
-                                          input0_range)
-                input0_min = input0_min_safe
-                input0_max = input0_max_safe
-
-            left_limit = (input0_min - input0_range * self.growth_limit / 2).flatten()
-            right_limit = (input0_max + input0_range * self.growth_limit / 2).flatten()
-            self._histogram_range_limit = torch.stack((left_limit, right_limit), dim=1)
-            return
-
-        hist_inputs = torch.reshape(input_tensor, (len(new_stats_list), -1))
-        for index, new_stats in enumerate(new_stats_list):
-            curr_stats = self.stats[index]
-            curr_input = hist_inputs[index]
-            left_limit, right_limit = self._histogram_range_limit[index]
-
-            updated_min = new_stats.min.clamp(left_limit, curr_stats.min)
-            updated_max = new_stats.max.clamp(curr_stats.max, right_limit)
-
-            # if the current histogram can capture new_stats within in its range
-            if updated_min == curr_stats.min and updated_max == curr_stats.max:
-                histogram_updates = curr_stats.histogram
-            else:
-                dest_bin_width = (updated_max - updated_min) / self.num_bins
-                src_bin_width = (curr_stats.max - curr_stats.min) / self.num_bins
-                
-                # 🔧 FIX: 如果 src_bin_width 为 0（即 curr_stats.min == curr_stats.max）
-                # 说明之前的 histogram 基于常数值，无法 merge，直接丢弃旧 histogram
-                minimum_scale = _get_minimum_scale(self.num_bins)
-                if abs(src_bin_width) < minimum_scale or torch.isnan(src_bin_width) or torch.isinf(src_bin_width):
-                    # 旧 histogram 不可用，直接使用空的 histogram_updates
-                    # 稍后会用当前输入重新构建 histogram
-                    histogram_updates = torch.zeros(self.num_bins, device=input_tensor.device)
-                else:
-                    # 正常的 merge 流程
-                    histogram_updates = torch.zeros(
-                        self.num_bins, device=input_tensor.device
-                    )
-
-                    src_bin_start = curr_stats.min + (
-                        src_bin_width
-                        * torch.arange(0, self.num_bins, device=input_tensor.device)
-                    )
-                    dest_bin_index = self._get_bin_num(
-                        dest_bin_width, updated_min, src_bin_start
-                    )
-                    dest_bin_end = updated_min + dest_bin_width * (dest_bin_index + 1)
-
-                    # split curr_hist if values in source bin cannot neatly fold into dest bin
-                    split_hist_value = torch.round(
-                        ((dest_bin_end - src_bin_start) / src_bin_width)
-                        * curr_stats.histogram
-                    )
-                    dest_bin_updates = torch.minimum(split_hist_value, curr_stats.histogram)
-
-                    # update appropriate bin with either the full or split curr_hist value
-                    histogram_updates.index_add_(
-                        dim=0, index=dest_bin_index, source=dest_bin_updates
-                    )
-
-                    # if curr_hist is split, update other bin that the remaining values fall into
-                    other_bins = (
-                        (dest_bin_updates < curr_stats.histogram).nonzero().flatten()
-                    )
-                    other_bin_index = self._get_bin_num(
-                        dest_bin_width, updated_min, src_bin_start + dest_bin_width
-                    )
-                    other_bin_updates = curr_stats.histogram - dest_bin_updates
-                    histogram_updates.index_add_(
-                        dim=0,
-                        index=other_bin_index[other_bins],
-                        source=other_bin_updates[other_bins],
-                    )
-
-            # create histogram given input tensor and full range
-            expanded_histogram = torch.histc(
-                curr_input.to(torch.float),
-                bins=self.num_bins,
-                min=updated_min,
-                max=updated_max,
-            )
-            expanded_histogram += histogram_updates.to(expanded_histogram.device)
-
-            # clip inf values to hist_min and hist_max
-            expanded_histogram[0] += torch.sum(curr_input < updated_min)
-            expanded_histogram[-1] += torch.sum(curr_input > updated_max)
-
-            expanded_bin_edges = self._create_bin_edges(
-                min_val=updated_min,
-                max_val=updated_max,
-                device=expanded_histogram.device,
-            )
-            self.stats[index] = _Histogram(
-                expanded_histogram, expanded_bin_edges, updated_min, updated_max
-            )
-
-    def reset_stats(self):
-        self.stats = [_Histogram() for _ in self.stats]
-
-    def get_stats(self) -> List[_Histogram]:
-        return self.stats
 
 
 class EncodingAnalyzer(Generic[_Statistics], ABC):
@@ -520,40 +289,6 @@ def _flag_extreme_min_max(curr_min, curr_max):
         )
 
 
-def adjust_min_max(curr_min, curr_max, num_steps, is_symmetric):
-    minimum_scale = _get_minimum_scale(num_steps)
-
-    # ensure that 0 is in the range
-    curr_min = torch.minimum(curr_min, torch.zeros_like(curr_min))
-    curr_max = torch.maximum(curr_max, torch.zeros_like(curr_max))
-
-    # ensure that min/max are finite
-    curr_min.clamp_(min=torch.finfo(curr_max.dtype).min, max=0)
-    curr_max.clamp_(min=0, max=torch.finfo(curr_max.dtype).max)
-
-    # ensure that min/max aren't too close
-    tensor_threshold = (curr_max - curr_min) / num_steps
-
-    if is_symmetric:
-        curr_min[tensor_threshold < minimum_scale] -= minimum_scale * math.ceil(
-            num_steps / 2
-        )
-        curr_max[tensor_threshold < minimum_scale] += minimum_scale * math.floor(
-            num_steps / 2
-        )
-    else:
-        curr_max[tensor_threshold < minimum_scale] += minimum_scale * num_steps
-
-    if is_symmetric:
-        num_pos_steps = math.floor(num_steps / 2)
-        num_neg_steps = math.ceil(num_steps / 2)
-        delta = max(curr_max / num_pos_steps, -curr_min / num_neg_steps)
-        offset = -1 * num_neg_steps
-
-        curr_min = offset * delta
-        curr_max = num_pos_steps * delta
-
-    return curr_min, curr_max
 
 
 # pylint: disable=arguments-differ
@@ -615,53 +350,10 @@ class PercentileEncodingAnalyzer(EncodingAnalyzer[_Histogram]):
     def compute_encodings_from_stats(
         self, stats: List[_Histogram], num_steps: int, is_symmetric: bool
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        if num_steps <= 0:
-            raise ValueError(
-                "The number of quantization bins cannot be less than or equal to 0."
-            )
-
         if stats[0].histogram is None:
             raise StatisticsNotFoundError("No statistics present to compute encodings.")
-
-        encoding_min_list = []
-        encoding_max_list = []
-
-        for list_elem in stats:
-            cum_sum = torch.cumsum(list_elem.histogram, dim=0)
-            # trim percentile value from min and max
-            max_index = torch.searchsorted(cum_sum, cum_sum[-1] * self.percentile / 100)
-            min_index = torch.searchsorted(
-                cum_sum, cum_sum[-1] * (1 - self.percentile / 100)
-            )
-
-            if self.percentile == 100:
-                min_index = 0
-                max_index = -1
-
-            curr_min = list_elem.bin_edges[min_index]
-            curr_max = list_elem.bin_edges[max_index]
-            # adjust min/max
-            updated_min, updated_max = adjust_min_max(
-                curr_min, curr_max, num_steps, is_symmetric
-            )
-            encoding_min_list.append(updated_min)
-            encoding_max_list.append(updated_max)
-
-        encoding_min = torch.tensor(
-            encoding_min_list,
-            device=stats[0].histogram.device,
-            dtype=stats[0].min.dtype,
-        )
-        encoding_min = torch.reshape(encoding_min, self.observer.shape)
-
-        encoding_max = torch.tensor(
-            encoding_max_list,
-            device=stats[0].histogram.device,
-            dtype=stats[0].max.dtype,
-        )
-        encoding_max = torch.reshape(encoding_max, self.observer.shape)
-
-        return encoding_min, encoding_max
+        return percentile_ranges(stats, self.observer.shape, num_steps,
+                                 is_symmetric, self.percentile)
 
 
 class _LpNormEncodingAnalyzer(EncodingAnalyzer[_Histogram]):

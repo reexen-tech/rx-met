@@ -22,6 +22,16 @@ python3 tests/verify_kws_ptq_roundtrip.py \
 产物不一致时仍保存完整报告并返回 1；`--report-only` 可只生成报告而返回 0。
 已有输出目录拒绝覆盖，可用 `--output-dir` 指定新目录。
 
+## 公共 Percentile 校准
+
+`test_percentile_calibration.py` 使用真实量化器和 ORT session，核对 Torch/ONNX 的动态
+直方图与网格，覆盖后续大值、批次顺序、常量和零、微小初始范围、逐通道与分块、
+重复校准、冻结编码，以及回调异常后的 session 恢复。CUDA 可用时同时核对 CPU/CUDA。
+
+```bash
+python3 -m unittest discover -s tests -p test_percentile_calibration.py -v
+```
+
 ## 文件说明
 
 `test_dependencies.py` 验证依赖管理配置和生成结果。该测试检查以下内容：
