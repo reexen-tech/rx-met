@@ -96,16 +96,33 @@ ONNX 适配器将 `TfEncoding.offset` 转为对应整数域的加性偏移；例
 - Power-of-2 使用与 `src/aimet_torch/power_of_2_quantization.py` 相同的 `cover_range`（容差 2%）
 - 权重默认 per-channel；Gemm 保持 per-channel；无 Conv+Relu supergroup
 
+
 配置与 `examples/quick_start_kws.py` 相同：
 
 - JSON 1：`examples/config/mrnn_quantsim_config_custom_mixed_precision_v2.json`
-- JSON 2：`examples/config/quick_start_full_quant.json`（`Quantized*` / `GRU_config` 在当前 ONNX 图里没有则忽略）
+- JSON 2：`examples/config/quick_start_full_quant.json`；图中存在标准 GRU 时，`GRU_config` 交由 QuantGRU 原生接口处理，其余已知但图中不存在的类型配置忽略。
 
 `src/aimet_common/quantsim_config/onnx_ptq_compiler_w8a8.json` 仍可作为 `--config` 覆盖项。
+
+## GRU 原生适配
+
+`create_onnx_ptq_sim` 自动识别标准 GRU，调用 `quant_gru` 算子包中的 ONNX 适配器。
+门内统计、量化前向、Po2、编码打包和恢复均由现有 QuantGRU 负责；普通层继续使用
+ONNX QuantSim。GRU 后的普通计算层保留自己的输入网格，用于混合精度和 bias 对齐。
+
+运行时需要包含 `quant_gru_onnx` 和 `quant_gru_onnx_runtime` 的更新版 QuantGRU wheel。
+桥接节点仅存在于仿真图；导出仍保存原标准 ONNX GRU、权重及张量名称，并合并
+`is_GRU`、双向 `internal_ops` 和原生参数编码。原始 AIMET encodings 附加
+`native_recurrent_encodings`，恢复时缺少门内信息、参数或方向信息会报错。
+
+当前支持 CUDA float32、常量 W/R/B、`linear_before_reset=1`、默认 Sigmoid/Tanh、
+单向前向或双向、layout 0/1，以及可选的初始状态。无 bias、变长 `sequence_lens`、
+自定义激活、clip、反向单向和可覆盖或共享的权重暂不支持，进入校准前报错。
+桥接使用主机缓冲区与原生 CUDA 算子交换数据，会产生额外拷贝，不是零拷贝执行。
 
 ## 限制
 
 - 该流程适用于 PTQ；QAT 使用 PyTorch 流程。
 - 校准数据必须与模型输入名称、shape 和 dtype 一致。
 - 编译器 encodings 是 rx-met 的部署格式，必须与同次导出的 Clean ONNX 配套使用。
-- CPU 模式用于调试，发布验证在目标 CUDA 环境执行。
+- CPU 模式用于普通 ONNX 模型调试；原生 GRU 校准要求 CUDA，发布验证在目标 CUDA 环境执行。

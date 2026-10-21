@@ -151,6 +151,23 @@ gru.cuda()
 产物使用标准 ONNX `GRU` 节点，量化参数单独导出。下游整图工具负责组合模型图、
 节点命名和部署 encodings。
 
+## ONNX 输入校准
+
+`pytorch/quant_gru_onnx.py` 提供标准 ONNX GRU 的输入适配，转换门顺序、方向、
+W/R/B 和输入输出布局，直接调用 QuantGRU 的校准、量化前向、Po2 与编码接口。
+`pytorch/lib/gru_onnx_runtime.cc` 只负责 ONNX Runtime 与 Python 接口之间的张量传递，
+不实现门计算。桥接经主机缓冲区调用原生 CUDA 算子，存在额外数据拷贝。
+
+RX-MET 的 `create_onnx_ptq_sim` 自动接入此能力，读取相同的 `GRU_config`。
+导出保存标准 GRU，双向参数编码按方向组合，内部编码沿用原生 schema。
+当前支持范围和验证见 [ONNX PTQ 文档](../../docs/ONNX_PTQ_COMPILER.md#gru-原生适配)
+及 [集成测试](../../tests/test_onnx_gru_native.py)。
+
+构建 wheel 时，仓库内的 ONNX Runtime 1.20.1 头文件用于构建
+`quant_gru_onnx_runtime` 扩展，支持本项目使用的 ONNX Runtime 1.20.1 及以上版本。
+独立构建可用 `QUANT_GRU_ONNXRUNTIME_INCLUDE` 指定头文件目录；没有头文件时仍可
+构建仅用于 Torch 的 wheel，ONNX 输入校准会提示缺少运行时扩展。
+
 ## 接口与验证
 
 | 接口 | 用途 |

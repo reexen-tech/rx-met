@@ -269,8 +269,8 @@ def apply_onnx_mixed_precision_bitwidth(
             print(f"  没有单节点 ONNX 对应的类型配置: {unsupported_types}")
         if config.get("LSTM_config"):
             print("  ONNX PTQ 不执行 QuantLSTM 内部校准，忽略 LSTM_config")
-        if config.get("GRU_config"):
-            print("  当前 ONNX 图没有 QuantGRU，忽略 GRU_config")
+        if config.get("GRU_config") and not getattr(sim, "_rx_native_grus", {}):
+            print("  当前 ONNX 图没有 GRU，忽略 GRU_config")
 
     stats: Dict[str, Any] = {
         "applied_ops": 0,
@@ -284,6 +284,8 @@ def apply_onnx_mixed_precision_bitwidth(
 
     plan = QuantizerConfigPlan()
     for op in ops:
+        if op.name in getattr(sim, "_rx_native_grus", {}):
+            continue
         type_config = {} if op.name in layer_name_config else _type_config_for_op(
             sim, op, layer_type_config
         )
@@ -315,6 +317,8 @@ def apply_onnx_mixed_precision_bitwidth(
                 print(f"  [{match}] {op.name} ({op.type})")
 
     _apply_plan(plan)
+    for adapter in getattr(sim, "_rx_native_grus", {}).values():
+        adapter.configure(config_file)
     if verbose:
         print(
             f"  应用 {stats['applied_ops']} 个 op，"

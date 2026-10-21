@@ -46,6 +46,8 @@ def force_model_io_quantizers(sim: Any, model: onnx.ModelProto) -> None:
     missing = []
     added = False
     for name in sorted(input_names | output_names):
+        if name in getattr(sim, "_rx_native_io", ()):
+            continue
         quantizer = sim.qc_quantize_op_dict.get(name)
         if quantizer is None:
             if name not in sim.connected_graph.get_all_products():
@@ -68,14 +70,7 @@ def force_model_io_quantizers(sim: Any, model: onnx.ModelProto) -> None:
             "配置没有为模型输入/输出创建 quantizer: " + ", ".join(missing)
         )
     if added:
-        from aimet_onnx.utils import OrtInferenceSession
-
-        sim.session = OrtInferenceSession(
-            sim.model.model,
-            sim.providers,
-            session_options=sim._ort_session_options,
-            path=sim._path,
-        )
+        sim._rebuild_session()
 
 
 def load_onnx_ptq_inputs(
@@ -117,7 +112,11 @@ def create_onnx_ptq_sim(
     """Create QuantSim, force IO quantizers, then set RX percentile."""
     from aimet_onnx import QuantizationSimModel
 
-    sim = QuantizationSimModel(
+    sim_type = QuantizationSimModel
+    if any(node.op_type == "GRU" and not node.domain for node in original_model.graph.node):
+        from .recurrent import NativeGRUSim
+        sim_type = NativeGRUSim
+    sim = sim_type(
         copy.deepcopy(original_model),
         param_type=param_type,
         activation_type=activation_type,
@@ -227,6 +226,9 @@ def verify_onnx_ptq_artifacts(
         )
         restored._rx_expected_quantizers = frozenset(
             artifacts["coverage"]["enabled_quantizer_names"]
+        )
+        restored._rx_expected_native_grus = frozenset(
+            artifacts["coverage"].get("enabled_native_recurrent_nodes", ())
         )
         load_encodings_to_sim(
             restored, str(artifacts["aimet_encodings"]), strict=False,

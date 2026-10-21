@@ -8,7 +8,7 @@ import sys
 
 try:
     import torch
-    from torch.utils.cpp_extension import CUDAExtension, BuildExtension, CUDA_HOME
+    from torch.utils.cpp_extension import CUDAExtension, CppExtension, BuildExtension, CUDA_HOME
 except ImportError as exc:
     raise RuntimeError(
         'PyTorch is required before building quant_gru. '
@@ -175,11 +175,20 @@ class BuildExtWithChecks(BuildExtension):
         super().run()
 
 
+onnx_headers = os.environ.get('QUANT_GRU_ONNXRUNTIME_INCLUDE', os.path.join(
+    here, '../../../native/third_party/onnxruntime-prepared/1.20.1/include'))
+onnx_extensions = []
+if os.path.isfile(os.path.join(onnx_headers, 'onnxruntime_cxx_api.h')):
+    onnx_extensions.append(CppExtension(
+        name='quant_gru_onnx_runtime', sources=['lib/gru_onnx_runtime.cc'],
+        include_dirs=[onnx_headers], extra_compile_args=['-std=c++17', '-O2'],
+    ))
+
 setup(
     name='quant_gru',
     version=read_version(),
     description='Quantized GRU implementation with C++ backend',
-    py_modules=['quant_gru', '_version'],
+    py_modules=['quant_gru', 'quant_gru_onnx', '_version'],
     ext_modules=[
         CUDAExtension(
             name='gru_interface_binding',
@@ -206,7 +215,7 @@ setup(
                 '-Wl,-rpath,$ORIGIN/lib',
             ]
         )
-    ],
+    ] + onnx_extensions,
     cmdclass={
         'build_ext': BuildExtWithChecks,
         'install': InstallWithLib,

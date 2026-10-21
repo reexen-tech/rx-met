@@ -66,6 +66,8 @@ class CompilerEncodingConverter:
         self, node_index: int, io_name: str, io_index: int, encoding: Dict[str, Any]
     ) -> None:
         node_name = self.graph.node_names[node_index]
+        if node_name in getattr(self.sim, "_rx_native_grus", {}):
+            return  # The native operator supplies its complete port/internal schema.
         node_entry = self.activation.setdefault(node_name, {})
         io_entry = node_entry.setdefault(io_name, {})
         key = str(io_index)
@@ -171,6 +173,14 @@ class CompilerEncodingConverter:
             enabled_activations.append(name)
             self.mapped.add(name)
 
+        from .recurrent import export_native_encodings, native_grus
+        native_payload = export_native_encodings(self.sim)
+        for name, adapter in native_grus(self.sim).items():
+            native_activation = native_payload["activation_encodings"].get(name)
+            if native_activation is not None:
+                for output in adapter.outputs:
+                    if output:
+                        tensor_encodings.setdefault(output, native_activation["output"][0])
         self._propagate_grid_preserving(tensor_encodings)
 
         for name, encoding in tensor_encodings.items():
@@ -186,9 +196,13 @@ class CompilerEncodingConverter:
             )
 
         quantizer_args = dict(getattr(self.sim, "quant_args", {}) or {})
+        self.activation.update(native_payload["activation_encodings"])
+        self.params.update(native_payload["param_encodings"])
         payload = {
             "activation_encodings": self.activation,
-            "excluded_layers": list(getattr(self.sim, "_excluded_layer_names", []) or []),
+            "excluded_layers": list(dict.fromkeys(
+                list(getattr(self.sim, "_excluded_layer_names", []) or []) + native_payload["excluded_layers"]
+            )),
             "param_encodings": self.params,
             "quantizer_args": quantizer_args,
             "version": "1.0.0",
@@ -203,5 +217,9 @@ class CompilerEncodingConverter:
             "activation_entries": len(self.activation),
             "param_entries": len(self.params),
             "initializer_count": len(self.graph.initializers),
+            "native_recurrent_nodes": sorted(native_grus(self.sim)),
+            "enabled_native_recurrent_nodes": sorted(
+                name for name, adapter in native_grus(self.sim).items() if adapter.module.use_quantization
+            ),
         }
         return normalize_compiler_encodings(payload, require_po2=True), report

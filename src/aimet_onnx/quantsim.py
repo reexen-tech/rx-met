@@ -316,27 +316,31 @@ def compute_encodings(sim: "QuantizationSimModel"):
         ...     for input in dataset:
         ...         _ = sim.session.run(None, {"input": input})
     """
-    enabled_quantizers = {
-        name: q for name, q in sim.qc_quantize_op_dict.items() if q.enabled
-    }
-    for op_name, qc_op in enabled_quantizers.items():
-        qc_op.reset_encoding_stats()
-        if op_name in sim.activation_names:
-            qc_op.op_mode = OpMode.updateStats
-        else:
-            qc_op.op_mode = OpMode.oneShotQuantizeDequantize
-            if qc_op.is_encoding_frozen():
-                qc_op.op_mode = OpMode.quantizeDequantize
+    with contextlib.ExitStack() as stack:
+        for adapter in getattr(sim, "_rx_native_grus", {}).values():
+            if adapter.module.use_quantization:
+                stack.enter_context(adapter.module.calibration_context())
+        enabled_quantizers = {
+            name: q for name, q in sim.qc_quantize_op_dict.items() if q.enabled
+        }
+        for op_name, qc_op in enabled_quantizers.items():
+            qc_op.reset_encoding_stats()
+            if op_name in sim.activation_names:
+                qc_op.op_mode = OpMode.updateStats
+            else:
+                qc_op.op_mode = OpMode.oneShotQuantizeDequantize
+                if qc_op.is_encoding_frozen():
+                    qc_op.op_mode = OpMode.quantizeDequantize
 
-    yield
+        yield
 
-    for op_name, qc_op in enabled_quantizers.items():
-        if (
-            qc_op.data_type == QuantizationDataType.int
-            and not qc_op.is_encoding_frozen()
-        ):
-            qc_op.compute_encodings()
-        qc_op.op_mode = OpMode.quantizeDequantize
+        for op_name, qc_op in enabled_quantizers.items():
+            if (
+                qc_op.data_type == QuantizationDataType.int
+                and not qc_op.is_encoding_frozen()
+            ):
+                qc_op.compute_encodings()
+            qc_op.op_mode = OpMode.quantizeDequantize
 
 
 # pylint: disable=missing-class-docstring, too-many-arguments, too-many-locals, too-many-instance-attributes
@@ -466,12 +470,16 @@ class QuantizationSimModel:
         if _tie_qtzrs:
             self._tie_quantizers_for_op_types(op_types_to_tie_qtzrs)
 
+        self._prepare_runtime_model()
         self.session = OrtInferenceSession(
             self.model.model,
             self.providers,
             session_options=self._ort_session_options,
             path=self._path,
         )
+
+    def _prepare_runtime_model(self):
+        """Allow operator-owned simulation nodes to be installed before ORT loads the graph."""
 
     @classmethod
     def _from_onnx_qdq(cls, model: ModelProto, **kwargs) -> "QuantizationSimModel":
@@ -2619,6 +2627,9 @@ def load_encodings_to_sim(
         quant_sim_model.qc_quantize_op_dict[quantizer_name]._load_encodings_dict(
             encodings_to_load, allow_overwrite=allow_overwrite
         )
+    if getattr(quant_sim_model, "_rx_native_grus", None) or encodings.get("native_recurrent_encodings"):
+        from aimet_onnx.rx_ptq.recurrent import restore_native_encodings
+        restore_native_encodings(quant_sim_model, encodings, allow_overwrite=allow_overwrite)
     return mismatched_encodings
 
 

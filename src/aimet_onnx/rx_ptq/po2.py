@@ -292,6 +292,9 @@ def align_sim_encodings_to_po2(
     2. Optionally overwrite Conv/Gemm/MatMul bias with ``Sb = Sx * Sw``.
     """
     validate_quantizer_state(sim, allow_pending_bias=True)
+    for adapter in getattr(sim, "_rx_native_grus", {}).values():
+        if adapter.module.use_quantization:
+            adapter.module.enable_pot2(method=method, tolerance=tolerance)
     temporarily_disabled = set(getattr(sim, "_rx_calibration_bias_quantizers", ()))
     if temporarily_disabled and not align_bias_scale:
         raise RuntimeError("Temporarily disabled bias quantizers require bias-scale alignment")
@@ -336,9 +339,17 @@ def align_sim_encodings_to_po2(
         bias_report = align_onnx_bias_scale(sim, bias_bitwidth=bias_bitwidth)
 
     sim._rx_expected_quantizers = frozenset(expected)
+    sim._rx_expected_native_grus = frozenset(
+        name for name, adapter in getattr(sim, "_rx_native_grus", {}).items()
+        if adapter.module.use_quantization
+    )
     validate_quantizer_state(sim)
 
     not_po2 = []
+    if getattr(sim, "_rx_native_grus", {}):
+        from .recurrent import export_native_encodings
+        from aimet_common.compiler_encodings import normalize_compiler_encodings
+        normalize_compiler_encodings(export_native_encodings(sim), require_po2=True)
     for name, quantizer in sim.qc_quantize_op_dict.items():
         if not quantizer.enabled or quantizer.data_type != QuantizationDataType.int:
             continue
