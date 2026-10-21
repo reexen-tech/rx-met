@@ -344,10 +344,9 @@ class AffineEncoding(EncodingBase, _GridMixin):
         if enc_type is None:
             raise ValueError(f"Unsupported encoding granularity: {self.granularity}")
 
-        # ✅ 修改：直接导出 zero_point，不加 qmin
-        # 原始 AIMET 行为：offset = self.offset.flatten() + self.qmin（导出 -128）
-        # 新行为：offset = self.offset.flatten()（对称量化导出 0）
-        offset = self.offset.flatten()  # 直接使用 zero_point
+        # Keep the additive Torch offset in the source format. Compiler export
+        # converts it to the standard subtractive zero point.
+        offset = self.offset.flatten()
 
         return [
             {

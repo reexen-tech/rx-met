@@ -37,6 +37,10 @@ python3 -m unittest discover -s tests -p test_percentile_calibration.py -v
 
 ## 文件说明
 
+`test_standard_zero_point.py` 检查 compiler schema 4 的统一减性零点、无版本及旧版本
+混合普通/循环编码迁移、重复规范化、全部 UINT8 整数码和有符号多位宽网格等价，
+并用真实 Torch 导出与重载验证非零零点，拒绝未知版本、字段冲突和错误符号。
+
 `test_native_qdq_alignment.py` 使用实际原生量化器及 ORT CPU/CUDA，核对 INT32 小整数码、
 逐通道、ties-to-even、非零 offset、非 Po2 倒数和 NaN/Inf 饱和；需使用新构建的 AIMET 原生库。
 `test_onnx_ptq_alignment.py` 同时检查 Percentile PTQ 的 bias 启用状态和配置位宽，

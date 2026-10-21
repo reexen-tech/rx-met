@@ -60,13 +60,13 @@ class OnnxGridAdapterTest(unittest.TestCase):
                 self.assertEqual(onnx_entry, torch_payload['param_encodings']['w'])
                 self.assertEqual(onnx_entry['zero_point'], [0])
 
-    def test_asymmetric_parameters_keep_true_nonzero_additive_offset(self):
+    def test_asymmetric_parameters_use_subtractive_zero_point(self):
         raw = dict(raw_encoding(offset=-7), is_symmetric='False')
         result = self.convert([raw], symmetric=False)
         expected = normalize_compiler_encodings({'param_encodings': {'w': [raw]}}, require_po2=True)
         self.assertEqual(result, expected['param_encodings']['w'])
         self.assertEqual(result['dtype'], 'UINT8')
-        self.assertEqual(result['zero_point'], [-7])
+        self.assertEqual(result['zero_point'], [7])
 
     def test_unsigned_symmetric_parameters(self):
         result = self.convert([raw_encoding(offset=0)], unsigned=True)
@@ -83,11 +83,11 @@ class OnnxGridAdapterTest(unittest.TestCase):
         entries = [raw_encoding(), raw_encoding(offset=0, scale=0.25)]
         result = self.convert(entries, unsigned=True)
         self.assertEqual(result['dtype'], 'INT8')
-        self.assertEqual(result['zero_point'], [0, 128])
+        self.assertEqual(result['zero_point'], [0, -128])
         for index, entry in enumerate(entries):
             for unsigned_q in (0, 127, 255):
                 signed_q = unsigned_q - 128
-                actual = (signed_q + result['zero_point'][index]) * result['scale'][index]
+                actual = (signed_q - result['zero_point'][index]) * result['scale'][index]
                 self.assertEqual(actual, (unsigned_q + entry['offset']) * entry['scale'])
 
     def test_single_channel_granularity_comes_from_quantizer(self):

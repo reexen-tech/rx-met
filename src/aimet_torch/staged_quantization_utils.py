@@ -156,6 +156,10 @@ def load_quantizer_encodings(
     
     with open(load_path, 'r', encoding='utf-8') as f:
         encodings_dict = json.load(f)
+
+    if 'activation_encodings' in encodings_dict or 'param_encodings' in encodings_dict:
+        from aimet_common.compiler_encodings import normalize_compiler_encodings
+        encodings_dict = normalize_compiler_encodings(encodings_dict)
     
     loaded_count = 0
     skipped_count = 0

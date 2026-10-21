@@ -50,14 +50,14 @@ class CompilerEncodingTest(unittest.TestCase):
                 self.assertEqual(parameter['dtype'], f'INT{bits}')
                 self.assertEqual(parameter['zero_point'], [0])
 
-    def test_asymmetric_offset_remains_additive_and_unsigned(self):
+    def test_asymmetric_offset_becomes_subtractive_zero_point(self):
         entry = encoding(is_symmetric='False', offset=-7, min=-0.875, max=31.0)
         result = shared.normalize_compiler_encodings(document(entry), require_po2=True)
         parameter = result['param_encodings']['conv.weight']
         self.assertEqual(parameter['dtype'], 'UINT8')
-        self.assertEqual(parameter['zero_point'], [-7])
+        self.assertEqual(parameter['zero_point'], [7])
         for q in (0, 7, 255):
-            self.assertEqual((q + parameter['zero_point'][0]) * parameter['scale'][0],
+            self.assertEqual((q - parameter['zero_point'][0]) * parameter['scale'][0],
                              (q - 7) * 0.125)
 
     def test_unsigned_symmetric_encoding(self):
@@ -100,7 +100,7 @@ class CompilerEncodingTest(unittest.TestCase):
                     'recurrent': {f'is_{kind}': True, 'input': [grid], 'output': [grid]}},
                     'param_encodings': {'recurrent.weight_ih.weight': copy.deepcopy(grid)}}
                 result = shared.normalize_compiler_encodings(source)
-                self.assertEqual(result, source)
+                self.assertEqual(result, dict(source, schema_version=4))
 
     def test_native_recurrent_indexed_ports_and_internal_lists_are_preserved(self):
         for kind in ('GRU', 'LSTM'):
@@ -113,7 +113,8 @@ class CompilerEncodingTest(unittest.TestCase):
                     'internal_ops': {'gate': {'output': [copy.deepcopy(grid)]}},
                     'internal_ops_reverse': {'gate': {'output': [copy.deepcopy(grid)]}}}},
                     'param_encodings': {'recurrent.weight_ih.weight': copy.deepcopy(grid)}}
-                self.assertEqual(shared.normalize_compiler_encodings(source, require_po2=True), source)
+                self.assertEqual(shared.normalize_compiler_encodings(source, require_po2=True),
+                                 dict(source, schema_version=4))
 
     def test_invalid_encoding_type_and_affine_exponent_are_rejected(self):
         for value in ('unknown', ['PER_TENSOR'], None):

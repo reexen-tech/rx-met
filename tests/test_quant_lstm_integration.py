@@ -22,7 +22,7 @@ ROOT = Path(__file__).resolve().parents[1]
 CONFIG = ROOT / 'examples/config/mrnn_quantsim_config_custom_mixed_precision_v2.json'
 
 
-def assert_public_encoding_document(test, document):
+def assert_public_encoding_document(test, document, schema_version=4):
     """Compiler encodings never contain standalone LSTM checkpoint metadata."""
     forbidden = {'quant_lstm_encodings', 'model_info', 'execution_metadata'}
     def visit(value, root=False):
@@ -39,7 +39,7 @@ def assert_public_encoding_document(test, document):
             for item in value:
                 visit(item)
     visit(document, root=True)
-    test.assertEqual(document['schema_version'], 3)  # Existing QuantGRU schema.
+    test.assertEqual(document['schema_version'], schema_version)
 
 
 def assert_recurrent_encoding_bounds(test, record):
@@ -173,7 +173,7 @@ class QuantLSTMIntegrationTest(unittest.TestCase):
             fresh.model(self.x * 10)
         self.assertEqual(before, fresh.model.lstm.export_quant_params())
         self.assertIn('lstm', saved['activation_encodings'])
-        assert_public_encoding_document(self, saved)
+        assert_public_encoding_document(self, saved, schema_version=3)
         torch.testing.assert_close(fresh.model(self.x), sim.model(self.x))
         self.assertIn('proj.input_quantizers.0', saved)
 
@@ -221,7 +221,7 @@ class QuantLSTMIntegrationTest(unittest.TestCase):
         self.assertIn('gru', enc['activation_encodings'])
         self.assertIn('lstm', enc['activation_encodings'])
         assert_public_encoding_document(self, enc)
-        self.assertEqual(enc['schema_version'], 3)
+        self.assertEqual(enc['schema_version'], 4)
         for name in ('gru', 'lstm'):
             assert_recurrent_encoding_schema(self, enc['activation_encodings'][name])
         self.assertEqual(set(enc['activation_encodings']['gru']['input']['0']),
@@ -268,7 +268,7 @@ class QuantLSTMIntegrationTest(unittest.TestCase):
         saved = save_quantizer_encodings(sim.model, str(path), verbose=False)
         self.assertIn('gru', saved['activation_encodings'])
         self.assertIn('lstm', saved['activation_encodings'])
-        assert_public_encoding_document(self, saved)
+        assert_public_encoding_document(self, saved, schema_version=3)
         fresh = make_sim()
         fresh.model.load_state_dict(sim.model.state_dict())
         loaded = load_quantizer_encodings(fresh.model, str(path), allow_overwrite=False, verbose=False)

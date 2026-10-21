@@ -1,10 +1,9 @@
 """Framework-independent compiler encoding normalization and validation.
 
-The existing RX compiler format uses an additive ``zero_point``:
-``real = scale * (q + zero_point)``. This is the negative of the ONNX Q/DQ
-zero point. Frontend adapters must convert their source grids to this convention
-before normalization; an AIMET ONNX TfEncoding offset is not a signed offset.
-Native recurrent records retain their library-owned schema and grid convention.
+Compiler schema 4 uses ``real = scale * (q - zero_point)`` for every record.
+Legacy ordinary records used an additive zero_point; native recurrent records
+already used the standard subtractive convention. AIMET source offsets remain
+additive and are converted only at the compiler interface.
 """
 from __future__ import annotations
 
@@ -14,6 +13,7 @@ import math
 from typing import Any, Iterable
 
 logger = logging.getLogger(__name__)
+COMPILER_SCHEMA_VERSION = 4
 _VECTOR_FIELDS = {'scale', 'n', 'offset', 'zero_point', 'min', 'max', 'real_min', 'real_max'}
 
 
@@ -69,6 +69,43 @@ def _records(document):
     owners = _native_owners(document)
     for name, value in document.get('param_encodings', {}).items():
         yield from visit(value, f'param_encodings.{name}', _native_parameter(name, owners))
+
+
+def _schema_version(document):
+    version = document.get('schema_version', 3)
+    if type(version) is not int or version not in (1, 2, 3, COMPILER_SCHEMA_VERSION):
+        raise ValueError(f'schema_version: unsupported compiler encoding version {version!r}')
+    return version
+
+
+def _standardize_zero_points(document):
+    version = _schema_version(document)
+    updates = []
+    for path, entry, native in _records(document):
+        def point(value):
+            if not _finite_number(value) or value != int(value):
+                raise ValueError(f'{path}.zero_point: expected finite integers')
+            return value
+
+        zero_point = None
+        if 'zero_point' in entry:
+            zero_point = _map_values(entry['zero_point'], point)
+            if version < COMPILER_SCHEMA_VERSION and not native:
+                zero_point = _map_values(zero_point, lambda value: -value)
+        if 'offset' in entry:
+            from_offset = _map_values(entry['offset'], lambda value: -point(value))
+            if zero_point is not None and zero_point != from_offset:
+                raise ValueError(f'{path}: offset and zero_point describe different grids')
+            zero_point = from_offset
+        if zero_point is not None:
+            updates.append((entry, zero_point))
+    changed = document.get('schema_version') != COMPILER_SCHEMA_VERSION
+    for entry, zero_point in updates:
+        changed |= 'offset' in entry or entry.get('zero_point') != zero_point
+        entry.pop('offset', None)
+        entry['zero_point'] = zero_point
+    document['schema_version'] = COMPILER_SCHEMA_VERSION
+    return changed
 
 
 def compact_encoding_records(entries: Iterable[dict[str, Any]], *, force_list: bool = False) -> dict[str, Any]:
@@ -150,16 +187,14 @@ def _exponent(scale, path, require_po2, verbose=False):
 def normalize_quant_fields_add_n(
     enc: dict, verbose: bool = True, *, require_po2: bool = False,
 ) -> tuple[dict, bool]:
-    changed = False
+    changed = _standardize_zero_points(enc)
     for path, entry, native in _records(enc):
-        if native:
-            continue
-        if 'scale' in entry:
+        if not native and 'scale' in entry:
             exponent = _map_values(entry['scale'], lambda scale: _exponent(scale, path, require_po2, verbose))
             if 'n' not in entry:
                 entry['n'] = exponent
                 changed = True
-        for old, new in (('offset', 'zero_point'), ('min', 'real_min'), ('max', 'real_max')):
+        for old, new in (('min', 'real_min'), ('max', 'real_max')):
             if old in entry:
                 value = entry.pop(old)
                 if new not in entry:
@@ -177,6 +212,7 @@ def normalize_quant_fields_add_n(
 
 def normalize_dtype_with_bitwidth(enc: dict, verbose: bool = True) -> tuple[dict, bool]:
     changed = False
+    version = _schema_version(enc)
     for path, entry, native in _records(enc):
         if native:
             continue
@@ -195,13 +231,15 @@ def normalize_dtype_with_bitwidth(enc: dict, verbose: bool = True) -> tuple[dict
         if base in ('INT', 'UINT', 'FLOAT'):
             if dtype == 'INT' and all(key in entry for key in ('scale', 'zero_point', 'real_min')):
                 scales = list(_values(entry['scale']))
-                offsets = list(_values(entry['zero_point']))
+                zero_points = list(_values(entry['zero_point']))
+                if version < COMPILER_SCHEMA_VERSION:
+                    zero_points = [-value for value in zero_points]
                 minima = list(_values(entry['real_min']))
-                length = max(len(scales), len(offsets), len(minima))
-                if (all(len(values) in (1, length) for values in (scales, offsets, minima))
-                        and all(_finite_number(value) for value in (*scales, *offsets, *minima))
+                length = max(len(scales), len(zero_points), len(minima))
+                if (all(len(values) in (1, length) for values in (scales, zero_points, minima))
+                        and all(_finite_number(value) for value in (*scales, *zero_points, *minima))
                         and all(scale > 0 for scale in scales)):
-                    bounds = [minima[i % len(minima)] / scales[i % len(scales)] - offsets[i % len(offsets)]
+                    bounds = [minima[i % len(minima)] / scales[i % len(scales)] + zero_points[i % len(zero_points)]
                               for i in range(length)]
                     dtype = 'UINT' if all(bound >= -1e-5 for bound in bounds) else 'INT'
                     base = dtype
@@ -213,6 +251,7 @@ def normalize_dtype_with_bitwidth(enc: dict, verbose: bool = True) -> tuple[dict
 
 def validate_compiler_encodings(enc: dict, *, require_po2: bool = False) -> None:
     """Validate numbers, channel shapes and representable compiler integer grids."""
+    version = _schema_version(enc)
     for path, entry, native in _records(enc):
         try:
             if 'enc_type' in entry and (not isinstance(entry['enc_type'], str) or
@@ -247,23 +286,23 @@ def validate_compiler_encodings(enc: dict, *, require_po2: bool = False) -> None
                 raise ValueError('n: exponent does not match scale')
             if any(low > high for low, high in zip(fields['real_min'], fields['real_max'])):
                 raise ValueError('range: real_min exceeds real_max')
-            if native:
-                continue  # The recurrent library validates its own zero-point convention.
             signed = dtype.startswith('INT')
             qmin = -(1 << (bits - 1)) if signed else 0
             qmax = (1 << (bits - int(signed))) - 1
             tolerance = max(1e-5, max(abs(qmin), abs(qmax)) * 1e-6)
             for index, step in enumerate(scales):
                 low, high = fields['real_min'][index], fields['real_max'][index]
-                offset = fields['zero_point'][index]
-                if low > high or low / step - offset < qmin - tolerance or high / step - offset > qmax + tolerance:
+                zero_point = fields['zero_point'][index]
+                if version < COMPILER_SCHEMA_VERSION and not native:
+                    zero_point = -zero_point
+                if low > high or low / step + zero_point < qmin - tolerance or high / step + zero_point > qmax + tolerance:
                     raise ValueError('range: scale/zero_point/real bounds do not fit dtype')
         except (KeyError, ValueError, TypeError, ZeroDivisionError) as exc:
             raise ValueError(f'{path}: {exc}') from exc
 
 
 def normalize_compiler_encodings(enc: dict, *, require_po2: bool = False, verbose: bool = False) -> dict:
-    """Normalize ordinary grids; frontends append library-owned recurrent grids afterwards."""
+    """Normalize compiler records and migrate legacy zero points without changing grids."""
     result = copy.deepcopy(enc)
     compact_per_channel_param_encodings(result, verbose)
     flatten_activation_io_index_dict(result, verbose)

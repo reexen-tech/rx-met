@@ -9,7 +9,9 @@ from typing import Any, Dict, List, Tuple
 
 import onnx
 
-from aimet_common.compiler_encodings import compact_encoding_records, normalize_compiler_encodings
+from aimet_common.compiler_encodings import (
+    COMPILER_SCHEMA_VERSION, compact_encoding_records, normalize_compiler_encodings,
+)
 from aimet_common.quantsim_config.compute_ops import is_grid_preserving_op
 from .validation import validate_quantizer_state
 
@@ -138,12 +140,12 @@ class CompilerEncodingConverter:
             if str(entry.get("dtype", "")).lower() == "int":
                 bits = int(entry["bitwidth"])
                 qmin = -(1 << (bits - 1)) + int(strict) if not unsigned else 0
-                # TfEncoding uses an unsigned index grid. Translate its additive
-                # offset to the effective compiler integer grid, preserving QDQ.
+                # TfEncoding uses an unsigned index grid. Convert its additive
+                # offset to a subtractive zero point in the compiler's code domain.
                 offset = entry.pop("offset")
                 if offset != int(offset):
                     raise ValueError(f"{name}: TfEncoding offset must be an integer")
-                entry["zero_point"] = int(offset) - qmin
+                entry["zero_point"] = qmin - int(offset)
                 entry["dtype"] = f"{'UINT' if unsigned else 'INT'}{bits}"
             entries.append(entry)
         return compact_encoding_records(entries, force_list=name in self.graph.initializers)
@@ -254,7 +256,7 @@ class CompilerEncodingConverter:
             "param_encodings": self.params,
             "quantizer_args": quantizer_args,
             "version": "1.0.0",
-            "schema_version": 3,
+            "schema_version": COMPILER_SCHEMA_VERSION,
         }
         report = {
             "enabled_quantizers": len(self.mapped),

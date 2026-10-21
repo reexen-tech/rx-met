@@ -68,11 +68,17 @@ python3 /examples/quick_start_onnx_ptq.py
 
 ## 输出
 
-为兼容已有 PyTorch 编译器格式，普通算子记录的 `zero_point` 是加性偏移：
-`real = scale * (q + zero_point)`，与标准 ONNX Q/DQ 零点的符号相反。
-ONNX 适配器将 `TfEncoding.offset` 转为对应整数域的加性偏移；例如有符号 INT8
-的 `-128` 转为 `0`，INT32 bias 的 `-2147483648` 转为 `0`。
-非对称量化保留实际偏移，不能统一置零。无符号编码使用 `UINT8` 等明确 dtype。
+编译器 encodings 使用 `schema_version=4`，普通算子和原生 GRU/LSTM 均采用标准零点：
+`real = scale * (q - zero_point)`，即实数 0 对应的整数码为 `zero_point`。
+Torch 源 offset 转为 `-offset`；ONNX 的 `TfEncoding.offset` 属于无符号索引域，
+需转为 `qmin - offset`。例如对称 INT8 的 `offset=-128` 与 `qmin=-128`
+得到 `zero_point=0`，INT32 bias 同理。原生 GRU/LSTM 已使用标准零点，保持原值。
+非对称量化保留实际零点，不能统一置零；无符号编码使用 `UINT8` 等明确 dtype。
+当前编译器只支持对称量化，输入编译器的配置应保持对称；此修正不扩大编译器的量化支持范围。
+
+旧文件（缺少 schema_version 或版本为 1/2/3）的普通算子使用加性零点，原生循环算子
+已采用减性零点。公共规范化及 Torch 编码重载按版本迁移普通记录，重复处理 schema 4
+不会再次取反。框架内部 offset、AIMET 原始 encodings 和实际量化网格保持不变。
 参数编码的通道字段统一为数组，单通道也保留数组结构。
 普通算子和原生 GRU/LSTM 的整数记录均包含 `enc_type` 与 `n`，n 的形状与 scale 一致。
 Po2 scale 满足 `scale = 2^(-n)`；非 Po2 scale 的 n 是舍入指数，实际网格以 scale 为准。
@@ -109,7 +115,7 @@ ONNX 适配器仅在校准期间使用临时 session 采集中间张量，并将
 
 原生 CPU/CUDA QDQ 共用居中整数网格计算，nearest 使用 ties-to-even。
 INT32 不经过 float32 的 `2^31` 平移，避免小整数码丢失；这需要重新构建原生库，
-encoding 的 scale、offset/zero_point 和保存格式保持不变。非 Po2 scale 使用正确舍入的
+该内核修正不改变 scale、offset/zero_point 或保存格式。非 Po2 scale 使用正确舍入的
 倒数乘法；最小范围保护仅在公共 Percentile 模块按目标整数域应用一次。
 CUDA provider 默认设置 `use_tf32=0`，使校准、评价和恢复使用完整 FP32 矩阵计算；
 显式传入的 provider 选项保持优先。
