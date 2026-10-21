@@ -41,12 +41,14 @@ def _sha256(path: Path) -> str:
 
 
 def force_model_io_quantizers(sim: Any, model: onnx.ModelProto) -> None:
-    """Ensure every graph input/output has an enabled activation quantizer."""
+    """Ensure quantizable floating graph inputs/outputs have enabled quantizers."""
     input_names = {value_info.name for value_info in model.graph.input}
     output_names = {value_info.name for value_info in model.graph.output}
     missing = []
     added = False
     for name in sorted(input_names | output_names):
+        if not sim._is_quantizable_dtype(name):
+            continue
         if (name in getattr(sim, "_rx_native_io", ())
                 or name in getattr(sim, "_rx_input_owned_io", ())):
             continue

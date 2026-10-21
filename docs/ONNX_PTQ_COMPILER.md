@@ -126,6 +126,12 @@ CUDA provider 默认设置 `use_tf32=0`，使校准、评价和恢复使用完�
 输入网格；常量仍存入 `param_encodings`。显式 `weight_*` 字段保留参数配置的优先级；
 只使用 `QuantizedLinear` 映射 MatMul 时，权重仍与激活输入分开配置。共享网格收到
 不兼容的显式请求时，在修改量化器前报错。
+
+网格传播只覆盖浮点数据输入及浮点输出。Gather 的 indices、Reshape 的 shape、
+TopK/MaxPool 的索引输出、Dropout mask 和 Pad 控制参数不继承数据网格；模型的整数、
+布尔输入输出也不会被强制添加量化器。导出检查量化器对应张量和端口的真实 dtype，
+发现非浮点编码时报错；恢复验证会拒绝被追加到索引端口的 sidecar 编码。
+
 常量 MatMul 输入在统计校准期间透传，普通权重仍执行参数 QDQ；同一共享量化器不能
 同时承担这两种校准角色。
 

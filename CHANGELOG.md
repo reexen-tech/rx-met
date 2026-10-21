@@ -17,6 +17,7 @@
 
 ### Fixed
 
+- ONNX 编译器编码传播按数据端口和真实 dtype 过滤，修复 Gather 的 INT64 索引及其生成节点被错误写入激活量化网格的问题，并排除 TopK/MaxPool 索引、Dropout mask 和非数据控制端口。模型整数/布尔输入输出保持原类型；导出拒绝挂在非浮点张量或端口上的量化器，恢复校验拒绝追加到索引端口的错误 sidecar 编码。
 - Torch 为 FX 展开 BN、自定义模块自动补建的参数量化器复用普通参数的 `_V2LazyQuantizer`，实际遵循所选校准方案、数据类型和位宽，修复固定使用 MinMax 导致 Percentile/TfEnhanced 选择丢失的问题；百分位设置和重新校准也覆盖这些参数。移除为匹配旧错误默认而添加的 ONNX 参数校准 metadata 适配。
 - ONNX GRU 后的普通计算输入在实际消费位置校准，避免中间帧复用整段序列网格及 GRU 输出的重复量化；普通计算分支后的 Concat 使用独立、共享的输入网格。混合精度、bias 对齐、编译器映射和原生编码重载共用端口解析，恢复前拒绝共享量化器的冲突编码，clean ONNX 保留原图。
 - ONNX Percentile 按最终 min/max 范围恢复 scale，并在对应 CPU/CUDA 设备上执行公共统计与范围计算，消除重复对称化及跨设备标量运算导致的 float32 scale 差别。

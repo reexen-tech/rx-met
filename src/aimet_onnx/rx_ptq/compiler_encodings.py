@@ -13,6 +13,11 @@ from aimet_common.compiler_encodings import compact_encoding_records, normalize_
 from aimet_common.quantsim_config.compute_ops import is_grid_preserving_op
 from .validation import validate_quantizer_state
 
+_FLOAT_TENSOR_TYPES = frozenset({
+    onnx.TensorProto.FLOAT, onnx.TensorProto.FLOAT16,
+    onnx.TensorProto.DOUBLE, onnx.TensorProto.BFLOAT16,
+})
+
 
 @dataclass(frozen=True)
 class _GraphIndex:
@@ -20,12 +25,19 @@ class _GraphIndex:
     consumers: Dict[str, List[Tuple[int, int]]]
     initializers: set[str]
     node_names: Dict[int, str]
+    tensor_types: Dict[str, int]
 
     @classmethod
-    def build(cls, model: onnx.ModelProto) -> "_GraphIndex":
+    def build(cls, model: onnx.ModelProto, activation_dtypes=None) -> "_GraphIndex":
         producers: Dict[str, List[Tuple[int, int]]] = defaultdict(list)
         consumers: Dict[str, List[Tuple[int, int]]] = defaultdict(list)
         node_names: Dict[int, str] = {}
+        tensor_types = {name: onnx.helper.np_dtype_to_tensor_dtype(dtype)
+                        for name, dtype in (activation_dtypes or {}).items()}
+        for value in (*model.graph.input, *model.graph.output, *model.graph.value_info):
+            if value.type.HasField("tensor_type") and value.type.tensor_type.elem_type:
+                tensor_types[value.name] = value.type.tensor_type.elem_type
+        tensor_types.update({value.name: value.data_type for value in model.graph.initializer})
         for index, node in enumerate(model.graph.node):
             node_names[index] = node.name or f"{node.op_type}_{index}"
             for output_index, tensor in enumerate(node.output):
@@ -39,14 +51,29 @@ class _GraphIndex:
             consumers=dict(consumers),
             initializers={item.name for item in model.graph.initializer},
             node_names=node_names,
+            tensor_types=tensor_types,
         )
 
     def data_inputs(self, node: onnx.NodeProto) -> List[str]:
+        # Grid-preserving ops carry values on port 0. Other inputs are indices,
+        # shapes, masks, ROI coordinates, or padding controls, even if floating.
         return [
             tensor
-            for tensor in node.input
-            if tensor and tensor not in self.initializers
+            for tensor in node.input[:1]
+            if tensor not in self.initializers and self.is_floating(tensor)
         ]
+
+    def data_outputs(self, node: onnx.NodeProto) -> List[str]:
+        return [tensor for tensor in node.output if self.is_floating(tensor)]
+
+    def is_floating(self, tensor: str) -> bool:
+        return self.tensor_types.get(tensor) in _FLOAT_TENSOR_TYPES
+
+    def validate_encoding_type(self, tensor: str) -> None:
+        dtype = self.tensor_types.get(tensor)
+        if dtype is not None and dtype not in _FLOAT_TENSOR_TYPES:
+            raise ValueError(f"Quantization encoding on non-floating ONNX tensor: {tensor} "
+                             f"({onnx.TensorProto.DataType.Name(dtype)})")
 
 
 class CompilerEncodingConverter:
@@ -54,7 +81,7 @@ class CompilerEncodingConverter:
 
     def __init__(self, sim: Any, original_model: onnx.ModelProto):
         self.sim = sim
-        self.graph = _GraphIndex.build(original_model)
+        self.graph = _GraphIndex.build(original_model, getattr(sim, "activation_dtypes", {}))
         self.original_model = original_model
         self.activation: Dict[str, Dict[str, Dict[str, Any]]] = {}
         self.params: Dict[str, Dict[str, Any]] = {}
@@ -68,6 +95,9 @@ class CompilerEncodingConverter:
         node_name = self.graph.node_names[node_index]
         if node_name in getattr(self.sim, "_rx_native_grus", {}):
             return  # The native operator supplies its complete port/internal schema.
+        node = self.original_model.graph.node[node_index]
+        tensor = node.input[io_index] if io_name == "input" else node.output[io_index]
+        self.graph.validate_encoding_type(tensor)
         node_entry = self.activation.setdefault(node_name, {})
         io_entry = node_entry.setdefault(io_name, {})
         key = str(io_index)
@@ -123,8 +153,8 @@ class CompilerEncodingConverter:
     ) -> None:
         """Copy encodings through reshape/maxpool/pad so compute I/O is complete.
 
-        Simulation still uses one quantizer per tensor. This only fills compiler
-        sidecar slots for grid-preserving edges that AIMET left disabled.
+        Only floating data ports participate; index, shape, mask, and other
+        control ports retain their ONNX types. Live quantizers are unchanged.
         """
         changed = True
         while changed:
@@ -133,7 +163,7 @@ class CompilerEncodingConverter:
                 if not is_grid_preserving_op(node.op_type):
                     continue
                 data_inputs = self.graph.data_inputs(node)
-                data_outputs = [tensor for tensor in node.output if tensor]
+                data_outputs = self.graph.data_outputs(node)
                 if not data_inputs or not data_outputs:
                     continue
                 source = next(
@@ -172,6 +202,7 @@ class CompilerEncodingConverter:
         for name, quantizer in self.sim.qc_quantize_op_dict.items():
             if not quantizer.enabled:
                 continue
+            self.graph.validate_encoding_type(name)
             encoding = self._encoding_from_quantizer(name, quantizer)
             if name in port_names:
                 port_encodings[name] = encoding
