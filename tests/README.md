@@ -3,6 +3,25 @@
 本目录保存跨源码目录和构建配置的项目级测试。各模块内部的专项测试继续放在对应模块
 目录中。
 
+## KWS PTQ 往返验证
+
+`verify_kws_ptq_roundtrip.py` 从 KWS 浮点检查点开始，调用示例的模型、数据集和量化接口，
+执行 PTQ、Po2 并导出，跳过 QAT；再将该 ONNX 作为输入重新 PTQ。
+两轮使用相同 JSON 快照、相同顺序的真实校准样本和 batch size 1，并检查 PTQ 未改变浮点权重。
+需要 CUDA 和包含 ONNX 桥接的新版本 QuantGRU。
+
+```bash
+python3 tests/verify_kws_ptq_roundtrip.py \
+  --fp-checkpoint /workspace/output/quick_start_kws/gru/model_fp_kws.pth \
+  --data-dir /datasets/speech_commands_v0.02
+```
+
+默认每类取 20 条训练校准及验证样本，输出到运行目录的
+`output/kws_ptq_roundtrip/<时间>/`。`torch_ptq/`、`onnx_ptq/` 保存两轮产物，
+`comparison.json` 逐项记录 ONNX、编码、GRU 编码和验证结果，`report.md` 提供摘要。
+产物不一致时仍保存完整报告并返回 1；`--report-only` 可只生成报告而返回 0。
+已有输出目录拒绝覆盖，可用 `--output-dir` 指定新目录。
+
 ## 文件说明
 
 `test_dependencies.py` 验证依赖管理配置和生成结果。该测试检查以下内容：
