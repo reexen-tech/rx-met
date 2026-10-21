@@ -89,7 +89,7 @@ class QcQuantizeOp:
         rounding_mode: str = "nearest",
         op_mode: Union[OpMode, None] = None,
         bitwidth: int = 8,
-        use_symmetric_encodings: bool = False,
+        use_symmetric_encodings: bool = True,
         tensor_quantizer_params: Union[TensorQuantizerParams, None] = None,
         signed: bool = True,
     ):

@@ -92,7 +92,9 @@ apply_mixed_precision_bitwidth(
 | `per_channel_quantization` | 是否使用逐通道参数量化 |
 | `disable_quantization` | 是否禁用匹配模块的量化器 |
 
-Torch 和 ONNX 的整数量化默认使用 INT，符号与对称性独立，`*_symmetric` 只调整
+Torch 和 ONNX 的整数量化默认使用 INT 和对称量化，JSON1 遗漏激活或参数的
+`is_symmetric` 时统一按 True 处理；显式 False 继续使用非对称量化。
+符号与对称性独立，`*_symmetric` 只调整
 校准策略，修改位宽保留当前符号。UINT 对称网格使用零点 0、范围 `[0, 2^bitwidth-1]`，
 校准及推理将负值截为零；INT 对称网格使用零点 0 和完整有符号范围。
 显式层设置优先于 `default_config.signed`。例如：

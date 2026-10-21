@@ -101,7 +101,7 @@ class AffineQuantizerBase(QuantizerBase, _GridMixin):  # pylint: disable=too-man
     Args:
         shape (tuple): Shape of the quantization parameters
         bitwidth (int): Quantization bitwidth
-        symmetric (bool): If True, performs symmetric quantization;
+        symmetric (bool): Defaults to True. If True, performs symmetric quantization;
                           otherwise, performs asymmetric quantization
         encoding_analyzer (EncodingAnalyzer, optional): Encoding analyzer for calibrating quantization encodings
                                                         (default: absolute min-max encoding analyzer)
@@ -117,7 +117,7 @@ class AffineQuantizerBase(QuantizerBase, _GridMixin):  # pylint: disable=too-man
         shape,
         qmin: int,
         qmax: int,
-        symmetric: bool,
+        symmetric: bool = True,
         encoding_analyzer: EncodingAnalyzer = None,
         block_size: Optional[Tuple[int, ...]] = None,
         zero_point_shift: Optional[float] = None,
@@ -129,7 +129,7 @@ class AffineQuantizerBase(QuantizerBase, _GridMixin):  # pylint: disable=too-man
         self,
         shape,
         bitwidth: int,
-        symmetric: bool,
+        symmetric: bool = True,
         encoding_analyzer: EncodingAnalyzer = None,
         block_size: Optional[Tuple[int, ...]] = None,
         zero_point_shift: Optional[float] = None,
@@ -151,7 +151,7 @@ class AffineQuantizerBase(QuantizerBase, _GridMixin):  # pylint: disable=too-man
         if arg1 is not None and not isinstance(arg1, bool):
             # (arg0, arg1, arg2) == (qmin, qmax, symmetric)
             qmin, qmax = arg0, arg1
-            symmetric = kwargs.pop("symmetric", args[2])
+            symmetric = kwargs.pop("symmetric", True if args[2] is None else args[2])
 
             if (qmin is None) or (qmax is None) or (symmetric is None):
                 raise self._arg_parsing_error(full_args, kwargs)
@@ -162,7 +162,7 @@ class AffineQuantizerBase(QuantizerBase, _GridMixin):  # pylint: disable=too-man
         else:
             # (arg0, arg1) == (bitwidth, symmetric)
             bitwidth = arg0
-            symmetric = kwargs.pop("symmetric", args[1])
+            symmetric = kwargs.pop("symmetric", True if args[1] is None else args[1])
 
             if (bitwidth is None) or (symmetric is None):
                 raise self._arg_parsing_error(full_args, kwargs)

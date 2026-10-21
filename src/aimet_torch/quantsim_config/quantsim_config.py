@@ -414,17 +414,17 @@ class QuantSimConfigurator(AimetCommonQuantSimConfigurator):
 
     def _disable_all_quantizers(self):
         """
-        Set all tensor quantizers to enabled False and use_symmetric_encodings False
+        Disable tensor quantizers and reset their symmetry to the shared default.
         """
         for quantsim_wrapper in self._module_to_quantsim_wrapper_dict.values():
             for quantizer in (
                 quantsim_wrapper.input_quantizers + quantsim_wrapper.output_quantizers
             ):
                 quantizer.enabled = False
-                quantizer.use_symmetric_encodings = False
+                quantizer.use_symmetric_encodings = True
             for param_quantizer in quantsim_wrapper.param_quantizers.values():
                 param_quantizer.enabled = False
-                param_quantizer.use_symmetric_encodings = False
+                param_quantizer.use_symmetric_encodings = True
 
     def _set_default_configs(self, default_configs: DefaultsType):
         """

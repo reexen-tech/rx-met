@@ -660,7 +660,7 @@ class MpHandler:
     def _get_param_is_symm_fields(self):
         """Generates dict of {op_name: is_symmetric} fields corresponding to the weight parameter"""
         is_symm_fields = {
-            "defaults": self._configs["defaults"]["params"].get("is_symmetric", False)
+            "defaults": self._configs["defaults"]["params"].get("is_symmetric", True)
         }
         for op_name, settings in self._configs["op_type"].items():
             if (

@@ -146,7 +146,7 @@ class QcQuantizeRecurrent(torch.nn.Module):  # pylint: disable=too-many-public-m
         activation_bw: int,
         round_mode: str,
         quant_scheme: QuantScheme,
-        is_symmetric: bool = False,
+        is_symmetric: bool = True,
         num_inputs=1,
         num_outputs=1,
         data_type: QuantizationDataType = QuantizationDataType.int,

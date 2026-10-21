@@ -8,6 +8,7 @@
 
 ### Changed
 
+- 量化器和公共 JSON1 配置的缺省对称性统一为 True，覆盖 Torch 普通/循环包装器、ONNX 构造与缺项回退，内置默认配置显式声明对称激活；与原生 GRU/LSTM 默认一致。显式非对称设置继续生效，整数符号仍由独立 signed 配置决定。
 - Torch/ONNX 整数量化的符号与对称性解耦，缺省固定使用 INT，显式 `signed=False` 使用 UINT；JSON2 增加 `weight/bias/param/input/output_signed`、`input_signeds` 和 `default_config.signed`。修改对称性或位宽不再隐式改变整数域；UINT 对称校准将负值截为零。编译器导出和重载共用 `aimet_common.quantization_grid`，保持 dtype、实际整数范围、scale 与标准零点。
 - Torch 原始 AIMET legacy 编码恢复 `offset_internal + qmin` 的索引域约定，并保存显式 signedness 和范围元数据；RX 适配层继续兼容旧的目标整数域 offset。INT32 offset 平移使用整数运算，避免丢失非零零点；原生 GRU/LSTM 编码不变。
 - 编译器 encodings 升级为 `schema_version=4`，普通 Torch/ONNX 算子与原生 GRU/LSTM 统一采用标准减性零点 `real=scale*(q-zero_point)`。公共模块转换源 offset、验证整数域和真实范围；Torch 重载兼容无版本及 schema 1/2/3 的旧文件，仅迁移普通算子的加性零点。对称网格的零点仍为 0，实际 scale、整数码及量化结果保持不变；非对称文件的消费者需按版本区分新旧符号。

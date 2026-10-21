@@ -37,6 +37,9 @@ python3 -m unittest discover -s tests -p test_percentile_calibration.py -v
 
 ## 文件说明
 
+`test_symmetric_defaults.py` 检查两种整数域下的对称构造默认值、Lazy 包装器、公共
+JSON1 缺项回退，以及真实 Torch v2/ONNX 模型的默认网格和显式非对称覆盖。
+
 `test_quantization_grid.py` 验证无框架依赖的 INT/UINT 范围、标准零点、两种源 offset
 转换、通道数组和窄范围。`test_integer_domains.py` 覆盖 INT/UINT 与对称/非对称四种
 组合的真实校准、JSON2 配置、精确重载、CPU/CUDA ORT 导出与恢复、原始 AIMET

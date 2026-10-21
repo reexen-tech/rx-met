@@ -981,7 +981,7 @@ class QuantizationSimModel:
         default_symmetry = (
             quantsim_configurator.quantsim_configs.get("defaults", {})
             .get("params", {})
-            .get("is_symmetric", False)
+            .get("is_symmetric", True)
         )
         op_specific_config = quantsim_configurator.quantsim_configs.get("op_type", {})
 
