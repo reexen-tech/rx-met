@@ -4,157 +4,84 @@
 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，正式版本遵循
 [Semantic Versioning](https://semver.org/lang/zh-CN/)。
 
-## [Unreleased]
-
-### Added
-
-- 内置自动运行目录和详细文件日志，无需用户初始化 logger；RX 导出接口将指定目录作为根目录，按 UTC 时间戳隔离任务，最终产物进入 `exports/`。记录版本、构建身份、配置快照和产物校验值，失败保留诊断信息和中间文件。
-- Torch/ONNX、GRU/LSTM 的详细输出独立于终端 `verbose` 写入日志，保持原有量化结果、导出返回类型及独立算子 wheel 的可用性。
-
-### Changed
-
-- 量化器和公共 JSON1 配置的缺省对称性统一为 True，覆盖 Torch 普通/循环包装器、ONNX 构造与缺项回退，内置默认配置显式声明对称激活；与原生 GRU/LSTM 默认一致。显式非对称设置继续生效，整数符号仍由独立 signed 配置决定。
-- Torch/ONNX 整数量化的符号与对称性解耦，缺省固定使用 INT，显式 `signed=False` 使用 UINT；JSON2 增加 `weight/bias/param/input/output_signed`、`input_signeds` 和 `default_config.signed`。修改对称性或位宽不再隐式改变整数域；UINT 对称校准将负值截为零。编译器导出和重载共用 `aimet_common.quantization_grid`，保持 dtype、实际整数范围、scale 与标准零点。
-- Torch 原始 AIMET legacy 编码恢复 `offset_internal + qmin` 的索引域约定，并保存显式 signedness 和范围元数据；RX 适配层继续兼容旧的目标整数域 offset。INT32 offset 平移使用整数运算，避免丢失非零零点；原生 GRU/LSTM 编码不变。
-- 编译器 encodings 升级为 `schema_version=4`，普通 Torch/ONNX 算子与原生 GRU/LSTM 统一采用标准减性零点 `real=scale*(q-zero_point)`。公共模块转换源 offset、验证整数域和真实范围；Torch 重载兼容无版本及 schema 1/2/3 的旧文件，仅迁移普通算子的加性零点。对称网格的零点仍为 0，实际 scale、整数码及量化结果保持不变；非对称文件的消费者需按版本区分新旧符号。
-- 统一整数 encodings 元数据：普通 Torch/ONNX 算子补齐真实量化粒度 `enc_type`，QuantGRU/QuantLSTM 的输入输出、参数和正反向内部量化点补齐 `n`；循环层顶层 `input/output` 使用 `{"0": {...}}`，内部 `output` 保留单元素列表。算子加载接口兼容旧列表和缺少 `n` 的编码，并校验已有指数，不改变实际量化网格。
-- KWS 示例默认输出到当前运行目录下的 `output/quick_start_kws/<gru|lstm>/`，与 ONNX PTQ 保持一致，仍支持环境变量和 `--output-dir` 覆盖。
-- ONNX PTQ 示例入口重命名为 `quick_start_onnx_ptq.py`，与 `quick_start_kws.py` 命名保持一致。
-- MobileNetV2 + ImageNette 专用准备脚本仅需模型和 parquet 路径，验证后将静态模型及校准、验证 NPY 写入运行目录的 `output/onnx_ptq_quick_start/models/`、`datasets/`，`--out-root` 改为可选；原始挂载保持只读。ONNX PTQ 示例默认读取准备结果，不执行预处理，两步在同一容器、同一目录完成，无需指定输入路径；量化输出也跟随当前运行目录。
-- QuantGRU 的全部内部量化点默认使用对称量化，与 QuantLSTM 保持一致；新建实例的 JSON 遗漏算子或对称性字段时保持对称，激活仍支持显式非对称配置。
-- 撤回 KWS 波形至 Log 的 FP32 回退配置，恢复原有整数 QDQ 约束。Log 前小信号归零与定义域问题重新进入分析，尚无新的量化修复。
-
-### Fixed
-
-- 修复编译器编码重载根据对称性推断 INT/UINT、忽略明确 dtype 导致 UINT 对称范围错误和 INT 非对称整数码平移的问题；编译器、原始 AIMET 和阶段编码共用精确网格恢复，避免从 INT32 浮点 min/max 反推时丢失零点。共享量化器的 signedness 冲突在应用配置前报错，ONNX 严格原始编码重载检查 signedness，防止静默改变整数域。
-- ONNX 编译器编码传播按数据端口和真实 dtype 过滤，修复 Gather 的 INT64 索引及其生成节点被错误写入激活量化网格的问题，并排除 TopK/MaxPool 索引、Dropout mask 和非数据控制端口。模型整数/布尔输入输出保持原类型；导出拒绝挂在非浮点张量或端口上的量化器，恢复校验拒绝追加到索引端口的错误 sidecar 编码。
-- Torch 为 FX 展开 BN、自定义模块自动补建的参数量化器复用普通参数的 `_V2LazyQuantizer`，实际遵循所选校准方案、数据类型和位宽，修复固定使用 MinMax 导致 Percentile/TfEnhanced 选择丢失的问题；百分位设置和重新校准也覆盖这些参数。移除为匹配旧错误默认而添加的 ONNX 参数校准 metadata 适配。
-- ONNX GRU 后的普通计算输入在实际消费位置校准，避免中间帧复用整段序列网格及 GRU 输出的重复量化；普通计算分支后的 Concat 使用独立、共享的输入网格。混合精度、bias 对齐、编译器映射和原生编码重载共用端口解析，恢复前拒绝共享量化器的冲突编码，clean ONNX 保留原图。
-- ONNX Percentile 按最终 min/max 范围恢复 scale，并在对应 CPU/CUDA 设备上执行公共统计与范围计算，消除重复对称化及跨设备标量运算导致的 float32 scale 差别。
-- 原生 CPU/CUDA QDQ 共用居中网格算术，消除 INT32 在 float32 中平移到 `2^31` 导致的低位丢失；统一 nearest 为 ties-to-even，覆盖逐张量、逐通道和广播执行，保留 NaN 与正确的 Inf 饱和边界，不修改 encoding 格式或退回浮点计算。
-- ONNX 默认 Percentile PTQ 保留配置位宽的 bias 统计量化，包含全零通道；Po2 阶段再按 `Sb=Sx*Sw` 对齐到 INT32，与 Torch 的阶段顺序一致。旧原生统计器仍保留延后 bias 校准的保护。
-- ONNX PTQ 的校准、评价和产物恢复默认关闭 CUDA TF32，保持完整 FP32 矩阵计算，显式 provider 选项仍可覆盖。非 Po2 QDQ 统一采用正确舍入的倒数乘法，避免半格附近的一格偏差。
-- Percentile 适配按目标整数域一次应用最小范围保护，避免零值、极小 bias 的 scale 被二次扩张；常量 MatMul 输入在校准期间透传，与普通权重的 QDQ 校准角色区分，并拒绝共享量化器的角色冲突。
-- ONNX 混合精度输入配置通过 QuantSim 有效网格追踪穿过 Transpose/Reshape 等数据搬运算子，避免 INT16 请求静默丢失；`QuantizedMatMul` 的常量矩阵按原输入编号应用位宽、对称性和默认逐张量网格，保留 `QuantizedLinear` 权重语义及显式 `weight_*` 配置优先级，并在写入前检测共享网格冲突。
-- Torch/ONNX Percentile 校准共用动态直方图、样本计数与百分位规则，修复 ONNX 固定首批三倍范围导致后续大值漏统计；保留常量、微小范围和非首维逐通道的历史计数，支持重复校准及冻结编码。ONNX 校准通过临时 session 采集中间张量，原生推理和导出保持原接口，GRU 内部校准继续由算子库负责。
-- ONNX GRU PTQ 接入 QuantGRU 原生校准、量化前向、Po2 与编码恢复，实际应用 `GRU_config`；适配方向、门顺序及常量 W/R/B，保留双向门内编码和逐通道参数，拒绝缺失内部编码或不支持的 GRU 属性。仿真使用算子包提供的 ORT 桥接，导出保持原标准 ONNX GRU。
-- ONNX PTQ 导出自动补全并保存所有中间张量的 shape/dtype，标准推导不足时使用符号形状推导；保持计算节点、权重及外部数据引用，产物回读校验拒绝缺失维度或 dtype 的文件，并在 metadata 中记录维度覆盖情况。
-- GRU/LSTM 显式关闭量化后可正常导出，禁用状态从 QuantSim 传给最终校验并写入 `excluded_layers`；保留节点名称、类型和已启用层的严格编码检查，拒绝伪造排除名单及禁用层的残留编码。
-- ONNX PTQ 在完整验证集上报告 FP32、PTQ、Po2 和恢复后的 Top-1 及累计误差，复用推理 session；准备脚本保存 ImageNette 到 ImageNet-1k 的验证标签，恢复验证逐样本检查输出和分类精度。
-- Torch/ONNX 共用 JSON2 默认位宽转换，使 `default_bitwidth.weight/output` 在 Torch 中实际生效；默认激活位宽同时用于已有输入、输出量化器，并保留显式禁用的输入槽及具体层配置的优先级。
-- ONNX 校准按模型声明保留或转换输入 dtype，支持 INT64 索引、BOOL mask 和 FLOAT16 数据；拒绝浮点索引截断、整数范围溢出及非有限输入，并保持标量输入形状。
-- 混合精度 JSON2 共用字段校验和匹配规则；ONNX 在写入前检测共享量化器的位宽、对称性和启用状态冲突，默认值作为回退，避免按遍历顺序覆盖显式配置。
-- 补齐 ONNX 的 MatMul、BatchNorm、Softmax、Log、Clamp 等类型适配和通用参数设置，区分已知不适用类型与未知配置；两框架实际应用逐通道权重设置，并保留校准分析器配置。
-- Torch/ONNX Po2 共用整数 offset 与范围计算，修复非对称编码的 min/max 不一致；保留零点可表示性，并修正 strict symmetric 编码的整数域和原生重载范围。
-- ONNX PTQ 示例和通用入口重建 QuantSim、恢复并冻结原生 encodings，检查保存前后的量化输出及 compiler encodings；拒绝缺失或篡改的编码、非有限输出和不一致的 clean ONNX。
-- Torch/ONNX 导出共用 compiler encodings 规范化，保留 `export_onnx_json` 兼容接口，并正确转换 ONNX TfEncoding 的 additive offset，避免对称参数导出非零 zero point。
-- Torch/ONNX 共用 bias 位宽和可表示性检查；ONNX 仅恢复校准期间临时关闭的 bias，统一写回有符号对称网格，并在全部候选检查通过后更新。
-- ONNX Po2 遇到非正或非有限 scale 时直接报错；导出核对必需量化器和待恢复 bias，防止关闭量化器后仍报告覆盖成功。
-- ONNX 混合精度配置区分激活与参数，防止输入位宽和对称性覆盖权重、bias；补齐 MatMul+Add 的 bias 参数识别，并保留缺失激活量化器的输入槽位。
-
-- FX 展开的 BN 等模块在参数读取处执行参数 QDQ，并移除同一参数边重复的输入 QDQ；保留 master 参数梯度，支持重新校准、禁用、浮点检查点和导出重载。
-
-- 阶段编码重载恢复保存的整数网格、对称性及精确 scale/offset，防止 Po2 的 32 位 bias 被按新模型的 16 位网格恢复；拒绝无效形状、数值和不一致的编码。
-
-- 修复 GRU `(1-z)` 重复减去更新门 zero point 的错误，覆盖主整数核、浮点参考和独立 CPU 参考；默认 zero point 为零的公式不变。
-
-- QuantGRU 的 FP32/INT32 carrier 共用整数/LUT 前向与截断 mask；锁定前完成待处理的网格转换，公共编码重载恢复 Po2 执行模式，消除 QAT、整数评估和重载之间的数值分歧。
-
-- PyTorch Po2 工作流遵守 `bias_bitwidth`，在 Conv/Linear bias 对齐到 `Sx*Sw` 前检查范围，并拒绝静默饱和。
-- QuantGRU/QuantLSTM 在校准时为固定 bias 网格保留相对与最小绝对训练余量，防止零偏置的微小 QAT 更新立即饱和；保留导入编码。
-- QuantGRU 输入线性截断 mask 在 bias 累加与跨 CUDA stream 同步之前应用，统一输入、权重和偏置梯度。
-- QuantGRU QAT 将候选门输入/输出截断 mask 先传到 reset gate 上游，修正截断时泄漏的梯度。
-
 ## [1.1.0] - 2026-10-12
 
 ### Added
 
-- QuantLSTM 接入 FX/ConnectedGraph、AIMET v2 QuantSim、混合精度、共享校准、Po2、
-  参数锁和 ONNX 导出回读；提供 KWS 用户示例与真实 CUDA 集成测试。
-- 在 `operators/quant-lstm/` 收录 QuantLSTM 源码、配置、构建脚本、测试和文档，
-  与 QuantGRU 同级维护并支持独立构建；应用包增加 QuantLSTM wheel，环境使用公共 `rx-quant-env` v1。
-- PyTorch 导出增加节点名/encoding key 双向对应及浮点计算输入覆盖检查；双输入计算
-  必须覆盖两路浮点张量，标量常量与非浮点输入豁免。即使未启用量化器也不能放过缺失。
-- PyTorch 导出末尾强制校验 ONNX 和 encodings；缺少已启用量化器的编码、通道或
-  GRU/LSTM 内部参数，以及未校准、非法 scale、编码值不一致或最终图无效时直接报错。
-- 增加独立的环境镜像构建、验证、加载和导出命令。
-- 发布包提供仅含当前版本内容的 `CHANGELOG.md`，安装后保留，并纳入文件完整性校验。
-- 增加 `CONTRIBUTING.md`，统一公开贡献、测试和文档更新要求。
+- **QuantLSTM 集成**：支持 FX、AIMET v2 QuantSim、混合精度、校准、QAT、Po2、参数锁和 ONNX 导出恢复；KWS 示例可选择 GRU 或 LSTM。
+- **ONNX GRU PTQ**：使用 QuantGRU 原生校准和量化计算，应用 `GRU_config`，支持双向内部编码和逐通道参数；最终模型保留标准 ONNX GRU 节点。
+- **自动运行记录**：自动写入 `run.log` 和 `run.json`，记录详细日志、运行状态、版本、配置快照和产物 SHA-256，无需用户初始化 logger。`verbose` 只控制终端详细程度；失败保留日志和中间文件，成功清理临时工作目录。
+- **ONNX PTQ 验证**：报告完整验证集上 FP32、PTQ、Po2 和恢复后的 Top-1 与输出误差；导出补全中间张量的 shape/dtype，并检查恢复后的量化输出和编译器编码。
+- **公共 GPU 环境**：提供可复用的 `rx-quant-env` v1，支持 `cu118`、`cu126`、`cu130`，以及独立的环境构建、验证、加载和离线导出命令。
 
 ### Changed
 
-- 发布包启动命令使用对应 CUDA 变体的可读 runtime 标签；安装器按镜像 ID 校验并补齐标签，拒绝覆盖冲突标签。
-
-- 安装器指定镜像文件的参数由 `--runtime-archive` 更名为 `--runtime-image`。
-
-- GPU 环境改为公共 `rx-quant-env` v1；两个产品独立安装和更新，复用同一批固定 runtime 镜像。
-- 发布构建支持 `--build-env-dir` 复用离线 build 镜像归档，`--runtime-dir` 更名为 `--runtime-env-dir`；本地缺少环境时校验并导入对应归档。
-- 默认发布只生成应用包；镜像附件统一使用 `--with-images`，缺少归档时从本机固定 runtime 自动导出到交付目录 `images/`，移除 `--with-runtime`。
-- 应用包只固定 runtime 镜像 ID，取消对归档文件 SHA256 的绑定；同一镜像重新导出的归档可跨应用包复用。归档独立提供 `.sha256` 文件校验。
-- 安装器核对本次实际导入的镜像和归档内容，避免本机已有正确镜像时误接受错误归档；下载验证通过后才写入缓存，宿主机无需 Python。
-- 独立环境导出、加载入口统一支持相同镜像的不同归档 SHA256，保留首次发布的环境身份记录。
-- 安装器负责离线安装和自检，README 说明 Docker 挂载运行。
-
-- 发布改为三个固定 runtime 镜像及三个独立应用包。用户通过 `install.sh` 离线安装，
-  再按 README 使用原生 Docker 命令挂载运行；构建环境 `build-env` 继续供内部使用。
-- runtime 支持独立 gzip 归档，应用包记录精确镜像身份及预留 HTTPS 下载地址。
-- QuantGRU、QuantLSTM wheel 版本统一跟随 rx-met 产品版本，并保留 CUDA 变体标识。
-- 验收改为纯 runtime、非 root 和只读应用目录，覆盖 ONNX、GRU、LSTM 的真实 GPU 流程。
-- KWS 示例改用 `QuantizableBatchNorm2d`，经 FX 展开后校准 Sub/Div/Mul/Add 的两路
-  输入；导出根据参数使用位置恢复被 reshape/常量折叠改名的 ONNX initializer。
-- KWS 用户示例通过 `--rnn_type gru|lstm` 选择循环层，共用量化配置，输出按网络类型隔离。
-  随机 LSTM 流程检查归入测试，客户说明随 examples 交付；发布验收覆盖两种模式。
-- 同步 QuantLSTM 上游更新，默认构建 Release CUDA 库并关闭测试和示例，更新使用文档；
-  算子目录不再收录上游 `.github/`、`docker/` 和 `.dockerignore`。
-- 更新 QuantGRU 使用、配置和计算流程文档，合并 PWL 说明并清理历史算法草稿。
-- 将 AIMET Python 包整理到 `src/`，将 AIMET 原生实现放在 `native/`，并将
-  QuantGRU 放在 `operators/quant-gru/`。安装后继续沿用现有 Python import 名和 wheel 名。
-- 将发布模板从顶层 `release/` 迁移到 `packaging/release-bundle/`，使用 `.in` 标识待渲染输入；
-  CHANGELOG 统一按 `VERSION` 从仓库完整历史中提取，避免维护两份版本记录。
-- 将公开命令按职责整理到 `scripts/release/` 和 `scripts/environment/`。
-- 由 `pyproject.toml` 定义 Python 兼容范围，由 `docker/variants.json` 统一管理
-  CUDA 变体和精确依赖；Bake 配置和 lock 文件由 `scripts/dependencies.py` 生成。
-- 文档按用户指南、配置说明、维护者文档和架构决策重新组织。
-- 用户 README 简化为安装、准备数据和工作目录、进入容器运行示例三个步骤；
-  Docker 启动命令只保留一套，数据下载和预处理说明集中到 examples 文档。
+- **量化配置**：Torch、ONNX 和原生 GRU/LSTM 默认使用对称量化，仍支持显式非对称配置。普通 Torch/ONNX 量化器的整数符号与对称性独立，默认使用 INT，可显式选择 UINT。
+- **编译器编码**：统一 Torch/ONNX 的编码转换、零点语义和循环层元数据，升级为 `schema_version=4`；兼容性要求见下方升级说明。
+- **输出目录**：RX 导出接口将指定目录作为输出根目录，每次任务创建 UTC 时间戳子目录，最终产物放入 `exports/`，KWS 检查点放入 `checkpoints/`。默认输出基于当前运行目录，原有输出目录覆盖参数继续有效。
+- **ONNX 示例**：入口统一命名为 `quick_start_onnx_ptq.py`。MobileNetV2 + ImageNette 准备脚本只需模型和 parquet 路径，生成可复用的模型、校准数据和带标签的验证数据；准备与量化分两步执行，默认路径相互对应，原始输入可只读挂载。
+- **离线交付**：产品包和公共运行环境分别交付、独立校验。应用包按精确镜像 ID 复用 runtime，同一镜像重新导出的归档可继续使用；安装器核对归档内容并准备可读的镜像标签，宿主机无需 Python。
+- **构建与安装**：构建前检查已有交付目录，默认在临时目录完成安装验收并清理。构建和安装分别支持 `--replace`，新内容验收通过后才替换目标，失败保留或恢复原内容。
+- **项目组织**：源码、原生库、循环算子和发布脚本按职责分目录维护，保留现有 Python import 名称。算子 wheel 跟随产品版本并保留 CUDA 标识；配置资源随 wheel 分发，支持安装目录迁移。
+- **发布说明**：应用包及安装目录仅包含当前版本的 CHANGELOG，并纳入文件校验；使用流程、配置说明和贡献要求集中到对应文档。
 
 ### Fixed
 
-- 为 CUDA 11.8/13.0 提供带来源与校验清单的 ONNX Runtime 离线头文件缓存，避免重复下载大型源码归档。
+#### 校准与整数量化
 
-- 修复单向/双向 QuantLSTM 在 `bias=False` 时的 ONNX 导出：正确省略可选 bias 输入，
-  消除缺少 `lstm.bias` 编码的校验错误；真实的全零 bias 仍保留参数和完整编码校验。
-- prepare_model 在校准前自动展开 nn.GELU/F.gelu，保留精确或 tanh 近似语义，
-  为所有中间计算提供独立编码；修复函数 GELU 的关键字输入准备及重复 prepare 命名。
-- 带偏置的高维 Linear 导出为 Reshape/Gemm/Reshape，复用已校准的融合层编码并恢复
-  Gemm 的模块名称，避免 MatMul/Add 拆分造成中间编码缺失；训练侧 QuantSim 保持不变。
-- 自定义 BN 使用无偏方差更新 running_var，支持累计平均并保持 buffer 对象不变；
-  修复自定义及展开 BN 的 QAT 冻结识别。
-- 原始模型和权重检查点移除展开模块残留的辅助参数量化器，支持 weights_only 重载。
-- ONNX 简化保留乘一、加零及单输入 Concat，避免删除携带编码的量化边界。
-- QuantLSTM signed symmetric 校准保留 `max_abs/qmax` 和零点 0，CPU/CUDA 与 QAT
-  运行范围改为完整 INT8/INT16 区间，允许 `-128/-32768`；导出及回读范围与 GRU 一致。
-- LSTM 的 rx-met 导出及回读统一使用与 GRU 相同的公共编码字段，移除原生参数备份
-  和执行元数据；算子独立的原生检查点格式保持分离。外层输入、输出各保存一条
-  `PER_TENSOR` 编码，h/c 状态按方向保留在内部量化点，不再展开为 `PER_CHANNEL` 数组。
-- KWS 校准改用无随机增强的训练集；检查点记录网络类型并严格恢复，恢复验证失败时退出。
-- 分阶段检查点同时保存和恢复普通层输入编码，避免回读后重复校准改变模型结果。
-- 修复 QuantGRU CPU 参考实现引用缺失测试源码导致的 CMake 配置失败。
-- 修复 ONNX PTQ 快速示例读取错误 `rxmet_encodings` 字段的问题。
-- QuantLSTM 和 ONNX PTQ 默认配置随 wheel 打包，支持安装到外部目录后挂载使用。
-- 补齐 ONNX 示例预处理后的数据根目录设置，使生成位置和读取位置一致。
-- 修正 ONNX Runtime vendored README 更新后未同步的校验值，恢复 cu126 环境构建。
+- Torch/ONNX Percentile 共用动态直方图、样本计数和范围计算，修复后续大值漏统计、常量及极小范围处理、逐通道累计和重复校准问题，减少两端 scale 差异。
+- 混合精度正确应用默认位宽、逐通道设置及输入端口配置，保留显式层配置的优先级；ONNX 的输入精度可穿过 Reshape/Transpose 传递，常量 MatMul 与权重、bias 按各自角色处理，共享量化器配置冲突提前报错。
+- bias 校准遵循配置位宽，Po2 阶段再按 `Sb = Sx * Sw` 对齐，并检查目标位宽和可表示范围，防止静默饱和；零值通道保留有效网格，非法 scale 在修改或导出前报错。
+- CPU/CUDA QDQ 修复 INT32 小整数码丢失和非 Po2 半格舍入偏差，nearest 统一采用 ties-to-even，正确处理 NaN、Inf 和饱和边界。ONNX PTQ 默认关闭 TF32，显式 provider 选项仍可覆盖。
+
+#### Torch 与循环算子
+
+- FX 展开的 BN、自定义模块在参数读取处执行 QDQ，避免重复量化，并遵循所选校准方案、类型和位宽；保留原始浮点参数的梯度、重新校准和禁用能力。
+- QuantGRU 统一 FP32/INT32 carrier 的整数与 LUT 前向，修复更新门 zero point 重复扣减和截断 mask 的梯度传播，确保 mask 在 bias 累加与跨 CUDA stream 同步前生效；在 eval 模式需要梯度时保留反向状态。
+- QuantGRU/QuantLSTM 为固定 bias 网格保留训练余量，避免零偏置的微小 QAT 更新立即饱和；加载已有编码时保留其网格。
+- QuantLSTM 正确导出单向、双向 `bias=False` 模型；有符号对称量化使用完整 INT8/INT16 运行范围，校准、QAT、导出和恢复保持一致。
+- GELU 展开和高维 Linear 导出保留计算语义及编码对应关系；修复 BN 的 running variance 更新、累计平均和 QAT 冻结识别。
+- KWS 使用可量化 BN 和无随机增强的校准样本；检查点记录网络类型，保存原始模型时移除辅助量化器，支持 `weights_only` 恢复，验证失败时退出。
+
+#### 导出与恢复
+
+- 编译器、原始 AIMET 和阶段编码按保存的类型、整数范围、scale 和零点精确恢复，避免 INT32 精度丢失、符号误判或重载时改变网格；兼容旧 offset 约定，拒绝冲突、无效或有歧义的编码。
+- 导出严格检查节点与编码对应关系、浮点输入覆盖、已启用量化器和循环层内部参数；恢复时拒绝缺失或篡改的编码、非有限输出及不一致的模型产物。
+- ONNX 按实际 dtype 处理校准输入，保留 INT64 索引、BOOL mask、FLOAT16 和标量形状；整数、布尔及控制端口不再错误传播浮点量化编码，拒绝索引截断、溢出和错误的端口编码。
+- ONNX GRU 后的计算输入在实际消费位置校准，避免重复量化或误用整段序列的网格；Concat 输入网格与恢复时的共享量化器检查保持一致。
+- GRU/LSTM 显式关闭量化后可正常导出，通过 `excluded_layers` 记录禁用层，同时保持已启用层的严格校验。
+- ONNX 简化保留携带量化边界的乘一、加零和单输入 Concat；LSTM 外层输入输出采用逐张量编码，h/c 状态保留在对应方向的内部编码中。
+
+#### 构建与安装
+
+- 修复 ONNX Runtime 离线头文件缺失及校验值不同步、QuantGRU CPU 参考实现引用缺失测试源码等构建问题。
+- 安装器验证显式提供或下载的 runtime 归档，避免本机已有正确镜像时误接受错误归档；下载内容通过验证后才进入缓存，产品和环境交付目录不再混入发布锁文件。
 
 ### Known limitations
 
+- KWS 前端 Log 前的小信号可能量化为零，其定义域及精度问题仍待处理；当前保留整数 QDQ，不使用 FP32 回退。
+- 原生 C++/CUDA 直接写入终端的文本不经过 Python 日志捕获。
 - cu130 的 onnxsim/nanobind 在部分进程退出时输出引用泄漏诊断，已测 examples 的退出码为 0。
 - 本版 GPU 验收使用 NVIDIA H200 NVL 和驱动 580.173.02，其他 GPU 架构和最低驱动未逐一实测。
 
 ### Upgrade notes
 
-- 首次使用需要对应的公共 `rx-quant-env` v1 runtime。安装应用包后，按 README 挂载该版本的应用目录。
-- 后续产品更新可复用兼容的 runtime；升级和回滚通过选择应用目录及其匹配的镜像完成。
-- 工作目录、模型、数据和输出独立于应用安装目录保存。
+- **编码格式**：schema v4 统一使用 `real = scale * (q - zero_point)`。外部消费者需按版本处理非对称零点符号；Torch 重载兼容无版本和 schema 1/2/3 的旧文件。格式转换不改变实际量化网格。
+- **循环层字段**：整数记录补齐 `enc_type` 和 `n`；顶层 `input/output` 改为端口字典，如 `{"0": {...}}`，内部 `output` 保留单元素列表。加载接口兼容旧端口列表和缺少 `n` 的文件。
+- **整数符号**：需要非对称或无符号量化时显式配置。JSON2 支持 `*_signed`、`input_signeds` 和 `default_config.signed`，更改对称性或位宽不会自动切换 INT/UINT；UINT 对称模式将负值截为零。
+- **产物路径**：加载时使用导出接口返回的路径。示例输出根目录为当前运行目录下的 `output/quick_start_kws/<gru|lstm>/` 或 `output/onnx_ptq_quick_start/`，实际文件位于本次时间戳目录的 `exports/`。
+- **示例入口**：原 `onnx_ptq_quick_start.py` 更名为 `quick_start_onnx_ptq.py`，命令及引用需同步更新；下载与两步运行方式见[示例说明](examples/README.md)。
+- **安装与更新**：首次离线使用需同时提供产品目录和对应的 `rx-quant-env` v1 环境目录，后续产品更新可复用兼容 runtime。`install.sh --replace` 仅替换同名安装；其他版本、模型、数据和用户工作目录独立保留。
+
+发布相关命令使用以下参数，替代旧名称：
+
+| 用途 | 当前参数 | 替代的旧参数 |
+| --- | --- | --- |
+| 安装时指定 runtime 归档 | `install.sh --runtime-image FILE` | `--runtime-archive` |
+| 构建时指定 runtime 归档目录 | `build.sh --runtime-env-dir DIR` | `--runtime-dir` |
+| 交付时附带公共运行环境 | `build.sh --with-env` | `--with-runtime`、`--with-images` |
+
+构建环境归档可用 `--build-env-dir DIR` 复用。应用包不再内嵌镜像。
 
 ## [1.0.0] - 2026-09-02
 
