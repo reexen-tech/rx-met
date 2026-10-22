@@ -22,6 +22,8 @@ from tests import test_onnx_ptq_alignment as fixtures
 
 class RuntimeLoggingIntegrationTest(unittest.TestCase):
     def setUp(self):
+        runtime.configure_output()
+        self.addCleanup(runtime.configure_output)
         self.fixture = fixtures.OnnxAlignmentTest()
         self.fixture.setUp()
         self.addCleanup(self.fixture.doCleanups)
@@ -133,6 +135,58 @@ class RuntimeLoggingIntegrationTest(unittest.TestCase):
         self.assertEqual(record['inputs']['model_path']['sha256'], runtime._sha256(source))
         self.assertEqual(record['status'], 'success')
         self.assertFalse((directory / '_work').exists())
+
+    def test_fixed_onnx_workflow_repeats_without_removing_prepared_inputs(self):
+        from aimet_onnx.rx_ptq.pipeline import run_onnx_ptq, write_onnx_ptq_metadata
+        import onnx
+        runtime.configure_output(timestamp_output=False)
+        root = self.path / 'fixed-workflow'
+        source = root / 'models/source.onnx'
+        source.parent.mkdir(parents=True)
+        onnx.save(fixtures.make_graph(), source)
+        calibration = root / 'datasets/calib'
+        calibration.mkdir(parents=True)
+        sample = calibration / 'sample.npy'
+        np.save(sample, self.fixture.feed['x'])
+        source_hash, sample_hash = runtime._sha256(source), runtime._sha256(sample)
+        ids = []
+        for _ in range(2):
+            result = run_onnx_ptq(model_path=source, calibration_dir=calibration,
+                                  output_dir=root, filename_prefix='model',
+                                  config_file=str(self.fixture.config), bitwidth_config_file='', quant_scheme='tf')
+            self.assertTrue(all(path.parent == root / 'exports' for path in result.values()))
+            record = json.loads((root / 'run.json').read_text())
+            self.assertFalse(record['output_config']['timestamp_output'])
+            self.assertEqual(record['status'], 'success')
+            ids.append(record['execution_id'])
+            self.assertFalse((root / record['execution_id']).exists())
+            self.assertFalse((root / '_work').exists())
+        self.assertNotEqual(ids[0], ids[1])
+        self.assertEqual(runtime._sha256(source), source_hash)
+        self.assertEqual(runtime._sha256(sample), sample_hash)
+        self.assertIn('Po2 method=', (root / 'run.log').read_text())
+        metadata = write_onnx_ptq_metadata(root, 'model', {'after_export': True})
+        self.assertEqual(metadata, root / 'exports/model.meta.json')
+        record = json.loads((root / 'run.json').read_text())
+        self.assertEqual(record['outputs']['exports/model.meta.json']['sha256'], runtime._sha256(metadata))
+
+    def test_fixed_torch_export_uses_the_same_root_for_logs_and_models(self):
+        from aimet_torch.rx_export import export_onnx_json
+        import onnx
+        runtime.configure_output(timestamp_output=False)
+        root = self.path / 'fixed-torch'
+        sim = self.torch_sim()
+        stage = runtime.get_run(sim).root
+        onnx_path, encodings_path = export_onnx_json(
+            sim, str(root), 'model', dummy_input_shape=(1, 4))
+        self.assertEqual(Path(onnx_path), root / 'exports/model.onnx')
+        self.assertEqual(Path(encodings_path), root / 'exports/model.encodings')
+        onnx.checker.check_model(onnx.load(onnx_path))
+        record = json.loads((root / 'run.json').read_text())
+        self.assertEqual(record['status'], 'success')
+        self.assertFalse(record['output_config']['timestamp_output'])
+        self.assertIn('model.encodings', (root / 'run.log').read_text())
+        self.assertFalse(stage.exists())
 
     def test_standalone_gru_still_loads_without_aimet_logging(self):
         original = builtins.__import__

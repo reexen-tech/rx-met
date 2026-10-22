@@ -15,7 +15,7 @@ import onnx
 from aimet_common.compiler_encodings import normalize_compiler_encodings
 from aimet_common.evaluation import classification_accuracy, compare_outputs
 from aimet_common.run_context import (
-    get_run, logged_export, logged_operation, logged_workflow, metadata_directory, note_output,
+    get_run, logged_export, logged_operation, logged_workflow, metadata_output, note_output,
 )
 from aimet_common.onnx_shapes import save_onnx_with_shapes, validate_onnx_shapes
 from .calibration import inspect_model_input_dtypes, inspect_model_inputs, iter_calibration_feeds
@@ -299,12 +299,13 @@ def write_onnx_ptq_metadata(
     filename_prefix: str,
     payload: Dict[str, Any],
 ) -> Path:
-    metadata_path = metadata_directory(output_dir) / f"{filename_prefix}.meta.json"
-    metadata_path.write_text(
-        json.dumps(payload, indent=2, ensure_ascii=False) + "\n",
-        encoding="utf-8",
-    )
-    note_output(metadata_path)
+    with metadata_output(output_dir) as directory:
+        metadata_path = directory / f"{filename_prefix}.meta.json"
+        metadata_path.write_text(
+            json.dumps(payload, indent=2, ensure_ascii=False) + "\n",
+            encoding="utf-8",
+        )
+        note_output(metadata_path)
     return metadata_path
 
 

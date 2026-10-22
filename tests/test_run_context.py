@@ -5,6 +5,7 @@ import errno
 import io
 import json
 import logging
+import multiprocessing
 import os
 from pathlib import Path
 import subprocess
@@ -20,6 +21,8 @@ from aimet_common import run_context as runtime
 
 class ExecutionTest(unittest.TestCase):
     def setUp(self):
+        runtime.configure_output()
+        self.addCleanup(runtime.configure_output)
         temporary = tempfile.TemporaryDirectory(prefix='rx-met-execution-')
         self.addCleanup(temporary.cleanup)
         self.addCleanup(runtime._finish_implicit)
@@ -30,6 +33,228 @@ class ExecutionTest(unittest.TestCase):
 
     def read_record(self, run):
         return json.loads((run.root / 'run.json').read_text())
+
+    def test_output_configuration_is_validated_and_snapshotted_per_task(self):
+        for value in (None, 0, 1, 'False'):
+            with self.subTest(value=value), self.assertRaises(TypeError):
+                runtime.configure_output(timestamp_output=value)
+        with runtime.execution(self.root / 'timestamped') as timestamped:
+            runtime.configure_output(timestamp_output=False)
+            self.assertEqual(timestamped.root.parent, self.root / 'timestamped')
+            self.assertTrue(timestamped.timestamp_output)
+        with runtime.execution(self.root / 'fixed') as fixed:
+            runtime.configure_output()
+            self.assertEqual(fixed.root, self.root / 'fixed')
+            self.assertFalse(fixed.timestamp_output)
+        self.assertEqual(self.read_record(fixed)['output_config'], {'timestamp_output': False})
+        with runtime.execution(self.root / 'restored') as restored:
+            self.assertTrue(restored.timestamp_output)
+
+    def test_fixed_output_replaces_same_named_files_and_preserves_inputs(self):
+        runtime.configure_output(timestamp_output=False)
+        for name in ('models/source.onnx', 'datasets/calib/sample.npy', 'exports/user.txt', 'notes.txt'):
+            path = self.root / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text('user data')
+        with runtime.execution(self.root) as first:
+            runtime.log_print('first execution only')
+            first.snapshot_config({'bits': 8})
+            (first.exports / 'model.onnx').write_bytes(b'first')
+            (first.exports / 'old.encodings').write_text('{}')
+            (first.checkpoints / 'model.pth').write_bytes(b'first checkpoint')
+        with runtime.execution(self.root) as second:
+            runtime.log_print('second execution only')
+            second.snapshot_config({'bits': 16})
+            (second.exports / 'model.onnx').write_bytes(b'second')
+            (second.checkpoints / 'model.pth').write_bytes(b'second checkpoint')
+        self.assertEqual(first.root, second.root)
+        self.assertEqual(second.root, self.root)
+        self.assertNotEqual(first.execution_id, second.execution_id)
+        self.assertEqual((self.root / 'exports/model.onnx').read_bytes(), b'second')
+        self.assertEqual((self.root / 'checkpoints/model.pth').read_bytes(), b'second checkpoint')
+        log = (self.root / 'run.log').read_text()
+        self.assertIn('second execution only', log)
+        self.assertNotIn('first execution only', log)
+        self.assertEqual(json.loads((self.root / 'config/quantization.json').read_text()), {'bits': 16})
+        record = self.read_record(second)
+        self.assertEqual(record['execution_id'], second.execution_id)
+        self.assertEqual(set(record['outputs']), {'exports/model.onnx', 'checkpoints/model.pth'})
+        for name in ('models/source.onnx', 'datasets/calib/sample.npy', 'exports/user.txt', 'notes.txt'):
+            self.assertEqual((self.root / name).read_text(), 'user data')
+        self.assertFalse((self.root / first.execution_id).exists())
+        self.assertFalse((self.root / second.execution_id).exists())
+
+    def test_fixed_models_keep_early_logs_separate_and_migrate_without_truncation(self):
+        runtime.configure_output(timestamp_output=False)
+
+        class Sim:
+            @runtime.logged_operation
+            def __init__(self, name):
+                self.name = name
+                runtime.log_print('prepare ' + name)
+
+        @runtime.logged_export('output_dir', task='export')
+        def export(sim, output_dir, filename_prefix):
+            runtime.log_print('export ' + sim.name)
+            path = Path(output_dir) / (filename_prefix + '.onnx')
+            path.write_text(sim.name)
+            return path
+
+        first = Sim('first')
+        first_stage = runtime.get_run(first).root
+        second = Sim('second')
+        second_stage = runtime.get_run(second).root
+        self.assertNotEqual(first_stage, second_stage)
+        target = self.root / 'exported'
+        target.mkdir(mode=0o750)
+        permissions = target.stat().st_mode
+        first_path = export(first, target, 'model')
+        first_log = (target / 'run.log').read_text()
+        self.assertIn('prepare first', first_log)
+        self.assertIn('export first', first_log)
+        self.assertNotIn('prepare second', first_log)
+        second_path = export(second, target, 'model')
+        second_log = (target / 'run.log').read_text()
+        self.assertIn('prepare second', second_log)
+        self.assertIn('export second', second_log)
+        self.assertNotIn('prepare first', second_log)
+        self.assertEqual(first_path, target / 'exports/model.onnx')
+        self.assertEqual(second_path, first_path)
+        self.assertEqual(second_path.read_text(), 'second')
+        self.assertFalse(first_stage.exists())
+        self.assertFalse(second_stage.exists())
+        self.assertEqual(target.stat().st_mode, permissions)
+
+    def test_fixed_implicit_run_finishes_in_default_output_root(self):
+        runtime.configure_output(timestamp_output=False)
+
+        @runtime.logged_operation
+        def prepare():
+            runtime.log_print('library diagnostic without export')
+
+        prepare()
+        run = runtime.get_run()
+        stage = run.root
+        runtime._finish_implicit()
+        self.assertEqual(run.root, self.root / 'automatic')
+        self.assertFalse(stage.exists())
+        self.assertIn('library diagnostic without export', (run.root / 'run.log').read_text())
+        self.assertEqual(self.read_record(run)['status'], 'success')
+
+    def test_fixed_work_cleanup_preserves_unrelated_and_failed_files(self):
+        runtime.configure_output(timestamp_output=False)
+        user = self.root / '_work/user.txt'
+        user.parent.mkdir()
+        user.write_text('preserve')
+        with self.assertRaisesRegex(ValueError, 'failed task'):
+            with runtime.execution(self.root) as failed:
+                diagnostic = failed.work / 'graph.onnx'
+                diagnostic.write_bytes(b'diagnostic')
+                raise ValueError('failed task')
+        self.assertEqual(self.read_record(failed)['status'], 'failed')
+        with runtime.execution(self.root) as success:
+            work = success.work
+            (work / 'new-intermediate').write_bytes(b'temporary')
+        self.assertFalse(work.exists())
+        self.assertEqual(user.read_text(), 'preserve')
+        self.assertEqual(diagnostic.read_bytes(), b'diagnostic')
+
+    def test_fixed_directory_is_locked_across_processes_before_log_truncation(self):
+        runtime.configure_output(timestamp_output=False)
+        script = '''import sys
+from aimet_common.run_context import configure_output, execution
+configure_output(timestamp_output=False)
+try:
+    with execution(sys.argv[1]):
+        raise AssertionError('overlapping task entered output directory')
+except RuntimeError:
+    print('directory-busy')
+'''
+        with runtime.execution(self.root) as run:
+            runtime.log_print('lock owner')
+            original = (run.root / 'run.log').read_bytes()
+            result = subprocess.run([sys.executable, '-c', script, str(self.root)],
+                                    capture_output=True, text=True, timeout=20)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn('directory-busy', result.stdout)
+            self.assertEqual((run.root / 'run.log').read_bytes(), original)
+        with runtime.execution(self.root) as replacement:
+            self.assertEqual(replacement.root, self.root)
+
+    def test_fixed_metadata_is_recorded_and_stale_tasks_cannot_rewrite_record(self):
+        runtime.configure_output(timestamp_output=False)
+        with runtime.export_execution(self.root) as first:
+            (first.exports / 'model.onnx').write_bytes(b'first')
+        with runtime.metadata_output(self.root) as directory:
+            metadata = directory / 'model.meta.json'
+            metadata.write_text('{}')
+            runtime.note_output(metadata)
+        self.assertIn('exports/model.meta.json', self.read_record(first)['outputs'])
+        with runtime.execution(self.root) as second:
+            (second.exports / 'model.onnx').write_bytes(b'second')
+        original = (self.root / 'run.json').read_bytes()
+        with self.assertRaisesRegex(RuntimeError, '后续任务覆盖'):
+            first.save()
+        self.assertEqual((self.root / 'run.json').read_bytes(), original)
+
+    def test_fixed_directory_lock_is_not_retained_by_forked_workers(self):
+        runtime.configure_output(timestamp_output=False)
+        context = multiprocessing.get_context('fork')
+        ready, stop = context.Event(), context.Event()
+
+        def worker():
+            ready.set()
+            stop.wait(10)
+
+        child = context.Process(target=worker)
+        try:
+            with runtime.execution(self.root):
+                child.start()
+                self.assertTrue(ready.wait(10))
+            with runtime.execution(self.root) as replacement:
+                self.assertFalse(replacement.timestamp_output)
+        finally:
+            stop.set()
+            if child.pid is not None:
+                child.join(5)
+                if child.is_alive():
+                    child.terminate()
+                    child.join(5)
+
+    def test_historical_metadata_does_not_modify_new_fixed_run_record(self):
+        with runtime.execution(self.root) as historical:
+            (historical.exports / 'model.onnx').write_bytes(b'historical')
+        runtime.configure_output(timestamp_output=False)
+        with runtime.execution(self.root) as current:
+            (current.exports / 'model.onnx').write_bytes(b'current')
+        original = (current.root / 'run.json').read_bytes()
+        with runtime.metadata_output(historical.exports) as directory:
+            metadata = directory / 'model.meta.json'
+            metadata.write_text('{}')
+            runtime.note_output(metadata)
+        self.assertEqual((current.root / 'run.json').read_bytes(), original)
+        self.assertEqual((historical.exports / 'model.onnx').read_bytes(), b'historical')
+
+    def test_fixed_directory_rejects_symlinks_before_overwriting_files(self):
+        runtime.configure_output(timestamp_output=False)
+        source = self.root / 'outside.txt'
+        source.write_text('preserve')
+        (self.root / 'run.log').symlink_to(source)
+        with self.assertRaisesRegex(ValueError, '符号链接'):
+            with runtime.execution(self.root):
+                self.fail('must reject symlink')
+        self.assertEqual(source.read_text(), 'preserve')
+        (self.root / 'run.log').unlink()
+        exports = self.root / 'exports'
+        exports.mkdir()
+        (exports / 'model.onnx').symlink_to(source)
+        with self.assertRaisesRegex(ValueError, '符号链接'):
+            with runtime.execution(self.root):
+                self.fail('must reject nested symlink')
+        self.assertEqual(source.read_text(), 'preserve')
+        (exports / 'model.onnx').unlink()
+        with runtime.execution(self.root):
+            pass
 
     def test_timestamp_collision_preserves_previous_execution(self):
         now = datetime.datetime(2026, 10, 21, 6, 30, 25, 123456, datetime.timezone.utc)
@@ -283,13 +508,15 @@ class ExecutionTest(unittest.TestCase):
 
     def test_logger_configuration_does_not_lose_open_run(self):
         import logging.config
-        with runtime.execution(self.root) as run:
-            runtime.log_print('before logger configuration')
-            logging.config.dictConfig({'version': 1, 'disable_existing_loggers': False})
-            runtime.log_print('after logger configuration')
-        text = (run.root / 'run.log').read_text()
-        self.assertIn('before logger configuration', text)
-        self.assertIn('after logger configuration', text)
+        for timestamp_output in (True, False):
+            runtime.configure_output(timestamp_output=timestamp_output)
+            with self.subTest(timestamp_output=timestamp_output), runtime.execution(self.root) as run:
+                runtime.log_print('before logger configuration')
+                logging.config.dictConfig({'version': 1, 'disable_existing_loggers': False})
+                runtime.log_print('after logger configuration')
+            text = (run.root / 'run.log').read_text()
+            self.assertIn('before logger configuration', text)
+            self.assertIn('after logger configuration', text)
 
     def test_nested_calls_record_warning_once_and_strip_terminal_colors(self):
         @runtime.logged_operation
