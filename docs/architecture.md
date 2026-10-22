@@ -147,7 +147,7 @@ QuantLSTM 现已通过相同链路接入，独立配置为 `LSTM_config`。
 | --- | --- |
 | `native/common` | 通用量化核心和 `_libpymo` binding |
 | `native/onnx` | `libquant_info` 和 ONNX Runtime custom op |
-| `native/third_party/onnxruntime` | 固定版本的 ONNX Runtime 头文件与许可证 |
+| `docker/environment/third_party/onnxruntime` | 固定版本的 ONNX Runtime 头文件与许可证 |
 | `native/tests` | CPU/CUDA Execution Provider 冒烟测试 |
 
 原生构建向 `src/aimet_common` 安装 `_libpymo`、`libquant_info` 和
@@ -188,7 +188,7 @@ flowchart LR
     Install --> Verify[纯 runtime + 外部只读目录 / GPU / 示例验收]
 ```
 
-环境镜像和应用包使用独立版本；公共环境为 rx-quant-env v1，由两仓库独立维护同一配方和发布身份记录：
+环境镜像和应用包使用独立版本；公共环境为 rx-quant-env v1，由两仓库独立维护公共配方和环境版本标签约定：
 
 - 环境版本随 CUDA、Python、Torch、ONNX Runtime 或构建工具链变化。
 - 项目版本随 AIMET Python、原生实现、QuantGRU、示例或产品行为变化。

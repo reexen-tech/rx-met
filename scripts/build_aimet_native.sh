@@ -29,7 +29,7 @@ case "${runtime}" in
     *) fail "requires CPython 3.10-3.12 on Linux x86_64; found ${runtime}" ;;
 esac
 
-onnxruntime_root="${RX_MET_ONNXRUNTIME_ROOT:-${SOURCE_DIR}/third_party/onnxruntime}"
+onnxruntime_root="${RX_MET_ONNXRUNTIME_ROOT:-${ROOT}/docker/environment/third_party/onnxruntime}"
 [[ -f "${onnxruntime_root}/VERSION_NUMBER" ]] \
     || fail "missing ONNX Runtime headers: ${onnxruntime_root}"
 if [[ -n "${RX_MET_ONNXRUNTIME_VERSION:-}" ]]; then
@@ -37,7 +37,7 @@ if [[ -n "${RX_MET_ONNXRUNTIME_VERSION:-}" ]]; then
     [[ "${actual_onnxruntime_version}" == "${RX_MET_ONNXRUNTIME_VERSION}" ]] \
         || fail "ONNX Runtime header version mismatch: ${actual_onnxruntime_version} != ${RX_MET_ONNXRUNTIME_VERSION}"
 fi
-if [[ "${onnxruntime_root}" == "${SOURCE_DIR}/third_party/onnxruntime" ]]; then
+if [[ "${onnxruntime_root}" == "${ROOT}/docker/environment/third_party/onnxruntime" ]]; then
     log "verify vendored ONNX Runtime headers"
     (
         cd "${onnxruntime_root}"

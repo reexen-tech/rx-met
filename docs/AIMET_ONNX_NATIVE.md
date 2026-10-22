@@ -19,7 +19,7 @@ BSD-3-Clause 许可证保存在 `native/LICENSE`。
 
 该映射记录初始源码来源。后续实现按 rx-met 的运行职责组织，所有变更由 Git 记录。
 
-`native/third_party/onnxruntime` 保存 ONNX Runtime 1.23.2 头文件，供本地独立
+`docker/environment/third_party/onnxruntime` 保存 ONNX Runtime 1.23.2 头文件，供本地独立
 构建使用，并保留许可证、第三方声明、版本和 `SHA256SUMS`。Docker 多 CUDA 构建会
 按变体准备与运行时一致的头文件：`cu118=1.20.1`、`cu126=1.23.2`、
 `cu130=1.27.0`。下载的官方源码归档通过固定 SHA-256 校验后进入编译，确保 custom-op

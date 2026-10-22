@@ -15,6 +15,9 @@ import tempfile
 ROOT = Path(__file__).resolve().parents[2]
 NAME = 'rx-quant-env'
 LABEL = 'com.reexen.rx-quant.'
+THIRD_PARTY = 'docker/environment/third_party'
+BUILD_FILES = ('docker/Dockerfile.environment', 'scripts/environment/common.py',
+               'scripts/internal/prepare_onnxruntime_headers.sh', 'scripts/internal/verify_dependency_wheelhouse.py')
 
 
 def run(*args, **kwargs):
@@ -44,13 +47,9 @@ def config():
 
 def config_digest():
     h = hashlib.sha256(json.dumps(config(), sort_keys=True, separators=(',', ':')).encode())
-    for name in ('docker/Dockerfile.environment', 'scripts/environment/common.py',
-                 'scripts/internal/prepare_onnxruntime_headers.sh', 'scripts/internal/verify_dependency_wheelhouse.py'):
+    for name in BUILD_FILES:
         h.update(name.encode() + b'\0' + bytes.fromhex(sha256(ROOT / name)))
-    for path in sorted((ROOT / 'native/third_party/onnxruntime').rglob('*')):
-        if path.is_file():
-            h.update(str(path.relative_to(ROOT)).encode() + bytes.fromhex(sha256(path)))
-    for path in sorted((ROOT / 'native/third_party/onnxruntime-prepared').rglob('*')):
+    for path in sorted((ROOT / THIRD_PARTY).rglob('*')):
         if path.is_file():
             h.update(str(path.relative_to(ROOT)).encode() + bytes.fromhex(sha256(path)))
     return h.hexdigest()
@@ -68,7 +67,7 @@ def image_ref(role, variant):
 def inspect(reference, role, variant):
     info = json.loads(subprocess.check_output(['docker', 'image', 'inspect', reference]))[0]
     expected = {'environment.name': NAME, 'environment.version': config()['environment_version'],
-                'environment.role': role, 'environment.config-sha256': config_digest(), 'cuda.variant': variant}
+                'environment.role': role, 'cuda.variant': variant}
     labels = info['Config'].get('Labels') or {}
     for key, value in expected.items():
         if labels.get(LABEL + key) != value:
@@ -76,14 +75,6 @@ def inspect(reference, role, variant):
     if (info['Os'], info['Architecture']) != ('linux', 'amd64'):
         raise RuntimeError(f'{reference}: expected linux/amd64')
     return info
-
-
-def load_record(variant, record_path=None):
-    path = Path(record_path or ROOT / 'docker/environment-images.json')
-    doc = json.loads(path.read_text())
-    if (doc['environment_name'], doc['environment_version'], doc['config_sha256']) != (NAME, config()['environment_version'], config_digest()):
-        raise RuntimeError('Published environment record does not match local common configuration')
-    return doc['variants'][variant]
 
 
 def verify(variant, gpu=False):
@@ -148,25 +139,23 @@ def download(variant, output):
 
 def build(variant, wheelhouse=None, builder=None):
     matrix = config(); spec = matrix['variants'][variant]
-    record_path = ROOT / 'docker/environment-images.json'
-    published = None
-    if record_path.is_file():
-        document = json.loads(record_path.read_text())
-        if variant in document.get('variants', {}): published = load_record(variant)
-    if published:
-        for role in ('build', 'runtime'):
-            info = inspect(published[role + '_image_id'], role, variant)
-            if info['Id'] != published[role + '_image_id']: raise RuntimeError('Published image identity mismatch')
-        print('Reuse published environment:', variant, flush=True)
+    missing = []
+    for role in ('build', 'runtime'):
+        reference = image_ref(role, variant)
+        result = subprocess.run(['docker', 'image', 'inspect', reference], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        if result.returncode == 0:
+            inspect(reference, role, variant)
+            print('Reuse environment:', reference, flush=True)
+        else:
+            missing.append(role)
+    if not missing:
         return
     context = ROOT / '.release/environment-context' / matrix['environment_version'] / variant
     context.mkdir(parents=True, exist_ok=True)
-    for name in ('docker/Dockerfile.environment', 'scripts/environment/common.py',
-                 'scripts/internal/prepare_onnxruntime_headers.sh', 'scripts/internal/verify_dependency_wheelhouse.py'):
+    for name in BUILD_FILES:
         destination = context / name; destination.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(ROOT / name, destination)
-    shutil.copytree(ROOT / 'native/third_party/onnxruntime', context / 'native/third_party/onnxruntime', dirs_exist_ok=True)
-    shutil.copytree(ROOT / 'native/third_party/onnxruntime-prepared', context / 'native/third_party/onnxruntime-prepared', dirs_exist_ok=True)
+    shutil.copytree(ROOT / THIRD_PARTY, context / THIRD_PARTY, dirs_exist_ok=True)
     write_json(context / 'docker/variants.json', matrix)
     requirements = context / 'requirements'; requirements.mkdir(exist_ok=True)
     for name, values in [('build', matrix['build_packages']), ('runtime', packages(matrix, variant))]:
@@ -180,13 +169,9 @@ def build(variant, wheelhouse=None, builder=None):
                 except OSError: shutil.copy2(source, target)
     args = {'DEVEL_IMAGE': spec['devel_image'], 'BASE_IMAGE': spec['base_image'], 'CUDA_VARIANT': variant,
             'ENV_VERSION': matrix['environment_version'], 'ENV_CONFIG_SHA256': config_digest()}
-    for role, target in [('build', 'build-env'), ('runtime', 'runtime-env')]:
+    for role in missing:
+        target = role + '-env'
         reference = image_ref(role, variant)
-        result = subprocess.run(['docker', 'image', 'inspect', reference], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        if result.returncode == 0:
-            inspect(reference, role, variant)
-            print('Reuse matching candidate:', reference, flush=True)
-            continue
         command = ['docker', 'buildx', 'build', '--load', '--progress=plain', '--target', target, '-t', reference, '-f', str(context / 'docker/Dockerfile.environment')]
         if builder: command += ['--builder', builder]
         for key, value in args.items(): command += ['--build-arg', f'{key}={value}']
@@ -197,51 +182,9 @@ def build(variant, wheelhouse=None, builder=None):
 
 
 def export(variant, directory):
-    matrix = config()
-    build_info = inspect(image_ref('build', variant), 'build', variant)
-    runtime = inspect(image_ref('runtime', variant), 'runtime', variant)
-    directory.mkdir(parents=True, exist_ok=True)
-    name = f"{NAME}-runtime-{matrix['environment_version']}-{variant}-linux-amd64.tar.gz"
-    archive = directory / name; sidecar = directory / (name + '.json')
-    if archive.exists() or sidecar.exists():
-        if not archive.is_file() or not sidecar.is_file(): raise RuntimeError('Incomplete existing runtime archive')
-        record = json.loads(sidecar.read_text())
-        if record['image_id'] != runtime['Id'] or record['sha256'] != sha256(archive): raise RuntimeError('Refuse to overwrite published runtime')
-    else:
-        partial = archive.with_name(archive.name + '.partial')
-        with partial.open('xb') as output:
-            saver = subprocess.Popen(['docker', 'save', runtime['Id']], stdout=subprocess.PIPE)
-            try:
-                compressor = ['pigz', '-p', '2', '-1', '-n'] if shutil.which('pigz') else ['gzip', '-1', '-n']
-                compressed = subprocess.run(compressor, stdin=saver.stdout, stdout=output)
-                saver.stdout.close()
-                if compressed.returncode or saver.wait(): raise RuntimeError('Runtime archive export failed')
-            finally:
-                if saver.poll() is None: saver.terminate(); saver.wait()
-        run('gzip', '-t', partial)
-        partial.replace(archive)
-        record = {'schema_version': 1, 'environment_name': NAME, 'environment_version': matrix['environment_version'],
-                  'variant': variant, 'config_sha256': config_digest(), 'image_id': runtime['Id'],
-                  'repo_digests': runtime.get('RepoDigests', []), 'filename': name, 'sha256': sha256(archive),
-                  'size_bytes': archive.stat().st_size, 'url': ''}
-        write_json(sidecar, record)
-    lock_path = ROOT / 'docker/environment-images.json'
-    document = {'schema_version': 1, 'environment_name': NAME, 'environment_version': matrix['environment_version'],
-                'config_sha256': config_digest(), 'variants': {}}
-    if lock_path.is_file():
-        document = json.loads(lock_path.read_text())
-        if (document['config_sha256'], document['environment_version']) != (config_digest(), matrix['environment_version']):
-            raise RuntimeError('Existing environment publication belongs to a different configuration')
-    entry = {'build_image_id': build_info['Id'], 'runtime_image_id': runtime['Id'], 'runtime': record}
-    if variant in document['variants'] and document['variants'][variant] != entry:
-        raise RuntimeError('Published environment entry cannot change')
-    document['variants'][variant] = entry
-    write_json(lock_path, document)
-    write_json(directory / 'manifest.json', document)
-    (directory / 'README.md').write_text(f'# rx-quant 公共 runtime {matrix["environment_version"]}\n\n供 rx-met 与 rx-lm-quant 应用包使用。将对应归档放入应用包旁的 images/，运行应用包 install.sh。\n\n镜像身份、配置摘要和归档校验值见 manifest.json。\n')
-    files = sorted(p for p in directory.iterdir() if p.is_file() and p.name != 'SHA256SUMS')
-    (directory / 'SHA256SUMS').write_text(''.join(f'{sha256(p)}  {p.name}\n' for p in files))
-    print('Published environment record:', lock_path, flush=True)
+    sys.path.insert(0, str(ROOT / 'scripts'))
+    from environment.runtime_archives import export_runtime
+    export_runtime(variant, directory)
 
 
 def main():
@@ -266,14 +209,9 @@ def main():
         elif args.action == 'download': download(variant, directory)
         else:
             if not args.directory: parser.error('load requires --directory')
-            record = load_record(variant)['runtime']
-            archive = args.directory / record['filename']
-            if sha256(archive) != record['sha256']: raise RuntimeError('Runtime archive checksum mismatch')
-            with subprocess.Popen(['gzip', '-dc', str(archive)], stdout=subprocess.PIPE) as decompressor:
-                run('docker', 'load', stdin=decompressor.stdout)
-                decompressor.stdout.close()
-                if decompressor.wait(): raise RuntimeError('Runtime archive decompression failed')
-            inspect(record['image_id'], 'runtime', variant)
+            sys.path.insert(0, str(ROOT / 'scripts'))
+            from environment.runtime_archives import load_runtime
+            load_runtime(variant, args.directory)
 
 
 if __name__ == '__main__':

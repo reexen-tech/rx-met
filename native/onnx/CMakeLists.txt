@@ -3,7 +3,7 @@ set(AIMET_ONNX_SRC "${CMAKE_CURRENT_SOURCE_DIR}/src")
 if(NOT RX_MET_ONNXRUNTIME_ROOT)
     set(
         RX_MET_ONNXRUNTIME_ROOT
-        "${PROJECT_SOURCE_DIR}/third_party/onnxruntime"
+        "${PROJECT_SOURCE_DIR}/../docker/environment/third_party/onnxruntime"
     )
 endif()
 

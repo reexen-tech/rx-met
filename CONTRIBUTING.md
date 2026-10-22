@@ -73,10 +73,11 @@ python3 -m unittest -v tests/test_dependencies.py
 
 ## 公共环境与应用包
 
-GPU 环境使用 rx-quant-env v1，两个仓库独立维护相同公共配置和发布身份记录。
-修改公共定义后核对 `python3 scripts/environment/common.py digest`，按 [公共环境](docs/Shared_environment.md)
-完成两边验收；已发布环境不覆盖。产品 VERSION 与环境版本独立。
-发布相关改动补充运行安装器、当前版本日志和环境身份测试，并从真实应用包执行离线安装与只读挂载验收。
+GPU 环境使用 rx-quant-env v1，两个仓库独立维护公共定义，通过环境版本标签复用兼容镜像。
+构建来源摘要和镜像 ID 用于追踪，不作为跨仓库复用条件，也不需要同步镜像身份记录。
+ORT 离线构建材料保存在 `docker/environment/third_party/`；业务原生源码按产品职责维护。
+依赖、ABI 或工具链的兼容性要求变化时升级环境版本；目录和脚本调整不使已有环境失效。
+发布相关修改需验证安装器、环境类型检查、归档完整性和当前版本日志，并执行真实离线安装与只读挂载验收。
 
 ## 提交说明
 

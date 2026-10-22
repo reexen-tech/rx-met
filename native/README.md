@@ -8,7 +8,7 @@ tag，对应 commit `0e679b705818df7f408971e34693b8098f0971a9`。
 
 - `common/` 保存公共量化实现和 `_libpymo` Python binding。
 - `onnx/` 保存 `libquant_info` 和 ONNX Runtime custom op。
-- `third_party/onnxruntime/` 保存固定版本的 ONNX Runtime 头文件和许可证。
+- ORT 头文件与许可证统一保存在 `../docker/environment/third_party/onnxruntime/`，本地编译默认读取该目录。
 - `tests/` 保存已安装原生运行接口的冒烟测试。
 
 ## 文件说明

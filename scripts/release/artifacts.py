@@ -123,9 +123,9 @@ def inspect_wheels(directory, wheel_version, python_version):
 
 
 def runtime_requirement(record, url=''):
-    """Application identity depends on the runtime image, not its export bytes."""
+    """Require a compatible environment tag, independently of local image IDs."""
     keys = ('schema_version', 'environment_name', 'environment_version', 'variant',
-            'config_sha256', 'image_id', 'filename')
+            'image_tag', 'filename')
     return {**{key: record[key] for key in keys}, 'url': url,
             'checksum_url': url + '.sha256' if url else ''}
 
@@ -133,6 +133,7 @@ def runtime_requirement(record, url=''):
 def assemble(args, matrix, variant, runtime, build, runtime_record, archive, wheel_dir, compatibility, *, version, changelog):
     env_version = matrix['environment_version']
     runtime_tag = common.image_ref('runtime', variant)
+    runtime_record = {**runtime_record, 'image_tag': runtime_tag}
     name = f'rx-met-v{version}-{variant}-linux-amd64'
     packed = args.output_dir / (name + '.tar.gz')
     if packed.exists() and not args.replace:
@@ -144,7 +145,7 @@ def assemble(args, matrix, variant, runtime, build, runtime_record, archive, whe
         revision += '-dirty'
     manifest = {'schema_version': 1, 'bundle_name': name, 'version': version, 'wheel_version': wheel_version,
                 'environment_name': common.NAME, 'environment_version': env_version, 'variant': variant, 'source_revision': revision,
-                'wheel_source_sha256': source_digest(), 'delivery_sources_sha256': delivery_digest(changelog), 'build_image_id': build['Id'],
+                'wheel_source_sha256': source_digest(), 'delivery_sources_sha256': delivery_digest(changelog), 'build_image_id': build['Id'], 'runtime_image_id': runtime['Id'],
                 'runtime': runtime_requirement(runtime_record, (args.runtime_base_url.rstrip('/') + '/' + archive.name) if args.runtime_base_url else ''),
                 'compatibility': compatibility, 'wheels': wheels}
     staging = ROOT / '.release/staging'
@@ -158,7 +159,10 @@ def assemble(args, matrix, variant, runtime, build, runtime_record, archive, whe
         write_json(staged / 'manifest.json', manifest)
         bootstrap = {'BUNDLE_NAME': name, 'MANIFEST_SHA256': sha256(staged / 'manifest.json'),
                      'RUNTIME_ENV_DIR': f"{runtime_record['environment_name']}-{env_version}",
-                     'RUNTIME_IMAGE_ID': runtime['Id'], 'RUNTIME_IMAGE_TAG': runtime_tag, 'RUNTIME_ARCHIVE': archive.name,
+                     'RUNTIME_VARIANT': variant, 'RUNTIME_ENV_NAME': runtime_record['environment_name'], 'RUNTIME_ENV_VERSION': env_version,
+                     'RUNTIME_LABEL_PREFIX': common.LABEL,
+                     'RUNTIME_VARIANT_LABEL': 'platform.variant' if variant == 'cpu' else 'cuda.variant',
+                     'RUNTIME_IMAGE_TAG': runtime_tag, 'RUNTIME_ARCHIVE': archive.name,
                      'RUNTIME_URL': manifest['runtime']['url'], 'RUNTIME_CHECKSUM_URL': manifest['runtime']['checksum_url'],
                      'APP_INSTALL_BYTES': str(max(512 * 1024**2, sum(w['unpacked_size_bytes'] for w in wheels) * 2))}
         script = (ROOT / 'packaging/release-bundle/install.sh.in').read_text()
@@ -227,14 +231,11 @@ def main():
     with delivery.stage_release(destination, replace=args.replace) as args.output_dir:
         bundles = []
         for variant in targets:
-            published = common.load_record(variant)
             build_ref = common.image_ref('build', variant)
-            runtime = environment_archives.ensure_image('runtime', variant, published, args.runtime_env_dir)
-            build = environment_archives.ensure_image('build', variant, published, args.build_env_dir)
-            if runtime['Id'] != published['runtime_image_id'] or build['Id'] != published['build_image_id']:
-                raise RuntimeError('公共环境标签与已发布镜像身份不一致')
-            archive, record = environment_archives.runtime_archive(
-                variant, published, args.runtime_env_dir, export=args.with_env)
+            runtime = environment_archives.ensure_image('runtime', variant, args.runtime_env_dir)
+            build = environment_archives.ensure_image('build', variant, args.build_env_dir)
+            archive, record = environment_archives.image_archive(
+                'runtime', variant, args.runtime_env_dir, export=args.with_env)
             if args.with_env:
                 environment = destination.parent / f"{record['environment_name']}-{record['environment_version']}"
                 delivery.publish_environment(archive, record, environment)

@@ -26,22 +26,22 @@ class SharedEnvironmentTest(unittest.TestCase):
         self.assertEqual(before, after)
         self.assertNotIn('cpu_variant', before)
 
-    def test_changed_config_or_missing_variant_rejects_published_record(self):
-        with tempfile.TemporaryDirectory() as temporary:
-            path = Path(temporary) / 'images.json'
-            document = {'environment_name': common.NAME, 'environment_version': common.config()['environment_version'],
-                        'config_sha256': common.config_digest(), 'variants': {'cu126': {'runtime_image_id': 'pinned'}}}
-            path.write_text(json.dumps(document))
-            self.assertEqual(common.load_record('cu126', path)['runtime_image_id'], 'pinned')
-            with self.assertRaises(KeyError): common.load_record('cu118', path)
-            document['config_sha256'] = 'different'
-            path.write_text(json.dumps(document))
-            with self.assertRaises(RuntimeError): common.load_record('cu126', path)
+    def test_existing_version_tags_reuse_images_without_source_digest_or_records(self):
+        with patch.object(common.subprocess, 'run') as run, \
+                patch.object(common, 'inspect') as inspect, \
+                patch.object(common, 'config_digest', side_effect=AssertionError('source digest must not gate reuse')), \
+                patch.object(common.shutil, 'copytree', side_effect=AssertionError('no rebuild needed')):
+            run.return_value.returncode = 0
+            common.build('cu126')
+        self.assertEqual(inspect.call_count, 2)
+        self.assertEqual([call.args[0] for call in inspect.call_args_list],
+                         [common.image_ref(role, 'cu126') for role in ('build', 'runtime')])
+
 
     def test_same_tag_with_wrong_environment_label_is_rejected(self):
         labels = {common.LABEL + key: value for key, value in {
             'environment.name': common.NAME, 'environment.version': common.config()['environment_version'],
-            'environment.role': 'runtime', 'environment.config-sha256': common.config_digest(), 'cuda.variant': 'cu126'}.items()}
+            'environment.role': 'runtime', 'environment.config-sha256': 'another-repository-build', 'cuda.variant': 'cu126'}.items()}
         info = {'Id': 'pinned', 'Os': 'linux', 'Architecture': 'amd64', 'Config': {'Labels': labels}}
         with patch.object(common.subprocess, 'check_output', return_value=json.dumps([info]).encode()):
             self.assertEqual(common.inspect('a-tag', 'runtime', 'cu126')['Id'], 'pinned')
@@ -54,7 +54,7 @@ class SharedEnvironmentTest(unittest.TestCase):
         for variant, spec in matrix['variants'].items():
             version = spec['onnxruntime']['packages']['onnxruntime-gpu']
             if spec['onnxruntime']['source_sha256'] != 'vendored':
-                self.assertTrue((ROOT / 'native/third_party/onnxruntime-prepared' / version / 'SHA256SUMS').is_file())
+                self.assertTrue((ROOT / 'docker/environment/third_party/onnxruntime-prepared' / version / 'SHA256SUMS').is_file())
             with self.subTest(variant=variant), tempfile.TemporaryDirectory() as temporary:
                 output = Path(temporary) / 'headers'
                 common.subprocess.run([str(ROOT / 'scripts/internal/prepare_onnxruntime_headers.sh'), version,
