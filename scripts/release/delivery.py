@@ -76,12 +76,12 @@ def publish_environment(archive, record, directory):
     with _publication_lock(directory):
         manifest_path = directory / 'manifest.json'
         document = {key: record[key] for key in
-                    ('schema_version', 'environment_name', 'environment_version', 'config_sha256')}
+                    ('schema_version', 'environment_name', 'environment_version')}
         document['variants'] = {}
         if manifest_path.exists():
             existing = json.loads(manifest_path.read_text())
             if any(existing.get(key) != document[key] for key in
-                   ('schema_version', 'environment_name', 'environment_version', 'config_sha256')):
+                   ('schema_version', 'environment_name', 'environment_version')):
                 raise RuntimeError(f'环境交付目录包含其他环境的发布清单: {directory}')
             document = existing
         verified = {}
@@ -91,9 +91,6 @@ def publish_environment(archive, record, directory):
             if not previous_archive.is_file() or common.sha256(previous_archive) != previous_record['sha256']:
                 raise RuntimeError(f'环境交付目录的归档冲突: {previous_archive}')
             verified[previous_archive.name] = previous_record['sha256']
-        old = document['variants'].get(record['variant'])
-        if old and old['runtime']['image_id'] != record['image_id']:
-            raise RuntimeError(f'环境交付目录的镜像身份冲突: {directory}')
         destination = directory / archive.name
         if destination.exists():
             if (verified.get(destination.name) or common.sha256(destination)) != record['sha256']:
@@ -112,7 +109,7 @@ def publish_environment(archive, record, directory):
         (directory / 'README.md').write_text(
             f"# {record['environment_name']} {record['environment_version']} 公共运行环境\n\n"
             '将本目录与产品交付目录平级放置，在产品目录内解压所选应用包并运行 install.sh。\n'
-            '这里只交付运行环境镜像；应用包按精确镜像 ID 校验环境，不包含构建环境镜像。\n')
+            '这里只交付运行环境镜像；应用包按版本标签复用兼容环境，不包含构建环境镜像。\n')
         files = sorted(path for path in directory.iterdir()
                        if path.is_file() and not path.name.startswith('.') and path.name != 'SHA256SUMS')
         (directory / 'SHA256SUMS').write_text(''.join(

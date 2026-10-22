@@ -63,7 +63,7 @@ CUDA 版 ONNX Runtime 安装在 runtime 中；QuantGRU 和 QuantLSTM 来自挂�
 ./install.sh --offline
 ```
 
-安装器打印应用目录和固定镜像 ID。将它们填入以下命令，并选择实际分配的 GPU、工作目录和数据目录：
+安装器打印应用目录和公共环境版本标签。将它们填入以下命令，并选择实际分配的 GPU、工作目录和数据目录：
 
 ```bash
 RUNTIME_IMAGE_ID='sha256:替换为安装器输出的镜像ID'

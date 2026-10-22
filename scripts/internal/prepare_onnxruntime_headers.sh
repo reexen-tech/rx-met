@@ -6,7 +6,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 VERSION="${1:?用法: prepare_onnxruntime_headers.sh VERSION OUT_DIR SHA256}"
 OUT_DIR="${2:?用法: prepare_onnxruntime_headers.sh VERSION OUT_DIR SHA256}"
 SHA256="${3:?用法: prepare_onnxruntime_headers.sh VERSION OUT_DIR SHA256}"
-VENDORED="${ROOT}/native/third_party/onnxruntime"
+VENDORED="${ROOT}/docker/environment/third_party/onnxruntime"
 
 log() { printf '[prepare_onnxruntime_headers] %s\n' "$*"; }
 die() { printf '[prepare_onnxruntime_headers] ERROR: %s\n' "$*" >&2; exit 1; }
@@ -23,8 +23,8 @@ if [[ "${SHA256}" == "vendored" ]]; then
         sha256sum --check --strict --quiet SHA256SUMS
     )
     cp -a "${VENDORED}/." "${OUT_DIR}/"
-elif [[ -d "${ROOT}/native/third_party/onnxruntime-prepared/${VERSION}" ]]; then
-    cached="${ROOT}/native/third_party/onnxruntime-prepared/${VERSION}"
+elif [[ -d "${ROOT}/docker/environment/third_party/onnxruntime-prepared/${VERSION}" ]]; then
+    cached="${ROOT}/docker/environment/third_party/onnxruntime-prepared/${VERSION}"
     [[ "$(tr -d '[:space:]' < "$cached/SOURCE_SHA256")" == "$SHA256" ]] || die "缓存头文件源码身份不匹配"
     (cd "$cached" && sha256sum --check --strict --quiet SHA256SUMS)
     cp -a "$cached/." "$OUT_DIR/"

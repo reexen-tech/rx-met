@@ -200,7 +200,7 @@ class ReleaseDeliveryTest(unittest.TestCase):
         archive, record = self.archive()
         delivery.publish_environment(archive, record, self.environment)
         before = (self.environment / 'manifest.json').read_bytes()
-        for key in ('environment_name', 'environment_version', 'config_sha256', 'image_id'):
+        for key in ('environment_name', 'environment_version'):
             with self.subTest(key=key), self.assertRaisesRegex(RuntimeError, '冲突|其他环境'):
                 delivery.publish_environment(archive, {**record, key: 'different'}, self.environment)
         self.assertEqual((self.environment / 'manifest.json').read_bytes(), before)
@@ -214,6 +214,12 @@ class ReleaseDeliveryTest(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, '归档冲突'):
             delivery.publish_environment(archive, record, self.environment)
         self.assertEqual(target.read_bytes(), b'corrupt')
+
+    def test_build_provenance_does_not_gate_shared_environment_delivery(self):
+        archive, record = self.archive()
+        delivery.publish_environment(archive, record, self.environment)
+        delivery.publish_environment(archive, {**record, 'config_sha256': 'other-source', 'image_id': 'rebuilt'}, self.environment)
+        self.assert_checksums(self.environment)
 
     def test_old_flag_is_rejected_before_docker_or_output(self):
         with patch('sys.argv', ['artifacts.py', 'build', '--with-images']), \
@@ -244,7 +250,7 @@ class ReleaseDeliveryTest(unittest.TestCase):
         (environment / 'keep').write_bytes(b'shared environment')
         targets = ['cu126', 'cpu' if hasattr(artifacts, 'cpu') else 'cu118']
         published = {'runtime_image_id': 'image', 'build_image_id': 'image'}
-        def runtime_archive(variant, *args, **kwargs):
+        def runtime_archive(role, variant, *args, **kwargs):
             record = self.runtime(variant)
             if variant == 'cpu':
                 record.update(environment_name='rx-lm-quant-env', environment_version='deps-v2')
@@ -262,9 +268,8 @@ class ReleaseDeliveryTest(unittest.TestCase):
                 (artifacts, 'ROOT', {'new': self.root}),
                 (artifacts.dependencies, 'check_generated_artifacts', {}),
                 (artifacts.common, 'config', {'return_value': {'environment_version': 'v1'}}),
-                (artifacts.common, 'load_record', {'return_value': published}),
                 (artifacts.environment_archives, 'ensure_image', {'return_value': {'Id': 'image'}}),
-                (artifacts.environment_archives, 'runtime_archive', {'side_effect': runtime_archive}),
+                (artifacts.environment_archives, 'image_archive', {'side_effect': runtime_archive}),
                 (artifacts, 'release_changelog', {'return_value': 'notes'}),
                 (artifacts, 'runtime_compatibility', {'return_value': {}}),
                 (artifacts, 'source_digest', {'return_value': 'source'}),
@@ -275,7 +280,6 @@ class ReleaseDeliveryTest(unittest.TestCase):
                 stack.enter_context(patch.object(obj, name, **options))
             if hasattr(artifacts, 'cpu'):
                 stack.enter_context(patch.object(artifacts.cpu, 'config', return_value={'environment_version': 'deps-v2'}))
-                stack.enter_context(patch.object(artifacts.cpu, 'load_record', return_value=published))
             stack.enter_context(patch('sys.argv', ['artifacts.py', 'build', *targets, '--replace']))
             artifacts.main()
         entries = json.loads((output / 'release.json').read_text())['bundles']

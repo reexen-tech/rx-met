@@ -139,9 +139,6 @@ class ReleaseBuildPreflightTest(unittest.TestCase):
             patcher = patch.object(obj, target, **options)
             patcher.start()
             self.addCleanup(patcher.stop)
-        patcher = patch.object(artifacts.common, 'load_record', return_value={})
-        self.load_record = patcher.start()
-        self.addCleanup(patcher.stop)
         patcher = patch.object(artifacts.environment_archives, 'ensure_image',
                                side_effect=RuntimeError('Docker work started'))
         self.ensure_image = patcher.start()
@@ -162,7 +159,6 @@ class ReleaseBuildPreflightTest(unittest.TestCase):
                 self.assertRaisesRegex(RuntimeError, '--replace') as raised:
             artifacts.main()
         self.assertIn(str(self.output), str(raised.exception))
-        self.load_record.assert_not_called()
         self.ensure_image.assert_not_called()
         self.assertFalse((self.root / '.release/wheels').exists())
         self.assertFalse((self.root / '.release/runtime-images').exists())

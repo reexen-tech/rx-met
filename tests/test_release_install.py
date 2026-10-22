@@ -57,16 +57,20 @@ elif args[:2] == ['image', 'inspect']:
     reference = args[-1]
     if reference == os.environ['FAKE_RUNTIME_TAG']:
         tag_state = Path(os.environ['FAKE_TAG_STATE'])
-        image_id = os.environ.get('FAKE_TAG_ID') or (tag_state.read_text() if tag_state.exists() else '')
+        image_id = os.environ.get('FAKE_TAG_ID') or (tag_state.read_text() if tag_state.exists() else (expected if os.environ.get('FAKE_IMAGE_PRESENT') == '1' else ''))
     else:
         image_id = images.get(reference)
         if reference == expected and os.environ.get('FAKE_IMAGE_PRESENT') == '1':
             image_id = expected
     if not image_id:
         sys.exit(1)
-    print(image_id)
+    if '--format' in args and '.Config.Labels' in args[args.index('--format') + 1]:
+        value = os.environ.get('FAKE_ENVIRONMENT_METADATA', 'linux/amd64|rx-quant-env|v1|runtime|cu126')
+        print(value if image_id == expected or image_id == os.environ.get('FAKE_COMPATIBLE_IMAGE_ID') else 'wrong-environment')
+    else:
+        print(image_id)
 elif args and args[0] == 'tag':
-    assert args[1] == expected
+    assert args[1] == expected or args[1] == os.environ.get('FAKE_COMPATIBLE_IMAGE_ID')
     assert args[2] == os.environ['FAKE_RUNTIME_TAG']
     Path(os.environ['FAKE_TAG_STATE']).write_text(args[1])
 elif args[:2] == ['load', '--input']:
@@ -164,7 +168,8 @@ else:
 ''')
         curl.chmod(0o755)
 
-    def write_bundle(self, url='', revision='original'):
+    def write_bundle(self, url='', revision='original', variant='cu126'):
+        self.env['FAKE_ENVIRONMENT_METADATA'] = ('linux/amd64|rx-lm-quant-env|deps-v2|runtime|cpu' if variant == 'cpu' else 'linux/amd64|rx-quant-env|v1|runtime|cu126')
         manifest = self.bundle / 'manifest.json'
         manifest.write_text(json.dumps({'version': '1.1.0', 'revision': revision}))
         for name in ('README.md', 'CHANGELOG.md', 'examples/example.py'):
@@ -172,7 +177,9 @@ else:
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(revision)
         bootstrap = {'BUNDLE_NAME': 'rx-met-test', 'MANIFEST_SHA256': hashlib.sha256(manifest.read_bytes()).hexdigest(),
-                     'RUNTIME_IMAGE_ID': self.runtime_id, 'RUNTIME_IMAGE_TAG': self.env['FAKE_RUNTIME_TAG'],
+                     'RUNTIME_IMAGE_TAG': self.env['FAKE_RUNTIME_TAG'],
+                     'RUNTIME_VARIANT': variant, 'RUNTIME_ENV_NAME': 'rx-quant-env', 'RUNTIME_ENV_VERSION': 'v1',
+                     'RUNTIME_LABEL_PREFIX': 'com.reexen.rx-quant.', 'RUNTIME_VARIANT_LABEL': 'cuda.variant',
                      'RUNTIME_ENV_DIR': 'rx-quant-env-v1', 'RUNTIME_ARCHIVE': 'runtime.tar.gz',
                      'RUNTIME_URL': url, 'RUNTIME_CHECKSUM_URL': url + '.sha256' if url else '', 'APP_INSTALL_BYTES': '1'}
         script = (ROOT / 'packaging/release-bundle/install.sh.in').read_text()
@@ -208,10 +215,14 @@ else:
         self.assert_failed_with('镜像归档损坏', self.invoke('--runtime-image', str(archive)))
         self.assertNotIn("['load'", (self.root / 'docker.log').read_text())
 
-    def test_missing_runtime_tag_is_created_from_verified_image(self):
-        self.env['FAKE_IMAGE_PRESENT'] = '1'
+    def test_compatible_rebuilt_runtime_tag_is_reused(self):
+        image_id = 'sha256:' + 'a' * 64
+        self.env['FAKE_TAG_ID'] = image_id
+        self.env['FAKE_COMPATIBLE_IMAGE_ID'] = image_id
         self.assert_failed_with('injected container failure', self.invoke('--offline'))
-        self.assertEqual((self.root / 'runtime-tag').read_text(), self.runtime_id)
+        log = (self.root / 'docker.log').read_text()
+        self.assertNotIn("['load'", log)
+        self.assertNotIn("['tag'", log)
 
     def test_matching_runtime_tag_is_reused(self):
         self.env['FAKE_IMAGE_PRESENT'] = '1'
@@ -222,7 +233,7 @@ else:
     def test_conflicting_runtime_tag_is_not_overwritten_or_used(self):
         self.env['FAKE_IMAGE_PRESENT'] = '1'
         self.env['FAKE_TAG_ID'] = 'sha256:' + '2' * 64
-        self.assert_failed_with('runtime 标签指向其他镜像', self.invoke('--offline'))
+        self.assert_failed_with('runtime 环境版本、角色、变体或平台不匹配', self.invoke('--offline'))
         log = (self.root / 'docker.log').read_text()
         self.assertNotIn("['tag'", log)
         self.assertNotIn("['run'", log)
@@ -447,23 +458,23 @@ os.execv(os.environ['REAL_MV'], ['mv', *sys.argv[1:]])
     def test_existing_expected_image_cannot_mask_wrong_explicit_archive(self):
         self.env['FAKE_IMAGE_PRESENT'] = '1'
         archive = self.local_archive(self.archive_bytes(config=b'{"wrong":"image"}'))
-        self.assert_failed_with('runtime 归档身份或内容校验失败', self.invoke('--runtime-image', str(archive)))
-        self.assertNotIn("['load'", (self.root / 'docker.log').read_text())
+        self.assert_failed_with('runtime 环境版本、角色、变体或平台不匹配', self.invoke('--runtime-image', str(archive)))
+        self.assertNotIn("['run'", (self.root / 'docker.log').read_text())
 
     def test_fresh_install_checks_actual_load_result(self):
         archive = self.local_archive(self.archive_bytes(config=b'{"wrong":"image"}'))
-        self.assert_failed_with('本次归档导入了不匹配的镜像', self.invoke('--runtime-image', str(archive)))
+        self.assert_failed_with('runtime 环境版本、角色、变体或平台不匹配', self.invoke('--runtime-image', str(archive)))
         self.assertNotIn("['run'", (self.root / 'docker.log').read_text())
 
     def test_archive_with_extra_image_is_rejected(self):
         archive = self.local_archive(self.archive_bytes(extra_image=True))
-        self.assert_failed_with('本次归档导入了不匹配的镜像', self.invoke('--runtime-image', str(archive)))
+        self.assert_failed_with('runtime 环境版本、角色、变体或平台不匹配', self.invoke('--runtime-image', str(archive)))
         self.assertNotIn("['run'", (self.root / 'docker.log').read_text())
 
     def test_conflicting_tag_is_rejected_before_loading_an_explicit_archive(self):
         self.env['FAKE_TAG_ID'] = 'sha256:' + '2' * 64
         archive = self.local_archive(self.archive_bytes(tags=[self.env['FAKE_RUNTIME_TAG']]))
-        self.assert_failed_with('runtime 标签指向其他镜像', self.invoke('--runtime-image', str(archive)))
+        self.assert_failed_with('runtime 环境版本、角色、变体或平台不匹配', self.invoke('--runtime-image', str(archive)))
         self.assertNotIn("['load'", (self.root / 'docker.log').read_text())
 
     def test_load_without_identity_report_is_not_accepted(self):
@@ -496,7 +507,7 @@ os.execv(os.environ['REAL_MV'], ['mv', *sys.argv[1:]])
         self.assertFalse(list(cache.glob('.download.*')))
         self.env['FAKE_CHECKSUM_STATUS'] = '404'
         self.env['FAKE_ARCHIVE'] = base64.b64encode(self.archive_bytes(config=b'{"wrong":"image"}')).decode()
-        self.assert_failed_with('本次归档导入了不匹配的镜像', self.invoke('--cache-dir', str(cache)))
+        self.assert_failed_with('runtime 环境版本、角色、变体或平台不匹配', self.invoke('--cache-dir', str(cache)))
         self.assertFalse((cache / 'runtime.tar.gz').exists())
         self.assertFalse(list(cache.glob('.download.*')))
 

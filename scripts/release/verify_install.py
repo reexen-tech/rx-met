@@ -20,7 +20,6 @@ assert platform.machine() == 'x86_64', platform.machine()
 assert sysconfig.get_config_var('SOABI') == expected['python_abi']
 environment = dict(line.split('=', 1) for line in Path('/opt/rx-quant-env/environment.env').read_text().splitlines())
 assert environment['environment_name'] == manifest['environment_name'] == 'rx-quant-env'
-assert environment['config_sha256'] == manifest['runtime']['config_sha256']
 assert environment['environment_role'] == 'runtime'
 assert environment['environment_version'] == manifest['environment_version']
 assert environment['cuda_variant'] == manifest['variant']

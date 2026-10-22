@@ -12,6 +12,7 @@ STAGING=""
 BACKUP=""
 DOWNLOAD_DIR=""
 RUNTIME_LOADED=0
+RUNTIME_IMAGE_ID=""
 log() { printf '[install] %s\n' "$*"; }
 die() { printf '[install] ERROR: %s\n' "$*" >&2; exit 1; }
 cleanup() {
@@ -120,25 +121,19 @@ check_archive() {
     fi
     gzip -t -- "$file" || die "镜像归档损坏: $file"
 }
-verify_archive_content() {
-    local file="$1"
-    log '校验归档中的 runtime 镜像身份和内容'
-    docker run --rm -i --network none --read-only --tmpfs /tmp:rw,noexec,nosuid,size=64m \
-        --user "$(id -u):$(id -g)" -e HOME=/tmp -e PYTHONDONTWRITEBYTECODE=1 \
-        --mount "type=bind,src=$file,dst=/runtime-image.tar.gz,readonly" \
-        --entrypoint python3 "$RUNTIME_IMAGE_ID" -B - /runtime-image.tar.gz "$RUNTIME_IMAGE_ID" <<'PY'
-@VERIFY_RUNTIME_ARCHIVE@
-PY
+verify_runtime_reference() {
+    local reference="$1" format actual
+    printf -v format '{{.Os}}/{{.Architecture}}|{{index .Config.Labels "%senvironment.name"}}|{{index .Config.Labels "%senvironment.version"}}|{{index .Config.Labels "%senvironment.role"}}|{{index .Config.Labels "%s%s"}}' \
+        "$RUNTIME_LABEL_PREFIX" "$RUNTIME_LABEL_PREFIX" "$RUNTIME_LABEL_PREFIX" "$RUNTIME_LABEL_PREFIX" "$RUNTIME_VARIANT_LABEL"
+    actual="$(docker image inspect --format "$format" "$reference")" || die "无法检查 runtime: $reference"
+    [[ "$actual" == "linux/amd64|$RUNTIME_ENV_NAME|$RUNTIME_ENV_VERSION|runtime|$RUNTIME_VARIANT" ]] \
+        || die "runtime 环境版本、角色、变体或平台不匹配: $reference"
 }
 load_archive() {
-    local file output line reference loaded_id count=0 verified=0
+    local file output line reference loaded_id candidate_id="" count=0
     file="$(realpath -- "$1")" || die "镜像归档不存在: $1"
     [[ "$file" != *','* && "$file" != *$'\n'* ]] || die '镜像路径不能包含逗号或换行'
     check_archive "$file"
-    if docker image inspect "$RUNTIME_IMAGE_ID" >/dev/null 2>&1; then
-        verify_archive_content "$file" || die 'runtime 归档身份或内容校验失败'
-        verified=1
-    fi
     log "导入 runtime: $file"
     output="$(docker load --input "$file")" || die "runtime 镜像导入失败: $file"
     printf '%s\n' "$output"
@@ -148,26 +143,24 @@ load_archive() {
             'Loaded image: '*) reference="${line#Loaded image: }" ;;
             *) continue ;;
         esac
+        verify_runtime_reference "$reference"
         loaded_id="$(docker image inspect --format '{{.Id}}' "$reference")" || die '无法检查本次导入的镜像'
-        [[ "$loaded_id" == "$RUNTIME_IMAGE_ID" ]] || die "本次归档导入了不匹配的镜像: $reference"
+        [[ -z "$candidate_id" || "$candidate_id" == "$loaded_id" ]] || die '归档包含多个不同的 runtime 镜像'
+        candidate_id="$loaded_id"
         ((count += 1))
     done <<< "$output"
-    ((count > 0)) || die 'docker load 未返回本次导入的镜像身份'
-    [[ "$(docker image inspect --format '{{.Id}}' "$RUNTIME_IMAGE_ID")" == "$RUNTIME_IMAGE_ID" ]] || die '导入的镜像与所需 runtime 不匹配'
-    if ((verified == 0)); then
-        verify_archive_content "$file" || die 'runtime 归档身份或内容校验失败'
-    fi
+    ((count > 0)) || die 'docker load 未返回本次导入的镜像'
+    docker tag "$candidate_id" "$RUNTIME_IMAGE_TAG"
     RUNTIME_LOADED=1
 }
-# Reject a conflicting public tag before docker load can change it.
-if tag_image_id="$(docker image inspect --format '{{.Id}}' "$RUNTIME_IMAGE_TAG" 2>/dev/null)"; then
-    [[ "$tag_image_id" == "$RUNTIME_IMAGE_ID" ]] || die "runtime 标签指向其他镜像: $RUNTIME_IMAGE_TAG；不会自动覆盖"
+if docker image inspect "$RUNTIME_IMAGE_TAG" >/dev/null 2>&1; then
+    verify_runtime_reference "$RUNTIME_IMAGE_TAG"
 fi
 if [[ -n "$ARCHIVE" ]]; then
     command -v gzip >/dev/null || die '缺少 gzip'
     load_archive "$ARCHIVE"
-elif docker image inspect "$RUNTIME_IMAGE_ID" >/dev/null 2>&1; then
-    log '复用已存在且身份匹配的 runtime'
+elif docker image inspect "$RUNTIME_IMAGE_TAG" >/dev/null 2>&1; then
+    log '复用已存在的 runtime 版本标签'
 else
     command -v gzip >/dev/null || die '缺少 gzip'
     for candidate in "$BUNDLE_DIR/../$RUNTIME_ENV_DIR/$RUNTIME_ARCHIVE" "$BUNDLE_DIR/../../$RUNTIME_ENV_DIR/$RUNTIME_ARCHIVE" "$CACHE_DIR/$RUNTIME_ARCHIVE"; do
@@ -209,14 +202,9 @@ else
     fi
     if ((RUNTIME_LOADED == 0)); then load_archive "$ARCHIVE"; fi
 fi
-[[ "$(docker image inspect --format '{{.Id}}' "$RUNTIME_IMAGE_ID")" == "$RUNTIME_IMAGE_ID" ]] || die '导入的镜像与所需 runtime 不匹配'
-# Keep the readable version tag pinned to the already verified image.
-if tag_image_id="$(docker image inspect --format '{{.Id}}' "$RUNTIME_IMAGE_TAG" 2>/dev/null)"; then
-    [[ "$tag_image_id" == "$RUNTIME_IMAGE_ID" ]] || die "runtime 标签指向其他镜像: $RUNTIME_IMAGE_TAG；不会自动覆盖"
-else
-    docker tag "$RUNTIME_IMAGE_ID" "$RUNTIME_IMAGE_TAG"
-fi
-[[ "$(docker image inspect --format '{{.Id}}' "$RUNTIME_IMAGE_TAG")" == "$RUNTIME_IMAGE_ID" ]] || die 'runtime 标签身份校验失败'
+verify_runtime_reference "$RUNTIME_IMAGE_TAG"
+# Resolve once so all containers in this installation use the same local image.
+RUNTIME_IMAGE_ID="$(docker image inspect --format '{{.Id}}' "$RUNTIME_IMAGE_TAG")"
 verify_installation() {
     local directory="$1"
     docker run --rm -i --network none --read-only --tmpfs /tmp:rw,exec,nosuid,size=1g \
