@@ -13,6 +13,7 @@ from aimet_common.mixed_precision import (
     load_mixed_precision_config, select_layer_config,
 )
 from .input_quantization import input_quantizer
+from aimet_common.run_context import log_details, log_print as print, logged_operation
 
 # JSON 2 的 Torch 类名 → 当前图里可能出现的 ONNX op_type。
 # 没有对应节点的项在 apply 时跳过。
@@ -259,6 +260,7 @@ def _apply_plan(plan):
             quantizer._rx_calibration_passthrough = settings["calibration_passthrough"]
 
 
+@logged_operation
 def apply_onnx_mixed_precision_bitwidth(
     sim: Any, config_file: str, verbose: bool = True
 ) -> Dict[str, Any]:
@@ -287,7 +289,7 @@ def apply_onnx_mixed_precision_bitwidth(
     ignored_types = sorted(name for name in layer_type_config
                            if not (set(_TORCH_TYPE_TO_ONNX.get(name, ())) & present_types))
 
-    if verbose:
+    with log_details(verbose):
         print("\n应用混合精度位宽配置（ONNX，复用 Torch JSON 2）")
         print(f"  配置文件: {config_file}")
         if ignored_types:
@@ -347,13 +349,14 @@ def apply_onnx_mixed_precision_bitwidth(
             stats["disabled_ops"] += 1
         else:
             stats["applied_ops"] += 1
-            if verbose and match in {"name", "pattern"}:
-                print(f"  [{match}] {op.name} ({op.type})")
+            if match in {'name', 'pattern'}:
+                with log_details(verbose):
+                    print(f"  [{match}] {op.name} ({op.type})")
 
     _apply_plan(plan)
     for adapter in getattr(sim, "_rx_native_grus", {}).values():
         adapter.configure(config_file)
-    if verbose:
+    with log_details(verbose):
         print(
             f"  应用 {stats['applied_ops']} 个 op，"
             f"禁用 {stats['disabled_ops']}，"

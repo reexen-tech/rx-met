@@ -107,6 +107,8 @@ if TYPE_CHECKING:
 
 logger = AimetLogger.get_area_logger(AimetLogger.LogAreas.Quant)
 
+from aimet_common.run_context import get_run, logged_operation
+
 SKIP_TORCH_ENCODINGS_EXPORT = False
 
 SUPPORTED_KERNELS_ACTION = SupportedKernelsAction.warn_on_error
@@ -292,6 +294,7 @@ class _QuantizationSimModelBase(_QuantizationSimModelInterface):
                              default_output_bw=16 or 32 and default_param_bw=16 or 32.
     """
 
+    @logged_operation
     def __init__(
         self,
         model: torch.nn.Module,
@@ -305,6 +308,7 @@ class _QuantizationSimModelBase(_QuantizationSimModelInterface):
         default_data_type: QuantizationDataType = QuantizationDataType.int,
     ):
         config_file = _get_config_file(config_file)
+        get_run().snapshot_config(config_file, 'quantsim')
 
         if not isinstance(dummy_input, (tuple, list)):
             dummy_input = (dummy_input,)

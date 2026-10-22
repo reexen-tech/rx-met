@@ -20,6 +20,8 @@ from .validation import validate_quantizer_state
 from .input_quantization import input_quantizer
 
 
+from aimet_common.run_context import log_details, log_print as print, logged_operation
+
 _ANALYTIC_BIAS_OPS = frozenset({"Conv", "ConvTranspose", "Gemm", "MatMul"})
 
 
@@ -377,6 +379,7 @@ def align_sim_encodings_to_po2(
     }
 
 
+@logged_operation
 def apply_power_of_2_workflow(
     sim: Any,
     method: str = "cover_range",
@@ -393,7 +396,7 @@ def apply_power_of_2_workflow(
         align_bias_scale=align_bias_scale,
         bias_bitwidth=bias_bitwidth,
     )
-    if verbose:
+    with log_details(verbose):
         print(
             f"Po2 method={report['method']} tolerance={report['tolerance']}: "
             f"修改 {len(report['po2_changes'])} 个 quantizer"

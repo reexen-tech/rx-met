@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import logging
 import copy
 from collections import Counter
 from typing import Any, Dict, List, Tuple
@@ -9,7 +8,9 @@ import onnx
 
 from .io_utils import load_encodings, save_encodings
 
-logger = logging.getLogger(__name__)
+from aimet_common.run_context import log_details, log_print as print, logged_operation, get_logger
+
+logger = get_logger(__name__)
 
 
 def _rename_value_references(model: onnx.ModelProto, old_name: str, new_name: str) -> None:
@@ -170,7 +171,7 @@ def _rename_non_gru_nodes_conflicting_with_gru_names(
         preferred = f"{node.name}.{node.op_type.lower()}"
         used_names.discard(node.name)
         new_name = _make_unique_name(preferred, used_names, gru_public_names)
-        if verbose:
+        with log_details(verbose):
             logger.info(
                 "重命名非 GRU 冲突节点: %s (%s) -> %s",
                 node.name,
@@ -306,20 +307,21 @@ def _rename_or_clone_initializer_for_node_input(
         if changed:
             use_counts[old_name] -= 1
             use_counts[node.input[input_idx]] += 1
-            if verbose:
+            with log_details(verbose):
                 logger.info("复制共享 initializer: %s -> %s，仅用于节点 %s", old_name, node.input[input_idx], node.name)
         return changed
 
     if _rename_initializer_and_refs(model, old_name, new_name):
         _rename_param_encoding(enc, old_name, new_name)
         use_counts[new_name] = use_counts.pop(old_name, 1)
-        if verbose:
+        with log_details(verbose):
             logger.info("重命名 initializer: %s -> %s，用于节点 %s", old_name, new_name, node.name)
         return True
 
     return False
 
 
+@logged_operation
 def rename_gru_initializers_and_change_gru_json_format(
     onnx_path: str,
     encodings_path: str,
@@ -352,7 +354,7 @@ def rename_gru_initializers_and_change_gru_json_format(
         if node.op_type == "GRU":
             new_name = gru_name_map[idx]
             if new_name != node.name:
-                if verbose:
+                with log_details(verbose):
                     logger.info("重命名 GRU 节点: %s -> %s", node.name, new_name)
                 node.name = new_name
                 gru_renamed = True
@@ -364,13 +366,13 @@ def rename_gru_initializers_and_change_gru_json_format(
                 weight_ih_new = f"{node.name}.weight_ih.weight"
                 weight_hh_new = f"{node.name}.weight_hh.weight"
                 if _rename_initializer_and_refs(model, weight_ih_old, weight_ih_new):
-                    if verbose:
+                    with log_details(verbose):
                         logger.info("重命名 GRU weight_ih: %s -> %s", weight_ih_old, weight_ih_new)
                     _rename_param_encoding(enc, weight_ih_old, weight_ih_new)
                     inputs[1] = weight_ih_new
                     param_renamed = True
                 if _rename_initializer_and_refs(model, weight_hh_old, weight_hh_new):
-                    if verbose:
+                    with log_details(verbose):
                         logger.info("重命名 GRU weight_hh: %s -> %s", weight_hh_old, weight_hh_new)
                     _rename_param_encoding(enc, weight_hh_old, weight_hh_new)
                     inputs[2] = weight_hh_new
@@ -379,7 +381,7 @@ def rename_gru_initializers_and_change_gru_json_format(
                 bias_old = inputs[3]
                 bias_new = f"{node.name}.bias"
                 if _rename_initializer_and_refs(model, bias_old, bias_new):
-                    if verbose:
+                    with log_details(verbose):
                         logger.info("重命名 GRU bias: %s -> %s", bias_old, bias_new)
                     _rename_param_encoding(enc, bias_old, bias_new)
                     inputs[3] = bias_new
@@ -413,7 +415,7 @@ def rename_gru_initializers_and_change_gru_json_format(
     else:
         enc_out = encodings_path
 
-    if verbose:
+    with log_details(verbose):
         logger.info("ONNX 输出: %s", onnx_out)
         logger.info("Encodings 输出: %s", enc_out)
 

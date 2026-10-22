@@ -199,7 +199,10 @@ class OnnxAlignmentTest(unittest.TestCase):
                 output = self.path / 'invalid-export'
                 with self.assertRaisesRegex(ValueError, 'w.*finite and positive'):
                     pipeline.export_onnx_json(sim, model, output, 'model')
-                self.assertFalse(list(output.glob('*')))
+                self.assertFalse(list(output.glob('*/exports/*')))
+                records = [json.loads(path.read_text()) for path in output.glob('*/run.json')]
+                self.assertTrue(records)
+                self.assertTrue(all(record['status'] == 'failed' for record in records))
 
     def test_uninitialized_quantizer_is_rejected(self):
         sim, _ = self.sim(bias=False)

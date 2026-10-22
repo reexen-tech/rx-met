@@ -9,12 +9,15 @@ from typing import Dict, List, Any, Optional, Tuple, Set
 from pathlib import Path
 
 
+from aimet_common.run_context import log_details, log_print as print, logged_operation
+
 def _matches_layer_types(module, included=None, excluded=None):
     names = {cls.__name__ for cls in type(module).mro()}
     matches = lambda types: any(value in name for value in types for name in names)
     return not (excluded and matches(excluded)) and (included is None or matches(included))
 
 
+@logged_operation
 def save_quantizer_encodings(
     sim_model,
     save_path: str,
@@ -104,7 +107,7 @@ def save_quantizer_encodings(
     with open(save_path, 'w', encoding='utf-8') as f:
         json.dump(encodings_dict, f, indent=2, ensure_ascii=False)
     
-    if verbose:
+    with log_details(verbose):
         layer_type_str = ', '.join(layer_types) if layer_types else 'all'
         print(f"\n✅ 保存量化参数:")
         print(f"   文件路径: {save_path}")
@@ -114,6 +117,7 @@ def save_quantizer_encodings(
     return encodings_dict
 
 
+@logged_operation
 def load_quantizer_encodings(
     sim_model,
     load_path: str,
@@ -192,7 +196,7 @@ def load_quantizer_encodings(
 
     # 检查 encodings 文件格式：AIMET 标准格式（activation_encodings + param_encodings）
     if "activation_encodings" in encodings_dict or "param_encodings" in encodings_dict:
-        if verbose:
+        with log_details(verbose):
             print("\n📝 检测到 AIMET 标准格式 encodings")
             print("   原生循环层参数已加载完成，正在加载 CONV 等 AIMET 量化器...")
         module_map = {name: m for name, m in sim_model.named_modules()}
@@ -211,7 +215,7 @@ def load_quantizer_encodings(
                 continue
             module = module_map.get(mod_name)
             if module is None:
-                if verbose:
+                with log_details(verbose):
                     print(f"  ⚠️ 模块不存在，跳过: {mod_name}")
                 skipped_count += 1
                 continue
@@ -292,7 +296,7 @@ def load_quantizer_encodings(
                 skipped_count += 1
                 if not skip_if_not_found:
                     raise ValueError(f"参数量化器 encoding 加载失败: {key}")
-        if verbose:
+        with log_details(verbose):
             print(f"\n✅ AIMET 格式加载完成: 共加载 {loaded_count} 个量化器")
     # 创建模块映射
     module_map = {name: module for name, module in sim_model.named_modules()}
@@ -336,7 +340,7 @@ def load_quantizer_encodings(
                     _set_quantizer_allow_overwrite(quantizer, allow_overwrite)
                     loaded_count += 1
                     loaded_types.add(module_type)
-                    if verbose:
+                    with log_details(verbose):
                         print(f"  ✅ {module_name}.param_quantizers.{param_name}")
                 else:
                     if not skip_if_not_found:
@@ -359,7 +363,7 @@ def load_quantizer_encodings(
                     _set_quantizer_allow_overwrite(quantizer, allow_overwrite)
                     loaded_count += 1
                     loaded_types.add(module_type)
-                    if verbose:
+                    with log_details(verbose):
                         print(f"  ✅ {module_name}.output_quantizers[{quantizer_idx}]")
                 else:
                     if not skip_if_not_found:
@@ -370,7 +374,7 @@ def load_quantizer_encodings(
                     raise ValueError(f"输出量化器不存在: {key}")
                 skipped_count += 1
     
-    if verbose:
+    with log_details(verbose):
         print(f"\n✅ 加载量化参数:")
         print(f"   文件路径: {load_path}")
         if layer_types:
@@ -391,6 +395,7 @@ def load_quantizer_encodings(
     }
 
 
+@logged_operation
 def disable_quantization_by_layer_types(
     sim_model,
     layer_types: List[str],
@@ -443,7 +448,7 @@ def disable_quantization_by_layer_types(
         
         disabled_modules.append(module_name)
     
-    if verbose:
+    with log_details(verbose):
         layer_type_str = ', '.join(layer_types)
         print(f"\n🚫 禁用量化:")
         print(f"   层类型: {layer_type_str}")
@@ -661,7 +666,7 @@ def _apply_aimet_encoding_to_quantizer(
         if not ok:
             if 'zero_point' in enc_entry:
                 raise ValueError(f'Cannot restore compiler integer grid: {msg}')
-            if verbose:
+            with log_details(verbose):
                 print(f"  ⚠️ 跳过（无法按 encoding 调整量化器）: {msg}")
             return False
     min_t = torch.tensor(real_min, dtype=torch.float32)
@@ -688,7 +693,7 @@ def _apply_aimet_encoding_to_quantizer(
     except Exception as e:
         if enc_entry is not None and 'zero_point' in enc_entry:
             raise ValueError(f'Cannot restore compiler integer grid: {e}') from e
-        if verbose:
+        with log_details(verbose):
             print(f"  ⚠️ set_range 失败: {e}")
         return False
 
@@ -1154,6 +1159,7 @@ def _sync_and_verify_quantizer_range(src_q, dst_q) -> bool:
     return _is_initialized_quantizer(dst_q)
 
 
+@logged_operation
 def sync_quantizer_pair_by_name(
     sim_model,
     src_module_name: str,
@@ -1175,17 +1181,17 @@ def sync_quantizer_pair_by_name(
     dst_module = module_map.get(dst_module_name)
 
     if src_module is None or dst_module is None:
-        if verbose:
+        with log_details(verbose):
             print(f"  ⚠️  精确同步失败: 模块不存在 {src_module_name} -> {dst_module_name}")
         return False
 
     if not hasattr(src_module, 'output_quantizers') or src_output_idx >= len(src_module.output_quantizers):
-        if verbose:
+        with log_details(verbose):
             print(f"  ⚠️  精确同步失败: 源 output_quantizer 不存在 {src_module_name}[{src_output_idx}]")
         return False
 
     if not hasattr(dst_module, 'input_quantizers') or dst_input_idx >= len(dst_module.input_quantizers):
-        if verbose:
+        with log_details(verbose):
             print(f"  ⚠️  精确同步失败: 目标 input_quantizer 不存在 {dst_module_name}[{dst_input_idx}]")
         return False
 
@@ -1193,17 +1199,17 @@ def sync_quantizer_pair_by_name(
     dst_q = dst_module.input_quantizers[dst_input_idx]
 
     if not _is_initialized_quantizer(src_q):
-        if verbose:
+        with log_details(verbose):
             print(f"  ⚠️  精确同步失败: 源量化器未初始化 {src_module_name}.output_q[{src_output_idx}]")
         return False
 
     if dst_q is None:
-        if verbose:
+        with log_details(verbose):
             print(f"  ⚠️  精确同步失败: 目标量化器为 None {dst_module_name}.input_q[{dst_input_idx}]")
         return False
 
     if dst_q.is_initialized() and not overwrite_initialized:
-        if verbose:
+        with log_details(verbose):
             print(f"  ⏭  精确同步跳过: 目标已初始化 {dst_module_name}.input_q[{dst_input_idx}]")
         return False
 
@@ -1211,7 +1217,7 @@ def sync_quantizer_pair_by_name(
         if not _sync_and_verify_quantizer_range(src_q, dst_q):
             raise RuntimeError("目标量化器在 set_range 后仍未初始化")
         _set_quantizer_allow_overwrite(dst_q, dst_quantizer_allow_overwrite)
-        if verbose:
+        with log_details(verbose):
             print(
                 f"  🎯 {src_module_name}.output_q[{src_output_idx}] => "
                 f"{dst_module_name}.input_q[{dst_input_idx}]  "
@@ -1219,7 +1225,7 @@ def sync_quantizer_pair_by_name(
             )
         return True
     except Exception as e:
-        if verbose:
+        with log_details(verbose):
             print(f"  ⚠️  精确同步失败 {src_module_name} -> {dst_module_name}: {e}")
         return False
 
@@ -1325,6 +1331,7 @@ def _has_blocking_call_module_between(
     )
 
 
+@logged_operation
 def sync_adjacent_quantizers(
     sim_model,
     verbose: bool = True,
@@ -1362,7 +1369,7 @@ def sync_adjacent_quantizers(
         统计信息字典
     """
     if not hasattr(sim_model, 'graph'):
-        if verbose:
+        with log_details(verbose):
             print("  ⚠️  sim_model 没有 .graph 属性，跳过 sync_adjacent_quantizers")
         return {
             'synced': 0,
@@ -1432,24 +1439,25 @@ def sync_adjacent_quantizers(
                     continue
                 if len(upstream_sources) > 1:
                     stats['skipped_multi_source'] += 1
-                    if verbose:
+                    with log_details(verbose):
                         names = ", ".join(src.target for src in upstream_sources)
                         print(f"  ⚠️  {node.target}.input[{idx}] 存在多个上游来源，跳过反向同步: {names}")
                     continue
 
                 src_node = upstream_sources[0]
-                if verbose and _leaf_module_name(node.target) in {"conv_t", "conv_f"}:
-                    debug_blocked = _has_blocking_call_module_between(
-                        node.args[idx],
-                        src_node,
-                        module_map,
-                        transparent_module_name_prefixes,
-                    )
-                    print(
-                        f"  [debug-upstream] {node.target}.input[{idx}] "
-                        f"sources={[src.target for src in upstream_sources]} "
-                        f"chosen={src_node.target} blocked={debug_blocked}"
-                    )
+                if _leaf_module_name(node.target) in {'conv_t', 'conv_f'}:
+                    with log_details(verbose):
+                        debug_blocked = _has_blocking_call_module_between(
+                            node.args[idx],
+                            src_node,
+                            module_map,
+                            transparent_module_name_prefixes,
+                        )
+                        print(
+                            f"  [debug-upstream] {node.target}.input[{idx}] "
+                            f"sources={[src.target for src in upstream_sources]} "
+                            f"chosen={src_node.target} blocked={debug_blocked}"
+                        )
                 if _has_blocking_call_module_between(
                     node.args[idx],
                     src_node,
@@ -1457,7 +1465,7 @@ def sync_adjacent_quantizers(
                     transparent_module_name_prefixes,
                 ):
                     stats['skipped_blocked_path'] += 1
-                    if verbose:
+                    with log_details(verbose):
                         print(
                             f"  ⏭  {src_node.target} -> {node.target}.input[{idx}] "
                             f"之间存在非透明中间模块，跳过反向同步"
@@ -1482,13 +1490,13 @@ def sync_adjacent_quantizers(
                     _set_quantizer_allow_overwrite(src_output_q, synced_quantizer_allow_overwrite)
                     stats['upstream_synced'] += 1
                     stats['synced'] += 1
-                    if verbose:
+                    with log_details(verbose):
                         print(
                             f"  🔁 {src_node.target}.output_q <- {node.target}.input_q[{idx}]  "
                             f"{_format_encoding_range(anchor_input_q.get_encodings())}"
                         )
                 except Exception as e:
-                    if verbose:
+                    with log_details(verbose):
                         print(f"  ⚠️  {src_node.target} <- {node.target}.input[{idx}]: 反向同步失败 - {e}")
 
         # 2) 正向同步：anchor.output_q -> downstream.input_q
@@ -1541,14 +1549,14 @@ def sync_adjacent_quantizers(
                             stats['downstream_synced'] += 1
                             stats['synced'] += 1
                             synced_this_dst = True
-                            if verbose:
+                            with log_details(verbose):
                                 print(
                                     f"  🔗 {node.target}.output_q[{out_idx}] -> {dst_node.target}.input_q[{dst_idx}]  "
                                     f"{_format_encoding_range(anchor_output_q.get_encodings())}"
                                 )
                             break
                         except Exception as e:
-                            if verbose:
+                            with log_details(verbose):
                                 print(f"  ⚠️  {node.target} -> {dst_node.target}.input[{dst_idx}]: 正向同步失败 - {e}")
 
                     if not synced_this_dst:
@@ -1556,7 +1564,7 @@ def sync_adjacent_quantizers(
 
     stats['skipped_disabled'] = stats['passthrough_disabled']
 
-    if verbose:
+    with log_details(verbose):
         print("\n✅ sync_adjacent_quantizers 完成:")
         print(f"   总传播: {stats['synced']}")
         print(f"   上游同步: {stats['upstream_synced']}")

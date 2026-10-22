@@ -17,8 +17,10 @@ from aimet_common.power_of_2 import (
 )
 from aimet_torch.v2.nn import QuantizationMixin
 from aimet_torch.v2.nn.base import BaseQuantizationMixin
+from aimet_common.run_context import log_details, log_print as print, logged_operation
 
 
+@logged_operation
 def print_quantizer_info(model, title="量化器信息", verbose=True):
     """
     打印模型中所有量化器的完整信息
@@ -58,7 +60,7 @@ def print_quantizer_info(model, title="量化器信息", verbose=True):
                     info['quantizer_type'] = f'param_quantizer[{param_name}]'
                     quantizer_info.append(info)
     
-    if verbose:
+    with log_details(verbose):
         print("\n" + "="*80)
         print(f"{title}")
         print("="*80)
@@ -168,6 +170,7 @@ def get_single_quantizer_info(quantizer) -> Dict:
     return info
 
 
+@logged_operation
 def apply_power_of_2_quantization(model, method: str = "round", tolerance: float = 0.02, verbose=True):
     """
     将模型中所有量化器的 scale 修改为 2 的幂次方
@@ -241,6 +244,7 @@ def apply_power_of_2_quantization(model, method: str = "round", tolerance: float
     }
 
 
+@logged_operation
 def modify_quantizer_to_power_of_2(quantizer, quantizer_name: str, method: str = "round", 
                                    tolerance: float = 0.02, verbose: bool = True) -> bool:
     """
@@ -316,7 +320,7 @@ def modify_quantizer_to_power_of_2(quantizer, quantizer_name: str, method: str =
             # 重塑回原始形状
             new_scale = new_scale_flat.view(old_scale.shape)
             
-            if verbose:
+            with log_details(verbose):
                 # 判断 scale 是增大还是减小（取代表值）
                 old_scale_repr = old_scale.mean().item()
                 new_scale_repr = new_scale.mean().item()
@@ -350,7 +354,7 @@ def modify_quantizer_to_power_of_2(quantizer, quantizer_name: str, method: str =
             
             new_scale = torch.tensor(new_scale_val, dtype=old_scale.dtype)
             
-            if verbose:
+            with log_details(verbose):
                 # 判断 scale 是增大还是减小
                 old_scale_val_orig = old_scale.item()
                 scale_direction = "↑" if new_scale_val > old_scale_val_orig else "↓"
@@ -397,10 +401,10 @@ def modify_quantizer_to_power_of_2(quantizer, quantizer_name: str, method: str =
                     quantizer.min.copy_(new_min)
                     quantizer.max.copy_(new_max)
                 except Exception as e:
-                    if verbose:
+                    with log_details(verbose):
                         print(f"  ⚠️  无法修改 min/max: {str(e)}")
         
-        if verbose:
+        with log_details(verbose):
             # 验证修改后的参数
             verify_scale = quantizer.get_scale()
             verify_min = quantizer.get_min()
@@ -461,13 +465,14 @@ def modify_quantizer_to_power_of_2(quantizer, quantizer_name: str, method: str =
         return True
         
     except Exception as e:
-        if verbose:
+        with log_details(verbose):
             print(f"\n警告: 修改 {quantizer_name} 失败: {str(e)}")
             import traceback
             traceback.print_exc()
         return False
 
 
+@logged_operation
 def verify_model_power_of_2(model, verbose=True):
     """
     验证模型中所有量化器的scale是否都是2的幂次方
@@ -476,7 +481,7 @@ def verify_model_power_of_2(model, verbose=True):
         model: 量化模型
         verbose: 是否输出验证信息
     """
-    if verbose:
+    with log_details(verbose):
         print("\n" + "="*80)
         print("验证 Power-of-2 量化")
         print("="*80)
@@ -523,22 +528,22 @@ def verify_model_power_of_2(model, verbose=True):
                     
                     if all_power_of_2:
                         power_of_2_quantizers += 1
-                        if verbose:
+                        with log_details(verbose):
                             print(f"✓ {qname}: 所有scale都是2的幂次方")
                     else:
-                        if verbose:
+                        with log_details(verbose):
                             print(f"✗ {qname}: 存在非2的幂次方scale")
                 else:
                     is_po2, n = verify_power_of_2_scale(scale.item())
                     if is_po2:
                         power_of_2_quantizers += 1
-                        if verbose:
+                        with log_details(verbose):
                             print(f"✓ {qname}: scale = 1/2^{n}")
                     else:
-                        if verbose:
+                        with log_details(verbose):
                             print(f"✗ {qname}: scale = {scale.item():.8f} (非2的幂次方)")
 
-    if verbose:
+    with log_details(verbose):
         print(f"\n验证结果: {power_of_2_quantizers}/{total_quantizers} 个量化器使用 Power-of-2 scale")
         print("="*80 + "\n")
     

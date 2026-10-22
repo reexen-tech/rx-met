@@ -57,6 +57,7 @@ from aimet_onnx.rx_ptq import (
     verify_onnx_ptq_artifacts,
     write_onnx_ptq_metadata,
 )
+from aimet_common.run_context import execution
 
 
 # ============================================================================
@@ -184,6 +185,13 @@ def print_stage_timings(timings: dict) -> None:
 # 主流程：与 quick_start_kws.py 对齐的步骤编号
 # ============================================================================
 def main() -> None:
+    with execution(OUTPUT_DIR, 'onnx_ptq') as run:
+        run.snapshot_config(CONFIG_FILE, 'quantsim')
+        run.snapshot_config(BITWIDTH_CONFIG_FILE, 'mixed_precision')
+        _run_onnx_ptq(run)
+
+
+def _run_onnx_ptq(run) -> None:
     if EXAMPLE not in EXAMPLES:
         raise KeyError(f"未知 EXAMPLE={EXAMPLE}，当前支持: {sorted(EXAMPLES)}")
 
@@ -191,6 +199,7 @@ def main() -> None:
     model_path = Path(os.environ.get("RX_MET_ONNX_PTQ_MODEL", spec["model"]))
     calib_dir = Path(os.environ.get("RX_MET_ONNX_PTQ_CALIB", spec["calib_dir"]))
     filename_prefix = spec["prefix"]
+    run.note_inputs(model=model_path, calibration=calib_dir)
     providers = choose_providers()
     timings: dict = {}
 
@@ -261,7 +270,7 @@ def main() -> None:
             quant_scheme=QUANT_SCHEME,
             percentile_value=PERCENTILE_VALUE,
             providers=providers,
-            work_dir=OUTPUT_DIR / "_aimet_tmp",
+            work_dir=run.work / "aimet",
         )
         require_active_cuda_session(sim.session)
         apply_mixed_precision_bitwidth(
@@ -324,7 +333,7 @@ def main() -> None:
     # ------------------------------------------------------------------
     with stage("步骤 7: 保存量化产物", timings):
         artifacts = export_onnx_json(
-            sim, original_model, OUTPUT_DIR, filename_prefix
+            sim, original_model, run.exports, filename_prefix
         )
         print(f"ONNX:              {artifacts['onnx']}")
         print(f"compiler encodings:{artifacts['encodings']}")
@@ -360,7 +369,7 @@ def main() -> None:
         print("✅ ONNX 维度、量化输出和 compiler encodings 恢复验证通过")
 
     metadata_path = write_onnx_ptq_metadata(
-        OUTPUT_DIR,
+        run.exports,
         filename_prefix,
         {
             "example": EXAMPLE,

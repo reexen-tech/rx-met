@@ -21,6 +21,7 @@ from collections import Counter
 import onnx
 import torch
 from aimet_common.compiler_encodings import normalize_compiler_encodings
+from aimet_common.run_context import logged_export, log_print as print
 from .custom_gru_onnx import (
     ensure_custom_gru_op_registered,
     replace_optimized_gru_modules,
@@ -146,6 +147,7 @@ def _postprocess_with_retry(
 
 
 # ---------- Public API ----------
+@logged_export('export_dir', task='torch_export')
 def export_onnx_json(
     sim,
     export_dir: str,

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import logging
 from typing import Any, Dict, List, Tuple
 
 from aimet_common.compiler_encodings import (
@@ -10,7 +9,9 @@ from aimet_common.compiler_encodings import (
     normalize_dtype_with_bitwidth,
 )
 
-logger = logging.getLogger(__name__)
+from aimet_common.run_context import log_details, log_print as print, logged_operation, get_logger
+
+logger = get_logger(__name__)
 
 
 def _as_list(x: Any) -> List[Any]:
@@ -21,6 +22,7 @@ def _as_list(x: Any) -> List[Any]:
     return [x]
 
 
+@logged_operation
 def merge_gru_bias_param_encodings(enc: Dict[str, Any], verbose: bool = True) -> Tuple[Dict[str, Any], bool]:
     if "param_encodings" not in enc or not isinstance(enc["param_encodings"], dict):
         return enc, False
@@ -50,7 +52,7 @@ def merge_gru_bias_param_encodings(enc: Dict[str, Any], verbose: bool = True) ->
             continue
 
         if out_key in pe and pe[out_key] != merged:
-            if verbose:
+            with log_details(verbose):
                 logger.warning("GRU bias encodings 冲突：%s 已存在，将覆盖为合并后的结果", out_key)
         pe[out_key] = merged
 
@@ -66,6 +68,7 @@ def merge_gru_bias_param_encodings(enc: Dict[str, Any], verbose: bool = True) ->
     return enc, changed
 
 
+@logged_operation
 def merge_gru_activation_encodings(enc: Dict[str, Any], verbose: bool = True) -> Tuple[Dict[str, Any], bool]:
     if "activation_encodings" not in enc or not isinstance(enc["activation_encodings"], dict):
         return enc, False
@@ -106,6 +109,7 @@ def merge_gru_activation_encodings(enc: Dict[str, Any], verbose: bool = True) ->
     return enc, changed
 
 
+@logged_operation
 def rename_gru_internal_ops_keys(enc: Dict[str, Any], verbose: bool = True) -> Tuple[Dict[str, Any], bool]:
     if "activation_encodings" not in enc or not isinstance(enc["activation_encodings"], dict):
         return enc, False
@@ -156,7 +160,7 @@ def rename_gru_internal_ops_keys(enc: Dict[str, Any], verbose: bool = True) -> T
         if local_changed:
             act[gru_name] = entry
             changed = True
-            if verbose:
+            with log_details(verbose):
                 logger.info("✅ 已重命名 GRU(%s) internal_ops key 以对齐后端字段名", gru_name)
 
     if changed:
@@ -164,6 +168,7 @@ def rename_gru_internal_ops_keys(enc: Dict[str, Any], verbose: bool = True) -> T
     return enc, changed
 
 
+@logged_operation
 def add_gru_output_from_internal_ops(enc: Dict[str, Any], verbose: bool = True) -> Tuple[Dict[str, Any], bool]:
     if "activation_encodings" not in enc or not isinstance(enc["activation_encodings"], dict):
         return enc, False
@@ -190,7 +195,7 @@ def add_gru_output_from_internal_ops(enc: Dict[str, Any], verbose: bool = True) 
         entry["output"] = out_enc
         act[gru_name] = entry
         changed = True
-        if verbose:
+        with log_details(verbose):
             logger.info("✅ 已为 GRU(%s) 补齐 output（来源 internal_ops.add_final_hidden.output）", gru_name)
 
     if changed:
@@ -198,6 +203,7 @@ def add_gru_output_from_internal_ops(enc: Dict[str, Any], verbose: bool = True) 
     return enc, changed
 
 
+@logged_operation
 def add_gru_input_from_internal_ops(enc: Dict[str, Any], verbose: bool = True) -> Tuple[Dict[str, Any], bool]:
     if "activation_encodings" not in enc or not isinstance(enc["activation_encodings"], dict):
         return enc, False
@@ -231,7 +237,7 @@ def add_gru_input_from_internal_ops(enc: Dict[str, Any], verbose: bool = True) -
         entry["input"] = picked
         act[gru_name] = entry
         changed = True
-        if verbose:
+        with log_details(verbose):
             logger.info("✅ 已为 GRU(%s) 补齐 input（来源 internal_ops.%s.input）", gru_name, used_key or "weight_ih_linear")
 
     if changed:
@@ -239,6 +245,7 @@ def add_gru_input_from_internal_ops(enc: Dict[str, Any], verbose: bool = True) -
     return enc, changed
 
 
+@logged_operation
 def merge_reverse_cells_into_cells(
     enc: Dict[str, Any], verbose: bool = True
 ) -> Tuple[Dict[str, Any], bool]:
@@ -292,7 +299,7 @@ def merge_reverse_cells_into_cells(
         del act[rev_key]
         changed = True
 
-        if verbose:
+        with log_details(verbose):
             logger.info("✅ 双向GRU：%s 的反向激活量化参数已合并至 %s.internal_ops_reverse",
                         rev_key, cells_key)
 
@@ -301,6 +308,7 @@ def merge_reverse_cells_into_cells(
     return enc, changed
 
 
+@logged_operation
 def merge_bidirectional_gru_param_encodings(
     enc: Dict[str, Any], verbose: bool = True
 ) -> Tuple[Dict[str, Any], bool]:
@@ -372,7 +380,7 @@ def merge_bidirectional_gru_param_encodings(
             changed = True
 
             fwd_ch = len(fwd_enc) if isinstance(fwd_enc, list) else len(fwd_enc.get("scale", []))
-            if verbose:
+            with log_details(verbose):
                 logger.info(
                     "✅ 双向GRU权重合并: %s [2, %d] (前向 %d + 反向 %d)",
                     k, fwd_ch, fwd_ch, fwd_ch,
@@ -383,6 +391,7 @@ def merge_bidirectional_gru_param_encodings(
     return enc, changed
 
 
+@logged_operation
 def postprocess_encodings_inplace(enc: Dict[str, Any], verbose: bool = True) -> Tuple[Dict[str, Any], bool]:
     changed_any = False
 

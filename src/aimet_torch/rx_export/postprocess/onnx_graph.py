@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import logging
 from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
@@ -8,7 +7,9 @@ import onnx
 from onnx import numpy_helper, shape_inference
 from onnxsim import simplify
 
-logger = logging.getLogger(__name__)
+from aimet_common.run_context import log_details, log_print as print, logged_operation, get_logger
+
+logger = get_logger(__name__)
 
 
 def _get_static_shape_tuple(name: str, graph) -> Optional[Tuple[int, ...]]:
@@ -458,6 +459,7 @@ def _get_shape_from_value_info(value_info) -> list:
     return dims
 
 
+@logged_operation
 def fix_slice_end_constants(onnx_path: str, verbose: bool = True) -> bool:
     """
     遍历 ONNX 中的 Slice 节点，将 `INT64_MAX` 形式的 ends 改写为真实维度。
@@ -465,7 +467,7 @@ def fix_slice_end_constants(onnx_path: str, verbose: bool = True) -> bool:
     try:
         model = onnx.load(onnx_path)
     except Exception as exc:  # noqa: BLE001
-        if verbose:
+        with log_details(verbose):
             logger.warning("无法加载ONNX进行Slice修正: %s", exc)
         return False
 
@@ -473,7 +475,7 @@ def fix_slice_end_constants(onnx_path: str, verbose: bool = True) -> bool:
         inferred = shape_inference.infer_shapes(model)
     except Exception as exc:  # noqa: BLE001
         inferred = None
-        if verbose:
+        with log_details(verbose):
             logger.warning("Slice修正时形状推断失败: %s", exc)
 
     value_info_map: Dict[str, onnx.ValueInfoProto] = {}
@@ -554,7 +556,7 @@ def fix_slice_end_constants(onnx_path: str, verbose: bool = True) -> bool:
             model.graph.initializer[init_index].CopyFrom(new_tensor)
             init_map[ends_name] = model.graph.initializer[init_index]
             changed = True
-            if verbose:
+            with log_details(verbose):
                 logger.info("✅ 调整Slice %s 的ends: %s", node.name, ends_arr.tolist())
 
     if changed:

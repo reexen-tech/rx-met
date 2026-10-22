@@ -76,6 +76,7 @@ from aimet_torch.utils_rx import (
     set_train_mode_freeze_bn,
 )
 from aimet_torch.v2 import quantsim
+from aimet_common.run_context import execution
 from quant_gru import QuantGRU
 from quant_lstm import QuantLSTM
 
@@ -889,10 +890,18 @@ def parse_args(argv=None):
 # ============================================================================
 def main(argv=None):
     args = parse_args(argv)
+    with execution(args.output_dir / args.rnn_type, f'kws_{args.rnn_type}') as run:
+        run.note_inputs(dataset=args.data_dir)
+        run.snapshot_config(args.quant_config, 'mixed_precision')
+        run.snapshot_config(CONFIG_FILE, 'quantsim')
+        _run_kws(args, run)
+
+
+def _run_kws(args, run):
     if not torch.cuda.is_available():
         raise RuntimeError("此示例需要 CUDA GPU，请在 rx-met GPU 镜像中使用 --gpus 启动容器")
-    output_dir = args.output_dir / args.rnn_type
-    fp_model_path = Path(os.environ.get("RX_MET_KWS_FP_MODEL", str(output_dir / "model_fp_kws.pth")))
+    output_dir = run.exports
+    fp_model_path = Path(os.environ.get("RX_MET_KWS_FP_MODEL", str(run.checkpoints / "model_fp_kws.pth")))
     if not args.quant_config.is_file():
         raise FileNotFoundError(f"量化配置不存在: {args.quant_config}")
     set_seed(SEED)
@@ -972,7 +981,7 @@ def main(argv=None):
 
     with stage("步骤 7: 保存量化产物", timings):
         output_dir.mkdir(parents=True, exist_ok=True)
-        qat_state_pth = output_dir / "att_mh_rnn_kws_qat.pth"
+        qat_state_pth = run.checkpoints / "att_mh_rnn_kws_qat.pth"
         # 主权重与量化参数分开保存；避免检查点依赖 QuantSim 的内部 Python 状态。
         original_model = sim.get_original_model(sim.model, qdq_weights=False)
         save_checkpoint(original_model, qat_state_pth, args.rnn_type)

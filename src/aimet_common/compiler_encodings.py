@@ -8,12 +8,12 @@ additive and are converted only at the compiler interface.
 from __future__ import annotations
 
 import copy
-import logging
 import math
 from typing import Any, Iterable
 from aimet_common.quantization_grid import IntegerGrid, integer_bounds
+from aimet_common.run_context import get_logger
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 COMPILER_SCHEMA_VERSION = 4
 _VECTOR_FIELDS = {'scale', 'n', 'offset', 'zero_point', 'min', 'max', 'real_min', 'real_max'}
 

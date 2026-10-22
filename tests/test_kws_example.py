@@ -96,9 +96,14 @@ class KwsExampleWorkflowTest(unittest.TestCase):
                      patch.dict('os.environ', {'RX_MET_KWS_FP_MODEL': str(Path(directory) / rnn_type / 'model_fp_kws.pth')}), \
                      contextlib.redirect_stdout(io.StringIO()):
                     kws.main(['--rnn_type', rnn_type, '--output-dir', directory])
-                    output = Path(directory) / rnn_type
-                    checkpoint = torch.load(output / 'att_mh_rnn_kws_qat.pth', weights_only=True)
+                    root = Path(directory) / rnn_type
+                    record_path, = root.glob('*/run.json')
+                    execution = record_path.parent
+                    output = execution / 'exports'
+                    checkpoint = torch.load(execution / 'checkpoints/att_mh_rnn_kws_qat.pth', weights_only=True)
                     self.assertEqual(checkpoint['rnn_type'], rnn_type)
+                    self.assertEqual(json.loads((execution / 'run.json').read_text())['status'], 'success')
+                    self.assertTrue((execution / 'run.log').is_file())
                     graph = onnx.load(output / 'att_mh_rnn_kws.onnx')
                     onnx.checker.check_model(graph)
                     self.assertFalse(any(n.op_type == 'BatchNormalization' for n in graph.graph.node))

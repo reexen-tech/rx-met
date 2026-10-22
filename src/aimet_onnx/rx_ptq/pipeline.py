@@ -14,6 +14,9 @@ import onnx
 
 from aimet_common.compiler_encodings import normalize_compiler_encodings
 from aimet_common.evaluation import classification_accuracy, compare_outputs
+from aimet_common.run_context import (
+    get_run, logged_export, logged_operation, logged_workflow, metadata_directory, note_output,
+)
 from aimet_common.onnx_shapes import save_onnx_with_shapes, validate_onnx_shapes
 from .calibration import inspect_model_input_dtypes, inspect_model_inputs, iter_calibration_feeds
 from .compiler_encodings import CompilerEncodingConverter
@@ -77,6 +80,7 @@ def force_model_io_quantizers(sim: Any, model: onnx.ModelProto) -> None:
         sim._rebuild_session()
 
 
+@logged_operation
 def load_onnx_ptq_inputs(
     model_path: str | Path,
     calibration_dir: str | Path,
@@ -101,6 +105,7 @@ def load_onnx_ptq_inputs(
     return original_model, input_shapes, feeds
 
 
+@logged_operation
 def create_onnx_ptq_sim(
     original_model: onnx.ModelProto,
     dummy_input: Dict[str, np.ndarray],
@@ -141,6 +146,7 @@ def create_onnx_ptq_sim(
     return sim
 
 
+@logged_operation
 def run_onnx_feed(
     source: Any,
     feed: Dict[str, np.ndarray],
@@ -157,6 +163,7 @@ def run_onnx_feed(
     return session.run(None, feed)
 
 
+@logged_operation
 def evaluate_onnx_outputs(
     source: Any,
     feed: Dict[str, np.ndarray],
@@ -166,6 +173,7 @@ def evaluate_onnx_outputs(
     return compare_outputs(reference, run_onnx_feed(source, feed, providers))
 
 
+@logged_export('output_dir', task='onnx_export')
 def export_onnx_json(
     sim: Any,
     original_model: onnx.ModelProto,
@@ -197,6 +205,7 @@ def export_onnx_json(
     }
 
 
+@logged_operation
 def verify_onnx_ptq_artifacts(
     artifacts: Dict[str, Any],
     feed: Dict[str, np.ndarray],
@@ -290,11 +299,12 @@ def write_onnx_ptq_metadata(
     filename_prefix: str,
     payload: Dict[str, Any],
 ) -> Path:
-    metadata_path = Path(output_dir) / f"{filename_prefix}.meta.json"
+    metadata_path = metadata_directory(output_dir) / f"{filename_prefix}.meta.json"
     metadata_path.write_text(
         json.dumps(payload, indent=2, ensure_ascii=False) + "\n",
         encoding="utf-8",
     )
+    note_output(metadata_path)
     return metadata_path
 
 
@@ -303,6 +313,7 @@ _force_model_io_quantizers = force_model_io_quantizers
 _compare_outputs = compare_outputs
 
 
+@logged_workflow('output_dir', task='onnx_ptq')
 def run_onnx_ptq(
     *,
     model_path: str | Path,
@@ -352,7 +363,7 @@ def run_onnx_ptq(
         quant_scheme=quant_scheme,
         percentile_value=percentile_value,
         providers=providers,
-        work_dir=output_dir / "_aimet_tmp",
+        work_dir=get_run().work / "aimet",
     )
     if bitwidth_config_file is None:
         bitwidth_config_file = str(DEFAULT_BITWIDTH_CONFIG)

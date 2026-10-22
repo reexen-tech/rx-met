@@ -11,6 +11,7 @@ QuantGRU、QuantLSTM 和可复现的多 CUDA 运行环境。
 - **量化循环算子**：QuantGRU / QuantLSTM 可替换 `num_layers=1`、`dropout=0` 的 PyTorch GRU / LSTM，
 支持单向、双向、校准和 QAT。
 - **可复现环境**：发布 `cu118`、`cu126` 和 `cu130` 三个固定 runtime 镜像及独立应用包。
+- **运行记录**：自动创建时间戳目录、详细文件日志、配置快照和版本记录，导出产物统一放入 `exports/`。
 
 ## 支持范围
 
@@ -49,7 +50,8 @@ python3 quick_start_kws.py
 ```
 
 将示例命令中的 `python3 quick_start_kws.py` 改为 `python3 quick_start_kws.py --rnn_type lstm` 即可运行 LSTM。
-两种模式共用量化配置，输出分别存放在 `output/quick_start_kws/gru/` 和 `lstm/`；
+两种模式共用量化配置，输出根目录分别为 `output/quick_start_kws/gru/` 和 `lstm/`，
+每次任务创建独立时间戳目录；
 字段说明和完整用法见 [示例说明](examples/README.md)。
 日志输出“量化流程完成（已通过加载验证）”且退出码为 0，表示示例运行成功。
 
@@ -63,6 +65,7 @@ python3 quick_start_kws.py
 | ONNX PTQ 制品和编译器 encodings  | [ONNX PTQ 编译器制品](docs/ONNX_PTQ_COMPILER.md)   |
 | 系统模块、量化数据流和发布架构            | [系统架构](docs/architecture.md)                   |
 | KWS 和 ONNX PTQ 可运行示例       | [示例说明](examples/README.md)                    |
+| 自动日志、运行目录和产物定位 | [运行目录与日志](docs/Runtime_outputs.md) |
 | QuantGRU 接口和构建             | [QuantGRU](operators/quant-gru/README.md)     |
 | QuantLSTM 集成与示例           | [QuantLSTM 接入](docs/QuantLSTM_integration.md) |
 | QuantLSTM 接口和构建           | [QuantLSTM](operators/quant-lstm/README.md) |

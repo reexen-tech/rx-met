@@ -12,7 +12,7 @@
 
 ```bash
 python3 tests/verify_kws_ptq_roundtrip.py \
-  --fp-checkpoint /workspace/output/quick_start_kws/gru/model_fp_kws.pth \
+  --fp-checkpoint /path/to/model_fp_kws.pth \
   --data-dir /datasets/speech_commands_v0.02
 ```
 
@@ -36,6 +36,11 @@ python3 -m unittest discover -s tests -p test_percentile_calibration.py -v
 ```
 
 ## 文件说明
+
+`test_run_context.py` 检查内置运行记录：UTC 微秒目录、多进程冲突、配置快照、日志迁移、
+终端和文件的独立详细程度、异常堆栈、成功清理和失败保留、历史运行保护、版本来源及模型/线程间的日志隔离。
+`test_run_logging.py` 使用真实 Torch/ONNX 和循环算子核对详细日志、数值不变、导出路径及版本记录。
+KWS 工作流测试同时检查新目录中的浮点/QAT 检查点、ONNX、编码和恢复结果。
 
 `test_symmetric_defaults.py` 检查两种整数域下的对称构造默认值、Lazy 包装器、公共
 JSON1 缺项回退，以及真实 Torch v2/ONNX 模型的默认网格和显式非对称覆盖。

@@ -10,6 +10,31 @@ import math
 from pathlib import Path
 
 
+try:
+    from aimet_common.run_context import log_details, log_print as print, logged_operation
+except ModuleNotFoundError as error:
+    if error.name not in ('aimet_common', 'aimet_common.run_context'):
+        raise
+    # Standalone operator wheels do not require AIMET.
+    import builtins as _builtins
+    from contextvars import ContextVar as _ContextVar
+    _console_details = _ContextVar('operator_console_details', default=True)
+
+    @contextmanager
+    def log_details(verbose):
+        token = _console_details.set(_console_details.get() and bool(verbose))
+        try:
+            yield
+        finally:
+            _console_details.reset(token)
+
+    def print(*args, **kwargs):
+        if _console_details.get():
+            _builtins.print(*args, **kwargs)
+
+    def logged_operation(function):
+        return function
+
 def _pot2_scale(scale, method, rmin, rmax, tolerance):
     exponent = math.log2(scale)
     span = abs(rmax - rmin)
@@ -139,6 +164,7 @@ class LSTMAimetIntegration:
     def set_module_name(self, module_name: str) -> None:
         self._module_name = module_name
 
+    @logged_operation
     def load_bitwidth_config(self, config_file, verbose: bool = False) -> None:
         """Read LSTM_config from a full stage config (mapping or JSON path)."""
         config = config_file if isinstance(config_file, dict) else json.loads(
@@ -157,7 +183,7 @@ class LSTMAimetIntegration:
         if "quant_config" in section:
             self.load_quant_config(section["quant_config"])
         self.use_quantization = enabled
-        if verbose:
+        with log_details(verbose):
             print(f"[QuantLSTM] {getattr(self, '_module_name', '')}: configuration loaded")
 
     @contextmanager
@@ -239,6 +265,7 @@ class LSTMAimetIntegration:
         document["execution_metadata"]["standard_scale_mode"] = "pot2"
         self.load_quant_params(document)
 
+    @logged_operation
     def export_quant_params_to_aimet_format(
         self, encodings_dict: dict, module_name: str = None, verbose: bool = False,
         *, for_onnx: bool = True,
@@ -280,6 +307,7 @@ class LSTMAimetIntegration:
         encodings_dict.setdefault("param_encodings", {}).update(params)
         return encodings_dict
 
+    @logged_operation
     def load_quant_params_from_aimet_format(
         self, encodings_dict: dict, module_name: str = None, verbose: bool = False
     ) -> bool:

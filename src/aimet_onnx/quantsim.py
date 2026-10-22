@@ -71,6 +71,7 @@ from packaging import version
 
 from aimet_common import libpymo, quantsim
 from aimet_common import libquant_info
+from aimet_common.run_context import get_run, logged_operation
 from aimet_common.defs import (
     QuantScheme,
     QuantizationDataType,
@@ -95,7 +96,7 @@ from aimet_common.quantsim import (
 )
 from aimet_common.utils import save_json_yaml, AimetLogger, _red, deprecated
 from aimet_common.quant_utils import _convert_encoding_format_0_6_1_to_1_0_0
-from aimet_common.quantsim_config.quantsim_config import _config_file_aliases
+from aimet_common.quantsim_config.quantsim_config import _config_file_aliases, _get_config_file
 from aimet_common.connected_graph.product import Product
 from aimet_common.onnx._utils import _convert_version
 from aimet_onnx import utils
@@ -371,6 +372,7 @@ class QuantizationSimModel:
     """
 
     @_allow_deprecated_args
+    @logged_operation
     def __init__(
         self,
         model: ModelProto,
@@ -384,6 +386,8 @@ class QuantizationSimModel:
         providers: Optional[Sequence[str | Tuple[str, Dict[Any, Any]]]] = None,
         path: Optional[str] = None,
     ):
+        config_file = _get_config_file(config_file)
+        get_run().snapshot_config(config_file, 'quantsim')
         if isinstance(quant_scheme, str):
             quant_scheme = QuantScheme.from_str(quant_scheme)
 

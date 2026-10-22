@@ -5,12 +5,14 @@ AIMET 量化工具函数库
 from typing import Dict, Any, Iterable, Mapping, Set, Tuple
 import json
 from pathlib import Path
+from aimet_common.run_context import log_details, log_print as print, logged_operation
 
 
 # ============================================================================
 # Percentile 校准相关函数
 # ============================================================================
 
+@logged_operation
 def setup_percentile_calibration(sim_model, percentile: float = 99.0, num_bins: int = 2048, verbose: bool = True, 
                                 only_params: bool = False) -> int:
     """
@@ -28,7 +30,7 @@ def setup_percentile_calibration(sim_model, percentile: float = 99.0, num_bins: 
     """
     from aimet_torch.v2.quantization.encoding_analyzer import PercentileEncodingAnalyzer
     
-    if verbose:
+    with log_details(verbose):
         print(f"\n设置校准方法为 Percentile ({percentile}% 分位数)...")
         print(f"  这将排除最小 {(100-percentile)/2:.1f}% 和最大 {(100-percentile)/2:.1f}% 的极端数据")
         if only_params:
@@ -66,12 +68,13 @@ def setup_percentile_calibration(sim_model, percentile: float = 99.0, num_bins: 
                     )
                     converted_count += 1
     
-    if verbose:
+    with log_details(verbose):
         print(f"✅ 已将 {converted_count} 个量化器的校准方法改为 Percentile")
     
     return converted_count
 
 
+@logged_operation
 def setup_selective_percentile_calibration(
     sim_model, 
     percentile: float = 99.0, 
@@ -109,7 +112,7 @@ def setup_selective_percentile_calibration(
     if exclude_modules is None:
         exclude_modules = []
     
-    if verbose:
+    with log_details(verbose):
         print(f"\n设置选择性 Percentile 校准 ({percentile}% 分位数)...")
         print(f"  排除模块关键字: {exclude_modules if exclude_modules else '无 (全部使用 Percentile)'}")
     
@@ -174,7 +177,7 @@ def setup_selective_percentile_calibration(
                     )
                     converted_count += 1
     
-    if verbose:
+    with log_details(verbose):
         print(f"\n✅ 已将 {converted_count} 个量化器改为 Percentile")
         print(f"⏭️  排除了 {excluded_quantizer_count} 个量化器（保持原始 Analyzer）")
         if excluded_modules_list:
@@ -187,6 +190,7 @@ def setup_selective_percentile_calibration(
     }
 
 
+@logged_operation
 def verify_percentile_calibration(sim_model, verbose: bool = True) -> Dict[str, int]:
     """
     验证 Percentile 校准设置是否成功
@@ -252,7 +256,7 @@ def verify_percentile_calibration(sim_model, verbose: bool = True) -> Dict[str, 
                             other_types[analyzer_type] = 0
                         other_types[analyzer_type] += 1
     
-    if verbose:
+    with log_details(verbose):
         print("\n验证校准方法:")
         print(f"  MinMaxEncodingAnalyzer:     {minmax_count} 个")
         print(f"  PercentileEncodingAnalyzer: {percentile_count} 个 ✅")
@@ -281,6 +285,7 @@ def verify_percentile_calibration(sim_model, verbose: bool = True) -> Dict[str, 
 # Power-of-2 量化相关函数
 # ============================================================================
 
+@logged_operation
 def apply_power_of_2_workflow(sim_model, method: str = "cover_range", tolerance: float = 0.02, 
                               align_bias_scale: bool = False, verbose: bool = True,
                               bias_bitwidth: int = 32) -> Dict[str, Any]:
@@ -339,7 +344,7 @@ def apply_power_of_2_workflow(sim_model, method: str = "cover_range", tolerance:
     results = {}
     
     # 1. 打印校准后的量化器信息
-    if verbose:
+    with log_details(verbose):
         print("\n" + "="*80)
         print("步骤 1: 校准后的量化器信息")
         print("="*80)
@@ -348,16 +353,16 @@ def apply_power_of_2_workflow(sim_model, method: str = "cover_range", tolerance:
     results['original_info'] = original_info
     
     # 2. 收集修改前的量化器信息
-    if verbose:
+    with log_details(verbose):
         print("\n收集修改前的量化器参数...")
     before_po2_info = collect_quantizer_info(sim_model)
-    if verbose:
+    with log_details(verbose):
         print(f"✅ 收集了 {len(before_po2_info)} 个量化器的信息")
     results['before_count'] = len(before_po2_info)
     results['before_info'] = before_po2_info
     
     # 3. 应用 Power-of-2 量化
-    if verbose:
+    with log_details(verbose):
         print("\n" + "="*80)
         print("步骤 2: 将 scale 修改为 2 的幂次方 (1/2^n)")
         print("="*80)
@@ -366,16 +371,16 @@ def apply_power_of_2_workflow(sim_model, method: str = "cover_range", tolerance:
     results['stats'] = stats
     
     # 4. 收集修改后的量化器信息
-    if verbose:
+    with log_details(verbose):
         print("\n收集修改后的量化器参数...")
     after_po2_info = collect_quantizer_info(sim_model)
-    if verbose:
+    with log_details(verbose):
         print(f"✅ 收集了 {len(after_po2_info)} 个量化器的信息")
     results['after_count'] = len(after_po2_info)
     results['after_info'] = after_po2_info
     
     # 5. 验证修改结果
-    if verbose:
+    with log_details(verbose):
         print("\n" + "="*80)
         print("步骤 3: 验证修改后的量化参数")
         print("="*80)
@@ -387,25 +392,24 @@ def apply_power_of_2_workflow(sim_model, method: str = "cover_range", tolerance:
     all_power_of_2 = verify_model_power_of_2(sim_model,verbose=verbose)
     results['all_power_of_2'] = all_power_of_2
     
-    if verbose:
+    with log_details(verbose):
         if all_power_of_2:
             print("\n✅ 所有量化器的 scale 已成功修改为 2 的幂次方!")
         else:
             print("\n⚠️ 警告: 部分量化器的 scale 未能修改为 2 的幂次方")
     
     # 7. 对比修改前后的参数
-    if verbose:
+    with log_details(verbose):
         print("\n" + "="*80)
         print("步骤 4: 对比修改前后的参数")
         print("="*80)
-        issues = compare_quantizers(before_po2_info, after_po2_info)
-    else:
-        issues = []
+        detailed_issues = compare_quantizers(before_po2_info, after_po2_info)
+    issues = detailed_issues if verbose else []
     results['issues'] = issues
     
     # 8. (可选) Bias Scale 对齐到 Sx * Sw
     if align_bias_scale:
-        if verbose:
+        with log_details(verbose):
             print("\n" + "="*80)
             print("步骤 5: Bias Scale 对齐（Sb = Sx * Sw）")
             print("="*80)
@@ -421,7 +425,7 @@ def apply_power_of_2_workflow(sim_model, method: str = "cover_range", tolerance:
             module.enable_pot2(method=method, tolerance=tolerance)
             key = f"{op.package}_pot2_count"
             results[key] = results.get(key, 0) + 1
-            if verbose:
+            with log_details(verbose):
                 print(f"  [{op.module_type.__name__}] {name}: POT2 enabled")
 
     return results
@@ -431,6 +435,7 @@ def apply_power_of_2_workflow(sim_model, method: str = "cover_range", tolerance:
 # 量化器参数冻结相关函数
 # ============================================================================
 
+@logged_operation
 def freeze_quantizer_parameters(sim_model, verbose: bool = True, freeze_bn_affine: bool = True) -> Dict[str, Any]:
     """
     冻结量化器参数（scale、offset 等），仅训练模型权重
@@ -493,7 +498,7 @@ def freeze_quantizer_parameters(sim_model, verbose: bool = True, freeze_bn_affin
             else:
                 trainable_params.append(name)
     
-    if verbose:
+    with log_details(verbose):
         print(f"冻结量化器参数:         {len(frozen_quantizer_params)} 个")
         if freeze_bn_affine:
             print(f"冻结 BN affine 参数:    {len(frozen_bn_params)} 个")
@@ -514,6 +519,7 @@ def freeze_quantizer_parameters(sim_model, verbose: bool = True, freeze_bn_affin
     }
 
 
+@logged_operation
 def set_train_mode_freeze_bn(model, verbose: bool = False) -> int:
     """
     设置模型为训练模式，但保持 BatchNorm 层为评估模式
@@ -578,7 +584,7 @@ def set_train_mode_freeze_bn(model, verbose: bool = False) -> int:
                     child.eval()
                     frozen_modules.add(child)
     
-    if verbose:
+    with log_details(verbose):
         print(f"✅ 模型设置为训练模式，{bn_count} 个 BatchNorm 层保持评估模式")
     
     return bn_count
@@ -690,6 +696,7 @@ def _set_weight_granularity(module, per_channel, name):
     module.param_quantizers['weight'] = replacement
 
 
+@logged_operation
 def apply_mixed_precision_bitwidth(sim_model, config_file: str, verbose: bool = True) -> Dict[str, int]:
     """
     根据 JSON 配置文件应用混合精度位宽设置
@@ -763,7 +770,7 @@ def apply_mixed_precision_bitwidth(sim_model, config_file: str, verbose: bool = 
     # 检查默认配置是否要求禁用量化
     default_disable_quantization = default_config.get('disable_quantization', False)
     
-    if verbose:
+    with log_details(verbose):
         print("\n" + "="*70)
         print("🔧 应用混合精度位宽配置")
         print("="*70)
@@ -787,8 +794,9 @@ def apply_mixed_precision_bitwidth(sim_model, config_file: str, verbose: bool = 
             "Not a registered Quantized* type and not present in sim.model; "
             "check spelling. Types that exist but are absent from this model are ignored."
         )
-    if ignored_layer_types and verbose:
-        print(f"  忽略当前模型没有的类型: {ignored_layer_types}")
+    if ignored_layer_types:
+        with log_details(verbose):
+            print(f"  忽略当前模型没有的类型: {ignored_layer_types}")
 
     # 统计信息
     stats = {
@@ -896,9 +904,10 @@ def apply_mixed_precision_bitwidth(sim_model, config_file: str, verbose: bool = 
                     if weight_sym is not None:
                         weight_quantizer.symmetric = weight_sym
                         changes.append(f"{'sym' if weight_sym else 'asym'}")
-                    if changes and verbose:
-                        label = f"pattern: {matched_pattern}" if match_type == 'pattern' else match_type
-                        print(f"  ✅ [{label}] {name}.weight: {', '.join(changes)}")
+                    if changes:
+                        with log_details(verbose):
+                            label = f"pattern: {matched_pattern}" if match_type == 'pattern' else match_type
+                            print(f"  ✅ [{label}] {name}.weight: {', '.join(changes)}")
                     if 'Conv' in module_type:
                         stats['conv_count'] += 1
                     elif 'Linear' in module_type:
@@ -928,11 +937,12 @@ def apply_mixed_precision_bitwidth(sim_model, config_file: str, verbose: bool = 
                         bias_quantizer.symmetric = bias_sym
                         changes.append(f"{'sym' if bias_sym else 'asym'}")
                     
-                    if changes and verbose:
-                        if match_type == 'pattern':
-                            print(f"  ✅ [pattern: {matched_pattern}] {name}.bias: {', '.join(changes)}")
-                        else:
-                            print(f"  ✅ [{match_type}] {name}.bias: {', '.join(changes)}")
+                    if changes:
+                        with log_details(verbose):
+                            if match_type == 'pattern':
+                                print(f"  ✅ [pattern: {matched_pattern}] {name}.bias: {', '.join(changes)}")
+                            else:
+                                print(f"  ✅ [{match_type}] {name}.bias: {', '.join(changes)}")
             
             # 设置通用参数量化器（param_bitwidth / param_symmetric）
             # 作用于所有非 weight/bias 的 param_quantizers 键，如 Snake2d 的 alpha
@@ -950,9 +960,10 @@ def apply_mixed_precision_bitwidth(sim_model, config_file: str, verbose: bool = 
                         if param_sym is not None:
                             param_quantizer.symmetric = param_sym
                             changes.append(f"{'sym' if param_sym else 'asym'}")
-                        if changes and verbose:
-                            prefix = f"pattern: {matched_pattern}" if match_type == 'pattern' else match_type
-                            print(f"  ✅ [{prefix}] {name}.{param_key}: {', '.join(changes)}")
+                        if changes:
+                            with log_details(verbose):
+                                prefix = f"pattern: {matched_pattern}" if match_type == 'pattern' else match_type
+                                print(f"  ✅ [{prefix}] {name}.{param_key}: {', '.join(changes)}")
 
             # 设置输入量化参数
             if hasattr(module, 'input_quantizers') and len(module.input_quantizers) > 0:
@@ -991,11 +1002,11 @@ def apply_mixed_precision_bitwidth(sim_model, config_file: str, verbose: bool = 
                             slots[idx] = new_q
                             module.input_quantizers = _nn.ModuleList(slots)
                             input_quantizer = new_q
-                            if verbose:
+                            with log_details(verbose):
                                 label = f"pattern: {matched_pattern}" if match_type == 'pattern' else match_type
                                 print(f"  ➕ [{label}] {name}.input[{idx}]: 创建新 quantizer {input_bw}-bit {'sym' if sym else 'asym'}")
                         except Exception as _e:
-                            if verbose:
+                            with log_details(verbose):
                                 print(f"  ⚠️  {name}.input[{idx}]: 创建 quantizer 失败 - {_e}")
 
                     if input_quantizer is not None:
@@ -1009,12 +1020,13 @@ def apply_mixed_precision_bitwidth(sim_model, config_file: str, verbose: bool = 
                             input_quantizer.symmetric = input_sym
                             changes.append(f"{'sym' if input_sym else 'asym'}")
 
-                        if verbose and changes:
-                            label = f"pattern: {matched_pattern}" if match_type == 'pattern' else match_type
-                            if len(module.input_quantizers) > 1:
-                                print(f"  ✅ [{label}] {name}.input[{idx}]: {', '.join(changes)}")
-                            else:
-                                print(f"  ✅ [{label}] {name}.input: {', '.join(changes)}")
+                        if changes:
+                            with log_details(verbose):
+                                label = f"pattern: {matched_pattern}" if match_type == 'pattern' else match_type
+                                if len(module.input_quantizers) > 1:
+                                    print(f"  ✅ [{label}] {name}.input[{idx}]: {', '.join(changes)}")
+                                else:
+                                    print(f"  ✅ [{label}] {name}.input: {', '.join(changes)}")
             
             # 设置输出量化参数
             if hasattr(module, 'output_quantizers') and len(module.output_quantizers) > 0:
@@ -1032,11 +1044,11 @@ def apply_mixed_precision_bitwidth(sim_model, config_file: str, verbose: bool = 
                         slots[0] = new_q
                         module.output_quantizers = _nn.ModuleList(slots)
                         output_quantizer = new_q
-                        if verbose:
+                        with log_details(verbose):
                             label = f"pattern: {matched_pattern}" if match_type == 'pattern' else match_type
                             print(f"  ➕ [{label}] {name}.output[0]: 创建新 quantizer {output_bw}-bit {'sym' if sym else 'asym'}")
                     except Exception as _e:
-                        if verbose:
+                        with log_details(verbose):
                             print(f"  ⚠️  {name}.output[0]: 创建 quantizer 失败 - {_e}")
                 if output_quantizer is not None:
                     changes = []
@@ -1051,10 +1063,11 @@ def apply_mixed_precision_bitwidth(sim_model, config_file: str, verbose: bool = 
                         output_quantizer.symmetric = output_sym
                         changes.append(f"{'sym' if output_sym else 'asym'}")
                     
-                    if verbose and changes:
-                        # 只在没有设置权重时打印，避免重复
-                        if not (hasattr(module, 'param_quantizers') and 'weight' in module.param_quantizers):
-                            print(f"  ✅ [{match_type}] {name}.output: {', '.join(changes)}")
+                    if changes:
+                        with log_details(verbose):
+                            # 只在没有设置权重时打印，避免重复
+                            if not (hasattr(module, 'param_quantizers') and 'weight' in module.param_quantizers):
+                                print(f"  ✅ [{match_type}] {name}.output: {', '.join(changes)}")
                     
                     # 统计不同类型的层（只统计有输出量化器的层）
                     if 'Tanh' in module_type or 'Sigmoid' in module_type or 'ReLU' in module_type:
@@ -1077,7 +1090,7 @@ def apply_mixed_precision_bitwidth(sim_model, config_file: str, verbose: bool = 
         stats[f"{key}_{state}"] += 1
 
     # 打印统计
-    if verbose:
+    with log_details(verbose):
         print("="*70)
         print(f"📊 位宽设置统计:")
         print(f"  • Conv 层:             {stats['conv_count']} 个")
@@ -1131,7 +1144,7 @@ def _disable_quantization(module, name: str, verbose: bool):
     if hasattr(module, 'output_quantizers') and len(module.output_quantizers) > 0:
         for idx in range(len(module.output_quantizers)):
             if module.output_quantizers[idx] is not None:
-                if verbose:
+                with log_details(verbose):
                     print(f"  🚫 {name}: 禁用输出量化器 [{idx}]")
                 module.output_quantizers[idx] = None
     
@@ -1139,7 +1152,7 @@ def _disable_quantization(module, name: str, verbose: bool):
     if hasattr(module, 'input_quantizers') and len(module.input_quantizers) > 0:
         for idx in range(len(module.input_quantizers)):
             if module.input_quantizers[idx] is not None:
-                if verbose:
+                with log_details(verbose):
                     print(f"  🚫 {name}: 禁用输入量化器 [{idx}]")
                 module.input_quantizers[idx] = None
     
@@ -1147,12 +1160,13 @@ def _disable_quantization(module, name: str, verbose: bool):
     if hasattr(module, 'param_quantizers'):
         for param_name in list(module.param_quantizers.keys()):
             if module.param_quantizers[param_name] is not None:
-                if verbose:
+                with log_details(verbose):
                     print(f"  🚫 {name}: 禁用参数量化器 [{param_name}]")
                 module.param_quantizers[param_name] = None
 
 
 
+@logged_operation
 def check_bn_params_status(model, verbose: bool = True) -> Dict[str, Any]:
     """
     检查 BatchNorm 参数的状态（是否可训练、是否存在）
@@ -1216,7 +1230,7 @@ def check_bn_params_status(model, verbose: bool = True) -> Dict[str, Any]:
             else:
                 frozen_affine_params.append(name)
     
-    if verbose:
+    with log_details(verbose):
         print("\n" + "="*70)
         print("BatchNorm 参数状态检查")
         print("="*70)
@@ -1321,6 +1335,6 @@ def _align_conv_bias_scale(model, verbose: bool = True, bias_bitwidth: int = 32)
             'Sb_old': previous.cpu().tolist(), 'Sb_new': target.cpu().tolist(),
             'bias_bitwidth': bias_bitwidth, 'is_per_channel': target.numel() > 1,
         })
-        if verbose:
+        with log_details(verbose):
             print(f"{name}: bias aligned to Sx*Sw, signed {bias_bitwidth}-bit; range checked")
     return stats

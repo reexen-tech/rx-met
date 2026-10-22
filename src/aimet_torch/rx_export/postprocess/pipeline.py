@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import logging
 from typing import Tuple
 
 from .encodings_ops import postprocess_encodings_inplace
@@ -8,9 +7,12 @@ from .io_utils import load_encodings, save_encodings
 from .onnx_graph import fix_slice_end_constants, postprocess_onnx_graph_inplace
 from .renaming import rename_gru_initializers_and_change_gru_json_format
 
-logger = logging.getLogger(__name__)
+from aimet_common.run_context import log_details, logged_operation, get_logger
+
+logger = get_logger(__name__)
 
 
+@logged_operation
 def postprocess_encodings_file(
     encodings_path: str,
     output_encodings_path: str,
@@ -23,6 +25,7 @@ def postprocess_encodings_file(
     return output_encodings_path
 
 
+@logged_operation
 def postprocess_all(
     *,
     onnx_path: str,
@@ -32,28 +35,28 @@ def postprocess_all(
     output_encodings_path: str | None = None,
     verbose: bool = True,
 ) -> Tuple[str, str]:
-    if verbose:
+    with log_details(verbose):
         logger.info("=== Pipeline G1: postprocess_onnx_graph_inplace ===")
     postprocess_onnx_graph_inplace(onnx_path, input_shape)
 
-    if verbose:
+    with log_details(verbose):
         logger.info("=== Pipeline G2: fix_slice_end_constants ===")
     fix_slice_end_constants(onnx_path, verbose=verbose)
 
-    if verbose:
+    with log_details(verbose):
         logger.info("=== Pipeline E*: load_encodings ===")
     enc = load_encodings(encodings_path)
     enc, changed_any = postprocess_encodings_inplace(enc, verbose=verbose)
 
     enc_out = output_encodings_path or encodings_path
     if changed_any or enc_out != encodings_path:
-        if verbose:
+        with log_details(verbose):
             logger.info("=== Pipeline E*: save_encodings -> %s ===", enc_out)
         save_encodings(enc, enc_out)
     else:
         enc_out = encodings_path
 
-    if verbose:
+    with log_details(verbose):
         logger.info("=== Pipeline X2: rename_gru_initializers_and_change_gru_json_format ===")
     onnx_out = output_onnx_path or onnx_path
     return rename_gru_initializers_and_change_gru_json_format(

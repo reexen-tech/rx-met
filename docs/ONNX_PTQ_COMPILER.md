@@ -59,8 +59,10 @@ python3 /examples/quick_start_onnx_ptq.py
 `RX_MET_ONNX_PTQ_CALIB` 指定输入，无需调用此准备脚本。
 
 输入名从 ONNX 图自动读取。多输入模型可用同一 sample 前缀的 npy，或改用 npz。
-产物默认写入当前运行目录下的 `output/onnx_ptq_quick_start/`，可用
-`RX_MET_ONNX_PTQ_OUTPUT_DIR` 覆盖。
+默认输出根目录为当前运行目录下的 `output/onnx_ptq_quick_start/`，可用
+`RX_MET_ONNX_PTQ_OUTPUT_DIR` 覆盖。每次量化在该根目录下创建 UTC 时间戳运行目录，
+产物写入其中的 `exports/`，日志和运行信息写入 `run.log`、`run.json`。
+准备好的 `models/`、`datasets/` 继续在根目录复用。
 
 命令退出码为 0，日志输出“量化流程完成”及 metadata 路径，并生成下述四类文件，
 即表示标准示例完成。`<prefix>.meta.json` 中的 `coverage`、`all_power_of_2` 和
@@ -95,7 +97,7 @@ Po2 scale 满足 `scale = 2^(-n)`；非 Po2 scale 的 n 是舍入指数，实际
 `internal_ops` 和 `internal_ops_reverse` 仍采用 `算子名 -> output -> [encoding]`，
 其网格及字段由算子库生成，不由通用层重写。循环层加载接口兼容旧端口列表及缺少 n 的文件。
 
-每次运行生成：
+每次运行的 `exports/` 中生成：
 
 - `<prefix>.onnx`：移除 AIMET `QcQuantizeOp` 并显式保存中间张量 shape/dtype 的 clean ONNX；
 - `<prefix>.encodings`：compiler-native schema，包含 node-level `input/output`

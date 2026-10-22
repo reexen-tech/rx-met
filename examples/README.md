@@ -33,7 +33,8 @@ python3 examples/quick_start_kws.py --rnn_type gru
 python3 examples/quick_start_kws.py --rnn_type lstm
 ```
 
-默认浮点训练和 QAT 各 1 epoch。结果保存到 `./output/quick_start_kws/gru/` 或 `lstm/`。
+默认浮点训练和 QAT 各 1 epoch。每次任务保存在
+`./output/quick_start_kws/<gru|lstm>/<execution-id>/`，最终模型位于 `exports/`，检查点位于 `checkpoints/`。
 
 ## ONNX PTQ：MobileNetV2
 
@@ -72,6 +73,10 @@ python3 examples/prepare_onnx_ptq_data.py \
 python3 examples/quick_start_onnx_ptq.py
 ```
 
-结果保存到 `./output/onnx_ptq_quick_start/`，包含 ONNX、encodings 和 metadata。
+结果保存到 `./output/onnx_ptq_quick_start/<execution-id>/exports/`，包含 ONNX、encodings 和 metadata。
 日志报告 FP32、PTQ、Po2 和恢复后的验证集 Top-1 精度。
 日志输出“量化流程完成”表示运行成功。
+
+`execution-id` 自动使用 UTC 时间戳。每次任务的详细日志和运行记录位于同级的
+`run.log`、`run.json`，产物位置见终端输出。
+参见[运行目录与日志](../docs/Runtime_outputs.md)。
