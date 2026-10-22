@@ -44,18 +44,75 @@ from torch import nn
 import torch.nn.functional as F
 from aimet_torch._base.nn.modules.custom import *  # pylint: disable=wildcard-import, unused-wildcard-import
 from aimet_torch.v2.quantization.tensor import QuantizedTensorBase
-from aimet_torch.v2.quantization.affine import QuantizeDequantize
+from aimet_torch.v2.quantization.affine import AffineQuantizerBase, QuantizeDequantize
+from aimet_torch.v2.quantization.affine.backends.torch_builtins import (
+    get_encoding_shape_with_blocks,
+    reshape_tensor_for_blocks,
+)
 from ..true_quant import (
     QuantizationMixin,
     _DispatchMixin,
     _quantize_if_applicable,
     _quantize_dequantize_if_applicable,
+    _is_computing_encodings,
 )
 
 # NOTE: Disabling due to pylint false alarm in ModuleList
 # pylint: disable=not-callable
 
 from aimet_torch.native_recurrent import recurrent_operators
+
+
+class _QuantizedSingularUnary(torch.autograd.Function):
+    """保持一元算子的前向结果，约定量化训练在奇点处的反向行为。"""
+
+    @staticmethod
+    def forward(ctx, x, is_sqrt, zero_code):
+        output = torch.sqrt(x) if is_sqrt else torch.log(x)
+        ctx.save_for_backward(x, output)
+        ctx.is_sqrt = is_sqrt
+        ctx.zero_code = zero_code
+        return output
+
+    @staticmethod
+    def backward(ctx, grad):
+        x, output = ctx.saved_tensors
+        denominator = 2 * output if ctx.is_sqrt else x
+        # 下游截断可能给 log/sqrt(0) 传回零梯度，此时应避开 0/0。
+        # TensorFlow 的 SqrtGrad 对零上游梯度也采用这一保护。
+        inactive = (denominator == 0) & (grad == 0)
+        if ctx.zero_code:
+            # 待审核的 QAT 近似梯度：Sqrt 输入为零码时，即使收到有限非零梯度也返回零。
+            # 这可防止无穷梯度传到上游平方，与平方的零导数相乘后产生 NaN。
+            # 这不是数学上的 Sqrt 零点导数，也不是量化截断的 STE mask：
+            # 被舍入为零的小非零值同样会失去梯度。
+            # 目前仅验证波形梯度变为有限，尚未证实训练收益；该策略仍待研究、审核。
+            # 正值沿用原导数，非有限的上游梯度不被屏蔽。
+            inactive = (denominator == 0) & torch.isfinite(grad)
+        # 除法前先为无效分支选择安全分母；先算无穷导数再乘零 mask 仍会产生 NaN。
+        safe = torch.where(inactive, torch.ones_like(denominator), denominator)
+        return torch.where(inactive, torch.zeros_like(grad), grad / safe), None, None
+
+
+def _singular_unary_qat_fn(module, fn, is_sqrt):
+    """校准期间和所有量化器均禁用时，保持 Torch 原有行为。"""
+    quantizers = list(module.input_quantizers) + list(module.output_quantizers)
+    if (not torch.is_grad_enabled() or _is_computing_encodings(module)
+            or not any(isinstance(q, AffineQuantizerBase) and q.is_initialized()
+                       for q in quantizers)):
+        return fn
+    input_quantizer = module.input_quantizers[0]
+    # 仅在输入 QDQ 已初始化时启用实验性的 Sqrt 零码规则。
+    # 只有输出 QDQ 时，零点收到非零梯度仍保留原有奇点行为。
+    zero_code = (is_sqrt and isinstance(input_quantizer, AffineQuantizerBase)
+                 and input_quantizer.is_initialized())
+
+    def call(x, **kwargs):
+        if kwargs or not x.is_floating_point():
+            return fn(x, **kwargs)
+        return _QuantizedSingularUnary.apply(x, is_sqrt, zero_code)
+
+    return call
 
 
 @QuantizationMixin.implements(Sin)
@@ -256,6 +313,9 @@ class QuantizedSqrt(_DispatchMixin, QuantizationMixin, Sqrt):
 
     _builtin_torch_fn = torch.sqrt
 
+    def _builtin_torch_fn_helper(self, fn):
+        return super()._builtin_torch_fn_helper(_singular_unary_qat_fn(self, fn, True))
+
 
 # @QuantizationMixin.implements(Maximum)
 # class QuantizedMaximum(_DispatchMixin, QuantizationMixin, Maximum):
@@ -415,6 +475,39 @@ class QuantizedLog(_DispatchMixin, QuantizationMixin, Log):
     """Quantized Log"""
 
     _builtin_torch_fn = torch.log
+
+    def _builtin_torch_fn_helper(self, fn):
+        fn = _singular_unary_qat_fn(self, fn, False)
+        output_quantizer = self.output_quantizers[0]
+        # 有限饱和处理要求已初始化的 affine 输出编码。
+        # 校准仍需观察原始 Log，不能用此前的输出编码覆盖校准样本。
+        if (not isinstance(output_quantizer, AffineQuantizerBase)
+                or not output_quantizer.is_initialized()
+                or _is_computing_encodings(self)):
+            return super()._builtin_torch_fn_helper(fn)
+
+        def saturated_log(x, **kwargs):
+            if kwargs or not x.is_floating_point():
+                return fn(x, **kwargs)
+            # 此处的 x 已经过输入 QDQ，基类稍后仍会执行输出 QDQ。
+            # 因 Qout(log(0)) == Qout(y_min)，零码直接取输出编码下限，
+            # 可保持前向结果一致，并避免饱和分支的输入梯度被无穷中间值污染。
+            # 不移动 QDQ、不改变 epsilon、不读取量化前输入，也不恢复已压零的小值信息。
+            zero = x == 0
+            # torch.where 会计算两个分支。1 仅用于未选中的 Log 分支，避免 log(0)
+            # 污染反向；零码实际返回 y_min，而非 log(1)。保留 y_min 的编码参数梯度。
+            safe = torch.where(zero, torch.ones_like(x), x)
+            lower = output_quantizer.get_min(dtype=x.dtype)
+            if output_quantizer.block_size is not None:
+                # 分块编码下每块有独立下限，不能按普通通道广播，也不能共用全局最小值。
+                # 沿用 QDQ 后端的分块布局，再映射回输入形状；保留 lower 的梯度，
+                # 使零码对编码参数的梯度与有限的饱和输入一致，避开 -Inf 污染。
+                blocked = reshape_tensor_for_blocks(x, lower.shape, output_quantizer.block_size)
+                lower = lower.view(get_encoding_shape_with_blocks(
+                    lower.shape, output_quantizer.block_size)).expand_as(blocked).reshape(x.shape)
+            return torch.where(zero, lower, fn(safe))
+
+        return super()._builtin_torch_fn_helper(saturated_log)
 
 
 @QuantizationMixin.implements(Abs)

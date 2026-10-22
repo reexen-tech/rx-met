@@ -75,14 +75,14 @@ struct OperatorQuantConfig {
     QuantBitWidth mul_reset_hidden_{8, false};  // r * weight_hh_linear (new gate中)
     QuantBitWidth mul_old_contribution_{8, false}, mul_new_contribution_{8, false};
 
-    bool x_symmetric_ = false, h_symmetric_ = false;
+    bool x_symmetric_ = true, h_symmetric_ = true;
     bool W_symmetric_ = true, R_symmetric_ = true, bw_symmetric_ = true, br_symmetric_ = true;
-    bool weight_ih_linear_symmetric_ = false, weight_hh_linear_symmetric_ = false;
-    bool update_gate_input_symmetric_ = false, update_gate_output_symmetric_ = false;
-    bool reset_gate_input_symmetric_ = false, reset_gate_output_symmetric_ = false;
-    bool new_gate_input_symmetric_ = false, new_gate_output_symmetric_ = true;
-    bool mul_reset_hidden_symmetric_ = false;
-    bool mul_old_contribution_symmetric_ = false, mul_new_contribution_symmetric_ = false;
+    bool weight_ih_linear_symmetric_ = true, weight_hh_linear_symmetric_ = true;
+    bool update_gate_input_symmetric_ = true, update_gate_output_symmetric_ = true;
+    bool reset_gate_input_symmetric_ = true, reset_gate_output_symmetric_ = true;
+    bool new_gate_input_symmetric_ = true, new_gate_output_symmetric_ = true;
+    bool mul_reset_hidden_symmetric_ = true;
+    bool mul_old_contribution_symmetric_ = true, mul_new_contribution_symmetric_ = true;
     // true: POT2 (multiplier=1, shift-only fast path), false: affine M+shift
     bool usePOT2_ = false;
     // POT2 取整策略（仅 usePOT2_=true 时生效）；默认 CoverRange，与 AIMET apply_power_of_2 一致

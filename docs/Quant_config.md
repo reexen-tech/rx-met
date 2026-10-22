@@ -1,7 +1,7 @@
 # AIMET 量化配置
 
 本文档说明 rx-met 当前使用的 QuantSim 和混合精度配置。完整可运行流程位于
-`examples/quick_start_kws.py`，ONNX PTQ 流程位于 `examples/onnx_ptq_quick_start.py`。
+`examples/quick_start_kws.py`，ONNX PTQ 流程位于 `examples/quick_start_onnx_ptq.py`。
 
 ## 配置文件
 
@@ -74,7 +74,7 @@ apply_mixed_precision_bitwidth(
 | `layer_type_config` | 按量化模块类名设置规则，例如 `QuantizedConv2d` |
 | `layer_name_config` | 按完整模块名或 `*` 通配符设置规则 |
 | `GRU_config` | 配置 QuantGRU 的量化开关和内部算子 |
-| `default_config` | 控制未匹配模块，支持 `disable_quantization` |
+| `default_config` | 支持未匹配模块的 `disable_quantization`，以及整数符号回退值 `signed` |
 
 普通量化模块支持以下配置项：
 
@@ -87,8 +87,35 @@ apply_mixed_precision_bitwidth(
 | `weight_symmetric`、`bias_symmetric` | 权重和偏置的对称性 |
 | `input_symmetric`、`output_symmetric` | 输入和输出的对称性 |
 | `param_symmetric` | 其他参数的对称性 |
+| `weight_signed`、`bias_signed`、`param_signed` | 权重、偏置及其他参数的整数符号，`true` 为 INT，`false` 为 UINT |
+| `input_signed`、`input_signeds`、`output_signed` | 全部输入、按输入编号或输出的整数符号；列表中 `null` 不施加局部覆盖 |
 | `per_channel_quantization` | 是否使用逐通道参数量化 |
 | `disable_quantization` | 是否禁用匹配模块的量化器 |
+
+Torch 和 ONNX 的整数量化默认使用 INT 和对称量化，JSON1 遗漏激活或参数的
+`is_symmetric` 时统一按 True 处理；显式 False 继续使用非对称量化。
+符号与对称性独立，`*_symmetric` 只调整
+校准策略，修改位宽保留当前符号。UINT 对称网格使用零点 0、范围 `[0, 2^bitwidth-1]`，
+校准及推理将负值截为零；INT 对称网格使用零点 0 和完整有符号范围。
+显式层设置优先于 `default_config.signed`。例如：
+
+```json
+{
+  "default_config": {"signed": true},
+  "layer_type_config": {
+    "QuantizedLinear": {
+      "input_signed": false,
+      "input_symmetric": true,
+      "weight_signed": true,
+      "weight_symmetric": false,
+      "output_signed": true
+    }
+  }
+}
+```
+
+该示例表示 UINT 对称输入、INT 非对称权重和 INT 输出。当前下游编译器仅支持对称
+量化，部署配置仍须满足其限制。GRU/LSTM 的内部配置继续由各算子包维护。
 
 当前实现按以下顺序选择规则：
 
@@ -131,6 +158,10 @@ QuantGRU 使用独立的 `GRU_config` 配置路径。`apply_mixed_precision_bitw
 
 `operator_config` 可以配置输入、输出、权重、偏置、线性计算结果以及三个门的输入和
 输出。完整键集合以 `examples/config/quick_start_full_quant.json` 为准。
+
+GRU 和 LSTM 的所有内部量化点默认均为对称量化。新建实例的 JSON 省略整个量化点
+或该点的 `is_symmetric` 时，使用 `true`；激活量化点显式设置 `false` 时仍按非对称
+配置执行。对称性与 signedness 独立，sigmoid 门输出保持默认无符号量化。
 
 `quantization_granularity` 支持 `PER_TENSOR`、`PER_GATE` 和 `PER_CHANNEL`。
 `is_unsigned` 适用于值域非负的量化点，例如 sigmoid 门输出。已校准或已加载量化参数
@@ -206,6 +237,11 @@ load_quantizer_encodings(
 加载已有 encodings 后，可以通过 `allow_overwrite=False` 防止后续校准覆盖已确认的
 量化参数。任何精度结论都应同时记录模型版本、数据集、配置和复现命令。
 
+阶段文件加载以保存的 `qmin/qmax/symmetric/scale/offset` 为准，包括 Po2 对齐后
+与初始配置不同的 bias 位宽。普通 affine 量化器使用 scale/offset 参数化精确恢复，
+不再从实数 min/max 反推网格；加载后再冻结量化器参数或创建训练 optimizer。
+目标量化器形状必须匹配，非法 scale、offset 或不一致的范围会抛出 `ValueError`。
+
 ## 检查清单
 
 - 配置文件路径指向仓库中实际存在的文件。
@@ -225,3 +261,28 @@ KWS 的两种模式共用 `examples/config/quick_start_full_quant.json`，分别
 per-channel；未列出的量化点保留默认值。用户可直接修改配置中的对应节。
 字段对照、最小 JSON 和默认值见 [示例配置说明](../examples/config/README.md)，
 Po2 和参数锁见 [LSTM 接入说明](QuantLSTM_integration.md)。
+
+### Conv/Linear bias 对齐的范围检查
+
+`apply_power_of_2_workflow(..., align_bias_scale=True, bias_bitwidth=32)` 在 PyTorch 中
+实际将已校准 Conv/Linear 的 bias 量化器设为指定的有符号位宽（默认 32），并使用精确的
+`Sb = Sx * Sw`。对齐前逐通道检查当前 bias 的整数码是否可表示。显式请求 16 位但范围
+不足、32 位仍溢出、scale 小于量化器下限或通道布局不兼容时抛出 `ValueError`，不再静默
+截断或吞掉错误。普通未校准/未量化层仍报告为 skipped，需在使用部署结果前检查统计。
+
+支持标量输入 scale，以及逐张量或与输出通道一一对应的权重/bias scale。目标后端需要支持
+所选 bias 位宽；不能仅修改元数据而让部署继续按 bias16 执行。对齐只检查当前参数，QAT
+期间仍应监测固定编码下的参数饱和；重复调用不会改变已经对齐的网格。
+
+### FX 展开模块的参数量化
+
+自定义 BN 等模块展开后，`weight/bias` 仍由原模块的 `param_quantizers` 管理。
+QuantSim 在 FX `get_attr` 后、reshape/view 前执行这些量化器；直接消费该参数
+或其形状变换结果的计算节点不再重复启用该路 input quantizer。激活、运行均值
+和标准差等 buffer 输入仍按普通算子配置量化。参数边只有一个量化归属，导出通过
+`param_encodings` 覆盖该边，而不是再写一份不同的 activation encoding。
+
+按模块名称修改参数位宽后需重新校准。参数量化不会 detach master 权重，
+`param_quantizers[name] = None` 会旁路该参数 QDQ。普通浮点检查点会移除新增的
+FX 量化调用；带 QDQ 权重的导出则使用实际执行的参数网格。旧版为同一参数
+同时保存父参数编码和子输入编码的阶段文件不保证兼容，应从固定 FP 权重重新校准。

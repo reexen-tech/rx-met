@@ -18,7 +18,7 @@ variants 定义公共 GPU 环境。CPU 专用字段和产品 VERSION 不参与�
 
 `docker/environment-images.json` 保存发布环境的公共配置摘要、各变体的 build/runtime 镜像 ID、
 首次发布的 runtime 归档名称和 SHA-256。产品打包核对本地配置、镜像标签、精确镜像身份和运行依赖。
-产品发布的 `--with-images` 可从同一镜像重新导出归档；文件 SHA-256 可以变化，
+产品发布的 `--with-env` 可从同一镜像重新导出归档；文件 SHA-256 可以变化，
 实际值保存在归档的 `.json`、`.sha256` 和 SHA256SUMS 中，不写入应用 manifest，也不改写公共环境身份记录。
 安装器按精确镜像 ID 复用或导入环境，再校验或补齐 `rx-quant-env-runtime:<环境版本>-<变体>` 标签。
 同名标签指向其他镜像时直接报错。用户启动命令使用这个可读标签，正式环境版本的标签不可替换内容。
@@ -60,7 +60,7 @@ ORT 1.20.1/1.27.0 所需头文件保存在 native/third_party/onnxruntime-prepar
 只交付 runtime，build 镜像供内部构建使用。runtime 归档采用 gzip，每个变体一份：
 
 ```text
-images/
+rx-quant-env-v1/
 ├── rx-quant-env-runtime-v1-cu118-linux-amd64.tar.gz
 ├── rx-quant-env-runtime-v1-cu126-linux-amd64.tar.gz
 ├── rx-quant-env-runtime-v1-cu130-linux-amd64.tar.gz
@@ -70,11 +70,11 @@ images/
 └── SHA256SUMS
 ```
 
-首次离线交付可将 images/ 放在应用包旁；两个工具复用同一份归档。
+产品发布使用 --with-env 时，将归档放入产品目录平级的 rx-quant-env-v1/；两个工具可复用同一份环境目录。
 加载匹配镜像身份的 runtime 归档（包括重新导出的归档）：
 
 ```bash
-./scripts/environment/load.sh --directory /path/to/images cu126
+./scripts/environment/load.sh --directory /path/to/rx-quant-env-v1 cu126
 ```
 
 内部构建可在 `scripts/release/build.sh` 使用 `--build-env-dir DIR` 与 `--runtime-env-dir DIR`，
@@ -82,7 +82,7 @@ images/
 `rx-quant-env-build-v1-<变体>-linux-amd64.tar.gz`，并附同名 `.json` 身份记录。
 脚本校验环境摘要、变体、镜像 ID、大小和 SHA-256，导入后再次核对镜像身份。
 同一镜像重新导出的归档也可以通过 `--runtime-env-dir` 复用；此时会额外检查归档内的镜像身份。
-配合 `--with-images`，缺失的 runtime 归档会从本机匹配镜像自动导出，不重新构建环境。
+配合 `--with-env`，缺失的 runtime 归档会从本机匹配镜像自动导出，不重新构建环境。
 完整命令见 [应用包发布](Release_packaging.md)。
 
 用户通常直接运行应用包 install.sh。应用包只固定镜像 ID；安装器校验实际导入的镜像及归档内容，

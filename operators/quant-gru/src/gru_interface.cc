@@ -44,6 +44,39 @@ inline EncodedScaleResult encodeFromRange(
     return encodeScaleResult(cont, bw, is_symmetric, use_pot2, method, tolerance);
 }
 
+// Biases have one value per channel. Histogram bin expansion and clipping
+// are not a useful training range for them; reserve headroom from observations.
+// Imported encodings never pass through this calibration helper.
+template <typename RangeAt>
+void calibrateBias(ChannelQuantParam& out, int hidden,
+                   OperatorQuantConfig::QuantizationGranularity granularity,
+                   QuantBitWidth width, bool use_pot2, RangeAt range_at) {
+    out.granularity = granularity;
+    out.hidden = hidden;
+    out.resize(3 * hidden);
+    const int group_size = granularity == OperatorQuantConfig::PER_TENSOR ? 3 * hidden
+                         : granularity == OperatorQuantConfig::PER_GATE ? hidden : 1;
+    for (int begin = 0; begin < 3 * hidden; begin += group_size) {
+        double extent = 0.0;
+        for (int c = begin; c < begin + group_size; ++c) {
+            const auto range = range_at(c);
+            if (!std::isfinite(range.first) || !std::isfinite(range.second) ||
+                range.first > range.second) {
+                throw std::invalid_argument("Bias calibration requires finite observations");
+            }
+            extent = std::max(extent, std::max(std::abs(static_cast<double>(range.first)),
+                                               std::abs(static_cast<double>(range.second))));
+        }
+        double scale = std::max(2.0 * extent, 0.01) / width.qmax_auto_scale();
+        if (use_pot2) scale = std::exp2(std::ceil(std::log2(scale)));
+        if (!std::isfinite(scale) || scale > std::numeric_limits<float>::max()) {
+            throw std::overflow_error("Bias headroom scale exceeds float32 range");
+        }
+        std::fill(out.channels.begin() + begin, out.channels.begin() + begin + group_size,
+                  QuantParam{static_cast<float>(scale), 0});
+    }
+}
+
 }  // namespace
 
 // =====================================================================
@@ -112,10 +145,10 @@ GRUQuantParams calculateGRUQuantitativeParameters(
                      bitwidth_config.W_symmetric_, quant_ranges.min_W_, quant_ranges.max_W_);
     calibrateChannel(quant_params.R_, bitwidth_config.R_granularity_, bitwidth_config.R_,
                      bitwidth_config.R_symmetric_, quant_ranges.min_R_, quant_ranges.max_R_);
-    calibrateChannel(quant_params.bw_, bitwidth_config.bw_granularity_, bitwidth_config.bw_,
-                     bitwidth_config.bw_symmetric_, quant_ranges.min_bw_, quant_ranges.max_bw_);
-    calibrateChannel(quant_params.br_, bitwidth_config.br_granularity_, bitwidth_config.br_,
-                     bitwidth_config.br_symmetric_, quant_ranges.min_br_, quant_ranges.max_br_);
+    calibrateBias(quant_params.bw_, hidden_size, bitwidth_config.bw_granularity_,
+        bitwidth_config.bw_, usePOT2, [&](int c) { return std::make_pair(quant_ranges.min_bw_[c], quant_ranges.max_bw_[c]); });
+    calibrateBias(quant_params.br_, hidden_size, bitwidth_config.br_granularity_,
+        bitwidth_config.br_, usePOT2, [&](int c) { return std::make_pair(quant_ranges.min_br_[c], quant_ranges.max_br_[c]); });
 
     // Linear 输出 (GEMM+bias)
     quant_params.weight_ih_linear_ = calibrateScalar(bitwidth_config.weight_ih_linear_,
@@ -905,7 +938,7 @@ void quantGRUForwardFP(
     const cublasHandle_t &g_blas_handle,
     float *h, float *v,
     // 输出量化后的值（必须由外部分配内存，训练和推理模式都需要）
-    // 函数会直接写入这些指针指向的内存，无需拷贝
+    // 保存与整数目标相同的量化码，仅将缓存转换为 FP32 carrier
     float *W_q_out,
     float *R_q_out,
     float *bw_q_out,
@@ -925,77 +958,30 @@ void quantGRUForwardFP(
     uint8_t *gate_output_mask,
     uint8_t *h_mask) {
     
-    const int hidden3 = hidden_size * 3;
-    const auto &bw_cfg = quant_params.bitwidth_config_;
-    const bool usePOT2 = bw_cfg.usePOT2_;
-    const std::size_t x_size = time_steps * batch_size * input_size;
-    const std::size_t h_size = (time_steps + 1) * batch_size * hidden_size;
-    const int NH = batch_size * hidden_size;
-    
-    // 量化权重（W, R, bw, br）- 使用统一接口，内部根据 granularity 自动选择
-    if (is_training) {
-        quantizeGRUWeights<true>(W, R, bw, br,
-                                 W_q_out, R_q_out, bw_q_out, br_q_out,
-                                 W_mask, R_mask, bw_mask, br_mask,
-                                 input_size, hidden_size, quant_params);
-        // x (始终 per-tensor)
-        dev::quantificationFP<true>(x, x_q_out, x_mask, x_size, toFixedScale(quant_params.x_, usePOT2),
-                                    quant_params.x_.zero_point, bw_cfg.x_);
-    } else {
-        quantizeGRUWeights<false>(W, R, bw, br,
-                                  W_q_out, R_q_out, bw_q_out, br_q_out,
-                                  nullptr, nullptr, nullptr, nullptr,
-                                  input_size, hidden_size, quant_params);
-        // x (始终 per-tensor)
-        dev::quantificationFP<false>(x, x_q_out, nullptr, x_size, toFixedScale(quant_params.x_, usePOT2),
-                                     quant_params.x_.zero_point, bw_cfg.x_);
-    }
-    
-    // 量化 h0 到 h 的前 NH 个元素（直接使用外部 h 缓冲区）
-    if (h0 != nullptr) {
-        if (is_training) {
-            dev::quantificationFP<true>(h0, h, h0_mask, NH, toFixedScale(quant_params.h_, usePOT2),
-                                       quant_params.h_.zero_point, bw_cfg.h_);
-        } else {
-            dev::quantificationFP<false>(h0, h, nullptr, NH, toFixedScale(quant_params.h_, usePOT2),
-                                        quant_params.h_.zero_point, bw_cfg.h_);
-        }
-    } else {
-        // 填充零点值（表示初始隐状态为 0）
-        dev::fill_n(h, NH, static_cast<float>(quant_params.h_.zero_point));
-    }
-    
-    // 前向传播：直接使用外部 h 和 v 缓冲区（会写入量化值）
-    gru::ForwardPassQuantFP forward_fp(is_training, batch_size, input_size, hidden_size,
-                                       g_blas_handle, nullptr);
-    forward_fp.setRescaleParam(quant_params);
-    forward_fp.Run(time_steps, W_q_out, R_q_out,
-                   bw_q_out, br_q_out,
-                   x_q_out, h,
-                   v,
-                   0.0f, nullptr,
-                   weight_ih_linear_mask,
-                   weight_hh_linear_mask,
-                   gate_input_mask,
-                   gate_output_mask,
-                   h_mask);
-    
-    // 原地反量化输出
-    dev::dequantificationFPInplace(h, h_size, toFixedScale(quant_params.h_, usePOT2), quant_params.h_.zero_point);
-    if (v != nullptr) {
-        dev::dequantificationVFPInplace(v, time_steps, batch_size, hidden_size,
-                                         toFixedScale(quant_params.update_gate_output_, usePOT2), quant_params.update_gate_output_.zero_point,
-                                         toFixedScale(quant_params.reset_gate_output_, usePOT2), quant_params.reset_gate_output_.zero_point,
-                                         toFixedScale(quant_params.new_gate_output_, usePOT2), quant_params.new_gate_output_.zero_point,
-                                         toFixedScale(quant_params.weight_hh_linear_, usePOT2), quant_params.weight_hh_linear_.zero_point);
-    }
-    
+    // The carrier selects cache storage, not a different numerical function.
+    // Reuse the integer/LUT target for quantization, rescaling, gates and masks.
+    const std::size_t hidden3 = static_cast<std::size_t>(hidden_size) * 3;
+    const std::size_t x_size = static_cast<std::size_t>(time_steps) * batch_size * input_size;
+    dev::vector<int32_t> W_q(input_size * hidden3), R_q(hidden_size * hidden3);
+    dev::vector<int32_t> bw_q(hidden3), br_q(hidden3), x_q(x_size);
+    quantGRUForwardInt(is_training, time_steps, batch_size, input_size, hidden_size,
+        W, R, bw, br, x, h0, quant_params, g_blas_handle, h, v,
+        x_mask, h0_mask, W_mask, R_mask, bw_mask, br_mask,
+        weight_ih_linear_mask, weight_hh_linear_mask, gate_input_mask, gate_output_mask, h_mask,
+        W_q.data(), R_q.data(), bw_q.data(), br_q.data(), x_q.data());
+
+    // Preserve the public FP32 q-cache ABI consumed by the existing STE backward.
+    // Identity dequantization only changes storage, without rescaling the codes.
+    const FixedPointScale identity{1, 0};
+    dev::dequantification(W_q.data(), W_q_out, W_q.size(), identity, 0);
+    dev::dequantification(R_q.data(), R_q_out, R_q.size(), identity, 0);
+    dev::dequantification(bw_q.data(), bw_q_out, bw_q.size(), identity, 0);
+    dev::dequantification(br_q.data(), br_q_out, br_q.size(), identity, 0);
+    dev::dequantification(x_q.data(), x_q_out, x_q.size(), identity, 0);
     cudaDeviceSynchronize();
-    cudaError_t err = cudaGetLastError();
+    const cudaError_t err = cudaGetLastError();
     if (err != cudaSuccess) {
-        const char *err_str = cudaGetErrorString(err);
-        fprintf(stderr, "CUDA error in quantGRUForwardFP: %s\n", err_str);
-        throw std::runtime_error(std::string("CUDA error in quantGRUForwardFP: ") + err_str);
+        throw std::runtime_error(std::string("CUDA error in quantGRUForwardFP: ") + cudaGetErrorString(err));
     }
 }
 
@@ -1043,6 +1029,8 @@ GRUHistogramCollectors convertGPUHistogramsToCPU(const GRUGPUHistogramCollectors
         for (int c = 0; c < src.channel_size; ++c) {
             Histogram& hist = dst[c].histogram();
             hist.num_bins = src.num_bins;
+            hist.observed_min = src.original_mins[c];
+            hist.observed_max = src.original_maxs[c];
             hist.min_val = src.mins[c];
             hist.max_val = src.maxs[c];
             hist.total_count = src.per_channel_count;
@@ -1136,10 +1124,12 @@ GRUQuantParams calculateGRUQuantitativeParametersFromHistograms(
         bitwidth_config.W_symmetric_, hist_collectors.W_tensor_hist, hist_collectors.W_gate_hist, hist_collectors.W_hist, "W");
     histCalibrateChannel(quant_params.R_, bitwidth_config.R_granularity_, bitwidth_config.R_,
         bitwidth_config.R_symmetric_, hist_collectors.R_tensor_hist, hist_collectors.R_gate_hist, hist_collectors.R_hist, "R");
-    histCalibrateChannel(quant_params.bw_, bitwidth_config.bw_granularity_, bitwidth_config.bw_,
-        bitwidth_config.bw_symmetric_, hist_collectors.bw_tensor_hist, hist_collectors.bw_gate_hist, hist_collectors.bw_hist, "bw");
-    histCalibrateChannel(quant_params.br_, bitwidth_config.br_granularity_, bitwidth_config.br_,
-        bitwidth_config.br_symmetric_, hist_collectors.br_tensor_hist, hist_collectors.br_gate_hist, hist_collectors.br_hist, "br");
+    calibrateBias(quant_params.bw_, hidden_size, bitwidth_config.bw_granularity_,
+        bitwidth_config.bw_, usePOT2, [&](int c) { const auto& h = hist_collectors.bw_hist[c].histogram();
+            return std::make_pair(h.observed_min, h.observed_max); });
+    calibrateBias(quant_params.br_, hidden_size, bitwidth_config.br_granularity_,
+        bitwidth_config.br_, usePOT2, [&](int c) { const auto& h = hist_collectors.br_hist[c].histogram();
+            return std::make_pair(h.observed_min, h.observed_max); });
 
     // 标量参数（不受 granularity 影响）
     quant_params.x_ = histCalibrate(hist_collectors.x_hist, bitwidth_config.x_, bitwidth_config.x_symmetric_, "scale_x");
@@ -1262,10 +1252,12 @@ GRUQuantParams calculateGRUQuantitativeParametersFromGPUHistograms(
         gpu_collectors.W_tensor_hist, gpu_collectors.W_gate_hist, gpu_collectors.W_batch, "W");
     sqnrChannel(quant_params.R_, bitwidth_config.R_granularity_, bitwidth_config.R_symmetric_, bitwidth_config.R_,
         gpu_collectors.R_tensor_hist, gpu_collectors.R_gate_hist, gpu_collectors.R_batch, "R");
-    sqnrChannel(quant_params.bw_, bitwidth_config.bw_granularity_, bitwidth_config.bw_symmetric_, bitwidth_config.bw_,
-        gpu_collectors.bw_tensor_hist, gpu_collectors.bw_gate_hist, gpu_collectors.bw_batch, "bw");
-    sqnrChannel(quant_params.br_, bitwidth_config.br_granularity_, bitwidth_config.br_symmetric_, bitwidth_config.br_,
-        gpu_collectors.br_tensor_hist, gpu_collectors.br_gate_hist, gpu_collectors.br_batch, "br");
+    calibrateBias(quant_params.bw_, hidden_size, bitwidth_config.bw_granularity_,
+        bitwidth_config.bw_, usePOT2, [&](int c) { return std::make_pair(gpu_collectors.bw_batch.original_mins[c],
+                                  gpu_collectors.bw_batch.original_maxs[c]); });
+    calibrateBias(quant_params.br_, hidden_size, bitwidth_config.br_granularity_,
+        bitwidth_config.br_, usePOT2, [&](int c) { return std::make_pair(gpu_collectors.br_batch.original_mins[c],
+                                  gpu_collectors.br_batch.original_maxs[c]); });
 
     // 同步 CUDA 操作
     cudaDeviceSynchronize();

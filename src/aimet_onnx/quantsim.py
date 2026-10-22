@@ -71,6 +71,7 @@ from packaging import version
 
 from aimet_common import libpymo, quantsim
 from aimet_common import libquant_info
+from aimet_common.run_context import get_run, logged_operation
 from aimet_common.defs import (
     QuantScheme,
     QuantizationDataType,
@@ -95,7 +96,7 @@ from aimet_common.quantsim import (
 )
 from aimet_common.utils import save_json_yaml, AimetLogger, _red, deprecated
 from aimet_common.quant_utils import _convert_encoding_format_0_6_1_to_1_0_0
-from aimet_common.quantsim_config.quantsim_config import _config_file_aliases
+from aimet_common.quantsim_config.quantsim_config import _config_file_aliases, _get_config_file
 from aimet_common.connected_graph.product import Product
 from aimet_common.onnx._utils import _convert_version
 from aimet_onnx import utils
@@ -316,27 +317,36 @@ def compute_encodings(sim: "QuantizationSimModel"):
         ...     for input in dataset:
         ...         _ = sim.session.run(None, {"input": input})
     """
-    enabled_quantizers = {
-        name: q for name, q in sim.qc_quantize_op_dict.items() if q.enabled
-    }
-    for op_name, qc_op in enabled_quantizers.items():
-        qc_op.reset_encoding_stats()
-        if op_name in sim.activation_names:
-            qc_op.op_mode = OpMode.updateStats
-        else:
-            qc_op.op_mode = OpMode.oneShotQuantizeDequantize
+    with contextlib.ExitStack() as stack:
+        for adapter in getattr(sim, "_rx_native_grus", {}).values():
+            if adapter.module.use_quantization:
+                stack.enter_context(adapter.module.calibration_context())
+        enabled_quantizers = {
+            name: q for name, q in sim.qc_quantize_op_dict.items() if q.enabled
+        }
+        for op_name, qc_op in enabled_quantizers.items():
+            qc_op.reset_encoding_stats()
             if qc_op.is_encoding_frozen():
                 qc_op.op_mode = OpMode.quantizeDequantize
+            elif op_name in sim.activation_names:
+                qc_op.op_mode = OpMode.updateStats
+            else:
+                qc_op.op_mode = OpMode.oneShotQuantizeDequantize
+                if qc_op.is_encoding_frozen():
+                    qc_op.op_mode = OpMode.quantizeDequantize
 
-    yield
+        from .percentile import calibration_context
+        stack.enter_context(calibration_context(sim, enabled_quantizers))
 
-    for op_name, qc_op in enabled_quantizers.items():
-        if (
-            qc_op.data_type == QuantizationDataType.int
-            and not qc_op.is_encoding_frozen()
-        ):
-            qc_op.compute_encodings()
-        qc_op.op_mode = OpMode.quantizeDequantize
+        yield
+
+        for op_name, qc_op in enabled_quantizers.items():
+            if (
+                qc_op.data_type == QuantizationDataType.int
+                and not qc_op.is_encoding_frozen()
+            ):
+                qc_op.compute_encodings()
+            qc_op.op_mode = OpMode.quantizeDequantize
 
 
 # pylint: disable=missing-class-docstring, too-many-arguments, too-many-locals, too-many-instance-attributes
@@ -362,6 +372,7 @@ class QuantizationSimModel:
     """
 
     @_allow_deprecated_args
+    @logged_operation
     def __init__(
         self,
         model: ModelProto,
@@ -375,6 +386,8 @@ class QuantizationSimModel:
         providers: Optional[Sequence[str | Tuple[str, Dict[Any, Any]]]] = None,
         path: Optional[str] = None,
     ):
+        config_file = _get_config_file(config_file)
+        get_run().snapshot_config(config_file, 'quantsim')
         if isinstance(quant_scheme, str):
             quant_scheme = QuantScheme.from_str(quant_scheme)
 
@@ -466,12 +479,16 @@ class QuantizationSimModel:
         if _tie_qtzrs:
             self._tie_quantizers_for_op_types(op_types_to_tie_qtzrs)
 
+        self._prepare_runtime_model()
         self.session = OrtInferenceSession(
             self.model.model,
             self.providers,
             session_options=self._ort_session_options,
             path=self._path,
         )
+
+    def _prepare_runtime_model(self):
+        """Allow operator-owned simulation nodes to be installed before ORT loads the graph."""
 
     @classmethod
     def _from_onnx_qdq(cls, model: ModelProto, **kwargs) -> "QuantizationSimModel":
@@ -968,7 +985,7 @@ class QuantizationSimModel:
         default_symmetry = (
             quantsim_configurator.quantsim_configs.get("defaults", {})
             .get("params", {})
-            .get("is_symmetric", False)
+            .get("is_symmetric", True)
         )
         op_specific_config = quantsim_configurator.quantsim_configs.get("op_type", {})
 
@@ -1176,9 +1193,7 @@ class QuantizationSimModel:
     def _compute_encodings_from_callback(
         self, forward_pass_callback, forward_pass_callback_args=_NOT_SPECIFIED
     ):
-        if forward_pass_callback_args is _NOT_SPECIFIED:
-            args = (self.session,)
-        else:
+        if forward_pass_callback_args is not _NOT_SPECIFIED:
             warnings.warn(
                 _red(
                     "Support for calling compute_encodings() with forward_pass_callback_args is deprecated and will be removed in the future. "
@@ -1186,9 +1201,9 @@ class QuantizationSimModel:
                 DeprecationWarning,
                 stacklevel=3,
             )
-            args = (self.session, forward_pass_callback_args)
-
         with compute_encodings(self):
+            args = ((self.session,) if forward_pass_callback_args is _NOT_SPECIFIED
+                    else (self.session, forward_pass_callback_args))
             forward_pass_callback(*args)
 
     def set_percentile_value(self, percentile_value: float):
@@ -2619,6 +2634,9 @@ def load_encodings_to_sim(
         quant_sim_model.qc_quantize_op_dict[quantizer_name]._load_encodings_dict(
             encodings_to_load, allow_overwrite=allow_overwrite
         )
+    if getattr(quant_sim_model, "_rx_native_grus", None) or encodings.get("native_recurrent_encodings"):
+        from aimet_onnx.rx_ptq.recurrent import restore_native_encodings
+        restore_native_encodings(quant_sim_model, encodings, allow_overwrite=allow_overwrite)
     return mismatched_encodings
 
 
@@ -2631,6 +2649,21 @@ def validate_encodings_to_load(
     :param encodings_to_load: Encodings to load
     :param quant_sim_model: Quantsim model to check for encoding names.
     """
+    # A shared runtime quantizer cannot restore two different saved grids.
+    # Check before loading/freezing the first alias, which would hide a conflict.
+    shared_encodings = {}
+    for encoding in itertools.chain(
+        encodings_to_load["activation_encodings"], encodings_to_load["param_encodings"]
+    ):
+        name = encoding["name"]
+        quantizer = quant_sim_model.qc_quantize_op_dict.get(name)
+        if quantizer is None:
+            continue
+        grid = {key: value for key, value in encoding.items() if key != "name"}
+        if quantizer in shared_encodings and shared_encodings[quantizer] != grid:
+            raise ValueError(f"Conflicting encodings for shared quantizer: {name}")
+        shared_encodings[quantizer] = grid
+
     # Check that all encoding names in the encodings to load are found in the model. This check only works for verifying
     # that names in encodings_to_load are valid. The reverse check will not work, since quantizers which are disabled
     # will not show up in encodings_to_load.
@@ -2742,6 +2775,12 @@ def log_and_catch_mismatched_encodings(
                     f"\tbitwidth: "
                     f"{mismatched_encoding_info.bitwidth_mismatch[0]}, loaded encoding bitwidth:"
                     f"{mismatched_encoding_info.bitwidth_mismatch[1]}"
+                )
+
+            if mismatched_encoding_info.signed_mismatch:
+                logging_strings.append(
+                    f'\tsigned: {mismatched_encoding_info.signed_mismatch[0]}, '
+                    f'loaded encoding signed: {mismatched_encoding_info.signed_mismatch[1]}'
                 )
 
             if mismatched_encoding_info.is_symmetric_mismatch:

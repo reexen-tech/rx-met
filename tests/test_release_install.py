@@ -7,6 +7,7 @@ import json
 import os
 from pathlib import Path
 import shlex
+import shutil
 import subprocess
 import sys
 import tarfile
@@ -40,7 +41,7 @@ class InstallerFailureTest(unittest.TestCase):
         self.env['FAKE_EXPECTED_IMAGE_ID'] = self.runtime_id
         self.env['FAKE_ARCHIVE'] = base64.b64encode(self.archive_bytes()).decode()
         docker = self.tools / 'docker'
-        docker.write_text(f'#!{sys.executable}\n' + r'''import hashlib, json, os, subprocess, sys, tarfile
+        docker.write_text(f'#!{sys.executable}\n' + r'''import hashlib, json, os, shutil, subprocess, sys, tarfile
 from pathlib import Path
 args = sys.argv[1:]
 expected = os.environ['FAKE_EXPECTED_IMAGE_ID']
@@ -94,6 +95,26 @@ elif args and args[0] == 'run':
         path = mount.split('src=', 1)[1].split(',dst=', 1)[0]
         result = subprocess.run([sys.executable, '-B', '-', path, expected], input=code, text=True)
         sys.exit(result.returncode)
+    if os.environ.get('FAKE_INSTALL_SUCCESS') == '1':
+        mounts = {}
+        for arg in args:
+            if arg.startswith('type=bind,src='):
+                source, target = arg.split('src=', 1)[1].split(',dst=', 1)
+                mounts[target.split(',', 1)[0]] = Path(source)
+        if '/install' in mounts:
+            if os.environ.get('FAKE_INSTALL_FAIL') == '1':
+                sys.exit('injected installation failure')
+            bundle, install = mounts['/bundle'], mounts['/install']
+            (install / 'python').mkdir()
+            (install / 'python/module.py').write_text(json.loads((bundle / 'manifest.json').read_text())['revision'])
+            shutil.copytree(bundle / 'examples', install / 'examples')
+            for name in ('manifest.json', 'README.md', 'CHANGELOG.md'):
+                shutil.copy2(bundle / name, install / name)
+        else:
+            if os.environ.get('FAKE_VERIFY_FAIL') == '1':
+                sys.exit('injected verification failure')
+            assert (mounts['/opt/rx-met'] / 'python/module.py').is_file()
+        sys.exit(0)
     print('injected container failure', file=sys.stderr)
     sys.exit(42)
 else:
@@ -143,12 +164,16 @@ else:
 ''')
         curl.chmod(0o755)
 
-    def write_bundle(self, url=''):
+    def write_bundle(self, url='', revision='original'):
         manifest = self.bundle / 'manifest.json'
-        manifest.write_text(json.dumps({'version': '1.1.0'}))
+        manifest.write_text(json.dumps({'version': '1.1.0', 'revision': revision}))
+        for name in ('README.md', 'CHANGELOG.md', 'examples/example.py'):
+            path = self.bundle / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(revision)
         bootstrap = {'BUNDLE_NAME': 'rx-met-test', 'MANIFEST_SHA256': hashlib.sha256(manifest.read_bytes()).hexdigest(),
                      'RUNTIME_IMAGE_ID': self.runtime_id, 'RUNTIME_IMAGE_TAG': self.env['FAKE_RUNTIME_TAG'],
-                     'RUNTIME_ARCHIVE': 'runtime.tar.gz',
+                     'RUNTIME_ENV_DIR': 'rx-quant-env-v1', 'RUNTIME_ARCHIVE': 'runtime.tar.gz',
                      'RUNTIME_URL': url, 'RUNTIME_CHECKSUM_URL': url + '.sha256' if url else '', 'APP_INSTALL_BYTES': '1'}
         script = (ROOT / 'packaging/release-bundle/install.sh.in').read_text()
         script = script.replace('@BOOTSTRAP@', '\n'.join(f'readonly {key}={shlex.quote(value)}' for key, value in bootstrap.items()))
@@ -157,7 +182,9 @@ else:
         self.installer = self.bundle / 'install.sh'
         self.installer.write_text(script)
         self.installer.chmod(0o755)
-        (self.bundle / 'SHA256SUMS').write_text(''.join(f'{hashlib.sha256(p.read_bytes()).hexdigest()}  {p.name}\n' for p in (manifest, self.installer)))
+        (self.bundle / 'SHA256SUMS').write_text(''.join(
+            f'{hashlib.sha256(p.read_bytes()).hexdigest()}  {p.relative_to(self.bundle)}\n'
+            for p in sorted(self.bundle.rglob('*')) if p.is_file() and p.name != 'SHA256SUMS'))
 
     def invoke(self, *args):
         return subprocess.run([str(self.installer), '--prefix', str(self.prefix), *args], env=self.env, text=True, capture_output=True)
@@ -223,20 +250,149 @@ else:
         self.assert_failed_with('已存在其他内容', self.invoke('--offline'))
         self.assertEqual((installed / 'manifest.json').read_text(), 'old manifest')
 
+    def install_original(self):
+        self.env['FAKE_IMAGE_PRESENT'] = '1'
+        self.env['FAKE_INSTALL_SUCCESS'] = '1'
+        result = self.invoke('--offline')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        return self.prefix / 'rx-met-test'
+
+    def assert_no_temporary_installations(self):
+        self.assertFalse(list(self.prefix.glob('.rx-met-test.*')))
+
+    def fail_install_move(self, *, rollback=False):
+        self.env['REAL_MV'] = shutil.which('mv')
+        self.env['FAIL_ROLLBACK'] = '1' if rollback else '0'
+        move = self.tools / 'mv'
+        move.write_text(f'#!{sys.executable}\n' + r'''import os, sys
+from pathlib import Path
+source, target = map(Path, sys.argv[-2:])
+if target.name == 'rx-met-test':
+    if source.name.startswith('.rx-met-test.') or os.environ['FAIL_ROLLBACK'] == '1':
+        sys.exit('injected rename failure')
+os.execv(os.environ['REAL_MV'], ['mv', *sys.argv[1:]])
+''')
+        move.chmod(0o755)
+
+    def test_help_describes_replace_without_docker(self):
+        result = self.invoke('--help')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('--replace', result.stdout)
+        self.assertFalse((self.root / 'docker.log').exists())
+
+    def test_replace_installs_fresh_when_destination_is_absent(self):
+        self.env['FAKE_IMAGE_PRESENT'] = '1'
+        self.env['FAKE_INSTALL_SUCCESS'] = '1'
+        result = self.invoke('--offline', '--replace')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual((self.prefix / 'rx-met-test/python/module.py').read_text(), 'original')
+        self.assert_no_temporary_installations()
+
+    def test_replace_publishes_changed_bundle_and_preserves_other_versions(self):
+        installed = self.install_original()
+        (installed / 'obsolete').write_text('old content')
+        previous = self.prefix / 'previous-version'
+        previous.mkdir()
+        (previous / 'keep').write_text('previous version')
+        self.write_bundle(revision='updated')
+        result = self.invoke('--offline', '--replace')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual((installed / 'manifest.json').read_bytes(), (self.bundle / 'manifest.json').read_bytes())
+        self.assertEqual((installed / 'python/module.py').read_text(), 'updated')
+        self.assertFalse((installed / 'obsolete').exists())
+        self.assertEqual((previous / 'keep').read_text(), 'previous version')
+        self.assertEqual(subprocess.run(['sha256sum', '--check', '--strict', 'INSTALL_SHA256SUMS'],
+                                       cwd=installed, capture_output=True).returncode, 0)
+        self.assert_no_temporary_installations()
+
+    def test_identical_installation_is_reused_by_default_and_replace_repairs_corruption(self):
+        installed = self.install_original()
+        (installed / 'marker').write_text('keep when reused')
+        result = self.invoke('--offline')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertTrue((installed / 'marker').exists())
+        (installed / 'python/module.py').write_text('corrupted')
+        self.assert_failed_with('已有安装内容发生变化', self.invoke('--offline'))
+        result = self.invoke('--offline', '--replace')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual((installed / 'python/module.py').read_text(), 'original')
+        self.assertFalse((installed / 'marker').exists())
+        self.assert_no_temporary_installations()
+
+    def test_replace_install_or_verification_failure_preserves_existing_installation(self):
+        installed = self.install_original()
+        original = (installed / 'manifest.json').read_bytes()
+        self.write_bundle(revision='updated')
+        for variable, message in (('FAKE_INSTALL_FAIL', 'injected installation failure'),
+                                  ('FAKE_VERIFY_FAIL', 'injected verification failure')):
+            with self.subTest(stage=variable):
+                self.env[variable] = '1'
+                self.assert_failed_with(message, self.invoke('--offline', '--replace'))
+                self.assertEqual((installed / 'manifest.json').read_bytes(), original)
+                self.assertEqual((installed / 'python/module.py').read_text(), 'original')
+                self.assert_no_temporary_installations()
+                self.env.pop(variable)
+
+    def test_replace_rename_failure_restores_previous_installation(self):
+        installed = self.install_original()
+        original = (installed / 'manifest.json').read_bytes()
+        self.write_bundle(revision='updated')
+        self.fail_install_move()
+        self.assert_failed_with('injected rename failure', self.invoke('--offline', '--replace'))
+        self.assertEqual((installed / 'manifest.json').read_bytes(), original)
+        self.assertEqual((installed / 'python/module.py').read_text(), 'original')
+        self.assert_no_temporary_installations()
+
+    def test_replace_failed_rollback_preserves_backup(self):
+        installed = self.install_original()
+        original = (installed / 'manifest.json').read_bytes()
+        self.write_bundle(revision='updated')
+        self.fail_install_move(rollback=True)
+        result = self.invoke('--offline', '--replace')
+        self.assertNotEqual(result.returncode, 0)
+        backups = list(self.prefix.glob('.rx-met-test.backup.*/previous'))
+        self.assertEqual(len(backups), 1, result.stdout + result.stderr)
+        self.assertEqual((backups[0] / 'manifest.json').read_bytes(), original)
+        self.assertIn(str(backups[0]), result.stdout + result.stderr)
+
+    def test_replace_rejects_symlink_targets_including_dangling_links(self):
+        self.env['FAKE_IMAGE_PRESENT'] = '1'
+        self.prefix.mkdir()
+        target = self.root / 'other installation'
+        target.mkdir()
+        (target / 'keep').write_text('preserve')
+        installed = self.prefix / 'rx-met-test'
+        for destination in (target, self.root / 'missing'):
+            with self.subTest(destination=destination):
+                installed.symlink_to(destination, target_is_directory=True)
+                try:
+                    self.assert_failed_with('目标路径不是独立安装目录', self.invoke('--offline', '--replace'))
+                    self.assertTrue(installed.is_symlink())
+                    self.assertEqual((target / 'keep').read_text(), 'preserve')
+                    self.assert_no_temporary_installations()
+                finally:
+                    installed.unlink()
+
     def test_remote_daemon_rejected_before_bind_mounts(self):
         self.env['DOCKER_HOST'] = 'ssh://example.invalid'
         self.assert_failed_with('本机 Docker daemon', self.invoke())
 
-    def test_local_attachment_is_verified_and_imported(self):
-        images = self.bundle / 'images'
+    def test_environment_next_to_product_directory_is_verified_and_imported(self):
+        product = self.root / 'product delivery'
+        product.mkdir()
+        relocated = product / self.bundle.name
+        self.bundle.rename(relocated)
+        self.bundle = relocated
+        self.installer = self.bundle / 'install.sh'
+        images = product.parent / 'rx-quant-env-v1'
         images.mkdir()
         (images / 'runtime.tar.gz').write_bytes(base64.b64decode(self.env['FAKE_ARCHIVE']))
         self.assert_failed_with('injected container failure', self.invoke('--offline'))
         self.assertTrue((self.root / 'image-loaded').is_file())
         self.assertFalse((self.prefix / 'rx-met-test').exists())
 
-    def test_adjacent_images_directory_is_used_by_default_install(self):
-        images = self.bundle.parent / 'images'
+    def test_environment_next_to_unpacked_bundle_is_used_by_default_install(self):
+        images = self.bundle.parent / 'rx-quant-env-v1'
         images.mkdir()
         (images / 'runtime.tar.gz').write_bytes(base64.b64decode(self.env['FAKE_ARCHIVE']))
         self.assert_failed_with('injected container failure', self.invoke())

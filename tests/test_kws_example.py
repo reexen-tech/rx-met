@@ -2,7 +2,9 @@
 import contextlib
 import io
 import json
+import os
 from pathlib import Path
+import runpy
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -19,6 +21,26 @@ from tests.test_quant_lstm_integration import (
 
 
 class KwsExampleConfigurationTest(unittest.TestCase):
+    def test_output_directory_uses_cwd_and_respects_overrides(self):
+        with tempfile.TemporaryDirectory() as directory, patch.dict(os.environ, {}):
+            root = Path(directory)
+            original_cwd = Path.cwd()
+            try:
+                os.chdir(root)
+                os.environ.pop('RX_MET_KWS_OUTPUT_DIR', None)
+                namespace = runpy.run_path(kws.__file__, run_name='kws_output_test')
+                for rnn_type in ('gru', 'lstm'):
+                    args = namespace['parse_args'](['--rnn_type', rnn_type])
+                    self.assertEqual(args.output_dir / args.rnn_type,
+                                     root / 'output/quick_start_kws' / rnn_type)
+                os.environ['RX_MET_KWS_OUTPUT_DIR'] = str(root / 'env-output')
+                namespace = runpy.run_path(kws.__file__, run_name='kws_output_test')
+                self.assertEqual(namespace['parse_args']([]).output_dir, root / 'env-output')
+                args = namespace['parse_args'](['--output-dir', str(root / 'cli-output')])
+                self.assertEqual(args.output_dir, root / 'cli-output')
+            finally:
+                os.chdir(original_cwd)
+
     def test_example_uses_custom_batchnorm(self):
         from aimet_torch.quantizable_batchnorm import QuantizableBatchNorm2d
         block = kws.ConvActBN(1, 4, (5, 1))
@@ -74,9 +96,14 @@ class KwsExampleWorkflowTest(unittest.TestCase):
                      patch.dict('os.environ', {'RX_MET_KWS_FP_MODEL': str(Path(directory) / rnn_type / 'model_fp_kws.pth')}), \
                      contextlib.redirect_stdout(io.StringIO()):
                     kws.main(['--rnn_type', rnn_type, '--output-dir', directory])
-                    output = Path(directory) / rnn_type
-                    checkpoint = torch.load(output / 'att_mh_rnn_kws_qat.pth', weights_only=True)
+                    root = Path(directory) / rnn_type
+                    record_path, = root.glob('*/run.json')
+                    execution = record_path.parent
+                    output = execution / 'exports'
+                    checkpoint = torch.load(execution / 'checkpoints/att_mh_rnn_kws_qat.pth', weights_only=True)
                     self.assertEqual(checkpoint['rnn_type'], rnn_type)
+                    self.assertEqual(json.loads((execution / 'run.json').read_text())['status'], 'success')
+                    self.assertTrue((execution / 'run.log').is_file())
                     graph = onnx.load(output / 'att_mh_rnn_kws.onnx')
                     onnx.checker.check_model(graph)
                     self.assertFalse(any(n.op_type == 'BatchNormalization' for n in graph.graph.node))
@@ -88,9 +115,15 @@ class KwsExampleWorkflowTest(unittest.TestCase):
                     initializer_names = {t.name for t in graph.graph.initializer}
                     self.assertLessEqual(set(encodings['activation_encodings']), node_names)
                     self.assertLessEqual(set(encodings['param_encodings']), initializer_names)
+                    for index in (0, 1):
+                        for parameter in ('weight', 'bias'):
+                            self.assertIn(f'convs.{index}.bn.{parameter}', encodings['param_encodings'])
                     for node in graph.graph.node:
                         if '.bn.' in node.name and node.op_type in ('Sub', 'Div', 'Mul', 'Add'):
-                            self.assertEqual(set(encodings['activation_encodings'][node.name]['input']), {'0', '1'})
+                            inputs = set(encodings['activation_encodings'][node.name]['input'])
+                            # BN affine parameters own their QDQ at get_attr.
+                            expected = {'0'} if node.input[1] in encodings['param_encodings'] else {'0', '1'}
+                            self.assertEqual(inputs, expected, node.name)
                     metadata = (set(encodings), encodings['version'], encodings['schema_version'])
                     if rnn_type == 'gru':
                         gru_metadata = metadata

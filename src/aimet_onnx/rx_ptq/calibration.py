@@ -35,8 +35,23 @@ def inspect_model_inputs(model: onnx.ModelProto) -> Dict[str, List[int]]:
     return result
 
 
+def inspect_model_input_dtypes(model: onnx.ModelProto) -> Dict[str, np.dtype]:
+    """Return declared numeric/boolean input dtypes, excluding initializers."""
+    names = inspect_model_inputs(model)
+    dtypes = {}
+    for value_info in model.graph.input:
+        if value_info.name not in names:
+            continue
+        dtype = np.dtype(onnx.helper.tensor_dtype_to_np_dtype(value_info.type.tensor_type.elem_type))
+        if dtype.kind not in 'biuf':
+            raise ValueError(f"Unsupported calibration dtype for {value_info.name}: {dtype}")
+        dtypes[value_info.name] = dtype
+    return dtypes
+
+
 def _validate_feed(
-    feed: Dict[str, np.ndarray], input_shapes: Dict[str, List[int]], source: str
+    feed: Dict[str, np.ndarray], input_shapes: Dict[str, List[int]], source: str,
+    input_dtypes: Dict[str, np.dtype] | None = None,
 ) -> Dict[str, np.ndarray]:
     required = set(input_shapes)
     missing = required - set(feed)
@@ -53,14 +68,24 @@ def _validate_feed(
             raise ValueError(
                 f"{source}:{name} shape={tuple(array.shape)} != {tuple(shape)}"
             )
-        if array.dtype != np.float32:
-            array = array.astype(np.float32)
-        normalized[name] = np.ascontiguousarray(array)
+        if input_dtypes is not None:
+            dtype = np.dtype(input_dtypes[name])
+            if not np.can_cast(array.dtype, dtype, casting='same_kind'):
+                raise TypeError(f"{source}:{name} cannot convert {array.dtype} to model dtype {dtype}")
+            if dtype.kind in 'iu':
+                bounds = np.iinfo(dtype)
+                if array.size and (np.any(array < bounds.min) or np.any(array > bounds.max)):
+                    raise ValueError(f"{source}:{name} values exceed model dtype {dtype}")
+            with np.errstate(over='ignore', invalid='ignore'):
+                array = array.astype(dtype, copy=False)
+        if array.dtype.kind not in 'biuf' or not np.all(np.isfinite(array)):
+            raise ValueError(f"{source}:{name} requires finite numeric or boolean input")
+        normalized[name] = array if array.flags.c_contiguous else np.ascontiguousarray(array)
     return normalized
 
 
 def _iter_npz(
-    root: Path, input_shapes: Dict[str, List[int]]
+    root: Path, input_shapes: Dict[str, List[int]], input_dtypes=None,
 ) -> Iterable[Dict[str, np.ndarray]]:
     files = sorted(root.glob("*.npz"))
     if not files:
@@ -71,6 +96,7 @@ def _iter_npz(
                 {name: data[name] for name in data.files},
                 input_shapes,
                 str(path),
+                input_dtypes,
             )
 
 
@@ -94,7 +120,7 @@ def _input_file_candidates(path: Path, input_name: str) -> bool:
 
 
 def _iter_npy(
-    root: Path, input_shapes: Dict[str, List[int]]
+    root: Path, input_shapes: Dict[str, List[int]], input_dtypes=None,
 ) -> Iterable[Dict[str, np.ndarray]]:
     files = sorted(root.glob("*.npy"))
     if not files:
@@ -107,6 +133,7 @@ def _iter_npy(
                 {name: np.load(path, allow_pickle=False)},
                 input_shapes,
                 str(path),
+                input_dtypes,
             )
         return
 
@@ -132,6 +159,7 @@ def _iter_npy(
             },
             input_shapes,
             f"{root}/{key}",
+            input_dtypes,
         )
 
 
@@ -139,6 +167,8 @@ def iter_calibration_feeds(
     calibration_dir: str | Path,
     input_shapes: Dict[str, List[int]],
     limit: int | None = None,
+    *,
+    input_dtypes: Dict[str, np.dtype] | None = None,
 ) -> Iterable[Dict[str, np.ndarray]]:
     """Load real calibration feeds from a directory of npz or npy files.
 
@@ -146,14 +176,19 @@ def iter_calibration_feeds(
     single-input model, individual ``npy`` files are accepted.  For the
     two-input layout, files that share a sample prefix are paired
     (for example ``imu`` with ``audio``).
+
+    ``input_dtypes`` applies the model's declared types with range checks.
+    Shape-only callers retain the dtype stored in each calibration array.
     """
     root = Path(calibration_dir)
     if not root.is_dir():
         raise FileNotFoundError(f"校准目录不存在: {root}")
 
-    iterator = _iter_npz(root, input_shapes)
+    if input_dtypes is not None and set(input_dtypes) != set(input_shapes):
+        raise ValueError("Input dtype names must match input shape names")
+    iterator = _iter_npz(root, input_shapes, input_dtypes)
     if not list(root.glob("*.npz")):
-        iterator = _iter_npy(root, input_shapes)
+        iterator = _iter_npy(root, input_shapes, input_dtypes)
 
     count = 0
     for feed in iterator:

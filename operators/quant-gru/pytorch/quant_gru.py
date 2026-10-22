@@ -90,6 +90,31 @@ from _version import __version__
 from torch.onnx import register_custom_op_symbolic, symbolic_helper
 
 try:
+    from aimet_common.run_context import log_details, log_print as print, logged_operation
+except ModuleNotFoundError as error:
+    if error.name not in ('aimet_common', 'aimet_common.run_context'):
+        raise
+    # Standalone operator wheels do not require AIMET.
+    import builtins as _builtins
+    from contextvars import ContextVar as _ContextVar
+    _console_details = _ContextVar('operator_console_details', default=True)
+
+    @contextmanager
+    def log_details(verbose):
+        token = _console_details.set(_console_details.get() and bool(verbose))
+        try:
+            yield
+        finally:
+            _console_details.reset(token)
+
+    def print(*args, **kwargs):
+        if _console_details.get():
+            _builtins.print(*args, **kwargs)
+
+    def logged_operation(function):
+        return function
+
+try:
     import gru_interface_binding as gru_ops
 except ImportError:
     raise ImportError(
@@ -1374,6 +1399,7 @@ class QuantGRU(nn.Module):
 
     # -------------------- 公开接口 --------------------
 
+    @logged_operation
     def load_bitwidth_config(self, config_file: str, verbose: bool = False):
         """
         从 JSON 文件加载位宽配置（2 层设计：JSON → C++ 对象）
@@ -1390,7 +1416,7 @@ class QuantGRU(nn.Module):
         """
         # 如果已加载量化参数，跳过此方法
         if self.is_calibrated():
-            if verbose:
+            with log_details(verbose):
                 module_name_str = f" [{self._module_name}]" if self._module_name else ""
                 print(
                     f" [QuantGRU{module_name_str}] 已完成校准或已加载量化参数，跳过 load_bitwidth_config()。\n"
@@ -1439,7 +1465,7 @@ class QuantGRU(nn.Module):
             # 如果字段名在映射表中，使用新字段名
             if json_key in FIELD_NAME_MAP:
                 new_key = FIELD_NAME_MAP[json_key]
-                if verbose:
+                with log_details(verbose):
                     print(f"  [字段名映射] '{json_key}' -> '{new_key}' (向后兼容)")
                 normalized_op_config[new_key] = op_cfg
             else:
@@ -1531,7 +1557,7 @@ class QuantGRU(nn.Module):
                     f"       → 将使用默认值: bitwidth={bw}, {sym_str}, {unsigned_str}"
                 )
             
-            if verbose:
+            with log_details(verbose):
                 print(f"\n  提示：JSON 配置文件 '{config_file}' 缺少以下算子配置，将使用默认值:\n"
                       + "\n".join(missing_details) + "\n")
         
@@ -1551,17 +1577,18 @@ class QuantGRU(nn.Module):
                     attr_lines.append(f"       → 缺少 '{attr_name}'，将使用默认值: {default_val}")
                 attr_details.append(f"    算子 '{op_name}':\n" + "\n".join(attr_lines))
             
-            if verbose:
+            with log_details(verbose):
                 print(f"\n  提示：JSON 配置文件 '{config_file}' 以下算子缺少部分属性，将使用默认值:\n"
                       + "\n".join(attr_details) + "\n")
 
         # 标记量化参数需要更新（forward 时会自动调用 finalize_calibration）
         self._quant_params_dirty = True
 
-        if verbose:
+        with log_details(verbose):
             print_bitwidth_config(self._bitwidth_config, config_file)
             print(f"  [全局]  use_quantization: {self.use_quantization}")
 
+    @logged_operation
     def set_all_bitwidth(self, bitwidth: int = 8, is_symmetric: bool = True, verbose: bool = False):
         """
         设置所有算子统一的位宽和对称量化配置（2 层设计：直接操作 C++ 对象）
@@ -1589,7 +1616,7 @@ class QuantGRU(nn.Module):
         # 标记量化参数需要更新（forward 时会自动调用 finalize_calibration）
         self._quant_params_dirty = True
 
-        if verbose:
+        with log_details(verbose):
             sym_str = "对称" if is_symmetric else "非对称"
             print(f"\n[QuantGRU] 设置所有算子: {bitwidth}bit, 激活值{sym_str}量化, 权重/偏置对称量化")
 
@@ -1646,8 +1673,14 @@ class QuantGRU(nn.Module):
         Args:
             locked: True 锁定（禁止覆盖）；False 解锁（允许覆盖）
         """
+        # Resolve lazy mode/bitwidth changes while calibration data is still usable.
+        # Otherwise the next locked forward discards the dirty flag and executes
+        # with stale scales that cannot describe the runtime in public encodings.
+        if locked and not self._quant_params_locked:
+            _ensure_quant_params_fresh_for_export(self)
         self._quant_params_locked = bool(locked)
 
+    @logged_operation
     def finalize_calibration(self, verbose: bool = False):
         """
         完成校准，计算量化参数并初始化 LUT
@@ -1660,7 +1693,7 @@ class QuantGRU(nn.Module):
         """
         if self._quant_params_locked and self.is_calibrated():
             self._quant_params_dirty = False
-            if verbose:
+            with log_details(verbose):
                 print("\n[QuantGRU] quant_params 已锁定，跳过 finalize_calibration 覆盖")
             return
 
@@ -1677,7 +1710,7 @@ class QuantGRU(nn.Module):
 
         bitwidth_config = self._bitwidth_config
 
-        if verbose:
+        with log_details(verbose):
             method_name = {
                 'minmax': 'MINMAX',
                 'sqnr': 'SQNR',
@@ -1723,7 +1756,7 @@ class QuantGRU(nn.Module):
         self._quant_params_dirty = False
         
         # verbose=True 时打印量化参数
-        if verbose:
+        with log_details(verbose):
             print_quant_params(self)
 
     def reset_calibration(self):
@@ -2162,13 +2195,23 @@ class QuantGRU(nn.Module):
         # 初始状态处理(统一接口)
         h0_forward, h0_reverse = self._parse_initial_state(hx, batch_size, device, to_cuda=True)
 
+        # eval 只切换模块模式，并不关闭 autograd。底层 is_training 在本接口中
+        # 控制门值缓存和 QAT mask 的写入；缺失它们会让 eval 反向读取未初始化数据。
+        # 公共 GRU 不启用 dropout/zoneout，保存缓存不改变前向数值；no_grad 推理仍不保存。
+        save_backward_state = self.training or (
+            torch.is_grad_enabled() and (
+                input.requires_grad or (hx is not None and hx.requires_grad)
+                or any(parameter.requires_grad for parameter in self.parameters())
+            )
+        )
+
         # 前向方向
         # LUT 现在存储在 quant_params 中，通过 setRescaleParam 复制到前向传播的 rescale 参数
         output_forward, h_n_forward = GRUFunction.apply(
             input, self.weight_ih_l0, self.weight_hh_l0,
             self.bias_ih_l0 if self.bias else None,
             self.bias_hh_l0 if self.bias else None,
-            h0_forward, self.training, self.use_quantization, self.quant_params, self.quant_storage_dtype)
+            h0_forward, save_backward_state, self.use_quantization, self.quant_params, self.quant_storage_dtype)
 
         # 反向方向(双向时)
         output_reverse, h_n_reverse = None, None
@@ -2178,7 +2221,7 @@ class QuantGRU(nn.Module):
                 input.flip(0), self.weight_ih_l0_reverse, self.weight_hh_l0_reverse,
                 self.bias_ih_l0_reverse if self.bias else None,
                 self.bias_hh_l0_reverse if self.bias else None,
-                h0_reverse, self.training, self.use_quantization, self.quant_params_reverse, self.quant_storage_dtype)
+                h0_reverse, save_backward_state, self.use_quantization, self.quant_params_reverse, self.quant_storage_dtype)
             # 反转反向输出以对齐时间步
             output_reverse = output_reverse.flip(0)
 
@@ -2410,6 +2453,7 @@ class QuantGRU(nn.Module):
 
     # -------------------- 量化参数导出/导入/调整 --------------------
 
+    @logged_operation
     def export_quant_params(
         self,
         export_path: str,
@@ -2432,6 +2476,7 @@ class QuantGRU(nn.Module):
         # 调用模块级实现
         _export_quant_params_impl(self, export_path, include_weights, verbose)
 
+    @logged_operation
     def load_quant_params(
         self,
         import_path: str,
@@ -2529,13 +2574,16 @@ class QuantGRU(nn.Module):
         if "is_symmetric" in encoding and isinstance(encoding["is_symmetric"], bool):
             encoding["is_symmetric"] = "True" if encoding["is_symmetric"] else "False"
 
-        # scale-only 导出：清理历史 runtime 编码字段
+        # 清理执行编码，描述性 n 从真实 scale 重新派生。
         for legacy_key in ("multiplier", "shift", "scale_encoding", "n", "exp2_inv"):
             if legacy_key in encoding:
                 del encoding[legacy_key]
+        if "scale" in encoding:
+            encoding["n"] = _encoding_n(encoding["scale"])
         
         return encoding
 
+    @logged_operation
     def export_quant_params_to_aimet_format(
         self,
         encodings_dict: dict,
@@ -2587,16 +2635,17 @@ class QuantGRU(nn.Module):
                 else:
                     dst[field] = [a, b]
 
-            if verbose and verbose_prefix:
-                for k in ["dtype", "symmetric", "enc_type"]:
-                    if k in dst and k in src and dst[k] != src[k]:
-                        print(f"  ⚠️ 警告：{verbose_prefix} 字段 '{k}' 正反向不一致："
-                              f"forward={dst[k]}, reverse={src[k]}。将保留 forward 值。")
+            if verbose_prefix:
+                with log_details(verbose):
+                    for k in ["dtype", "symmetric", "enc_type"]:
+                        if k in dst and k in src and dst[k] != src[k]:
+                            print(f"  ⚠️ 警告：{verbose_prefix} 字段 '{k}' 正反向不一致："
+                                  f"forward={dst[k]}, reverse={src[k]}。将保留 forward 值。")
             return dst
         
         # 检查是否已校准
         if not self.is_calibrated():
-            if verbose:
+            with log_details(verbose):
                 print(f"  ⚠️ 警告：模块 {module_name or 'unknown'} 未校准，跳过导出")
             return encodings_dict
 
@@ -2607,20 +2656,20 @@ class QuantGRU(nn.Module):
         if module_name is None:
             module_name = self._module_name
             if not module_name:
-                if verbose:
+                with log_details(verbose):
                     print(f"  _module_name 未设置，使用默认名称 'gru'")
                 module_name = "gru"
         
         # 获取量化参数
         if self.quant_params is None:
-            if verbose:
+            with log_details(verbose):
                 print(f"  ⚠️ 警告：模块 {module_name} 的 quant_params 为空，跳过导出")
             return encodings_dict
         
         # 使用 _build_operators_dict 从 quant_params 构建 operators 字典
         operators = _build_operators_dict(self._bitwidth_config, self.quant_params, verbose)
         if not operators:
-            if verbose:
+            with log_details(verbose):
                 print(f"  ⚠️ 警告：模块 {module_name} 的 operators 为空，跳过导出")
             return encodings_dict
 
@@ -2628,7 +2677,7 @@ class QuantGRU(nn.Module):
         operators_reverse = None
         if self.bidirectional:
             if self.quant_params_reverse is None:
-                if verbose:
+                with log_details(verbose):
                     print(f"  ⚠️ 警告：模块 {module_name} 为双向，但 quant_params_reverse 为空。将仅导出正向参数。")
             else:
                 operators_reverse = _build_operators_dict(self._bitwidth_config, self.quant_params_reverse, verbose)
@@ -2643,8 +2692,8 @@ class QuantGRU(nn.Module):
         if module_name not in encodings_dict["activation_encodings"]:
             encodings_dict["activation_encodings"][module_name] = {
                 "is_GRU": True,
-                "input": [],
-                "output": [],
+                "input": {},
+                "output": {},
                 "internal_ops": {
                     "add_final_hidden": {"output": []},
                     "mul_new_contribution": {"output": []},
@@ -2706,7 +2755,7 @@ class QuantGRU(nn.Module):
             }
         
         # 1. 填充 activation_encodings 的 input 和 output
-        if verbose:
+        with log_details(verbose):
             print(f"\n处理 activation_encodings[{module_name}]:")
         
         # input
@@ -2714,13 +2763,13 @@ class QuantGRU(nn.Module):
             data = self._fix_zero_point(operators["input"])
             data = self._convert_to_encoding_format(data)
             if isinstance(data, dict):
-                gru_encodings["input"] = [data]
+                gru_encodings["input"] = {"0": data}
             else:
                 gru_encodings["input"] = data
-            if verbose:
+            with log_details(verbose):
                 print(f"  ✅ input <- input")
         else:
-            if verbose:
+            with log_details(verbose):
                 print(f"  ⚠️ 警告：未找到参数 'input'")
         
         # output
@@ -2728,17 +2777,17 @@ class QuantGRU(nn.Module):
             data = self._fix_zero_point(operators["output"])
             data = self._convert_to_encoding_format(data)
             if isinstance(data, dict):
-                gru_encodings["output"] = [data]
+                gru_encodings["output"] = {"0": data}
             else:
                 gru_encodings["output"] = data
-            if verbose:
+            with log_details(verbose):
                 print(f"  ✅ output <- output")
         else:
-            if verbose:
+            with log_details(verbose):
                 print(f"  ⚠️ 警告：未找到参数 'output'")
         
         # 2. 填充 param_encodings
-        if verbose:
+        with log_details(verbose):
             print(f"\n处理 param_encodings:")
         
         # 直接使用 ONNX 标准命名规则（不需要推断）：
@@ -2759,10 +2808,10 @@ class QuantGRU(nn.Module):
                 )
             data = self._convert_to_encoding_format(data)
             encodings_dict["param_encodings"][param_key] = data
-            if verbose:
+            with log_details(verbose):
                 print(f"  ✅ {param_key} <- weight_ih")
         else:
-            if verbose:
+            with log_details(verbose):
                 print(f"  ⚠️ 警告：未找到参数 'weight_ih'")
         
         # weight_hh - ONNX 标准命名：{module_name}.weight_hh.weight
@@ -2778,10 +2827,10 @@ class QuantGRU(nn.Module):
                 )
             data = self._convert_to_encoding_format(data)
             encodings_dict["param_encodings"][param_key] = data
-            if verbose:
+            with log_details(verbose):
                 print(f"  ✅ {param_key} <- weight_hh")
         else:
-            if verbose:
+            with log_details(verbose):
                 print(f"  ⚠️ 警告：未找到参数 'weight_hh'")
         
         # bias - 特殊处理，需要拼接 bias_ih 和 bias_hh 两个来源的各个字段
@@ -2792,13 +2841,13 @@ class QuantGRU(nn.Module):
         # 检查 bias_ih 和 bias_hh 是否都存在
         if "bias_ih" not in operators:
             error_msg = f"❌ 错误：未找到参数 'bias_ih'（模块 {module_name} 的 bias 需要同时有 bias_ih 和 bias_hh）"
-            if verbose:
+            with log_details(verbose):
                 print(f"  {error_msg}")
             raise ValueError(error_msg)
         
         if "bias_hh" not in operators:
             error_msg = f"❌ 错误：未找到参数 'bias_hh'（模块 {module_name} 的 bias 需要同时有 bias_ih 和 bias_hh）"
-            if verbose:
+            with log_details(verbose):
                 print(f"  {error_msg}")
             raise ValueError(error_msg)
         
@@ -2806,7 +2855,7 @@ class QuantGRU(nn.Module):
         # 处理 bias_ih（第一个源）
         bw_data = self._fix_zero_point(operators["bias_ih"])
         merged_dict = copy.deepcopy(bw_data)
-        if verbose:
+        with log_details(verbose):
             print(f"  ✅ {param_key} <- bw (初始化)")
         
         # 处理 bias_hh（第二个源，需要拼接）
@@ -2822,7 +2871,7 @@ class QuantGRU(nn.Module):
             if field in br_data and field in merged_dict:
                 if isinstance(merged_dict[field], list) and isinstance(br_data[field], list):
                     merged_dict[field].extend(br_data[field])
-                    if verbose:
+                    with log_details(verbose):
                         print(f"      拼接字段 {field}: {len(merged_dict[field])} 元素")
                 elif isinstance(merged_dict[field], list):
                     merged_dict[field].append(br_data[field])
@@ -2834,7 +2883,7 @@ class QuantGRU(nn.Module):
                         merged_dict[field],
                         br_data[field],
                     ]
-        if verbose:
+        with log_details(verbose):
             print(f"  ✅ {param_key} <- br (拼接)")
 
         # 双向：把反向 bias_ih/bias_hh 继续拼接到末尾
@@ -2852,10 +2901,10 @@ class QuantGRU(nn.Module):
                     list_fields=list_fields,
                     verbose_prefix=f"{param_key}/bias_hh_reverse"
                 )
-                if verbose:
+                with log_details(verbose):
                     print(f"  ✅ {param_key} <- (追加反向 bw/br)")
             else:
-                if verbose:
+                with log_details(verbose):
                     print(f"  ⚠️ 警告：未找到反向 bias_ih/bias_hh，跳过反向 bias 拼接")
         
         # 转换格式并保存
@@ -2863,7 +2912,7 @@ class QuantGRU(nn.Module):
         encodings_dict["param_encodings"][param_key] = merged_dict
         
         # 3. 填充 tensor_encodings
-        if verbose:
+        with log_details(verbose):
             print(f"\n处理 tensor_encodings:")
         
         # X <- input
@@ -2871,10 +2920,10 @@ class QuantGRU(nn.Module):
             data = self._fix_zero_point(operators["input"])
             data = self._convert_to_encoding_format(data)
             encodings_dict["tensor_encodings"]["X"] = data
-            if verbose:
+            with log_details(verbose):
                 print(f"  ✅ X <- input")
         else:
-            if verbose:
+            with log_details(verbose):
                 print(f"  ⚠️ 警告：未找到参数 'input' (用于 tensor_encodings['X'])")
         
         # Y <- output
@@ -2882,10 +2931,10 @@ class QuantGRU(nn.Module):
             data = self._fix_zero_point(operators["output"])
             data = self._convert_to_encoding_format(data)
             encodings_dict["tensor_encodings"]["Y"] = data
-            if verbose:
+            with log_details(verbose):
                 print(f"  ✅ Y <- output")
         else:
-            if verbose:
+            with log_details(verbose):
                 print(f"  ⚠️ 警告：未找到参数 'output' (用于 tensor_encodings['Y'])")
         
         # /gru/GRU_output_1 <- output
@@ -2893,14 +2942,14 @@ class QuantGRU(nn.Module):
             data = self._fix_zero_point(operators["output"])
             data = self._convert_to_encoding_format(data)
             encodings_dict["tensor_encodings"]["/gru/GRU_output_1"] = data
-            if verbose:
+            with log_details(verbose):
                 print(f"  ✅ /gru/GRU_output_1 <- output")
         else:
-            if verbose:
+            with log_details(verbose):
                 print(f"  ⚠️ 警告：未找到参数 'output' (用于 tensor_encodings['/gru/GRU_output_1'])")
         
         # 4. 填充 internal_ops
-        if verbose:
+        with log_details(verbose):
             print(f"\n处理 internal_ops:")
         
         internal_ops = gru_encodings["internal_ops"]
@@ -2928,10 +2977,10 @@ class QuantGRU(nn.Module):
                     internal_ops[op_name]["output"] = [data]
                 else:
                     internal_ops[op_name] = data
-                if verbose:
+                with log_details(verbose):
                     print(f"  ✅ {op_name} <- {op_name} (output)")
             else:
-                if verbose:
+                with log_details(verbose):
                     print(f"  ⚠️ 警告：未找到参数 '{op_name}'")
         
         # 特殊处理：add_final_hidden 使用 output 的参数
@@ -2943,10 +2992,10 @@ class QuantGRU(nn.Module):
                     internal_ops["add_final_hidden"]["output"] = [data]
                 else:
                     internal_ops["add_final_hidden"] = data
-                if verbose:
+                with log_details(verbose):
                     print(f"  ✅ add_final_hidden <- output (使用 output 的量化参数)")
             else:
-                if verbose:
+                with log_details(verbose):
                     print(f"  ⚠️ 警告：未找到参数 'output' (用于 add_final_hidden)")
         
         # 特殊处理：sub_one_minus_update 复用 update_gate_output 的参数
@@ -2958,15 +3007,15 @@ class QuantGRU(nn.Module):
                     internal_ops["sub_one_minus_update"]["output"] = [data]
                 else:
                     internal_ops["sub_one_minus_update"] = data
-                if verbose:
+                with log_details(verbose):
                     print(f"  ✅ sub_one_minus_update <- update_gate_output (复用 update_gate_output)")
             else:
-                if verbose:
+                with log_details(verbose):
                     print(f"  ⚠️ 警告：未找到参数 'update_gate_output' (用于 sub_one_minus_update)")
 
         # 双向：填充 internal_ops_reverse（与 internal_ops 相同逻辑，但读取 operators_reverse）
         if self.bidirectional and operators_reverse is not None and "internal_ops_reverse" in gru_encodings:
-            if verbose:
+            with log_details(verbose):
                 print(f"\n处理 internal_ops_reverse:")
             internal_ops_rev = gru_encodings["internal_ops_reverse"]
 
@@ -2978,10 +3027,10 @@ class QuantGRU(nn.Module):
                         internal_ops_rev[op_name]["output"] = [data]
                     else:
                         internal_ops_rev[op_name] = data
-                    if verbose:
+                    with log_details(verbose):
                         print(f"  ✅ {op_name} <- {op_name} (reverse/output)")
                 else:
-                    if verbose:
+                    with log_details(verbose):
                         print(f"  ⚠️ 警告：未找到反向参数 '{op_name}'")
 
             # add_final_hidden: 使用 reverse 的 output
@@ -2993,10 +3042,10 @@ class QuantGRU(nn.Module):
                         internal_ops_rev["add_final_hidden"]["output"] = [data]
                     else:
                         internal_ops_rev["add_final_hidden"] = data
-                    if verbose:
+                    with log_details(verbose):
                         print(f"  ✅ add_final_hidden <- output (reverse)")
                 else:
-                    if verbose:
+                    with log_details(verbose):
                         print(f"  ⚠️ 警告：未找到反向参数 'output' (用于 add_final_hidden/reverse)")
 
             # sub_one_minus_update: 复用 reverse 的 update_gate_output
@@ -3008,10 +3057,10 @@ class QuantGRU(nn.Module):
                         internal_ops_rev["sub_one_minus_update"]["output"] = [data]
                     else:
                         internal_ops_rev["sub_one_minus_update"] = data
-                    if verbose:
+                    with log_details(verbose):
                         print(f"  ✅ sub_one_minus_update <- update_gate_output (reverse)")
                 else:
-                    if verbose:
+                    with log_details(verbose):
                         print(f"  ⚠️ 警告：未找到反向参数 'update_gate_output' (用于 sub_one_minus_update/reverse)")
         
         # 删除 tensor_encodings（避免旧版本 load_quantizer_encodings 报错）
@@ -3019,12 +3068,13 @@ class QuantGRU(nn.Module):
         # 旧版本的 load_quantizer_encodings 会遍历顶层键，当遍历到 tensor_encodings 时会报 KeyError
         if "tensor_encodings" in encodings_dict:
             del encodings_dict["tensor_encodings"]
-            if verbose:
+            with log_details(verbose):
                 print(f"\n⚠️  已移除 tensor_encodings（避免与旧版本 load_quantizer_encodings 不兼容）")
                 print(f"   tensor_encodings 主要用于 ONNX 导出，不影响量化器加载")
         
         return encodings_dict
 
+    @logged_operation
     def load_quant_params_from_aimet_format(
         self,
         encodings_dict: dict,
@@ -3083,7 +3133,7 @@ class QuantGRU(nn.Module):
         if module_name is None:
             module_name = self._module_name
             if not module_name:
-                if verbose:
+                with log_details(verbose):
                     print(f"  _module_name 未设置，使用默认名称 'gru'")
                 module_name = "gru"
         
@@ -3092,69 +3142,76 @@ class QuantGRU(nn.Module):
         
         # 检查 encodings_dict 结构
         if "activation_encodings" not in encodings_dict:
-            if verbose:
+            with log_details(verbose):
                 print(f"  ❌ 错误：encodings_dict 中缺少 'activation_encodings'")
             return False
         
         if module_name not in encodings_dict["activation_encodings"]:
-            if verbose:
+            with log_details(verbose):
                 print(f"  ❌ 错误：未找到模块 '{module_name}' 的 activation_encodings")
             return False
         
         gru_encodings = encodings_dict["activation_encodings"][module_name]
+        _validate_encoding_n(gru_encodings)
+        for suffix in ("weight_ih.weight", "weight_hh.weight", "bias"):
+            _validate_encoding_n(encodings_dict.get("param_encodings", {}).get(f"{module_name}.{suffix}"))
         
         # 检查 is_GRU 标记
         if gru_encodings.get("is_GRU") != True:
-            if verbose:
+            with log_details(verbose):
                 print(f"  ⚠️ 警告：模块 '{module_name}' 的 is_GRU 标记不是 True")
         
         # 构建 operators 字典
         operators = {}
         
         # 1. 从 activation_encodings 读取 input 和 output
-        if verbose:
+        with log_details(verbose):
             print(f"\n从 activation_encodings[{module_name}] 读取:")
         
         # input
         if "input" in gru_encodings:
             input_data = gru_encodings["input"]
-            if isinstance(input_data, list) and len(input_data) > 0:
+            if isinstance(input_data, dict) and "0" in input_data:
+                operators["input"] = input_data["0"]
+            elif isinstance(input_data, list) and len(input_data) > 0:
                 operators["input"] = input_data[0]
             elif isinstance(input_data, dict):
                 operators["input"] = input_data
-            if verbose:
+            with log_details(verbose):
                 print(f"  ✅ input <- input")
             # 双向 GRU 的反向分支与正向分支使用同一个输入张量，
             # 若不显式同步，operators_reverse["input"] 会落回默认量化参数。
             if self.bidirectional and operators_reverse is not None:
                 operators_reverse["input"] = copy.deepcopy(operators["input"])
-                if verbose:
+                with log_details(verbose):
                     print(f"  ✅ input <- input (reverse 同步)")
         else:
-            if verbose:
+            with log_details(verbose):
                 print(f"  ❌ 错误：未找到 'input'")
             return False
         
         # output
         if "output" in gru_encodings:
             output_data = gru_encodings["output"]
-            if isinstance(output_data, list) and len(output_data) > 0:
+            if isinstance(output_data, dict) and "0" in output_data:
+                operators["output"] = output_data["0"]
+            elif isinstance(output_data, list) and len(output_data) > 0:
                 operators["output"] = output_data[0]
             elif isinstance(output_data, dict):
                 operators["output"] = output_data
-            if verbose:
+            with log_details(verbose):
                 print(f"  ✅ output <- output")
         else:
-            if verbose:
+            with log_details(verbose):
                 print(f"  ❌ 错误：未找到 'output'")
             return False
         
         # 2. 从 param_encodings 读取权重和偏置
-        if verbose:
+        with log_details(verbose):
             print(f"\n从 param_encodings 读取:")
         
         if "param_encodings" not in encodings_dict:
-            if verbose:
+            with log_details(verbose):
                 print(f"  ⚠️ 警告：encodings_dict 中缺少 'param_encodings'")
         else:
             param_encodings = encodings_dict["param_encodings"]
@@ -3174,10 +3231,10 @@ class QuantGRU(nn.Module):
                         operators_reverse["weight_ih"] = rev
                 else:
                     operators["weight_ih"] = param_encodings[param_key]
-                if verbose:
+                with log_details(verbose):
                     print(f"  ✅ weight_ih <- {param_key}")
             else:
-                if verbose:
+                with log_details(verbose):
                     print(f"  ❌ 错误：未找到 '{param_key}'")
                 return False
             
@@ -3191,10 +3248,10 @@ class QuantGRU(nn.Module):
                         operators_reverse["weight_hh"] = rev
                 else:
                     operators["weight_hh"] = param_encodings[param_key]
-                if verbose:
+                with log_details(verbose):
                     print(f"  ✅ weight_hh <- {param_key}")
             else:
-                if verbose:
+                with log_details(verbose):
                     print(f"  ❌ 错误：未找到 '{param_key}'")
                 return False
             
@@ -3219,7 +3276,7 @@ class QuantGRU(nn.Module):
                     if "scale" in merged_data and isinstance(merged_data["scale"], list):
                         split_length = len(merged_data["scale"]) // 2
                     else:
-                        if verbose:
+                        with log_details(verbose):
                             print(f"  ⚠️ 警告：无法确定 split_length，假设 bias_ih 和 bias_hh 长度相同")
                         split_length = None
                 
@@ -3256,7 +3313,7 @@ class QuantGRU(nn.Module):
                             dir_len = len(merged_data[field]) // 2
                             break
                     if dir_len is None or dir_len % 2 != 0:
-                        if verbose:
+                        with log_details(verbose):
                             print(f"  ❌ 错误：无法从 bias 推断双向拆分长度（dir_len={dir_len}）")
                         return False
                     ih_len = dir_len // 2
@@ -3284,15 +3341,15 @@ class QuantGRU(nn.Module):
 
                     operators_reverse["bias_ih"] = bias_ih_rev
                     operators_reverse["bias_hh"] = bias_hh_rev
-                if verbose:
+                with log_details(verbose):
                     print(f"  ✅ bias_ih, bias_hh <- {param_key} (从合并的 bias 拆分)")
             else:
-                if verbose:
+                with log_details(verbose):
                     print(f"  ❌ 错误：未找到 '{param_key}'")
                 return False
         
         # 3. 从 internal_ops 读取中间算子
-        if verbose:
+        with log_details(verbose):
             print(f"\n从 internal_ops 读取:")
         
         if "internal_ops" in gru_encodings:
@@ -3324,28 +3381,28 @@ class QuantGRU(nn.Module):
                             operators[op_name] = output_data
                     elif isinstance(op_data, dict):
                         operators[op_name] = op_data
-                    if verbose:
+                    with log_details(verbose):
                         print(f"  ✅ {op_name} <- internal_ops[{op_name}]")
                 else:
-                    if verbose:
+                    with log_details(verbose):
                         print(f"  ⚠️ 警告：未找到中间算子 '{op_name}'")
             
             # 特殊处理：add_final_hidden 和 sub_one_minus_update 可以忽略
             # （因为它们分别使用 h 和 update_gate_output 的参数）
             if "add_final_hidden" in internal_ops:
-                if verbose:
+                with log_details(verbose):
                     print(f"  跳过 'add_final_hidden'（使用 h 的参数）")
             if "sub_one_minus_update" in internal_ops:
-                if verbose:
+                with log_details(verbose):
                     print(f"  跳过 'sub_one_minus_update'（使用 update_gate_output 的参数）")
         else:
-            if verbose:
+            with log_details(verbose):
                 print(f"  ⚠️ 警告：未找到 'internal_ops'")
 
         # 双向：从 internal_ops_reverse 读取反向中间算子
         if self.bidirectional and operators_reverse is not None and "internal_ops_reverse" in gru_encodings:
             internal_ops_reverse = gru_encodings["internal_ops_reverse"]
-            if verbose:
+            with log_details(verbose):
                 print(f"\n从 internal_ops_reverse 读取:")
             for op_name in internal_op_names:
                 if op_name in internal_ops_reverse:
@@ -3358,10 +3415,10 @@ class QuantGRU(nn.Module):
                             operators_reverse[op_name] = output_data
                     elif isinstance(op_data, dict):
                         operators_reverse[op_name] = op_data
-                    if verbose:
+                    with log_details(verbose):
                         print(f"  ✅ {op_name} <- internal_ops_reverse[{op_name}]")
                 else:
-                    if verbose:
+                    with log_details(verbose):
                         print(f"  ⚠️ 警告：未找到反向中间算子 '{op_name}'")
             # add_final_hidden 在导出时使用的是 reverse 的 output 参数，加载时需回填 operators_reverse["output"]
             if "add_final_hidden" in internal_ops_reverse:
@@ -3374,10 +3431,11 @@ class QuantGRU(nn.Module):
                         operators_reverse["output"] = output_data
                 elif isinstance(op_data, dict):
                     operators_reverse["output"] = op_data
-                if verbose:
+                with log_details(verbose):
                     print(f"  ✅ output <- internal_ops_reverse[add_final_hidden] (reverse 输出)")
-        elif self.bidirectional and verbose:
-            print(f"  ⚠️ 警告：未找到 'internal_ops_reverse'（反向中间算子将无法加载）")
+        elif self.bidirectional:
+            with log_details(verbose):
+                print(f"  ⚠️ 警告：未找到 'internal_ops_reverse'（反向中间算子将无法加载）")
         
         # 4. 转换格式（从 AIMET 格式转换为 QuantGRU 格式）
         # 将 is_symmetric 字符串转换回 symmetric 布尔值
@@ -3396,7 +3454,21 @@ class QuantGRU(nn.Module):
         try:
             # 初始化 bitwidth_config 和 quant_params
             # gru_ops 已在模块顶部导入
+            # Compiler encodings carry standard scales, not execution metadata.
+            # As with QuantLSTM, all-Po2 grids select the shift execution mode.
+            scales = []
+            for direction in (operators, operators_reverse):
+                if direction:
+                    for record in direction.values():
+                        scale = record.get("scale", [])
+                        scales.extend(scale if isinstance(scale, list) else [scale])
+            use_pot2 = bool(scales) and all(
+                isinstance(scale, (int, float)) and scale > 0 and math.isfinite(scale)
+                and math.frexp(scale)[0] == 0.5 for scale in scales
+            )
             self._bitwidth_config = gru_ops.OperatorQuantConfig()
+            self._bitwidth_config.usePOT2_ = use_pot2
+            self._use_pot2_scale = use_pot2
             self.quant_params = gru_ops.GRUQuantParams()
             self.quant_params.hidden_ = self.hidden_size
             
@@ -3414,22 +3486,23 @@ class QuantGRU(nn.Module):
                     self.quant_params_reverse.bitwidth_config_ = self._bitwidth_config
                 else:
                     self.quant_params_reverse = None
-                    if verbose:
+                    with log_details(verbose):
                         print("  ⚠️ 警告：双向模型未找到反向 operators，quant_params_reverse 将保持为空")
             
             # 清除脏标志
             self._quant_params_dirty = False
             
-            if verbose:
+            with log_details(verbose):
                 module_name_str = f" [{self._module_name}]" if self._module_name else ""
                 print(f"  ✅ 成功加载量化参数{module_name_str}")
             return True
         except Exception as e:
-            if verbose:
+            with log_details(verbose):
                 module_name_str = f" [{self._module_name}]" if self._module_name else ""
                 print(f"  ❌ 错误：加载量化参数失败{module_name_str}: {e}")
             return False
 
+    @logged_operation
     def adjust_quant_config(
         self,
         operator: str,
@@ -3486,6 +3559,7 @@ class QuantGRU(nn.Module):
 #   >>> print_quant_config(gru)   # 打印量化配置详情
 #   >>> print_bitwidth_config(gru._bitwidth_config)  # 打印位宽配置
 
+@logged_operation
 def print_quant_params(gru: 'QuantGRU'):
     """
     打印 QuantGRU 的量化参数和配置（合并版本）
@@ -3740,6 +3814,7 @@ def print_quant_params(gru: 'QuantGRU'):
     print("=" * 60)
 
 
+@logged_operation
 def print_quant_ranges(gru: 'QuantGRU'):
     """
     打印 QuantGRU 的量化范围
@@ -3841,7 +3916,7 @@ def _extract_weight_scale_for_export(bitwidth_config, quant_params, op_name: str
     elif granularity == 2:
         enc_type = "PER_CHANNEL"
     else:
-        if verbose:
+        with log_details(verbose):
             print(f"  算子 '{op_name}' 未配置 quantization_granularity，按默认 PER_CHANNEL 导出")
         enc_type = "PER_CHANNEL"
 
@@ -3872,6 +3947,35 @@ def _scalar_or_list(values: list):
     if len(values) == 1:
         return values[0]
     return values
+
+
+def _encoding_n(scale):
+    if isinstance(scale, list):
+        if not scale:
+            raise ValueError("Encoding scale cannot be empty")
+        return [_encoding_n(value) for value in scale]
+    if isinstance(scale, bool) or not isinstance(scale, (int, float)) or not math.isfinite(scale) or scale <= 0:
+        raise ValueError("Encoding scale must be positive and finite")
+    return int(round(-math.log2(scale)))
+
+
+def _validate_encoding_n(value):
+    def matches(actual, expected):
+        if isinstance(expected, list):
+            return (isinstance(actual, list) and len(actual) == len(expected)
+                    and all(matches(a, b) for a, b in zip(actual, expected)))
+        return isinstance(actual, int) and not isinstance(actual, bool) and actual == expected
+
+    if isinstance(value, dict):
+        if "scale" in value:
+            if "n" in value and not matches(value["n"], _encoding_n(value["scale"])):
+                raise ValueError("Encoding n does not match scale")
+        else:
+            for child in value.values():
+                _validate_encoding_n(child)
+    elif isinstance(value, list):
+        for child in value:
+            _validate_encoding_n(child)
 
 
 def _encode_mshift_py(scale: float) -> tuple:
@@ -4098,7 +4202,7 @@ def _parse_weight_operator(bitwidth_config, quant_params, op_name: str, op_data:
     scale_attr = op_info["scale_attr"]
     enc_type = op_data.get("enc_type")
     if enc_type is None:
-        if verbose:
+        with log_details(verbose):
             print(f"  算子 '{op_name}' 在 JSON 中缺少 'enc_type' 字段，按默认 PER_CHANNEL 解析")
         enc_type = "PER_CHANNEL"
     scale_list, _ = _parse_runtime_scale_lists(op_name, op_data)
@@ -4275,7 +4379,7 @@ def _ensure_quant_params_fresh_for_export(gru: 'QuantGRU', verbose: bool = False
             "提示：pickle/deepcopy 后校准数据会丢失，需要重新校准。"
         )
 
-    if verbose:
+    with log_details(verbose):
         print("[QuantGRU] 导出前检测到 _quant_params_dirty=True，"
               "自动重新 finalize_calibration() 以保证导出与当前配置一致 ...")
     gru.finalize_calibration(verbose=verbose)
@@ -4327,7 +4431,7 @@ def _export_quant_params_impl(
     with open(export_path, 'w', encoding='utf-8') as f:
         json.dump(export_data, f, indent=2, ensure_ascii=False)
     
-    if verbose:
+    with log_details(verbose):
         print(f"\n[QuantGRU] 量化参数已导出到: {export_path}")
         print(f"  - 模型配置: input_size={gru.input_size}, hidden_size={gru.hidden_size}")
         print(f"  - 双向: {gru.bidirectional}")
@@ -4415,7 +4519,7 @@ def _load_quant_params_impl(
         )
     # batch_first 不影响量化参数，但不一致可能导致用户困惑，给出警告
     if model_info.get("batch_first", False) != gru.batch_first:
-        if verbose:
+        with log_details(verbose):
             print(f"  ⚠️ 警告：batch_first 不匹配: 文件中为 {model_info.get('batch_first')}, "
                   f"模型为 {gru.batch_first}。这不影响量化参数，但请确保输入数据格式正确。")
     
@@ -4467,7 +4571,7 @@ def _load_quant_params_impl(
     # 清除脏标志
     gru._quant_params_dirty = False
     
-    if verbose:
+    with log_details(verbose):
         print(f"\n[QuantGRU] 量化参数已从 {import_path} 加载")
         print(f"  - 模型配置: input_size={gru.input_size}, hidden_size={gru.hidden_size}")
         print(f"  - 双向: {gru.bidirectional}")
@@ -4553,7 +4657,7 @@ def _adjust_quant_config_impl(
     if gru.quant_params is not None:
         gru.quant_params.bitwidth_config_ = gru._bitwidth_config
     
-    if verbose:
+    with log_details(verbose):
         print(f"\n[QuantGRU] 调整算子 '{operator}' 配置:")
         print(f"  修改前: {old_values}")
         print(f"  修改后: {new_values if new_values else '(无修改)'}")
@@ -4602,6 +4706,7 @@ def _get_quant_config_impl(gru: 'QuantGRU', operator: str = None) -> dict:
 #
 # 以下函数依赖 _get_quant_config_impl，故放在其后。
 
+@logged_operation
 def print_quant_config(gru: 'QuantGRU', operators: list = None):
     """
     打印量化配置（已合并到 print_quant_params）
@@ -4638,6 +4743,7 @@ def _format_symmetric(is_symmetric: bool) -> str:
     return "对称" if is_symmetric else "非对称"
 
 
+@logged_operation
 def print_bitwidth_config(config: gru_ops.OperatorQuantConfig,
                           config_file: str = None,
                           verbose: bool = True) -> None:
@@ -4649,35 +4755,34 @@ def print_bitwidth_config(config: gru_ops.OperatorQuantConfig,
         config_file: 配置文件路径(可选，仅用于显示来源)
         verbose: 是否打印详情(默认 True)
     """
-    if not verbose:
-        return
+    with log_details(verbose):
 
-    print("\n" + "=" * 70)
-    print("🔧 GRU 量化配置(位宽 + 对称量化)")
-    print("=" * 70)
-    if config_file:
-        print(f"📄 配置来源: {config_file}")
-    print("-" * 70)
-    print(f"  [输入]  input: {_format_bitwidth(config.x_):6s} ({_format_symmetric(config.x_symmetric_)})")
-    print(f"  [输出]  output: {_format_bitwidth(config.h_):6s} ({_format_symmetric(config.h_symmetric_)})")
-    print(f"  [权重]  weight_ih: {_format_bitwidth(config.W_):6s} ({_format_symmetric(config.W_symmetric_)})")
-    print(f"          weight_hh: {_format_bitwidth(config.R_):6s} ({_format_symmetric(config.R_symmetric_)})")
-    print(f"          bias_ih: {_format_bitwidth(config.bw_):6s} ({_format_symmetric(config.bw_symmetric_)})")
-    print(f"          bias_hh: {_format_bitwidth(config.br_):6s} ({_format_symmetric(config.br_symmetric_)})")
-    print(f"  [矩阵]  weight_ih_linear: {_format_bitwidth(config.weight_ih_linear_):6s} ({_format_symmetric(config.weight_ih_linear_symmetric_)})")
-    print(f"          weight_hh_linear: {_format_bitwidth(config.weight_hh_linear_):6s} ({_format_symmetric(config.weight_hh_linear_symmetric_)})")
-    print(f"  [门控]  update_gate_input: {_format_bitwidth(config.update_gate_input_):6s} ({_format_symmetric(config.update_gate_input_symmetric_)})")
-    print(f"          update_gate_output: {_format_bitwidth(config.update_gate_output_):6s} ({_format_symmetric(config.update_gate_output_symmetric_)})")
-    print(f"          reset_gate_input: {_format_bitwidth(config.reset_gate_input_):6s} ({_format_symmetric(config.reset_gate_input_symmetric_)})")
-    print(f"          reset_gate_output: {_format_bitwidth(config.reset_gate_output_):6s} ({_format_symmetric(config.reset_gate_output_symmetric_)})")
-    print(f"          new_gate_input: {_format_bitwidth(config.new_gate_input_):6s} ({_format_symmetric(config.new_gate_input_symmetric_)})")
-    print(f"          new_gate_output: {_format_bitwidth(config.new_gate_output_):6s} ({_format_symmetric(config.new_gate_output_symmetric_)})")
-    print(f"  [运算]  mul_reset_hidden: {_format_bitwidth(config.mul_reset_hidden_):6s} ({_format_symmetric(config.mul_reset_hidden_symmetric_)})")
-    print(
-        f"  [输出]  mul_old_contribution: {_format_bitwidth(config.mul_old_contribution_):6s} ({_format_symmetric(config.mul_old_contribution_symmetric_)})")
-    print(
-        f"          mul_new_contribution: {_format_bitwidth(config.mul_new_contribution_):6s} ({_format_symmetric(config.mul_new_contribution_symmetric_)})")
-    print("=" * 70 + "\n")
+        print("\n" + "=" * 70)
+        print("🔧 GRU 量化配置(位宽 + 对称量化)")
+        print("=" * 70)
+        if config_file:
+            print(f"📄 配置来源: {config_file}")
+        print("-" * 70)
+        print(f"  [输入]  input: {_format_bitwidth(config.x_):6s} ({_format_symmetric(config.x_symmetric_)})")
+        print(f"  [输出]  output: {_format_bitwidth(config.h_):6s} ({_format_symmetric(config.h_symmetric_)})")
+        print(f"  [权重]  weight_ih: {_format_bitwidth(config.W_):6s} ({_format_symmetric(config.W_symmetric_)})")
+        print(f"          weight_hh: {_format_bitwidth(config.R_):6s} ({_format_symmetric(config.R_symmetric_)})")
+        print(f"          bias_ih: {_format_bitwidth(config.bw_):6s} ({_format_symmetric(config.bw_symmetric_)})")
+        print(f"          bias_hh: {_format_bitwidth(config.br_):6s} ({_format_symmetric(config.br_symmetric_)})")
+        print(f"  [矩阵]  weight_ih_linear: {_format_bitwidth(config.weight_ih_linear_):6s} ({_format_symmetric(config.weight_ih_linear_symmetric_)})")
+        print(f"          weight_hh_linear: {_format_bitwidth(config.weight_hh_linear_):6s} ({_format_symmetric(config.weight_hh_linear_symmetric_)})")
+        print(f"  [门控]  update_gate_input: {_format_bitwidth(config.update_gate_input_):6s} ({_format_symmetric(config.update_gate_input_symmetric_)})")
+        print(f"          update_gate_output: {_format_bitwidth(config.update_gate_output_):6s} ({_format_symmetric(config.update_gate_output_symmetric_)})")
+        print(f"          reset_gate_input: {_format_bitwidth(config.reset_gate_input_):6s} ({_format_symmetric(config.reset_gate_input_symmetric_)})")
+        print(f"          reset_gate_output: {_format_bitwidth(config.reset_gate_output_):6s} ({_format_symmetric(config.reset_gate_output_symmetric_)})")
+        print(f"          new_gate_input: {_format_bitwidth(config.new_gate_input_):6s} ({_format_symmetric(config.new_gate_input_symmetric_)})")
+        print(f"          new_gate_output: {_format_bitwidth(config.new_gate_output_):6s} ({_format_symmetric(config.new_gate_output_symmetric_)})")
+        print(f"  [运算]  mul_reset_hidden: {_format_bitwidth(config.mul_reset_hidden_):6s} ({_format_symmetric(config.mul_reset_hidden_symmetric_)})")
+        print(
+            f"  [输出]  mul_old_contribution: {_format_bitwidth(config.mul_old_contribution_):6s} ({_format_symmetric(config.mul_old_contribution_symmetric_)})")
+        print(
+            f"          mul_new_contribution: {_format_bitwidth(config.mul_new_contribution_):6s} ({_format_symmetric(config.mul_new_contribution_symmetric_)})")
+        print("=" * 70 + "\n")
 
 
 def set_quant_gru_module_names(model: torch.nn.Module, prefix: str = "") -> None:

@@ -3,6 +3,8 @@
 """
 import torch
 
+from aimet_common.run_context import log_print as print
+
 def collect_quantizer_info(model):
     """
     收集模型中所有量化器的信息

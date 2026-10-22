@@ -1,3 +1,5 @@
+// Non-target real-activation reference. Public quantGRUForwardFP uses the
+// shared integer/LUT core; this implementation is retained for low-level studies.
 // ============================================================================
 // gru_forward_gpu_quant_fp.cu - 浮点存储版量化 GRU 前向传播 CUDA 实现
 // ============================================================================
@@ -331,16 +333,15 @@ __device__ __forceinline__ float computeHiddenStateFP(float update_gate, float n
     // quant_one = 2^shift + zp，是常数 1 在 update_gate_output 量化空间的完整表示
     // one_minus_u = quant_one - update_gate = (2^shift + zp) - update_gate
     const float one_minus_u = p.quant_one_in_update_gate_scale_ - update_gate;
-    float one_minus_u_diff = one_minus_u;  // 在 update_gate_output scale
+    // quant_one and update_gate share a zero point, so one_minus_u is already centered.
     float n_diff_aligned = new_gate_aligned_to_h;  // 在 h scale
 #ifndef USE_SYMMETRIC_QUANTIZATION
-    one_minus_u_diff -= p.zp_update_gate_output_;
     n_diff_aligned -= p.zp_h_;
 #endif
-    // one_minus_u_diff 在 update_gate_output scale，n_diff_aligned 在 h scale
+    // one_minus_u 在 update_gate_output scale，n_diff_aligned 在 h scale
     // 乘积 scale = scale_update_gate_output * scale_h
     const float new_contribution_mul =
-        one_minus_u_diff * n_diff_aligned;  // scale = scale_u * scale_h
+        one_minus_u * n_diff_aligned;  // scale = scale_u * scale_h
 
     // ========== 步骤4: 合并两个贡献并 rescale 到 h scale ==========
     // old_contribution_mul 和 new_contribution_mul 都在 scale_update_gate_output * scale_h

@@ -38,7 +38,7 @@ def export_runtime(variant, directory):
     common.write_json(manifest_path, document)
     (directory / 'README.md').write_text(
         '# rx-quant 公共 runtime\n\n'
-        '将对应镜像归档及可选的 .sha256 文件放入应用包同级的 images/，运行应用包 install.sh。\n'
+        '将归档目录按环境名和版本命名，与产品目录平级放置；在产品目录内解压应用包并运行 install.sh。\n'
         '应用包固定镜像 ID；同一镜像重新导出的归档可以复用，文件校验值单独记录。\n')
     files = sorted(p for p in directory.iterdir() if p.is_file() and not p.name.startswith('.') and p.name != 'SHA256SUMS')
     (directory / 'SHA256SUMS').write_text(''.join(f'{common.sha256(p)}  {p.name}\n' for p in files))

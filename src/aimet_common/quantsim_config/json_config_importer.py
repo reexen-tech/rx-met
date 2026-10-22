@@ -102,6 +102,8 @@ class JsonConfigImporter:
 
         _validate_syntax(quantsim_configs)
         convert_configs_values_to_bool(quantsim_configs)
+        for section in (ConfigDictKeys.OPS, ConfigDictKeys.PARAMS):
+            quantsim_configs[ConfigDictKeys.DEFAULTS][section].setdefault(ConfigDictKeys.IS_SYMMETRIC, True)
         _convert_dtype_to_quantization_data_type(quantsim_configs)
         _validate_semantics(quantsim_configs)
         return quantsim_configs

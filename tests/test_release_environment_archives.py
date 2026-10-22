@@ -299,7 +299,7 @@ class EnvironmentArchiveTest(unittest.TestCase):
             ('runtime', 'cu126', self.published, self.directory),
             ('build', 'cu126', self.published, self.directory)])
 
-    def test_cli_with_images_exports_to_missing_directory_and_passes_actual_record_to_bundle(self):
+    def test_cli_with_env_exports_to_missing_directory_and_passes_actual_record_to_bundle(self):
         _, _, original = self.archive('runtime')
         (self.directory / 'VERSION').write_text('1.0.0\n')
         runtime_dir = self.directory / 'new-runtime-cache'
@@ -322,18 +322,29 @@ class EnvironmentArchiveTest(unittest.TestCase):
             output = next(value.split('dest=', 1)[1] for value in command if isinstance(value, str) and '.output=type=local,dest=' in value)
             Path(output).mkdir(parents=True)
         self.install_patch(artifacts, 'run', side_effect=compile_artifacts)
-        assemble = self.install_patch(artifacts, 'assemble')
-        argv = ['artifacts.py', 'build', 'cu126', '--with-images', '--runtime-env-dir', str(runtime_dir),
+        def assemble_bundle(args, matrix, variant, runtime, build, record, archive, *rest, **kwargs):
+            manifest = {'bundle_name': 'rx-met-v1.0.0-' + variant + '-linux-amd64',
+                        'variant': variant, 'runtime': artifacts.runtime_requirement(record)}
+            (args.output_dir / (manifest['bundle_name'] + '.tar.gz')).write_bytes(b'application fixture')
+            return manifest
+        assemble = self.install_patch(artifacts, 'assemble', side_effect=assemble_bundle)
+        argv = ['artifacts.py', 'build', 'cu126', '--with-env', '--runtime-env-dir', str(runtime_dir),
                 '--output-dir', str(output_dir)]
         with patch('sys.argv', argv):
             artifacts.main()
-        archive = output_dir / 'images' / original['filename']
+        environment = output_dir.parent / 'rx-quant-env-v1'
+        archive = environment / original['filename']
         actual = json.loads(archive.with_name(archive.name + '.json').read_text())
         self.assertEqual(actual['sha256'], archives.common.sha256(archive))
         self.assertNotEqual(actual['sha256'], original['sha256'])
         self.assertEqual(assemble.call_args.args[5], actual)
         self.assertEqual(self.published['runtime'], original)
-        self.assertIn(actual['sha256'], (output_dir / 'SHA256SUMS').read_text())
+        self.assertIn(actual['sha256'], (environment / 'SHA256SUMS').read_text())
+        self.assertNotIn(actual['sha256'], (output_dir / 'SHA256SUMS').read_text())
+        self.assertFalse((output_dir / 'images').exists())
+        release = json.loads((output_dir / 'release.json').read_text())
+        self.assertTrue(release['bundles'][0]['environment_included'])
+        self.assertEqual(release['bundles'][0]['environment_directory'], '../rx-quant-env-v1')
 
     def test_application_requirement_is_independent_of_archive_bytes(self):
         _, _, original = self.archive('runtime')

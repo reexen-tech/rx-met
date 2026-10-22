@@ -70,6 +70,7 @@ class _V2LazyQuantizer(LazyQuantizer):
                 self.bitwidth,
                 self.use_symmetric_encodings,
                 encoding_analyzer,
+                signed=not self.use_unsigned_symmetric,
             )
         else:
             if self.bitwidth == 16:
@@ -95,12 +96,6 @@ class _V2LazyQuantizer(LazyQuantizer):
         if self.use_symmetric_encodings:
             assert not self.use_strict_symmetric, (
                 "Strict symmetric is not supported in quantsim v2"
-            )
-            assert not self.use_unsigned_symmetric, (
-                "Unsigned symmetric is not supported in quantsim v2"
-            )
-            assert not self.is_unsigned_symmetric, (
-                "Unsigned symmetric is not supported in quantsim v2"
             )
 
         if self.channel_axis:

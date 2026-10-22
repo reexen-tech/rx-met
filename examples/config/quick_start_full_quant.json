@@ -187,7 +187,82 @@
   },
 
   "layer_name_config": {
-    "_comment": "默认空。需要为模型中的 EPS 加法 / 标量 size 乘法做精细 disable 时，可在此追加 wildcard，比如：'*.cln.module_add_*': {disable_quantization: true}, 'module_floordiv*': {disable_quantization: true} 等"
+    "speech_features.windowing.module_mul": {
+      "input_bitwidth": 16,
+      "output_bitwidth": 16,
+      "input_symmetric": true,
+      "output_symmetric": true
+    },
+    "speech_features.mag_rdft_mel.module_matmul": {
+      "input_bitwidth": 16,
+      "output_bitwidth": 16,
+      "input_symmetric": true,
+      "output_symmetric": true
+    },
+    "speech_features.mag_rdft_mel.module_matmul_1": {
+      "input_bitwidth": 16,
+      "output_bitwidth": 16,
+      "input_symmetric": true,
+      "output_symmetric": true
+    },
+    "speech_features.mag_rdft_mel.module_mul_1": {
+      "input_bitwidth": 16,
+      "output_bitwidth": 32,
+      "input_symmetric": true,
+      "output_symmetric": true
+    },
+    "speech_features.mag_rdft_mel.module_mul_2": {
+      "input_bitwidth": 16,
+      "output_bitwidth": 32,
+      "input_symmetric": true,
+      "output_symmetric": true
+    },
+    "speech_features.mag_rdft_mel.module_add": {
+      "input_bitwidth": 32,
+      "output_bitwidth": 32,
+      "input_symmetric": true,
+      "output_symmetric": true
+    },
+    "speech_features.mag_rdft_mel.module_sqrt": {
+      "input_bitwidth": 32,
+      "output_bitwidth": 16,
+      "input_symmetric": true,
+      "output_symmetric": true
+    },
+    "speech_features.mag_rdft_mel.module_matmul_2": {
+      "input_bitwidth": 16,
+      "output_bitwidth": 16,
+      "input_symmetric": true,
+      "output_symmetric": true
+    },
+    "module_clamp": {
+      "input_bitwidth": 16,
+      "output_bitwidth": 16,
+      "input_symmetric": true,
+      "output_symmetric": true
+    },
+    "convs.0.conv": {
+      "weight_bitwidth": 8,
+      "bias_bitwidth": 16,
+      "input_bitwidth": 8,
+      "output_bitwidth": 16,
+      "input_symmetric": true,
+      "output_symmetric": true,
+      "comment": "Conv/ReLU 中间保留 INT16，避免较粗的 INT8 Po2 网格在 ReLU 前丢失小正值。按层名覆盖时需显式保留权重 INT8、bias INT16。"
+    },
+    "convs.0.act": {
+      "input_bitwidth": 16,
+      "output_bitwidth": 8,
+      "input_symmetric": true,
+      "output_symmetric": true,
+      "comment": "输入与前一个 Conv 的 INT16 输出匹配；若此处仍用 INT8 输入 QDQ，会再次丢失保留的精度。ReLU 输出仍为 INT8。"
+    },
+    "module_log": {
+      "input_bitwidth": 16,
+      "output_bitwidth": 8,
+      "input_symmetric": true,
+      "output_symmetric": true
+    }
   },
 
   "GRU_config": {

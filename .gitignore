@@ -28,7 +28,7 @@ dist/
 *.egg
 .eggs/
 pip-wheel-metadata/
-*/tmp/
+tmp/
 
 # ===== 测试 / Lint =====
 .pytest_cache/
@@ -56,6 +56,7 @@ native/**/build*/
 # ===== 日志 / 示例输出 =====
 *.log
 logs/
+/output/
 examples/output/
 examples/**/output/
 src/aimet_torch/rx_export/**/output/

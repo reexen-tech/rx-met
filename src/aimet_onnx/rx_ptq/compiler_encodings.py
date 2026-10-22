@@ -3,79 +3,23 @@
 from __future__ import annotations
 
 import copy
-import math
 from collections import defaultdict
 from dataclasses import dataclass
-from typing import Any, Dict, Iterable, List, Tuple
+from typing import Any, Dict, List, Tuple
 
 import onnx
 
+from aimet_common.compiler_encodings import (
+    COMPILER_SCHEMA_VERSION, compact_encoding_records, normalize_compiler_encodings,
+)
+from aimet_common.quantization_grid import IntegerGrid, integer_bounds
 from aimet_common.quantsim_config.compute_ops import is_grid_preserving_op
+from .validation import validate_quantizer_state
 
-
-_VECTOR_FIELDS = {"scale", "n", "zero_point", "real_min", "real_max"}
-
-
-def _po2_exponent(scale: float) -> int:
-    if not math.isfinite(scale) or scale <= 0:
-        raise ValueError(f"scale 必须为正数且有限: {scale}")
-    exponent = int(round(-math.log2(scale)))
-    expected = 2.0 ** (-exponent)
-    if not math.isclose(scale, expected, rel_tol=1e-5, abs_tol=1e-12):
-        raise ValueError(f"scale 不是 Po2: {scale}")
-    return exponent
-
-
-def _map_recursive(value: Any, fn) -> Any:
-    if isinstance(value, list):
-        return [_map_recursive(item, fn) for item in value]
-    return fn(value)
-
-
-def _normalize_encoding(entry: Dict[str, Any]) -> Dict[str, Any]:
-    bitwidth = int(entry["bitwidth"])
-    dtype = str(entry.get("dtype", "int")).upper()
-    if dtype == "INT":
-        dtype = f"INT{bitwidth}"
-    elif dtype == "FLOAT":
-        dtype = f"FLOAT{bitwidth}"
-
-    scale = entry.get("scale")
-    if scale is None:
-        raise KeyError(f"encoding 缺少 scale: {entry}")
-    result: Dict[str, Any] = {
-        "bitwidth": bitwidth,
-        "dtype": dtype,
-        "is_symmetric": str(entry.get("is_symmetric", "False")),
-        "scale": scale,
-        "n": _map_recursive(scale, lambda item: _po2_exponent(float(item))),
-    }
-
-    zero_point = entry.get("zero_point", entry.get("offset", 0))
-    result["zero_point"] = zero_point
-    result["real_min"] = entry.get("real_min", entry.get("min"))
-    result["real_max"] = entry.get("real_max", entry.get("max"))
-    if result["real_min"] is None or result["real_max"] is None:
-        raise KeyError(f"encoding 缺少 real_min/real_max: {entry}")
-    return result
-
-
-def _compact_encodings(entries: Iterable[Dict[str, Any]]) -> Dict[str, Any]:
-    normalized = [_normalize_encoding(entry) for entry in entries]
-    if not normalized:
-        raise ValueError("不能压缩空 encoding 列表")
-    if len(normalized) == 1:
-        return normalized[0]
-
-    keys = set().union(*(entry.keys() for entry in normalized))
-    result: Dict[str, Any] = {}
-    for key in sorted(keys):
-        values = [entry.get(key) for entry in normalized]
-        if key in _VECTOR_FIELDS or any(value != values[0] for value in values[1:]):
-            result[key] = values
-        else:
-            result[key] = values[0]
-    return result
+_FLOAT_TENSOR_TYPES = frozenset({
+    onnx.TensorProto.FLOAT, onnx.TensorProto.FLOAT16,
+    onnx.TensorProto.DOUBLE, onnx.TensorProto.BFLOAT16,
+})
 
 
 @dataclass(frozen=True)
@@ -84,12 +28,19 @@ class _GraphIndex:
     consumers: Dict[str, List[Tuple[int, int]]]
     initializers: set[str]
     node_names: Dict[int, str]
+    tensor_types: Dict[str, int]
 
     @classmethod
-    def build(cls, model: onnx.ModelProto) -> "_GraphIndex":
+    def build(cls, model: onnx.ModelProto, activation_dtypes=None) -> "_GraphIndex":
         producers: Dict[str, List[Tuple[int, int]]] = defaultdict(list)
         consumers: Dict[str, List[Tuple[int, int]]] = defaultdict(list)
         node_names: Dict[int, str] = {}
+        tensor_types = {name: onnx.helper.np_dtype_to_tensor_dtype(dtype)
+                        for name, dtype in (activation_dtypes or {}).items()}
+        for value in (*model.graph.input, *model.graph.output, *model.graph.value_info):
+            if value.type.HasField("tensor_type") and value.type.tensor_type.elem_type:
+                tensor_types[value.name] = value.type.tensor_type.elem_type
+        tensor_types.update({value.name: value.data_type for value in model.graph.initializer})
         for index, node in enumerate(model.graph.node):
             node_names[index] = node.name or f"{node.op_type}_{index}"
             for output_index, tensor in enumerate(node.output):
@@ -103,14 +54,29 @@ class _GraphIndex:
             consumers=dict(consumers),
             initializers={item.name for item in model.graph.initializer},
             node_names=node_names,
+            tensor_types=tensor_types,
         )
 
     def data_inputs(self, node: onnx.NodeProto) -> List[str]:
+        # Grid-preserving ops carry values on port 0. Other inputs are indices,
+        # shapes, masks, ROI coordinates, or padding controls, even if floating.
         return [
             tensor
-            for tensor in node.input
-            if tensor and tensor not in self.initializers
+            for tensor in node.input[:1]
+            if tensor not in self.initializers and self.is_floating(tensor)
         ]
+
+    def data_outputs(self, node: onnx.NodeProto) -> List[str]:
+        return [tensor for tensor in node.output if self.is_floating(tensor)]
+
+    def is_floating(self, tensor: str) -> bool:
+        return self.tensor_types.get(tensor) in _FLOAT_TENSOR_TYPES
+
+    def validate_encoding_type(self, tensor: str) -> None:
+        dtype = self.tensor_types.get(tensor)
+        if dtype is not None and dtype not in _FLOAT_TENSOR_TYPES:
+            raise ValueError(f"Quantization encoding on non-floating ONNX tensor: {tensor} "
+                             f"({onnx.TensorProto.DataType.Name(dtype)})")
 
 
 class CompilerEncodingConverter:
@@ -118,7 +84,7 @@ class CompilerEncodingConverter:
 
     def __init__(self, sim: Any, original_model: onnx.ModelProto):
         self.sim = sim
-        self.graph = _GraphIndex.build(original_model)
+        self.graph = _GraphIndex.build(original_model, getattr(sim, "activation_dtypes", {}))
         self.original_model = original_model
         self.activation: Dict[str, Dict[str, Dict[str, Any]]] = {}
         self.params: Dict[str, Dict[str, Any]] = {}
@@ -130,6 +96,11 @@ class CompilerEncodingConverter:
         self, node_index: int, io_name: str, io_index: int, encoding: Dict[str, Any]
     ) -> None:
         node_name = self.graph.node_names[node_index]
+        if node_name in getattr(self.sim, "_rx_native_grus", {}):
+            return  # The native operator supplies its complete port/internal schema.
+        node = self.original_model.graph.node[node_index]
+        tensor = node.input[io_index] if io_name == "input" else node.output[io_index]
+        self.graph.validate_encoding_type(tensor)
         node_entry = self.activation.setdefault(node_name, {})
         io_entry = node_entry.setdefault(io_name, {})
         key = str(io_index)
@@ -142,7 +113,10 @@ class CompilerEncodingConverter:
     def _map_activation(self, tensor_name: str, encoding: Dict[str, Any]) -> bool:
         mapped = False
         for node_index, input_index in self.graph.consumers.get(tensor_name, []):
-            self._add_activation(node_index, "input", input_index, encoding)
+            port = (self.graph.node_names[node_index], input_index)
+            alias = getattr(self.sim, "_rx_input_quantizers", {}).get(port)
+            if alias is None or not self.sim.qc_quantize_op_dict[alias].enabled:
+                self._add_activation(node_index, "input", input_index, encoding)
             mapped = True
         for node_index, output_index in self.graph.producers.get(tensor_name, []):
             self._add_activation(node_index, "output", output_index, encoding)
@@ -153,15 +127,39 @@ class CompilerEncodingConverter:
         raw = quantizer.export_encodings("0.6.1")
         if raw is None:
             raise RuntimeError(f"enabled quantizer 没有 encoding: {name}")
-        return _compact_encodings(raw)
+        symmetric = bool(getattr(quantizer, "use_symmetric_encodings", False))
+        signed = getattr(quantizer, 'signed', True)
+        strict = bool(getattr(quantizer, "use_strict_symmetric", False))
+        enc_type = quantizer._encoding_type().name
+        entries = []
+        for entry in raw:
+            entry = dict(entry)
+            entry["enc_type"] = enc_type
+            if str(entry.get("dtype", "")).lower() == "int":
+                bits = int(entry["bitwidth"])
+                qmin, qmax = integer_bounds(bits, signed, strict=strict and symmetric)
+                # TfEncoding uses an unsigned index grid. Convert its additive
+                # offset to a subtractive zero point in the compiler's code domain.
+                offset = entry.pop("offset")
+                if offset != int(offset):
+                    raise ValueError(f"{name}: TfEncoding offset must be an integer")
+                grid = IntegerGrid.from_offset(entry['scale'], offset, bits, signed,
+                    index_domain=True, qmin=qmin, qmax=qmax)
+                entry["zero_point"] = grid.zero_point
+                entry["dtype"] = grid.dtype
+                entry.pop('signed', None)
+                if (qmin, qmax) != integer_bounds(bits, signed):
+                    entry['qmin'], entry['qmax'] = qmin, qmax
+            entries.append(entry)
+        return compact_encoding_records(entries, force_list=name in self.graph.initializers)
 
     def _propagate_grid_preserving(
         self, tensor_encodings: Dict[str, Dict[str, Any]]
     ) -> None:
         """Copy encodings through reshape/maxpool/pad so compute I/O is complete.
 
-        Simulation still uses one quantizer per tensor. This only fills compiler
-        sidecar slots for grid-preserving edges that AIMET left disabled.
+        Only floating data ports participate; index, shape, mask, and other
+        control ports retain their ONNX types. Live quantizers are unchanged.
         """
         changed = True
         while changed:
@@ -170,7 +168,7 @@ class CompilerEncodingConverter:
                 if not is_grid_preserving_op(node.op_type):
                     continue
                 data_inputs = self.graph.data_inputs(node)
-                data_outputs = [tensor for tensor in node.output if tensor]
+                data_outputs = self.graph.data_outputs(node)
                 if not data_inputs or not data_outputs:
                     continue
                 source = next(
@@ -200,12 +198,21 @@ class CompilerEncodingConverter:
                     changed = True
 
     def convert(self) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+        validate_quantizer_state(self.sim)
         tensor_encodings: Dict[str, Dict[str, Any]] = {}
+        port_encodings: Dict[str, Dict[str, Any]] = {}
+        ports = getattr(self.sim, "_rx_input_quantizers", {})
+        port_names = set(ports.values())
         enabled_activations: List[str] = []
         for name, quantizer in self.sim.qc_quantize_op_dict.items():
             if not quantizer.enabled:
                 continue
+            self.graph.validate_encoding_type(name)
             encoding = self._encoding_from_quantizer(name, quantizer)
+            if name in port_names:
+                port_encodings[name] = encoding
+                self.mapped.add(name)
+                continue
             if name in self.graph.initializers:
                 self.params[name] = encoding
                 self.mapped.add(name)
@@ -214,6 +221,14 @@ class CompilerEncodingConverter:
             enabled_activations.append(name)
             self.mapped.add(name)
 
+        from .recurrent import export_native_encodings, native_grus
+        native_payload = export_native_encodings(self.sim)
+        for name, adapter in native_grus(self.sim).items():
+            native_activation = native_payload["activation_encodings"].get(name)
+            if native_activation is not None:
+                for output in adapter.outputs:
+                    if output:
+                        tensor_encodings.setdefault(output, native_activation["output"]["0"])
         self._propagate_grid_preserving(tensor_encodings)
 
         for name, encoding in tensor_encodings.items():
@@ -222,6 +237,11 @@ class CompilerEncodingConverter:
             if name in enabled_activations:
                 self.unmapped.append(name)
 
+        node_indices = {name: index for index, name in self.graph.node_names.items()}
+        for (node_name, input_index), alias in ports.items():
+            if alias in port_encodings:
+                self._add_activation(node_indices[node_name], "input", input_index, port_encodings[alias])
+
         if self.unmapped:
             raise RuntimeError(
                 "enabled quantizer 无法映射到原始 ONNX node-io/initializer: "
@@ -229,21 +249,30 @@ class CompilerEncodingConverter:
             )
 
         quantizer_args = dict(getattr(self.sim, "quant_args", {}) or {})
+        self.activation.update(native_payload["activation_encodings"])
+        self.params.update(native_payload["param_encodings"])
         payload = {
             "activation_encodings": self.activation,
-            "excluded_layers": list(getattr(self.sim, "_excluded_layer_names", []) or []),
+            "excluded_layers": list(dict.fromkeys(
+                list(getattr(self.sim, "_excluded_layer_names", []) or []) + native_payload["excluded_layers"]
+            )),
             "param_encodings": self.params,
             "quantizer_args": quantizer_args,
             "version": "1.0.0",
-            "schema_version": 3,
+            "schema_version": COMPILER_SCHEMA_VERSION,
         }
         report = {
             "enabled_quantizers": len(self.mapped),
+            "enabled_quantizer_names": sorted(self.mapped),
             "mapped_quantizers": len(self.mapped),
             "unmapped_quantizers": sorted(self.unmapped),
             "propagated_tensors": self.propagated,
             "activation_entries": len(self.activation),
             "param_entries": len(self.params),
             "initializer_count": len(self.graph.initializers),
+            "native_recurrent_nodes": sorted(native_grus(self.sim)),
+            "enabled_native_recurrent_nodes": sorted(
+                name for name, adapter in native_grus(self.sim).items() if adapter.module.use_quantization
+            ),
         }
-        return payload, report
+        return normalize_compiler_encodings(payload, require_po2=True), report

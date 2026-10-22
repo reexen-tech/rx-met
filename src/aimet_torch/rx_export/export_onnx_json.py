@@ -20,11 +20,14 @@ from collections import Counter
 
 import onnx
 import torch
+from aimet_common.compiler_encodings import normalize_compiler_encodings
+from aimet_common.run_context import logged_export, log_print as print
 from .custom_gru_onnx import (
     ensure_custom_gru_op_registered,
     replace_optimized_gru_modules,
 )
 from .postprocess import postprocess_all
+from .postprocess.io_utils import load_encodings, save_encodings
 from .parameter_names import restore_parameter_names
 from .linear import prepare_linear_export, restore_linear_names
 from .validation import (
@@ -37,7 +40,9 @@ from aimet_torch.optimized_quantizable_gru import OptimizedQuantizableGRU
 STATIC_DUMMY_INPUT_SHAPE: Tuple[int, int, int] = (1, 16000, 1)
 
 
-from aimet_torch.native_recurrent import recurrent_export_mode, export_recurrent_encodings
+from aimet_torch.native_recurrent import (
+    named_native_recurrent, recurrent_export_mode, export_recurrent_encodings,
+)
 
 # ---------- Internal helpers ----------
 def _is_truthy_env(name: str) -> bool:
@@ -142,6 +147,7 @@ def _postprocess_with_retry(
 
 
 # ---------- Public API ----------
+@logged_export('export_dir', task='torch_export')
 def export_onnx_json(
     sim,
     export_dir: str,
@@ -160,6 +166,7 @@ def export_onnx_json(
     - ONNX 保持“干净”：不导出 Q/DQ/fakequant（固定为 sidecar encodings）
     - torch.onnx.export 强制 legacy：dynamo=False
     - 返回前统一校验最终 ONNX 及启用量化器的编码；缺失或不一致时抛出 RuntimeError
+    - 保留既有接口：返回 (onnx_path, encodings_path) 字符串元组
     """
     os.makedirs(export_dir, exist_ok=True)
     # if tuple(dummy_input_shape) != STATIC_DUMMY_INPUT_SHAPE:
@@ -171,6 +178,10 @@ def export_onnx_json(
         raise RuntimeError("sim 没有 get_original_model()，无法走 sim.export 链路")
 
     with ExitStack() as export_stack:
+        disabled_recurrent = {
+            name: op.onnx_type for name, module, op in named_native_recurrent(sim.model)
+            if not module.use_quantization
+        }
         original_model = sim.get_original_model(sim.model, qdq_weights=False)
         original_model = original_model.cpu().eval()
         linear_names = prepare_linear_export(original_model)
@@ -239,11 +250,17 @@ def export_onnx_json(
             input_shape=dummy_input_shape,
         )
 
+        try:
+            encodings = normalize_compiler_encodings(load_encodings(enc_out_path))
+        except ValueError as exc:
+            raise RuntimeError(f"Export artifact validation failed: {exc}") from exc
+        save_encodings(encodings, enc_out_path)
         export_recurrent_encodings(sim.model, onnx_path, enc_out_path)
         restore_parameter_names(onnx_path, original_model, expected_encodings)
         validate_exported_artifacts(
             onnx_path, enc_out_path, expected_encodings,
             scalar_inputs=scalar_inputs, reference_graph=reference_graph,
+            disabled_recurrent=disabled_recurrent,
         )
 
         return onnx_path, enc_out_path

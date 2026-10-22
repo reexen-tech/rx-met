@@ -143,7 +143,7 @@ for target in "${TARGETS[@]}"; do
         -v "${DATASET_DIR}:/datasets/calib:ro" \
         -v "${target_output}:/output" \
         "${image}" \
-        python3 /opt/rx-met/examples/onnx_ptq_quick_start.py \
+        python3 /opt/rx-met/examples/quick_start_onnx_ptq.py \
         2>&1 | tee "${target_output}/verify.log"
 done
 

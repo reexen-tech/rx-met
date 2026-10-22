@@ -72,28 +72,13 @@ void collectAllHistogramsGPU(
         }
     }
     
-    // bw
-    if (bitwidth_config.bw_granularity_ == OperatorQuantConfig::PER_TENSOR) {
-        size_t total_size = hidden_size * 3;
-        hist_collectors.bw_tensor_hist.collect(bw, total_size, streams[6]);
-    } else if (bitwidth_config.bw_granularity_ == OperatorQuantConfig::PER_GATE) {
-        gpu_hist::collect_per_gate_histograms(hist_collectors.bw_gate_hist, bw, 1, hidden_size, false, streams[6]);
-    } else {  // PER_CHANNEL
-        if (!hist_collectors.bw_batch.is_valid()) {
-            gpu_hist::collect_per_channel_histograms_batch(hist_collectors.bw_batch, bw, 1, streams[6]);
-        }
+    // Bias calibration always needs the unexpanded observations. Collect the
+    // per-channel ranges once, then aggregate them for per-gate/tensor grids.
+    if (!hist_collectors.bw_batch.is_valid()) {
+        gpu_hist::collect_per_channel_histograms_batch(hist_collectors.bw_batch, bw, 1, streams[6]);
     }
-    
-    // br
-    if (bitwidth_config.br_granularity_ == OperatorQuantConfig::PER_TENSOR) {
-        size_t total_size = hidden_size * 3;
-        hist_collectors.br_tensor_hist.collect(br, total_size, streams[7]);
-    } else if (bitwidth_config.br_granularity_ == OperatorQuantConfig::PER_GATE) {
-        gpu_hist::collect_per_gate_histograms(hist_collectors.br_gate_hist, br, 1, hidden_size, false, streams[7]);
-    } else {  // PER_CHANNEL
-        if (!hist_collectors.br_batch.is_valid()) {
-            gpu_hist::collect_per_channel_histograms_batch(hist_collectors.br_batch, br, 1, streams[7]);
-        }
+    if (!hist_collectors.br_batch.is_valid()) {
+        gpu_hist::collect_per_channel_histograms_batch(hist_collectors.br_batch, br, 1, streams[7]);
     }
 
     // 统一等待基础数据收集完成

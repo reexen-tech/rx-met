@@ -99,6 +99,15 @@ class TorchExportValidationTest(unittest.TestCase):
     def test_normal_export(self):
         self.export(self.sim())
 
+    def test_export_preserves_string_tuple_and_repeatable_encodings(self):
+        sim = self.sim()
+        result = exporter.export_onnx_json(sim, self.tmp.name, 'first', tuple(self.x.shape))
+        self.assertIsInstance(result, tuple)
+        self.assertTrue(all(isinstance(path, str) and Path(path).is_file() for path in result))
+        _, legacy_path = self.export(sim)
+        self.assertEqual(json.loads(Path(result[1]).read_text()),
+                         json.loads(Path(legacy_path).read_text()))
+
     def test_disabled_quantizer_needs_no_encoding(self):
         sim = self.sim()
         sim.model.module_add.output_quantizers[0] = None
@@ -331,8 +340,13 @@ class TorchExportValidationTest(unittest.TestCase):
             self.assertEqual(node.input[1], parameter)
             self.assertIn(parameter, enc['param_encodings'])
         for node in graph.graph.node:
-            if node.op_type in ('Sub', 'Div', 'Mul', 'Add'):
+            if node.op_type in ('Sub', 'Div'):
                 self.assertEqual(set(enc['activation_encodings'][node.name]['input']), {'0', '1'})
+            elif node.op_type in ('Mul', 'Add'):
+                # Parameter QDQ owns gamma/beta; an activation QDQ on this
+                # same edge would quantize them a second time.
+                self.assertEqual(set(enc['activation_encodings'][node.name]['input']), {'0'})
+                self.assertIn(node.input[1], enc['param_encodings'])
 
     def test_equal_parameters_keep_distinct_names_after_constant_deduplication(self):
         from aimet_torch.quantizable_batchnorm import QuantizableBatchNorm2d

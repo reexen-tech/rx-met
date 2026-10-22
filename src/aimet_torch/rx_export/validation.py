@@ -16,6 +16,7 @@ import onnx
 import torch
 
 from aimet_common.quantsim_config.compute_ops import is_compute_op
+from aimet_common.compiler_encodings import validate_compiler_encodings
 from aimet_torch.native_recurrent import named_native_recurrent
 from aimet_torch.v2.utils import flatten_nn_module_list
 from .postprocess.encodings_ops import postprocess_encodings_inplace
@@ -174,24 +175,10 @@ def _compare(expected, actual, path: str, errors: list[str]) -> None:
 
 
 def _check_scales(value, path: str, errors: list[str]) -> None:
-    if isinstance(value, dict):
-        for key, child in value.items():
-            if key == 'scale':
-                def check_scale(scale, location):
-                    if isinstance(scale, list):
-                        if not scale:
-                            errors.append(f'{location}: empty scale')
-                        for index, element in enumerate(scale):
-                            check_scale(element, f'{location}[{index}]')
-                    elif (not isinstance(scale, (int, float)) or isinstance(scale, bool)
-                          or not math.isfinite(scale) or scale <= 0):
-                        errors.append(f'{location}: scale must be positive and finite')
-                check_scale(child, f'{path}.{key}')
-            else:
-                _check_scales(child, f'{path}.{key}', errors)
-    elif isinstance(value, list):
-        for index, child in enumerate(value):
-            _check_scales(child, f'{path}[{index}]', errors)
+    try:
+        validate_compiler_encodings(value)
+    except ValueError as exc:
+        errors.append(f'{path}: {exc}')
 
 
 def _io_encoding(entry, index):
@@ -207,7 +194,8 @@ def _has_encoding(value):
             and (str(value['dtype']).upper().startswith('FLOAT') or 'scale' in value))
 
 
-def _check_node_encodings(graph, encodings, scalar_inputs, reference_graph, errors):
+def _check_node_encodings(graph, encodings, scalar_inputs, reference_graph, errors,
+                          disabled_recurrent):
     """Check actual compute operands even if QuantSim never created a quantizer.
 
     Ordinary keys must match final node names exactly. A module-level encoding
@@ -251,6 +239,8 @@ def _check_node_encodings(graph, encodings, scalar_inputs, reference_graph, erro
         # Native recurrent operators pack parameters/state grids under one key.
         entry = activations.get(node.name)
         if node.op_type in ('GRU', 'LSTM'):
+            if disabled_recurrent.get(node.name) == node.op_type:
+                continue
             if not isinstance(entry, dict) or not _has_encoding(_io_encoding(entry.get('input'), 0)):
                 errors.append(f'ONNX {node.name} ({node.op_type}): missing encoding input[0]')
             for index in (1, 2, 3):
@@ -311,15 +301,23 @@ def _check_node_encodings(graph, encodings, scalar_inputs, reference_graph, erro
 
 
 def validate_exported_artifacts(onnx_path: str, encodings_path: str, expected: dict,
-                                *, scalar_inputs=(), reference_graph=None) -> None:
+                                *, scalar_inputs=(), reference_graph=None,
+                                disabled_recurrent=None) -> None:
     """Fail unless the final ONNX is valid and all required encodings survived.
 
     ``expected`` must come from collect_expected_encodings, never from an
     exporter-generated JSON file: that file may already have lost encodings.
     Also require exact encoding keys and floating-input coverage for final
     compute nodes. This does not validate numerical execution equivalence.
+    ``disabled_recurrent`` maps module names to ONNX types, captured from
+    QuantSim. Never derive these exemptions from the exported encodings file.
     """
     errors = []
+    disabled_recurrent = dict(disabled_recurrent or {})
+    for name, op_type in disabled_recurrent.items():
+        if not isinstance(name, str) or not name or op_type not in ('GRU', 'LSTM'):
+            errors.append(f'Invalid disabled recurrent declaration: {name!r}: {op_type!r}')
+    _fail(errors)
     graph = None
     try:
         onnx.checker.check_model(onnx_path, full_check=True)
@@ -328,6 +326,11 @@ def validate_exported_artifacts(onnx_path: str, encodings_path: str, expected: d
         for name, count in counts.items():
             if count > 1:
                 errors.append(f'ONNX node {name}: duplicate name ({count})')
+        for name, op_type in disabled_recurrent.items():
+            matches = sum(node.name == name and node.op_type == op_type
+                          and node.domain in ('', 'ai.onnx') for node in graph.graph.node)
+            if matches != 1:
+                errors.append(f'{name}: expected one ONNX {op_type} for disabled recurrent layer, found {matches}')
         # Recurrent entries are packed for a single, named ONNX operator.
         for name, entry in expected['activation_encodings'].items():
             for op_type in ('GRU', 'LSTM'):
@@ -344,7 +347,23 @@ def validate_exported_artifacts(onnx_path: str, encodings_path: str, expected: d
         _compare(expected, actual, 'encodings', errors)
         _check_scales(actual, 'encodings', errors)
         if graph is not None and isinstance(actual, dict):
-            _check_node_encodings(graph, actual, scalar_inputs, reference_graph, errors)
+            excluded = actual.get('excluded_layers') or []
+            if not isinstance(excluded, list) or any(not isinstance(name, str) for name in excluded):
+                errors.append('encodings.excluded_layers: expected a list of module names')
+                excluded = []
+            for name, entry in expected['activation_encodings'].items():
+                if name in excluded and any(entry.get(f'is_{kind}') for kind in ('GRU', 'LSTM')):
+                    errors.append(f'{name}: enabled recurrent layer is listed in excluded_layers')
+            for name in disabled_recurrent:
+                if name not in excluded:
+                    errors.append(f'{name}: disabled recurrent layer missing from excluded_layers')
+                activations = actual.get('activation_encodings', {})
+                params = actual.get('param_encodings', {})
+                if ((isinstance(activations, dict) and name in activations)
+                        or (isinstance(params, dict) and any(key.startswith(name + '.') for key in params))):
+                    errors.append(f'{name}: disabled recurrent layer has quantization encodings')
+            _check_node_encodings(graph, actual, scalar_inputs, reference_graph, errors,
+                                  disabled_recurrent)
     except (OSError, ValueError) as exc:
         errors.append(f'encodings {encodings_path}: {exc}')
     _fail(errors)

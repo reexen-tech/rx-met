@@ -5,12 +5,14 @@ AIMET 量化工具函数库
 from typing import Dict, Any, Iterable, Mapping, Set, Tuple
 import json
 from pathlib import Path
+from aimet_common.run_context import log_details, log_print as print, logged_operation
 
 
 # ============================================================================
 # Percentile 校准相关函数
 # ============================================================================
 
+@logged_operation
 def setup_percentile_calibration(sim_model, percentile: float = 99.0, num_bins: int = 2048, verbose: bool = True, 
                                 only_params: bool = False) -> int:
     """
@@ -28,7 +30,7 @@ def setup_percentile_calibration(sim_model, percentile: float = 99.0, num_bins: 
     """
     from aimet_torch.v2.quantization.encoding_analyzer import PercentileEncodingAnalyzer
     
-    if verbose:
+    with log_details(verbose):
         print(f"\n设置校准方法为 Percentile ({percentile}% 分位数)...")
         print(f"  这将排除最小 {(100-percentile)/2:.1f}% 和最大 {(100-percentile)/2:.1f}% 的极端数据")
         if only_params:
@@ -66,12 +68,13 @@ def setup_percentile_calibration(sim_model, percentile: float = 99.0, num_bins: 
                     )
                     converted_count += 1
     
-    if verbose:
+    with log_details(verbose):
         print(f"✅ 已将 {converted_count} 个量化器的校准方法改为 Percentile")
     
     return converted_count
 
 
+@logged_operation
 def setup_selective_percentile_calibration(
     sim_model, 
     percentile: float = 99.0, 
@@ -109,7 +112,7 @@ def setup_selective_percentile_calibration(
     if exclude_modules is None:
         exclude_modules = []
     
-    if verbose:
+    with log_details(verbose):
         print(f"\n设置选择性 Percentile 校准 ({percentile}% 分位数)...")
         print(f"  排除模块关键字: {exclude_modules if exclude_modules else '无 (全部使用 Percentile)'}")
     
@@ -174,7 +177,7 @@ def setup_selective_percentile_calibration(
                     )
                     converted_count += 1
     
-    if verbose:
+    with log_details(verbose):
         print(f"\n✅ 已将 {converted_count} 个量化器改为 Percentile")
         print(f"⏭️  排除了 {excluded_quantizer_count} 个量化器（保持原始 Analyzer）")
         if excluded_modules_list:
@@ -187,6 +190,7 @@ def setup_selective_percentile_calibration(
     }
 
 
+@logged_operation
 def verify_percentile_calibration(sim_model, verbose: bool = True) -> Dict[str, int]:
     """
     验证 Percentile 校准设置是否成功
@@ -252,7 +256,7 @@ def verify_percentile_calibration(sim_model, verbose: bool = True) -> Dict[str, 
                             other_types[analyzer_type] = 0
                         other_types[analyzer_type] += 1
     
-    if verbose:
+    with log_details(verbose):
         print("\n验证校准方法:")
         print(f"  MinMaxEncodingAnalyzer:     {minmax_count} 个")
         print(f"  PercentileEncodingAnalyzer: {percentile_count} 个 ✅")
@@ -281,6 +285,7 @@ def verify_percentile_calibration(sim_model, verbose: bool = True) -> Dict[str, 
 # Power-of-2 量化相关函数
 # ============================================================================
 
+@logged_operation
 def apply_power_of_2_workflow(sim_model, method: str = "cover_range", tolerance: float = 0.02, 
                               align_bias_scale: bool = False, verbose: bool = True,
                               bias_bitwidth: int = 32) -> Dict[str, Any]:
@@ -310,7 +315,7 @@ def apply_power_of_2_workflow(sim_model, method: str = "cover_range", tolerance:
             - True: 执行对齐，使得硬件可以直接计算 (Qx*Qw + Qb)
             - False: 跳过对齐
         verbose: 是否打印详细信息
-        bias_bitwidth: 仅 ONNX 路径使用，对齐后的 Conv/Gemm/MatMul bias 位宽
+        bias_bitwidth: 对齐后的有符号 bias 位宽；PyTorch Conv/Linear 与 ONNX 均使用，默认 32。不可表示时拒绝对齐
     
     Returns:
         结果字典，包含统计信息和对比结果
@@ -339,7 +344,7 @@ def apply_power_of_2_workflow(sim_model, method: str = "cover_range", tolerance:
     results = {}
     
     # 1. 打印校准后的量化器信息
-    if verbose:
+    with log_details(verbose):
         print("\n" + "="*80)
         print("步骤 1: 校准后的量化器信息")
         print("="*80)
@@ -348,16 +353,16 @@ def apply_power_of_2_workflow(sim_model, method: str = "cover_range", tolerance:
     results['original_info'] = original_info
     
     # 2. 收集修改前的量化器信息
-    if verbose:
+    with log_details(verbose):
         print("\n收集修改前的量化器参数...")
     before_po2_info = collect_quantizer_info(sim_model)
-    if verbose:
+    with log_details(verbose):
         print(f"✅ 收集了 {len(before_po2_info)} 个量化器的信息")
     results['before_count'] = len(before_po2_info)
     results['before_info'] = before_po2_info
     
     # 3. 应用 Power-of-2 量化
-    if verbose:
+    with log_details(verbose):
         print("\n" + "="*80)
         print("步骤 2: 将 scale 修改为 2 的幂次方 (1/2^n)")
         print("="*80)
@@ -366,16 +371,16 @@ def apply_power_of_2_workflow(sim_model, method: str = "cover_range", tolerance:
     results['stats'] = stats
     
     # 4. 收集修改后的量化器信息
-    if verbose:
+    with log_details(verbose):
         print("\n收集修改后的量化器参数...")
     after_po2_info = collect_quantizer_info(sim_model)
-    if verbose:
+    with log_details(verbose):
         print(f"✅ 收集了 {len(after_po2_info)} 个量化器的信息")
     results['after_count'] = len(after_po2_info)
     results['after_info'] = after_po2_info
     
     # 5. 验证修改结果
-    if verbose:
+    with log_details(verbose):
         print("\n" + "="*80)
         print("步骤 3: 验证修改后的量化参数")
         print("="*80)
@@ -387,32 +392,31 @@ def apply_power_of_2_workflow(sim_model, method: str = "cover_range", tolerance:
     all_power_of_2 = verify_model_power_of_2(sim_model,verbose=verbose)
     results['all_power_of_2'] = all_power_of_2
     
-    if verbose:
+    with log_details(verbose):
         if all_power_of_2:
             print("\n✅ 所有量化器的 scale 已成功修改为 2 的幂次方!")
         else:
             print("\n⚠️ 警告: 部分量化器的 scale 未能修改为 2 的幂次方")
     
     # 7. 对比修改前后的参数
-    if verbose:
+    with log_details(verbose):
         print("\n" + "="*80)
         print("步骤 4: 对比修改前后的参数")
         print("="*80)
-        issues = compare_quantizers(before_po2_info, after_po2_info)
-    else:
-        issues = []
+        detailed_issues = compare_quantizers(before_po2_info, after_po2_info)
+    issues = detailed_issues if verbose else []
     results['issues'] = issues
     
     # 8. (可选) Bias Scale 对齐到 Sx * Sw
     if align_bias_scale:
-        if verbose:
+        with log_details(verbose):
             print("\n" + "="*80)
             print("步骤 5: Bias Scale 对齐（Sb = Sx * Sw）")
             print("="*80)
             print("📝 将卷积/全连接层的 bias scale 对齐到输入和权重的 scale 乘积")
             print("📝 目标：使得硬件可以直接计算 Sy*Qy = Sx*Sw*(Qx*Qw + Qb)\n")
         
-        bias_alignment_stats = _align_conv_bias_scale(sim_model, verbose=verbose)
+        bias_alignment_stats = _align_conv_bias_scale(sim_model, verbose=verbose, bias_bitwidth=bias_bitwidth)
         results['bias_alignment'] = bias_alignment_stats
 
     from aimet_torch.native_recurrent import named_native_recurrent
@@ -421,7 +425,7 @@ def apply_power_of_2_workflow(sim_model, method: str = "cover_range", tolerance:
             module.enable_pot2(method=method, tolerance=tolerance)
             key = f"{op.package}_pot2_count"
             results[key] = results.get(key, 0) + 1
-            if verbose:
+            with log_details(verbose):
                 print(f"  [{op.module_type.__name__}] {name}: POT2 enabled")
 
     return results
@@ -431,6 +435,7 @@ def apply_power_of_2_workflow(sim_model, method: str = "cover_range", tolerance:
 # 量化器参数冻结相关函数
 # ============================================================================
 
+@logged_operation
 def freeze_quantizer_parameters(sim_model, verbose: bool = True, freeze_bn_affine: bool = True) -> Dict[str, Any]:
     """
     冻结量化器参数（scale、offset 等），仅训练模型权重
@@ -493,7 +498,7 @@ def freeze_quantizer_parameters(sim_model, verbose: bool = True, freeze_bn_affin
             else:
                 trainable_params.append(name)
     
-    if verbose:
+    with log_details(verbose):
         print(f"冻结量化器参数:         {len(frozen_quantizer_params)} 个")
         if freeze_bn_affine:
             print(f"冻结 BN affine 参数:    {len(frozen_bn_params)} 个")
@@ -514,6 +519,7 @@ def freeze_quantizer_parameters(sim_model, verbose: bool = True, freeze_bn_affin
     }
 
 
+@logged_operation
 def set_train_mode_freeze_bn(model, verbose: bool = False) -> int:
     """
     设置模型为训练模式，但保持 BatchNorm 层为评估模式
@@ -578,7 +584,7 @@ def set_train_mode_freeze_bn(model, verbose: bool = False) -> int:
                     child.eval()
                     frozen_modules.add(child)
     
-    if verbose:
+    with log_details(verbose):
         print(f"✅ 模型设置为训练模式，{bn_count} 个 BatchNorm 层保持评估模式")
     
     return bn_count
@@ -598,17 +604,10 @@ def load_mixed_precision_config(config_file: str) -> Dict[str, Any]:
     Returns:
         配置字典
     """
-    config_path = Path(config_file)
-    if not config_path.exists():
-        raise FileNotFoundError(f"配置文件不存在: {config_file}")
-    
-    with open(config_path, 'r', encoding='utf-8') as f:
-        config = json.load(f)
-    
-    return config
+    from aimet_common.mixed_precision import load_mixed_precision_config as load_config
+    return load_config(config_file)
 
 
-_LAYER_TYPE_CONFIG_COMMENT_KEYS = frozenset({"comment", "examples"})
 _LAYER_TYPE_CONFIG_JSON_ALIASES = frozenset(
     {
         "QuantizedSign",
@@ -617,7 +616,8 @@ _LAYER_TYPE_CONFIG_JSON_ALIASES = frozenset(
 
 
 def _is_layer_type_config_comment(key: str) -> bool:
-    return str(key).startswith("_") or key in _LAYER_TYPE_CONFIG_COMMENT_KEYS
+    from aimet_common.mixed_precision import is_config_comment
+    return is_config_comment(key)
 
 
 def known_layer_type_config_keys() -> Set[str]:
@@ -660,6 +660,43 @@ def classify_unused_layer_type_config_keys(
 
 
 
+def _set_weight_granularity(module, per_channel, name):
+    import copy
+    import torch.nn as nn
+    from aimet_torch.v2.quantization.affine import QuantizeDequantize
+
+    quantizers = getattr(module, 'param_quantizers', {})
+    quantizer = quantizers['weight'] if 'weight' in quantizers else None
+    if quantizer is None:
+        return
+    shape = ()
+    if per_channel:
+        transposed = isinstance(module, (nn.ConvTranspose1d, nn.ConvTranspose2d, nn.ConvTranspose3d))
+        supported = isinstance(module, (nn.Linear, nn.Conv1d, nn.Conv2d, nn.Conv3d)) or transposed
+        if not supported or (transposed and module.groups != 1):
+            raise ValueError(f'{name}: unsupported per-channel weight configuration')
+        axis = 1 if transposed else 0
+        shape = tuple(size if index == axis else 1 for index, size in enumerate(module.weight.shape))
+    if quantizer.shape == shape:
+        return
+    if type(quantizer) is not QuantizeDequantize or quantizer.block_size is not None:
+        raise ValueError(f'{name}: unsupported weight quantizer granularity change')
+    if quantizer.is_initialized():
+        raise ValueError(f'{name}: configure per_channel_quantization before calibration')
+    analyzer = copy.deepcopy(quantizer.encoding_analyzer)
+    analyzer.observer.shape = shape
+    analyzer.observer.reset_stats()
+    parameter = next(quantizer.parameters())
+    replacement = QuantizeDequantize(
+        shape, qmin=quantizer.qmin, qmax=quantizer.qmax, symmetric=quantizer.symmetric,
+        encoding_analyzer=analyzer, zero_point_shift=quantizer.zero_point_shift,
+    ).to(device=parameter.device, dtype=parameter.dtype)
+    replacement.train(quantizer.training)
+    replacement.requires_grad_(parameter.requires_grad)
+    module.param_quantizers['weight'] = replacement
+
+
+@logged_operation
 def apply_mixed_precision_bitwidth(sim_model, config_file: str, verbose: bool = True) -> Dict[str, int]:
     """
     根据 JSON 配置文件应用混合精度位宽设置
@@ -693,8 +730,8 @@ def apply_mixed_precision_bitwidth(sim_model, config_file: str, verbose: bool = 
     
     配置优先级：
     1. layer_name_config - 精确匹配（优先级最高）
-    2. layer_name_config - 模式匹配
-    3. layer_type_config（按类型匹配）
+    2. layer_type_config（按类型匹配）
+    3. layer_name_config - 模式匹配
     4. default_bitwidth（默认值）
     
     Args:
@@ -714,7 +751,9 @@ def apply_mixed_precision_bitwidth(sim_model, config_file: str, verbose: bool = 
             sim_model, config_file, verbose=verbose
         )
 
-    import fnmatch
+    from aimet_common.mixed_precision import (
+        QuantizerConfigPlan, default_layer_config, is_config_comment, select_layer_config,
+    )
     
     # 加载配置
     config = load_mixed_precision_config(config_file)
@@ -726,12 +765,12 @@ def apply_mixed_precision_bitwidth(sim_model, config_file: str, verbose: bool = 
     
     # 过滤掉注释字段
     layer_name_config = {k: v for k, v in layer_name_config.items() 
-                        if not k.startswith('_') and k not in ['examples', 'comment']}
+                        if not is_config_comment(k)}
     
     # 检查默认配置是否要求禁用量化
     default_disable_quantization = default_config.get('disable_quantization', False)
     
-    if verbose:
+    with log_details(verbose):
         print("\n" + "="*70)
         print("🔧 应用混合精度位宽配置")
         print("="*70)
@@ -755,8 +794,9 @@ def apply_mixed_precision_bitwidth(sim_model, config_file: str, verbose: bool = 
             "Not a registered Quantized* type and not present in sim.model; "
             "check spelling. Types that exist but are absent from this model are ignored."
         )
-    if ignored_layer_types and verbose:
-        print(f"  忽略当前模型没有的类型: {ignored_layer_types}")
+    if ignored_layer_types:
+        with log_details(verbose):
+            print(f"  忽略当前模型没有的类型: {ignored_layer_types}")
 
     # 统计信息
     stats = {
@@ -776,6 +816,31 @@ def apply_mixed_precision_bitwidth(sim_model, config_file: str, verbose: bool = 
     recurrent_modules = list(named_native_recurrent(sim_model))
     recurrent_names = {name for name, _, _ in recurrent_modules}
 
+    domain_plan = QuantizerConfigPlan()
+    for name, module in sim_model.named_modules():
+        if any(name == native or name.startswith(native + '.') for native in recurrent_names):
+            continue
+        settings, _, _ = select_layer_config(name, type(module).__name__, layer_type_config, layer_name_config)
+        if settings is None and default_disable_quantization:
+            continue
+        settings = settings or {}
+        if settings.get('disable_quantization', False):
+            continue
+        bindings = [(role if role in ('weight', 'bias') else 'param', None, q)
+                    for role, q in getattr(module, 'param_quantizers', {}).items()]
+        bindings += [(role, index, q) for role in ('input', 'output')
+                     for index, q in enumerate(getattr(module, f'{role}_quantizers', []))]
+        for role, index, quantizer in bindings:
+            domain_plan.request(quantizer, 'signed', default_config.get('signed'),
+                                f'default_config.{name}.{role}', fallback=True)
+            signs = settings.get('input_signeds') if role == 'input' else None
+            signed = ((signs[index] if index < len(signs) else None) if signs is not None
+                      else settings.get(f'{role}_signed'))
+            domain_plan.request(quantizer, 'signed', signed, f'{name}.{role}[{index}]')
+    for quantizer, settings in domain_plan.entries():
+        if 'signed' in settings and hasattr(quantizer, 'signed'):
+            quantizer.signed = settings['signed']
+
     # 遍历所有模块
     for name, module in sim_model.named_modules():
         module_type = type(module).__name__
@@ -792,27 +857,13 @@ def apply_mixed_precision_bitwidth(sim_model, config_file: str, verbose: bool = 
         match_type = None
         matched_pattern = None
 
-        # 1. 尝试按名称精确匹配
-        if name in layer_name_config:
-            layer_config = layer_name_config[name]
-            match_type = 'name'
+        layer_config, match_type, matched_pattern = select_layer_config(
+            name, module_type, layer_type_config, layer_name_config
+        )
+        if match_type in ('name', 'pattern'):
             stats['name_matched_count'] += 1
-
-        # 2. 尝试按类型匹配（优先于通配符模式，避免宽泛模式意外覆盖）
-        if layer_config is None and module_type in layer_type_config:
-            layer_config = layer_type_config[module_type]
-            match_type = 'type'
+        elif match_type == 'type':
             stats['type_matched_count'] += 1
-
-        # 3. 尝试按模式匹配（支持通配符 *，仅在无类型配置时生效）
-        if layer_config is None:
-            for pattern, config in layer_name_config.items():
-                if '*' in pattern and fnmatch.fnmatch(name, pattern):
-                    layer_config = config
-                    match_type = 'pattern'
-                    matched_pattern = pattern
-                    stats['name_matched_count'] += 1
-                    break
 
         # 4. 对于未匹配的模块，检查是否需要禁用量化
         if layer_config is None:
@@ -826,7 +877,7 @@ def apply_mixed_precision_bitwidth(sim_model, config_file: str, verbose: bool = 
                 stats['disabled_count'] += 1
                 continue
             elif has_quantizers:
-                layer_config = default_bitwidth
+                layer_config = default_layer_config(default_bitwidth)
                 match_type = 'default'
                 stats['default_count'] += 1
 
@@ -836,6 +887,9 @@ def apply_mixed_precision_bitwidth(sim_model, config_file: str, verbose: bool = 
                 _disable_quantization(module, name, verbose)
                 stats['disabled_count'] += 1
                 continue
+
+            if 'per_channel_quantization' in layer_config:
+                _set_weight_granularity(module, layer_config['per_channel_quantization'], name)
 
             # 设置权重量化参数
             if hasattr(module, 'param_quantizers') and 'weight' in module.param_quantizers:
@@ -850,9 +904,10 @@ def apply_mixed_precision_bitwidth(sim_model, config_file: str, verbose: bool = 
                     if weight_sym is not None:
                         weight_quantizer.symmetric = weight_sym
                         changes.append(f"{'sym' if weight_sym else 'asym'}")
-                    if changes and verbose:
-                        label = f"pattern: {matched_pattern}" if match_type == 'pattern' else match_type
-                        print(f"  ✅ [{label}] {name}.weight: {', '.join(changes)}")
+                    if changes:
+                        with log_details(verbose):
+                            label = f"pattern: {matched_pattern}" if match_type == 'pattern' else match_type
+                            print(f"  ✅ [{label}] {name}.weight: {', '.join(changes)}")
                     if 'Conv' in module_type:
                         stats['conv_count'] += 1
                     elif 'Linear' in module_type:
@@ -882,11 +937,12 @@ def apply_mixed_precision_bitwidth(sim_model, config_file: str, verbose: bool = 
                         bias_quantizer.symmetric = bias_sym
                         changes.append(f"{'sym' if bias_sym else 'asym'}")
                     
-                    if changes and verbose:
-                        if match_type == 'pattern':
-                            print(f"  ✅ [pattern: {matched_pattern}] {name}.bias: {', '.join(changes)}")
-                        else:
-                            print(f"  ✅ [{match_type}] {name}.bias: {', '.join(changes)}")
+                    if changes:
+                        with log_details(verbose):
+                            if match_type == 'pattern':
+                                print(f"  ✅ [pattern: {matched_pattern}] {name}.bias: {', '.join(changes)}")
+                            else:
+                                print(f"  ✅ [{match_type}] {name}.bias: {', '.join(changes)}")
             
             # 设置通用参数量化器（param_bitwidth / param_symmetric）
             # 作用于所有非 weight/bias 的 param_quantizers 键，如 Snake2d 的 alpha
@@ -900,19 +956,14 @@ def apply_mixed_precision_bitwidth(sim_model, config_file: str, verbose: bool = 
                         changes = []
                         if param_bw is not None:
                             param_quantizer.bitwidth = param_bw
-                            if hasattr(param_quantizer, 'symmetric') and param_quantizer.symmetric:
-                                param_quantizer.qmin = -(2 ** (param_bw - 1))
-                                param_quantizer.qmax = 2 ** (param_bw - 1) - 1
-                            else:
-                                param_quantizer.qmin = 0
-                                param_quantizer.qmax = 2 ** param_bw - 1
                             changes.append(f"{param_bw}-bit")
                         if param_sym is not None:
                             param_quantizer.symmetric = param_sym
                             changes.append(f"{'sym' if param_sym else 'asym'}")
-                        if changes and verbose:
-                            prefix = f"pattern: {matched_pattern}" if match_type == 'pattern' else match_type
-                            print(f"  ✅ [{prefix}] {name}.{param_key}: {', '.join(changes)}")
+                        if changes:
+                            with log_details(verbose):
+                                prefix = f"pattern: {matched_pattern}" if match_type == 'pattern' else match_type
+                                print(f"  ✅ [{prefix}] {name}.{param_key}: {', '.join(changes)}")
 
             # 设置输入量化参数
             if hasattr(module, 'input_quantizers') and len(module.input_quantizers) > 0:
@@ -932,12 +983,17 @@ def apply_mixed_precision_bitwidth(sim_model, config_file: str, verbose: bool = 
                     # 标量输入槽（构造期已判定为“无 shape”并移除量化器）不得重建，否则会破坏
                     # 训练/reload 的量化器集合一致性，并使导出 encodings 重新包含标量路参数。
                     _is_scalar_slot = idx in getattr(module, "_scalar_input_slots", set())
-                    if input_quantizer is None and idx == 0 and input_bw is not None and not _is_scalar_slot:
+                    if (input_quantizer is None and idx == 0 and input_bw is not None
+                            and match_type != 'default' and not _is_scalar_slot):
                         try:
                             from aimet_torch.v2.quantization.affine import QuantizeDequantize
                             import torch.nn as _nn
                             sym = input_sym if input_sym is not None else True
-                            new_q = QuantizeDequantize(shape=(), bitwidth=input_bw, symmetric=sym)
+                            signed = layer_config.get('input_signed', default_config.get('signed', True))
+                            signs = layer_config.get('input_signeds')
+                            if signs is not None and idx < len(signs) and signs[idx] is not None:
+                                signed = signs[idx]
+                            new_q = QuantizeDequantize(shape=(), bitwidth=input_bw, symmetric=sym, signed=signed)
                             q_device = _infer_quant_module_device(module)
                             if q_device is not None:
                                 new_q = new_q.to(q_device)
@@ -946,11 +1002,11 @@ def apply_mixed_precision_bitwidth(sim_model, config_file: str, verbose: bool = 
                             slots[idx] = new_q
                             module.input_quantizers = _nn.ModuleList(slots)
                             input_quantizer = new_q
-                            if verbose:
+                            with log_details(verbose):
                                 label = f"pattern: {matched_pattern}" if match_type == 'pattern' else match_type
                                 print(f"  ➕ [{label}] {name}.input[{idx}]: 创建新 quantizer {input_bw}-bit {'sym' if sym else 'asym'}")
                         except Exception as _e:
-                            if verbose:
+                            with log_details(verbose):
                                 print(f"  ⚠️  {name}.input[{idx}]: 创建 quantizer 失败 - {_e}")
 
                     if input_quantizer is not None:
@@ -958,31 +1014,19 @@ def apply_mixed_precision_bitwidth(sim_model, config_file: str, verbose: bool = 
 
                         if input_bw:
                             input_quantizer.bitwidth = input_bw
-                            if hasattr(input_quantizer, 'symmetric') and input_quantizer.symmetric:
-                                input_quantizer.qmin = -(2 ** (input_bw - 1))
-                                input_quantizer.qmax = 2 ** (input_bw - 1) - 1
-                            else:
-                                input_quantizer.qmin = 0
-                                input_quantizer.qmax = 2 ** input_bw - 1
                             changes.append(f"{input_bw}-bit")
 
                         if input_sym is not None:
                             input_quantizer.symmetric = input_sym
-                            bw = input_bw if input_bw else input_quantizer.bitwidth
-                            if input_sym:
-                                input_quantizer.qmin = -(2 ** (bw - 1))
-                                input_quantizer.qmax = 2 ** (bw - 1) - 1
-                            else:
-                                input_quantizer.qmin = 0
-                                input_quantizer.qmax = 2 ** bw - 1
                             changes.append(f"{'sym' if input_sym else 'asym'}")
 
-                        if verbose and changes:
-                            label = f"pattern: {matched_pattern}" if match_type == 'pattern' else match_type
-                            if len(module.input_quantizers) > 1:
-                                print(f"  ✅ [{label}] {name}.input[{idx}]: {', '.join(changes)}")
-                            else:
-                                print(f"  ✅ [{label}] {name}.input: {', '.join(changes)}")
+                        if changes:
+                            with log_details(verbose):
+                                label = f"pattern: {matched_pattern}" if match_type == 'pattern' else match_type
+                                if len(module.input_quantizers) > 1:
+                                    print(f"  ✅ [{label}] {name}.input[{idx}]: {', '.join(changes)}")
+                                else:
+                                    print(f"  ✅ [{label}] {name}.input: {', '.join(changes)}")
             
             # 设置输出量化参数
             if hasattr(module, 'output_quantizers') and len(module.output_quantizers) > 0:
@@ -994,16 +1038,17 @@ def apply_mixed_precision_bitwidth(sim_model, config_file: str, verbose: bool = 
                         from aimet_torch.v2.quantization.affine import QuantizeDequantize
                         import torch.nn as _nn
                         sym = output_sym if output_sym is not None else True
-                        new_q = QuantizeDequantize(shape=(), bitwidth=output_bw, symmetric=sym)
+                        signed = layer_config.get('output_signed', default_config.get('signed', True))
+                        new_q = QuantizeDequantize(shape=(), bitwidth=output_bw, symmetric=sym, signed=signed)
                         slots = list(module.output_quantizers)
                         slots[0] = new_q
                         module.output_quantizers = _nn.ModuleList(slots)
                         output_quantizer = new_q
-                        if verbose:
+                        with log_details(verbose):
                             label = f"pattern: {matched_pattern}" if match_type == 'pattern' else match_type
                             print(f"  ➕ [{label}] {name}.output[0]: 创建新 quantizer {output_bw}-bit {'sym' if sym else 'asym'}")
                     except Exception as _e:
-                        if verbose:
+                        with log_details(verbose):
                             print(f"  ⚠️  {name}.output[0]: 创建 quantizer 失败 - {_e}")
                 if output_quantizer is not None:
                     changes = []
@@ -1011,35 +1056,18 @@ def apply_mixed_precision_bitwidth(sim_model, config_file: str, verbose: bool = 
                     # 位宽
                     if output_bw:
                         output_quantizer.bitwidth = output_bw
-                        # 🔧 FIX: 更新 qmin 和 qmax 以匹配新的位宽
-                        if hasattr(output_quantizer, 'symmetric') and output_quantizer.symmetric:
-                            # 对称量化
-                            output_quantizer.qmin = -(2 ** (output_bw - 1))
-                            output_quantizer.qmax = 2 ** (output_bw - 1) - 1
-                        else:
-                            # 非对称量化
-                            output_quantizer.qmin = 0
-                            output_quantizer.qmax = 2 ** output_bw - 1
                         changes.append(f"{output_bw}-bit")
                     
                     # 对称性
                     if output_sym is not None:
                         output_quantizer.symmetric = output_sym
-                        # 🔧 FIX: 如果改变了对称性，需要重新计算 qmin/qmax
-                        # 使用配置的位宽或当前的位宽
-                        bw = output_bw if output_bw else output_quantizer.bitwidth
-                        if output_sym:
-                            output_quantizer.qmin = -(2 ** (bw - 1))
-                            output_quantizer.qmax = 2 ** (bw - 1) - 1
-                        else:
-                            output_quantizer.qmin = 0
-                            output_quantizer.qmax = 2 ** bw - 1
                         changes.append(f"{'sym' if output_sym else 'asym'}")
                     
-                    if verbose and changes:
-                        # 只在没有设置权重时打印，避免重复
-                        if not (hasattr(module, 'param_quantizers') and 'weight' in module.param_quantizers):
-                            print(f"  ✅ [{match_type}] {name}.output: {', '.join(changes)}")
+                    if changes:
+                        with log_details(verbose):
+                            # 只在没有设置权重时打印，避免重复
+                            if not (hasattr(module, 'param_quantizers') and 'weight' in module.param_quantizers):
+                                print(f"  ✅ [{match_type}] {name}.output: {', '.join(changes)}")
                     
                     # 统计不同类型的层（只统计有输出量化器的层）
                     if 'Tanh' in module_type or 'Sigmoid' in module_type or 'ReLU' in module_type:
@@ -1062,7 +1090,7 @@ def apply_mixed_precision_bitwidth(sim_model, config_file: str, verbose: bool = 
         stats[f"{key}_{state}"] += 1
 
     # 打印统计
-    if verbose:
+    with log_details(verbose):
         print("="*70)
         print(f"📊 位宽设置统计:")
         print(f"  • Conv 层:             {stats['conv_count']} 个")
@@ -1116,7 +1144,7 @@ def _disable_quantization(module, name: str, verbose: bool):
     if hasattr(module, 'output_quantizers') and len(module.output_quantizers) > 0:
         for idx in range(len(module.output_quantizers)):
             if module.output_quantizers[idx] is not None:
-                if verbose:
+                with log_details(verbose):
                     print(f"  🚫 {name}: 禁用输出量化器 [{idx}]")
                 module.output_quantizers[idx] = None
     
@@ -1124,7 +1152,7 @@ def _disable_quantization(module, name: str, verbose: bool):
     if hasattr(module, 'input_quantizers') and len(module.input_quantizers) > 0:
         for idx in range(len(module.input_quantizers)):
             if module.input_quantizers[idx] is not None:
-                if verbose:
+                with log_details(verbose):
                     print(f"  🚫 {name}: 禁用输入量化器 [{idx}]")
                 module.input_quantizers[idx] = None
     
@@ -1132,12 +1160,13 @@ def _disable_quantization(module, name: str, verbose: bool):
     if hasattr(module, 'param_quantizers'):
         for param_name in list(module.param_quantizers.keys()):
             if module.param_quantizers[param_name] is not None:
-                if verbose:
+                with log_details(verbose):
                     print(f"  🚫 {name}: 禁用参数量化器 [{param_name}]")
                 module.param_quantizers[param_name] = None
 
 
 
+@logged_operation
 def check_bn_params_status(model, verbose: bool = True) -> Dict[str, Any]:
     """
     检查 BatchNorm 参数的状态（是否可训练、是否存在）
@@ -1201,7 +1230,7 @@ def check_bn_params_status(model, verbose: bool = True) -> Dict[str, Any]:
             else:
                 frozen_affine_params.append(name)
     
-    if verbose:
+    with log_details(verbose):
         print("\n" + "="*70)
         print("BatchNorm 参数状态检查")
         print("="*70)
@@ -1242,409 +1271,70 @@ def check_bn_params_status(model, verbose: bool = True) -> Dict[str, Any]:
     }
 
 
-def _align_conv_bias_scale(model, verbose: bool = True) -> Dict[str, Any]:
+def _align_conv_bias_scale(model, verbose: bool = True, bias_bitwidth: int = 32) -> Dict[str, Any]:
+    """Align Conv/Linear bias to the accumulator grid, rejecting unrepresentable values.
+
+    The requested signed bias width is applied to the actual PyTorch quantizer.
+    All candidate bias grids are checked before any bias quantizer is replaced.
     """
-    将所有卷积层和全连接（Linear）层的 bias scale 对齐到 Sx * Sw
-    
-    目标量化公式：Sy*Qy = Sx*Sw*(Qx*Qw + Qb)
-    通过设置 Sb = Sx*Sw，使得 bias 可以在整数域与乘积结果直接相加
-    
-    适用场景：
-    - 权重对称量化（zp_w = 0）
-    - 输入可能非对称量化（zp_x 可能非零，但不影响 Sb 的设置）
-    
-    Args:
-        model: 量化后的模型（已执行 compute_encodings 和 Power-of-2）
-        verbose: 是否打印详细信息
-        
-    Returns:
-        stats: {
-            'total_conv': 检查的卷积层总数,
-            'modified_conv': 成功修改的数量,
-            'skipped': 跳过的层列表及原因,
-            'scale_changes': 每层的 scale 变化详情
-        }
-    """
+    import copy
     import torch
     import torch.nn as nn
     from aimet_torch.v2.nn import QuantizationMixin
-    
-    stats = {
-        'total_conv': 0,
-        'modified_conv': 0,
-        'skipped': [],
-        'scale_changes': []
-    }
-    
-    # 支持的层类型：卷积 + 全连接
-    # Linear 的 bias 若走 AIMET 独立标定，近零通道会落到 minimum_scale 地板，
-    # 且 scale 与累加器 Sx*Sw 脱节（可能小到 2^-38、移位超 32 位）。
-    # 对齐到 Sb = Sx*Sw 后，scale 跟随累加器（约 2^-17~2^-26），必为 POT2 且移位 <=32。
-    conv_types = (
-        nn.Conv1d, nn.Conv2d, nn.Conv3d,
-        nn.ConvTranspose1d, nn.ConvTranspose2d, nn.ConvTranspose3d,
-        nn.Linear,
-    )
-    
+    from aimet_common.power_of_2 import validate_bias_bitwidth, validate_bias_values
+
+    validate_bias_bitwidth(bias_bitwidth)
+    stats = {'total_conv': 0, 'modified_conv': 0, 'skipped': [], 'scale_changes': []}
+    conv_types = (nn.Conv1d, nn.Conv2d, nn.Conv3d, nn.ConvTranspose1d,
+                  nn.ConvTranspose2d, nn.ConvTranspose3d, nn.Linear)
+    pending = []
     for name, module in model.named_modules():
-        # 只处理卷积层和全连接层
         if not isinstance(module, conv_types):
             continue
-        
         stats['total_conv'] += 1
-        
-        # 检查是否有 bias
-        if not hasattr(module, 'bias') or module.bias is None:
-            stats['skipped'].append((name, 'no bias'))
-            if verbose:
-                print(f"⏭️  {name}: 跳过（无 bias）")
+        if module.bias is None or not isinstance(module, QuantizationMixin):
+            stats['skipped'].append((name, 'no bias or not quantized'))
             continue
-        
-        # 检查是否是量化模块
-        if not isinstance(module, QuantizationMixin):
-            stats['skipped'].append((name, 'not quantized'))
-            if verbose:
-                print(f"⏭️  {name}: 跳过（未量化）")
+        weight_q = module.param_quantizers['weight']
+        bias_q = module.param_quantizers['bias']
+        input_q = module.input_quantizers[0] if module.input_quantizers else None
+        if any(q is None or not q.is_initialized() for q in (weight_q, bias_q, input_q)):
+            stats['skipped'].append((name, 'input/weight/bias quantizer not initialized'))
             continue
-        
-        # 获取参数量化器
-        if not hasattr(module, 'param_quantizers') or not module.param_quantizers:
-            stats['skipped'].append((name, 'no param_quantizers'))
-            if verbose:
-                print(f"⏭️  {name}: 跳过（无参数量化器）")
-            continue
-        
-        # 获取权重量化器（ModuleDict 访问方式）
-        weight_quantizer = None
-        if 'weight' in module.param_quantizers:
-            weight_quantizer = module.param_quantizers['weight']
-        
-        if weight_quantizer is None or not weight_quantizer.is_initialized():
-            stats['skipped'].append((name, 'weight quantizer not initialized'))
-            if verbose:
-                print(f"⏭️  {name}: 跳过（权重量化器未初始化）")
-            continue
-        
-        # 获取 bias 量化器（ModuleDict 访问方式）
-        bias_quantizer = None
-        if 'bias' in module.param_quantizers:
-            bias_quantizer = module.param_quantizers['bias']
-        
-        if bias_quantizer is None or not bias_quantizer.is_initialized():
-            stats['skipped'].append((name, 'bias quantizer not initialized'))
-            if verbose:
-                print(f"⏭️  {name}: 跳过（bias 量化器未初始化）")
-            continue
-        
-        # 获取输入量化器（从输入量化器列表）
-        input_quantizer = None
-        if hasattr(module, 'input_quantizers') and module.input_quantizers:
-            input_quantizer = module.input_quantizers[0]  # 通常第一个是数据输入
-        
-        if input_quantizer is None or not input_quantizer.is_initialized():
-            stats['skipped'].append((name, 'input quantizer not found or not initialized'))
-            if verbose:
-                print(f"⏭️  {name}: 跳过（输入量化器未找到或未初始化）")
-            continue
-        
-        # ===== 步骤 1: 提取量化参数 =====
-        try:
-            # 确保所有量化器使用 scale-offset 参数化
-            input_quantizer._reparametrize_to_scale_offset()
-            weight_quantizer._reparametrize_to_scale_offset()
-            bias_quantizer._reparametrize_to_scale_offset()
-            
-            # 获取 scale（直接访问属性）
-            Sx = input_quantizer.scale
-            Sw = weight_quantizer.scale
-            Sb_old = bias_quantizer.scale
-            
-            # 获取 zero-point（用于记录）
-            zp_x = input_quantizer.offset if hasattr(input_quantizer, 'offset') and input_quantizer.offset is not None else 0
-            if isinstance(zp_x, torch.Tensor):
-                zp_x = float(zp_x.item()) if zp_x.numel() == 1 else zp_x
-            
-            # 转换为标量（如果是 tensor）
-            if isinstance(Sx, torch.Tensor):
-                Sx = float(Sx.item()) if Sx.numel() == 1 else Sx
-            if isinstance(Sb_old, torch.Tensor):
-                Sb_old = float(Sb_old.item()) if Sb_old.numel() == 1 else Sb_old
-            
-            # 检查是否是 per-channel 权重量化
-            is_per_channel = isinstance(Sw, torch.Tensor) and Sw.numel() > 1
-            
-        except Exception as e:
-            stats['skipped'].append((name, f'error getting scales: {e}'))
-            if verbose:
-                print(f"⏭️  {name}: 跳过（获取 scale 失败: {e}）")
-            continue
-        
-        # ===== 步骤 2: 计算新的 bias scale =====
-        if is_per_channel:
-            # Per-channel: Sb_new 是向量
-            # Sx 是标量，Sw 是向量
-            if isinstance(Sx, torch.Tensor):
-                Sx_val = float(Sx.item())
-            else:
-                Sx_val = float(Sx)
-            
-            Sb_new_raw = Sx_val * Sw  # 可能是 [out_channels] 或 [out_channels, 1, 1, 1]
-            
-            # 🔑 关键：如果 Sw 是多维的（例如 [16, 1, 1, 1]），需要展平为 1D
-            if isinstance(Sb_new_raw, torch.Tensor) and Sb_new_raw.dim() > 1:
-                # 找到非1的维度
-                non_one_dims = [i for i, s in enumerate(Sb_new_raw.shape) if s > 1]
-                if len(non_one_dims) == 1:
-                    # 只有一个非1维度，squeeze 掉其他维度
-                    Sb_new = Sb_new_raw.squeeze()
-                else:
-                    # 多个非1维度，保持原样
-                    Sb_new = Sb_new_raw
-            else:
-                Sb_new = Sb_new_raw
-        else:
-            # Per-tensor: Sb_new 是标量
-            Sw_scalar = float(Sw.item()) if isinstance(Sw, torch.Tensor) else float(Sw)
-            if isinstance(Sx, torch.Tensor):
-                Sx_val = float(Sx.item())
-            else:
-                Sx_val = float(Sx)
-            Sb_new = Sx_val * Sw_scalar
-        
-        # ===== 步骤 3: 计算新的浮点表示范围 =====
-        try:
-            # 获取 bias 位宽
-            bias_bitwidth = bias_quantizer.bitwidth
-            
-            # 计算量化整数范围（对称量化）
-            Qmax = 2 ** (bias_bitwidth - 1) - 1
-            Qmin = -2 ** (bias_bitwidth - 1)
-            
-            # 🔑 使用展平后的 Sb_new 计算范围
-            if is_per_channel:
-                fmin_new = Qmin * Sb_new  # 向量，现在应该是 1D
-                fmax_new = Qmax * Sb_new  # 向量，现在应该是 1D
-            else:
-                fmin_new = Qmin * Sb_new
-                fmax_new = Qmax * Sb_new
-            
-        except Exception as e:
-            stats['skipped'].append((name, f'error computing new range: {e}'))
-            if verbose:
-                print(f"⏭️  {name}: 跳过（计算新范围失败: {e}）")
-            continue
-        
-        # ===== 步骤 4: 更新 bias 量化器 =====
-        try:
-            # 确保量化器使用 scale-offset 参数化
-            bias_quantizer._reparametrize_to_scale_offset()
-            
-            # 🔑 关键：保持与原始 scale 相同的形状
-            original_scale_shape = bias_quantizer.scale.shape
-            
-            if verbose:
-                print(f"\n🔧 准备更新 bias 量化器:")
-                print(f"  原始 scale 形状: {original_scale_shape}")
-            
-            # 转换 Sb_new 为 tensor（如果是标量）
-            if not isinstance(Sb_new, torch.Tensor):
-                Sb_new_tensor = torch.tensor(Sb_new, dtype=bias_quantizer.scale.dtype, device=bias_quantizer.scale.device)
-            else:
-                Sb_new_tensor = Sb_new.clone().to(dtype=bias_quantizer.scale.dtype, device=bias_quantizer.scale.device)
-            
-            if verbose:
-                print(f"  Sb_new 原始形状: {Sb_new_tensor.shape}")
-            
-            # 确保形状匹配：如果原始 scale 有特殊形状，需要调整
-            if Sb_new_tensor.shape != original_scale_shape:
-                if Sb_new_tensor.numel() == 1:
-                    # 标量情况：扩展到目标形状
-                    Sb_new_tensor = Sb_new_tensor.view(1).expand(original_scale_shape).contiguous()
-                elif original_scale_shape == torch.Size([]):
-                    # 目标是标量
-                    Sb_new_tensor = Sb_new_tensor.squeeze()
-                else:
-                    # Per-channel 情况：尝试 reshape
-                    # 首先确保元素数量匹配
-                    if Sb_new_tensor.numel() == original_scale_shape.numel():
-                        Sb_new_tensor = Sb_new_tensor.reshape(original_scale_shape)
-                    else:
-                        # 如果元素数量不匹配，可能需要广播
-                        # 例如 [16] -> [16, 1, 1, 16] 是不合理的，应该只是 [16]
-                        # 尝试保持 1D 形状
-                        if len(original_scale_shape) > 1 and original_scale_shape[0] == Sb_new_tensor.numel():
-                            # 假设第一维是通道维度
-                            target_shape = [original_scale_shape[0]] + [1] * (len(original_scale_shape) - 1)
-                            Sb_new_tensor = Sb_new_tensor.view(target_shape).expand(original_scale_shape).contiguous()
-                        else:
-                            if verbose:
-                                print(f"  ⚠️  形状不兼容: {Sb_new_tensor.shape} -> {original_scale_shape}")
-            
-            if verbose:
-                print(f"  Sb_new 调整后形状: {Sb_new_tensor.shape}")
-            
-            # 修改 scale（使用 copy_ 避免破坏梯度图）
-            with torch.no_grad():
-                bias_quantizer.scale.copy_(Sb_new_tensor)
-            
-            # offset 保持 0（对称量化，无需修改）
-            # bias_quantizer.offset 已经是 0，不需要改
-            
-            # 更新 min/max 范围（也需要匹配形状）
-            if is_per_channel:
-                fmin_new_tensor = fmin_new.clone().to(dtype=bias_quantizer.scale.dtype, device=bias_quantizer.scale.device)
-                fmax_new_tensor = fmax_new.clone().to(dtype=bias_quantizer.scale.dtype, device=bias_quantizer.scale.device)
-            else:
-                fmin_new_tensor = torch.tensor(fmin_new, dtype=bias_quantizer.scale.dtype, device=bias_quantizer.scale.device)
-                fmax_new_tensor = torch.tensor(fmax_new, dtype=bias_quantizer.scale.dtype, device=bias_quantizer.scale.device)
-            
-            # 确保 min/max 也匹配原始形状
-            if hasattr(bias_quantizer, 'min') and bias_quantizer.min is not None:
-                original_min_shape = bias_quantizer.min.shape
-                if fmin_new_tensor.shape != original_min_shape:
-                    if fmin_new_tensor.numel() == 1:
-                        fmin_new_tensor = fmin_new_tensor.view(1).expand(original_min_shape).contiguous()
-                    elif original_min_shape == torch.Size([]):
-                        fmin_new_tensor = fmin_new_tensor.squeeze()
-                    else:
-                        if fmin_new_tensor.numel() == original_min_shape.numel():
-                            fmin_new_tensor = fmin_new_tensor.reshape(original_min_shape)
-                        elif len(original_min_shape) > 1 and original_min_shape[0] == fmin_new_tensor.numel():
-                            target_shape = [original_min_shape[0]] + [1] * (len(original_min_shape) - 1)
-                            fmin_new_tensor = fmin_new_tensor.view(target_shape).expand(original_min_shape).contiguous()
-            
-            if hasattr(bias_quantizer, 'max') and bias_quantizer.max is not None:
-                original_max_shape = bias_quantizer.max.shape
-                if fmax_new_tensor.shape != original_max_shape:
-                    if fmax_new_tensor.numel() == 1:
-                        fmax_new_tensor = fmax_new_tensor.view(1).expand(original_max_shape).contiguous()
-                    elif original_max_shape == torch.Size([]):
-                        fmax_new_tensor = fmax_new_tensor.squeeze()
-                    else:
-                        if fmax_new_tensor.numel() == original_max_shape.numel():
-                            fmax_new_tensor = fmax_new_tensor.reshape(original_max_shape)
-                        elif len(original_max_shape) > 1 and original_max_shape[0] == fmax_new_tensor.numel():
-                            target_shape = [original_max_shape[0]] + [1] * (len(original_max_shape) - 1)
-                            fmax_new_tensor = fmax_new_tensor.view(target_shape).expand(original_max_shape).contiguous()
-            
-            if verbose:
-                print(f"  fmin 形状: {fmin_new_tensor.shape}")
-                print(f"  fmax 形状: {fmax_new_tensor.shape}")
-            
-            # 使用 set_range() 方法更新 min/max
-            bias_quantizer.set_range(fmin_new_tensor, fmax_new_tensor)
-            
-            if verbose:
-                print(f"  ✅ 更新成功")
-            
-            stats['modified_conv'] += 1
-            
-            # 记录修改信息
-            # 转换为可序列化的格式
-            Sx_display = float(Sx) if not isinstance(Sx, torch.Tensor) else float(Sx.item()) if Sx.numel() == 1 else f'tensor shape={Sx.shape}'
-            Sb_old_display = float(Sb_old) if not isinstance(Sb_old, torch.Tensor) else float(Sb_old.item()) if Sb_old.numel() == 1 else 'tensor'
-            
-            scale_change_info = {
-                'layer': name,
-                'Sx': Sx_display,
-                'Sw': float(Sw_scalar) if not is_per_channel else f'per-channel (shape={Sw.shape})',
-                'Sb_old': Sb_old_display,
-                'Sb_new': float(Sb_new) if not is_per_channel else f'per-channel (shape={Sb_new.shape})',
-                'scale_ratio': float(Sb_new / Sb_old_display) if not is_per_channel and isinstance(Sb_old_display, (int, float)) else 'varies',
-                'bias_bitwidth': bias_bitwidth,
-                'new_float_range': [float(fmin_new), float(fmax_new)] if not is_per_channel else 'per-channel',
-                'zp_x': int(zp_x) if isinstance(zp_x, (int, float, torch.Tensor)) and zp_x is not None else 0,
-                'is_per_channel': is_per_channel
-            }
-            stats['scale_changes'].append(scale_change_info)
-            
-            # 打印详细信息
-            if verbose:
-                print(f"\n📊 {name}:")
-                print(f"  类型: {type(module).__name__}")
-                
-                # 打印 Sx
-                Sx_display = float(Sx) if not isinstance(Sx, torch.Tensor) else float(Sx.item()) if Sx.numel() == 1 else Sx
-                if isinstance(Sx_display, torch.Tensor):
-                    print(f"  Sx (输入 scale):   per-channel, shape={Sx_display.shape}")
-                else:
-                    print(f"  Sx (输入 scale):   {Sx_display:.8f}")
-                
-                # 打印 Sw
-                if is_per_channel:
-                    # 显示原始形状和 Sb_new 的形状
-                    Sb_new_shape = Sb_new.shape if isinstance(Sb_new, torch.Tensor) else "scalar"
-                    if isinstance(Sb_new, torch.Tensor) and Sw.shape != Sb_new.shape:
-                        print(f"  Sw (权重 scale):   per-channel, 原始形状={Sw.shape} → Sb_new形状={Sb_new.shape}")
-                    else:
-                        print(f"  Sw (权重 scale):   per-channel, shape={Sw.shape}")
-                    print(f"                     min={Sw.min().item():.8f}, max={Sw.max().item():.8f}")
-                else:
-                    print(f"  Sw (权重 scale):   {Sw_scalar:.8f}")
-                
-                # 打印 Sb_old
-                Sb_old_display = float(Sb_old) if not isinstance(Sb_old, torch.Tensor) else float(Sb_old.item()) if Sb_old.numel() == 1 else Sb_old
-                if isinstance(Sb_old_display, torch.Tensor):
-                    print(f"  Sb_old (旧 bias scale): per-channel")
-                else:
-                    print(f"  Sb_old (旧 bias scale): {Sb_old_display:.8f}")
-                
-                # 打印 Sb_new
-                if is_per_channel:
-                    print(f"  Sb_new (新 bias scale): per-channel, shape={Sb_new.shape}")
-                    print(f"                          min={Sb_new.min().item():.8f}, max={Sb_new.max().item():.8f}")
-                    # 计算平均变化倍数
-                    ratio_tensor = Sb_new / Sb_old_display if isinstance(Sb_old_display, torch.Tensor) else Sb_new / Sb_old_display
-                    print(f"  变化倍数:          平均 {ratio_tensor.mean().item():.4f}x (范围: {ratio_tensor.min().item():.4f}x - {ratio_tensor.max().item():.4f}x)")
-                else:
-                    print(f"  Sb_new (新 bias scale): {Sb_new:.8f}")
-                    print(f"  变化倍数:          {Sb_new / Sb_old_display:.4f}x")
-                
-                print(f"  Bias 位宽:         {bias_bitwidth}-bit")
-                print(f"  量化范围:          [{Qmin}, {Qmax}]")
-                
-                if is_per_channel:
-                    print(f"  新浮点范围:        per-channel")
-                    print(f"                     min范围: [{fmin_new.min().item():.6f}, {fmin_new.max().item():.6f}]")
-                    print(f"                     max范围: [{fmax_new.min().item():.6f}, {fmax_new.max().item():.6f}]")
-                else:
-                    print(f"  新浮点范围:        [{fmin_new:.6f}, {fmax_new:.6f}]")
-                
-                print(f"  offset:            0 (对称量化)")
-                
-                if isinstance(zp_x, (int, float)) and zp_x != 0:
-                    print(f"  输入 zero-point:   {zp_x} (非对称量化)")            
-        except Exception as e:
-            stats['skipped'].append((name, f'error updating quantizer: {e}'))
-            if verbose:
-                print(f"❌ {name}: 更新失败: {e}")
-            continue
-    
-    # 打印汇总
-    if verbose:
-        print("\n" + "="*80)
-        print("Bias Scale 对齐汇总")
-        print("="*80)
-        print(f"检查的卷积/全连接层总数: {stats['total_conv']}")
-        print(f"成功修改的层数:     {stats['modified_conv']}")
-        print(f"跳过的层数:         {len(stats['skipped'])}")
-        
-        if stats['skipped'] and len(stats['skipped']) <= 10:
-            print("\n跳过的层:")
-            for layer_name, reason in stats['skipped']:
-                print(f"  - {layer_name}: {reason}")
-        elif len(stats['skipped']) > 10:
-            print(f"\n跳过的层（仅显示前 10 个）:")
-            for layer_name, reason in stats['skipped'][:10]:
-                print(f"  - {layer_name}: {reason}")
-            print(f"  ... 还有 {len(stats['skipped']) - 10} 个")
-        
-        if stats['modified_conv'] > 0:
-            print(f"\n✅ 成功对齐 {stats['modified_conv']} 个卷积/全连接层的 bias scale")
-        else:
-            print("\n⚠️  没有成功修改任何层")
-        
-        print("="*80)
-    
-    return stats
 
+        sx = input_q.get_scale().detach()
+        sw = weight_q.get_scale().detach()
+        if sx.numel() != 1 or sw.numel() not in (1, module.bias.numel()):
+            raise ValueError(f"{name}: bias alignment requires scalar input and output-channel weight scales")
+        target = (sx.reshape(()) * sw.reshape(-1)).to(module.bias.device)
+        validate_bias_values(module.bias.detach().double().cpu().numpy(),
+                             target.double().cpu().numpy(), bias_bitwidth, name=name)
+
+        aligned = copy.deepcopy(bias_q)
+        aligned.bitwidth = bias_bitwidth
+        aligned.signed = True
+        aligned.symmetric = True
+        aligned._reparametrize_to_scale_offset()
+        if target.numel() == 1:
+            target = target.reshape(()).expand_as(aligned.scale)
+        elif target.numel() == aligned.scale.numel():
+            target = target.reshape_as(aligned.scale)
+        else:
+            raise ValueError(f"{name}: bias quantizer shape cannot represent the output-channel accumulator grid")
+        with torch.no_grad():
+            aligned.scale.copy_(target)
+        if not torch.equal(aligned.get_scale(), target):
+            raise ValueError(f"{name}: bias accumulator scale is below the quantizer's representable scale range")
+        pending.append((name, module, aligned, sx, sw, bias_q.get_scale().detach().clone(), target))
+
+    for name, module, aligned, sx, sw, previous, target in pending:
+        module.param_quantizers['bias'] = aligned
+        stats['modified_conv'] += 1
+        stats['scale_changes'].append({
+            'layer': name, 'Sx': sx.cpu().tolist(), 'Sw': sw.cpu().tolist(),
+            'Sb_old': previous.cpu().tolist(), 'Sb_new': target.cpu().tolist(),
+            'bias_bitwidth': bias_bitwidth, 'is_per_channel': target.numel() > 1,
+        })
+        with log_details(verbose):
+            print(f"{name}: bias aligned to Sx*Sw, signed {bias_bitwidth}-bit; range checked")
+    return stats

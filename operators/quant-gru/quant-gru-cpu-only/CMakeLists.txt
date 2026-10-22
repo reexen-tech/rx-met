@@ -22,3 +22,9 @@ install(TARGETS quant_gru_cpu_static quant_gru_cpu_shared
         LIBRARY DESTINATION lib
         ARCHIVE DESTINATION lib)
 install(DIRECTORY include/ DESTINATION include)
+
+include(CTest)
+if(BUILD_TESTING)
+    add_executable(test_update_zero_point tests/test_update_zero_point.cc)
+    add_test(NAME update_zero_point COMMAND test_update_zero_point)
+endif()

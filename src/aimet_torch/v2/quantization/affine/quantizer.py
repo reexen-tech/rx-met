@@ -78,6 +78,7 @@ from aimet_torch.v2.quantization.affine.backends import (
 )
 from aimet_torch.v2.utils import ste_round
 from aimet_torch.v2.deepspeed_utils import SafeGatheredParameters
+from aimet_common.quantization_grid import IntegerGrid, integer_bounds, symmetric_offset
 from aimet_common.quantsim import _get_minimum_scale
 from ._utils import _GridMixin, _register_signature
 
@@ -100,7 +101,7 @@ class AffineQuantizerBase(QuantizerBase, _GridMixin):  # pylint: disable=too-man
     Args:
         shape (tuple): Shape of the quantization parameters
         bitwidth (int): Quantization bitwidth
-        symmetric (bool): If True, performs symmetric quantization;
+        symmetric (bool): Defaults to True. If True, performs symmetric quantization;
                           otherwise, performs asymmetric quantization
         encoding_analyzer (EncodingAnalyzer, optional): Encoding analyzer for calibrating quantization encodings
                                                         (default: absolute min-max encoding analyzer)
@@ -116,7 +117,7 @@ class AffineQuantizerBase(QuantizerBase, _GridMixin):  # pylint: disable=too-man
         shape,
         qmin: int,
         qmax: int,
-        symmetric: bool,
+        symmetric: bool = True,
         encoding_analyzer: EncodingAnalyzer = None,
         block_size: Optional[Tuple[int, ...]] = None,
         zero_point_shift: Optional[float] = None,
@@ -128,7 +129,7 @@ class AffineQuantizerBase(QuantizerBase, _GridMixin):  # pylint: disable=too-man
         self,
         shape,
         bitwidth: int,
-        symmetric: bool,
+        symmetric: bool = True,
         encoding_analyzer: EncodingAnalyzer = None,
         block_size: Optional[Tuple[int, ...]] = None,
         zero_point_shift: Optional[float] = None,
@@ -140,6 +141,7 @@ class AffineQuantizerBase(QuantizerBase, _GridMixin):  # pylint: disable=too-man
             shape = (shape,)
         self.shape = tuple(shape)
         full_args = (shape, *args)
+        signed = kwargs.pop("signed", True)
 
         # Pad positional args with None's such that len(args) == 6
         args = tuple(chain(args, repeat(None, 6 - len(args))))
@@ -149,7 +151,7 @@ class AffineQuantizerBase(QuantizerBase, _GridMixin):  # pylint: disable=too-man
         if arg1 is not None and not isinstance(arg1, bool):
             # (arg0, arg1, arg2) == (qmin, qmax, symmetric)
             qmin, qmax = arg0, arg1
-            symmetric = kwargs.pop("symmetric", args[2])
+            symmetric = kwargs.pop("symmetric", True if args[2] is None else args[2])
 
             if (qmin is None) or (qmax is None) or (symmetric is None):
                 raise self._arg_parsing_error(full_args, kwargs)
@@ -160,13 +162,12 @@ class AffineQuantizerBase(QuantizerBase, _GridMixin):  # pylint: disable=too-man
         else:
             # (arg0, arg1) == (bitwidth, symmetric)
             bitwidth = arg0
-            symmetric = kwargs.pop("symmetric", args[1])
+            symmetric = kwargs.pop("symmetric", True if args[1] is None else args[1])
 
             if (bitwidth is None) or (symmetric is None):
                 raise self._arg_parsing_error(full_args, kwargs)
 
-            # We support two quantization modes: (unsigned) asymmetric and signed-symmetric
-            qmin, qmax = _derive_qmin_qmax(bitwidth=bitwidth, signed=symmetric)
+            qmin, qmax = integer_bounds(bitwidth, signed)
             encoding_analyzer = kwargs.pop("encoding_analyzer", args[2])
             block_size = kwargs.pop("block_size", args[3])
             zero_point_shift = kwargs.pop("zero_point_shift", args[4])
@@ -475,7 +476,7 @@ class AffineQuantizerBase(QuantizerBase, _GridMixin):  # pylint: disable=too-man
                 offset,
                 self.qmin,
                 self.qmax,
-                self._symmetric,
+                self.symmetric,
                 self.block_size,
                 self.zero_point_shift,
             )
@@ -494,9 +495,36 @@ class AffineQuantizerBase(QuantizerBase, _GridMixin):  # pylint: disable=too-man
             block_size=encodings.block_size,
         )
 
-        qtzr.set_range(encodings.min, encodings.max)
+        grid = IntegerGrid.from_offset(encodings.scale.detach().cpu().tolist(),
+            encodings.offset.detach().cpu().tolist(), encodings.bitwidth, encodings.signed,
+            qmin=encodings.qmin, qmax=encodings.qmax)
+        qtzr.set_integer_grid(grid, symmetric=encodings.symmetry)
 
         return qtzr
+
+    @torch.no_grad()
+    def set_integer_grid(self, grid: IntegerGrid, *, symmetric: bool):
+        if (grid.qmin, grid.qmax) != integer_bounds(grid.bitwidth, grid.signed):
+            raise ValueError('Torch QuantSim does not support narrow integer ranges')
+        device = next(self.parameters()).device
+
+        def tensor(value):
+            value = torch.as_tensor(value, dtype=torch.float32, device=device)
+            if value.numel() == 1:
+                return value.reshape((1,) * len(self.shape)).expand(self.shape)
+            return value.reshape(self.shape)
+
+        scale = tensor(grid.scale)
+        offset = tensor(grid.additive_offset())
+        if symmetric and not (offset == symmetric_offset(grid.qmin, grid.qmax)).all():
+            raise ValueError('symmetric encoding has an incompatible zero point')
+        self.qmin, self.qmax = grid.qmin, grid.qmax
+        self.symmetric = symmetric
+        self.set_range(tensor(grid.real_min), tensor(grid.real_max))
+        self._reparametrize_to_scale_offset()
+        self.scale.copy_(scale)
+        if not symmetric:
+            self.offset.copy_(offset)
 
     @torch.no_grad()
     def get_legacy_encodings(self) -> Optional[List[Dict]]:
@@ -532,15 +560,9 @@ class AffineQuantizerBase(QuantizerBase, _GridMixin):  # pylint: disable=too-man
                 return True
             raise ValueError
 
-        bitwidth = encodings[0]["bitwidth"]
         symmetric = str_to_bool(encodings[0]["is_symmetric"])
-        # We support two quantization modes: (unsigned) asymmetric and signed-symmetric
-        self.qmin, self.qmax = _derive_qmin_qmax(bitwidth=bitwidth, signed=symmetric)
-        self.symmetric = symmetric
-        # Note: We can only accurately infer signed-ness in the symmetric case, but AIMET uses unsigned for asymmetric
-        min_ = torch.tensor([e["min"] for e in encodings]).view(self.shape)
-        max_ = torch.tensor([e["max"] for e in encodings]).view(self.shape)
-        self.set_range(min_, max_)
+        grid = IntegerGrid.from_aimet_legacy_records(encodings, signed=self.signed)
+        self.set_integer_grid(grid, symmetric=symmetric)
 
     def extra_repr(self) -> str:
         extra_repr = f"shape={self.shape}"
@@ -602,7 +624,13 @@ class AffineQuantizerBase(QuantizerBase, _GridMixin):  # pylint: disable=too-man
 
     @signed.setter
     def signed(self, signed: bool):
+        if type(signed) is not bool:
+            raise ValueError('signed must be a boolean')
+        old_min = self.qmin
         self._set_signed(signed)
+        if self._is_scale_offset_quantizer() and not self.symmetric:
+            with torch.no_grad():
+                self.offset.add_(old_min - self.qmin)
 
     @contextlib.contextmanager
     def compute_encodings(self):
@@ -629,13 +657,14 @@ class AffineQuantizerBase(QuantizerBase, _GridMixin):  # pylint: disable=too-man
             expanded_input = torch_builtins.reshape_tensor_for_blocks(
                 input, shape, self.block_size
             )
-            batch_statistics = self.encoding_analyzer.update_stats(expanded_input)
+            observed = expanded_input.clamp_min(0) if self.symmetric and not self.signed else expanded_input
+            batch_statistics = self.encoding_analyzer.update_stats(observed)
             num_steps = self.qmax - self.qmin
             if self.zero_point_shift == 0.5:
                 num_steps -= 1
             dynamic_min, dynamic_max = (
                 self.encoding_analyzer.compute_encodings_from_stats(
-                    batch_statistics, num_steps, self.symmetric
+                    batch_statistics, num_steps, self.symmetric and self.signed
                 )
             )
             if self.block_size is not None:
@@ -643,6 +672,8 @@ class AffineQuantizerBase(QuantizerBase, _GridMixin):  # pylint: disable=too-man
                 dynamic_max = dynamic_max.view(shape)
             dynamic_min = dynamic_min.to(dtype=dtype, device=device).expand(shape)
             dynamic_max = dynamic_max.to(dtype=dtype, device=device).expand(shape)
+            if self.symmetric and not self.signed:
+                dynamic_min = torch.zeros_like(dynamic_min)
 
             if self._is_min_max_quantizer():
                 with (
@@ -680,12 +711,14 @@ class AffineQuantizerBase(QuantizerBase, _GridMixin):  # pylint: disable=too-man
             if self.zero_point_shift == 0.5:
                 num_steps -= 1
             enc_min, enc_max = self.encoding_analyzer.compute_encodings(
-                num_steps, self.symmetric
+                num_steps, self.symmetric and self.signed
             )
             if self.block_size is not None:
                 enc_min = enc_min.view(shape)
                 enc_max = enc_max.view(shape)
             _flag_extreme_min_max(enc_min, enc_max)
+            if self.symmetric and not self.signed:
+                enc_min = torch.zeros_like(enc_min)
 
         except StatisticsNotFoundError:
             return
@@ -702,7 +735,7 @@ class AffineQuantizerBase(QuantizerBase, _GridMixin):  # pylint: disable=too-man
 def _get_symmetric_offset(qmin, qmax, shape, dtype, device):
     return torch.full(
         shape,
-        fill_value=-round((qmin + qmax) / 2),
+        fill_value=symmetric_offset(qmin, qmax),
         requires_grad=False,
         dtype=dtype,
         device=device,
@@ -751,7 +784,7 @@ def _get_scale_offset(
 
     if symmetric:
         offset = torch.full_like(
-            min, fill_value=-round((qmin + qmax) / 2), requires_grad=False
+            min, fill_value=symmetric_offset(qmin, qmax), requires_grad=False
         )
     else:
         offset = ste_round(min / scale) - qmin

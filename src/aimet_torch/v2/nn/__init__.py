@@ -71,6 +71,9 @@ def compute_encodings(model: torch.nn.Module):
             if isinstance(module, BaseQuantizationMixin):  # pylint: disable=undefined-variable
                 ctx = module.compute_encodings()
                 stack.enter_context(ctx)
+            elif getattr(module, '_param_quantization_enabled', False):
+                from aimet_torch.v2.quantsim.fx_parameters import compute_parameter_encodings
+                stack.enter_context(compute_parameter_encodings(module))
 
         yield
 
@@ -86,3 +89,6 @@ def compute_param_encodings(model: torch.nn.Module):
     for module in model.modules():
         if isinstance(module, BaseQuantizationMixin):  # pylint: disable=undefined-variable
             module.compute_param_encodings()
+        elif getattr(module, '_param_quantization_enabled', False):
+            from aimet_torch.v2.quantsim.fx_parameters import update_parameter_encodings
+            update_parameter_encodings(module)

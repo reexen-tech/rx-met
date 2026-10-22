@@ -67,7 +67,7 @@ class LazyQuantizeWrapper(torch.nn.Module, ABC):  # pylint: disable=too-many-ins
         rounding_mode,
         quant_scheme: QuantScheme,
         is_output_quantized=True,
-        is_symmetric=False,
+        is_symmetric=True,
         num_inputs=1,
         num_outputs=1,
         data_type: QuantizationDataType = QuantizationDataType.int,

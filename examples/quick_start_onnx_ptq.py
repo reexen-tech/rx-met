@@ -8,20 +8,26 @@ RX-MET ONNX PTQ 演示 — 标准用法
         → apply_mixed_precision_bitwidth（JSON 2，与 quick_start_kws.py 同一份）
         → sim.compute_encodings 校准 (PTQ)
         → apply_power_of_2_workflow（RX cover_range + Sb=Sx*Sw，算法在 aimet_common）
-        → export_onnx_compiler_artifacts（clean ONNX + compiler encodings）
-        → 重建 clean ONNX session，对比 FP32
+        → export_onnx_json（clean ONNX + compiler encodings）
+        → 重建 QuantSim，恢复 encodings，对比保存前的量化输出
 
 ONNX 没有 PyTorch 权重可训，因此没有 QAT 微调；其余步骤与 quick_start_kws.py 对应。
 main() 只编排已有模块，不复制量化规则。
 
 运行（先进入 examples/）：
 
-    python onnx_ptq_quick_start.py
+    python quick_start_onnx_ptq.py
 
-跑 MobileNetV2 示例。先用 `prepare_onnx_ptq_data.py` 从 ImageNette
-parquet 生成 calib/val npy。模型、校准目录和输出目录可分别用
+本入口只读取用户准备好的静态 ONNX 和 NPY/NPZ 校准数据，不执行模型专属预处理。
+复现 MobileNetV2 + ImageNette 演示时，先单独运行 `prepare_onnx_ptq_data.py`，
+再按其打印的命令执行本入口。模型、校准目录和输出目录可分别用
 `RX_MET_ONNX_PTQ_MODEL`、`RX_MET_ONNX_PTQ_CALIB` 和
 `RX_MET_ONNX_PTQ_OUTPUT_DIR` 覆盖。
+
+默认模型: ./output/onnx_ptq_quick_start/models/mobilenetv2/mobilenetv2-12.onnx
+默认校准: ./output/onnx_ptq_quick_start/datasets/imagenette2-320/calib
+默认验证: 校准目录同级的 val/；RX_MET_ONNX_PTQ_VAL 可覆盖
+默认输出: 当前运行目录下的 output/onnx_ptq_quick_start
 """
 
 from __future__ import annotations
@@ -43,13 +49,15 @@ from aimet_onnx.rx_ptq import (
     apply_power_of_2_workflow,
     create_onnx_ptq_sim,
     disable_onnx_bias_quantizers,
-    evaluate_onnx_outputs,
-    export_onnx_compiler_artifacts,
+    evaluate_onnx_dataset,
+    export_onnx_json,
     force_model_io_quantizers,
     load_onnx_ptq_inputs,
-    run_onnx_feed,
+    load_onnx_validation_inputs,
+    verify_onnx_ptq_artifacts,
     write_onnx_ptq_metadata,
 )
+from aimet_common.run_context import execution
 
 
 # ============================================================================
@@ -57,11 +65,12 @@ from aimet_onnx.rx_ptq import (
 # ============================================================================
 EXAMPLE = os.environ.get("RX_MET_ONNX_PTQ_EXAMPLE", "mobilenetv2")
 
-_DATA = Path(os.environ.get("RX_MET_ONNX_PTQ_ROOT", "/datasets"))
+_PREPARED_ROOT = Path.cwd() / "output" / "onnx_ptq_quick_start"
+_DATA = Path(os.environ.get("RX_MET_ONNX_PTQ_ROOT", str(_PREPARED_ROOT / "datasets")))
 EXAMPLES = {
     "mobilenetv2": {
-        "model": _DATA / "mobilenetv2" / "mobilenetv2-12.onnx",
-        "calib_dir": _DATA / "mobilenetv2" / "calib",
+        "model": _PREPARED_ROOT / "models" / "mobilenetv2" / "mobilenetv2-12.onnx",
+        "calib_dir": _DATA / "imagenette2-320" / "calib",
         "prefix": "mobilenetv2_ptq",
     },
 }
@@ -83,7 +92,7 @@ BITWIDTH_CONFIG_FILE = _HERE / "config" / "quick_start_full_quant.json"
 OUTPUT_DIR = Path(
     os.environ.get(
         "RX_MET_ONNX_PTQ_OUTPUT_DIR",
-        str(_HERE / "output" / "onnx_ptq_quick_start"),
+        str(_PREPARED_ROOT),
     )
 )
 DEVICE = os.environ.get("RX_MET_ONNX_PTQ_DEVICE", "cuda").strip().lower()
@@ -149,6 +158,11 @@ def print_compare_report(title: str, report: list[dict]) -> None:
         )
 
 
+def print_accuracy_report(title: str, report: dict) -> None:
+    if "top1_accuracy" in report:
+        print(f"{title}: Top-1 {report['top1_accuracy'] * 100:.2f}% ({report['sample_count']} samples)")
+
+
 def print_stage_timings(timings: dict) -> None:
     print("\n" + "=" * 70)
     print("耗时汇总")
@@ -171,6 +185,13 @@ def print_stage_timings(timings: dict) -> None:
 # 主流程：与 quick_start_kws.py 对齐的步骤编号
 # ============================================================================
 def main() -> None:
+    with execution(OUTPUT_DIR, 'onnx_ptq') as run:
+        run.snapshot_config(CONFIG_FILE, 'quantsim')
+        run.snapshot_config(BITWIDTH_CONFIG_FILE, 'mixed_precision')
+        _run_onnx_ptq(run)
+
+
+def _run_onnx_ptq(run) -> None:
     if EXAMPLE not in EXAMPLES:
         raise KeyError(f"未知 EXAMPLE={EXAMPLE}，当前支持: {sorted(EXAMPLES)}")
 
@@ -178,6 +199,7 @@ def main() -> None:
     model_path = Path(os.environ.get("RX_MET_ONNX_PTQ_MODEL", spec["model"]))
     calib_dir = Path(os.environ.get("RX_MET_ONNX_PTQ_CALIB", spec["calib_dir"]))
     filename_prefix = spec["prefix"]
+    run.note_inputs(model=model_path, calibration=calib_dir)
     providers = choose_providers()
     timings: dict = {}
 
@@ -206,18 +228,29 @@ def main() -> None:
         original_model, input_shapes, feeds = load_onnx_ptq_inputs(
             model_path, calib_dir, CALIB_LIMIT
         )
+        validation_dir = Path(os.environ.get("RX_MET_ONNX_PTQ_VAL", str(calib_dir.parent / "val")))
+        if validation_dir.is_dir() or "RX_MET_ONNX_PTQ_VAL" in os.environ:
+            evaluation_feeds, validation_labels = load_onnx_validation_inputs(original_model, validation_dir)
+        else:
+            evaluation_feeds, validation_labels = feeds, None
+            validation_dir = None
         print(f"输入 shape: {input_shapes}")
         print(f"校准样本:   {len(feeds)}")
+        print(f"评估数据:   {validation_dir or calib_dir} ({len(evaluation_feeds)} feeds)")
 
     # ------------------------------------------------------------------
     # 步骤 2: 浮点评估
     #   ONNX 已是训练好的浮点图，这里只跑 FP32 参考输出，供后续对比。
     # ------------------------------------------------------------------
     with stage("步骤 2: 浮点评估", timings):
-        fp32_outputs = run_onnx_feed(model_path, feeds[0], providers)
+        fp32_batches, fp32_evaluation = evaluate_onnx_dataset(
+            model_path, evaluation_feeds, labels=validation_labels, providers=providers
+        )
+        fp32_outputs = fp32_batches[0]
         print(f"FP32 输出数量: {len(fp32_outputs)}")
         for index, value in enumerate(fp32_outputs):
             print(f"  output[{index}] shape={list(value.shape)}")
+        print_accuracy_report("FP32 验证", fp32_evaluation)
 
     # ------------------------------------------------------------------
     # 步骤 3: 创建 QuantizationSimModel
@@ -237,31 +270,33 @@ def main() -> None:
             quant_scheme=QUANT_SCHEME,
             percentile_value=PERCENTILE_VALUE,
             providers=providers,
-            work_dir=OUTPUT_DIR / "_aimet_tmp",
+            work_dir=run.work / "aimet",
         )
         require_active_cuda_session(sim.session)
         apply_mixed_precision_bitwidth(
             sim, config_file=str(BITWIDTH_CONFIG_FILE), verbose=True
         )
         force_model_io_quantizers(sim, original_model)
-        disabled_biases = disable_onnx_bias_quantizers(sim)
+        disabled_biases = disable_onnx_bias_quantizers(
+            sim, preserve_shared_percentile=True) if ALIGN_BIAS_SCALE else []
         print(f"quantizer 数量: {len(sim.qc_quantize_op_dict)}")
         print(
-            f"校准前关闭 {len(disabled_biases)} 个 bias quantizer；"
-            "Sb=Sx*Sw 在步骤 5 写入"
+            f"延后至 Po2 对齐的 bias quantizer: {len(disabled_biases)}"
         )
 
     # ------------------------------------------------------------------
     # 步骤 4: 校准 (PTQ)
     #   对应 aimet.nn.compute_encodings。
-    #   bias 不参与统计校准：近零 per-channel scale=0 会向后续图注入 Inf。
+    #   Percentile 按配置校准 bias；旧原生统计路径的 bias 延后到 Po2 对齐。
     # ------------------------------------------------------------------
     with stage("步骤 4: 校准 (PTQ)", timings):
         sim.compute_encodings(feeds)
-        ptq_report = evaluate_onnx_outputs(
-            sim, feeds[0], fp32_outputs, providers
+        _, ptq_evaluation = evaluate_onnx_dataset(
+            sim, evaluation_feeds, reference=fp32_batches, labels=validation_labels, providers=providers
         )
+        ptq_report = ptq_evaluation["comparison"]
         print_compare_report("PTQ vs FP32", ptq_report)
+        print_accuracy_report("PTQ 验证", ptq_evaluation)
 
     # ------------------------------------------------------------------
     # 步骤 5: Power-of-2 量化
@@ -277,8 +312,12 @@ def main() -> None:
             verbose=True,
             bias_bitwidth=BIAS_BITWIDTH,
         )
-        po2_eval = evaluate_onnx_outputs(sim, feeds[0], fp32_outputs, providers)
+        quantized_batches, po2_evaluation = evaluate_onnx_dataset(
+            sim, evaluation_feeds, reference=fp32_batches, labels=validation_labels, providers=providers
+        )
+        po2_eval = po2_evaluation["comparison"]
         print_compare_report("Po2 vs FP32", po2_eval)
+        print_accuracy_report("Po2 验证", po2_evaluation)
 
     # ------------------------------------------------------------------
     # 步骤 6: QAT 微调
@@ -290,11 +329,11 @@ def main() -> None:
 
     # ------------------------------------------------------------------
     # 步骤 7: 保存量化产物
-    #   对应 export_onnx_json：clean ONNX + compiler encodings + RX-MET raw。
+    #   与 Torch 共用导出入口名：clean ONNX + compiler encodings + RX-MET raw。
     # ------------------------------------------------------------------
     with stage("步骤 7: 保存量化产物", timings):
-        artifacts = export_onnx_compiler_artifacts(
-            sim, original_model, OUTPUT_DIR, filename_prefix
+        artifacts = export_onnx_json(
+            sim, original_model, run.exports, filename_prefix
         )
         print(f"ONNX:              {artifacts['onnx']}")
         print(f"compiler encodings:{artifacts['encodings']}")
@@ -307,20 +346,30 @@ def main() -> None:
 
     # ------------------------------------------------------------------
     # 步骤 8: 重新加载并验证
-    #   对应重建 sim + load encodings。这里加载 clean ONNX，确认图契约未变。
+    #   同时检查浮点图、恢复后的量化输出和 compiler encodings。
     # ------------------------------------------------------------------
     with stage("步骤 8: 重新加载并验证", timings):
-        reload_report = evaluate_onnx_outputs(
-            artifacts["onnx"], feeds[0], fp32_outputs, providers
+        _, clean_evaluation = evaluate_onnx_dataset(
+            artifacts["onnx"], evaluation_feeds, reference=fp32_batches, providers=providers
         )
-        print_compare_report("clean ONNX vs FP32", reload_report)
-        if any(item["rmse"] > 0 for item in reload_report):
-            print("⚠️  clean ONNX 与 FP32 不一致，请检查 export 是否改图")
-        else:
-            print("✅ clean ONNX 与 FP32 输出一致，加载验证通过")
+        clean_report = clean_evaluation["comparison"]
+        print_compare_report("clean ONNX vs FP32", clean_report)
+        if any(item["max_abs"] > 0 for item in clean_report):
+            raise RuntimeError("clean ONNX 与 FP32 不一致，请检查 export 是否改图")
+        reload_report = verify_onnx_ptq_artifacts(
+            artifacts, evaluation_feeds[0], quantized_batches[0], config_file=str(CONFIG_FILE),
+            param_type=PARAM_TYPE, activation_type=ACTIVATION_TYPE,
+            quant_scheme=QUANT_SCHEME, percentile_value=PERCENTILE_VALUE,
+            providers=providers,
+            validation_feeds=evaluation_feeds, expected_validation_outputs=quantized_batches,
+            validation_labels=validation_labels,
+        )
+        print_compare_report("恢复后的量化输出 vs 保存前", reload_report)
+        print_accuracy_report("恢复验证", reload_report[0])
+        print("✅ ONNX 维度、量化输出和 compiler encodings 恢复验证通过")
 
     metadata_path = write_onnx_ptq_metadata(
-        OUTPUT_DIR,
+        run.exports,
         filename_prefix,
         {
             "example": EXAMPLE,
@@ -328,17 +377,22 @@ def main() -> None:
             "input_shapes": input_shapes,
             "calibration_dir": str(calib_dir.resolve()),
             "calibration_count": len(feeds),
+            "evaluation_source": "validation" if validation_dir is not None else "calibration",
+            "validation_dir": str(validation_dir.resolve()) if validation_dir is not None else None,
+            "evaluation": {"fp32": fp32_evaluation, "ptq": ptq_evaluation, "po2": po2_evaluation},
             "quant_scheme": QUANT_SCHEME,
             "percentile_value": PERCENTILE_VALUE,
             "po2_method": PO2_METHOD,
             "align_bias_scale": ALIGN_BIAS_SCALE,
             "bias_bitwidth": BIAS_BITWIDTH,
             "coverage": artifacts["coverage"],
+            "onnx_shapes": artifacts["onnx_shapes"],
             "ptq_vs_fp32": ptq_report,
             "po2_vs_fp32": po2_eval,
             "bias_align": po2_report["bias_align"],
             "all_power_of_2": po2_report.get("all_power_of_2"),
-            "clean_onnx_vs_fp32": reload_report,
+            "clean_onnx_vs_fp32": clean_report,
+            "restored_quantized_vs_pre_export": reload_report,
             "onnx": str(artifacts["onnx"]),
             "compiler_encodings": str(artifacts["encodings"]),
             "aimet_encodings": str(artifacts["aimet_encodings"]),

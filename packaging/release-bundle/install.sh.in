@@ -7,16 +7,32 @@ PREFIX="${HOME}/.local/share/rx-met"
 CACHE_DIR="${XDG_CACHE_HOME:-${HOME}/.cache}/rx-met/images"
 ARCHIVE=""
 OFFLINE=0
+REPLACE=0
 STAGING=""
+BACKUP=""
 DOWNLOAD_DIR=""
 RUNTIME_LOADED=0
 log() { printf '[install] %s\n' "$*"; }
 die() { printf '[install] ERROR: %s\n' "$*" >&2; exit 1; }
 cleanup() {
+    local status=$?
+    if [[ -n "$BACKUP" && -d "$BACKUP/previous" ]]; then
+        if [[ ! -e "$DESTINATION" && ! -L "$DESTINATION" ]] \
+            && mv -T -- "$BACKUP/previous" "$DESTINATION"; then
+            log '替换失败，已恢复原安装'
+        else
+            printf '[install] ERROR: 无法恢复原安装，备份保留于: %s\n' "$BACKUP/previous" >&2
+            status=1
+        fi
+    fi
     if [[ -n "$STAGING" && -d "$STAGING" ]]; then rm -rf -- "$STAGING"; fi
+    if [[ -n "$BACKUP" && -d "$BACKUP" && ! -e "$BACKUP/previous" ]]; then rm -rf -- "$BACKUP"; fi
     if [[ -n "$DOWNLOAD_DIR" && -d "$DOWNLOAD_DIR" ]]; then rm -rf -- "$DOWNLOAD_DIR"; fi
+    return "$status"
 }
 trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 while (($#)); do
     case "$1" in
         --prefix|--cache-dir|--runtime-image)
@@ -28,14 +44,16 @@ while (($#)); do
             esac
             shift 2 ;;
         --offline) OFFLINE=1; shift ;;
+        --replace) REPLACE=1; shift ;;
         -h|--help)
-            printf '用法: ./install.sh [--prefix DIR] [--offline] [--runtime-image FILE] [--cache-dir DIR]\n'
+            printf '用法: ./install.sh [--prefix DIR] [--offline] [--runtime-image FILE] [--cache-dir DIR] [--replace]\n'
             printf '  --runtime-image FILE  指定本地 runtime Docker 镜像文件\n'
+            printf '  --replace             安装并自检通过后替换同名安装目录\n'
             exit 0 ;;
         *) die "未知参数: $1" ;;
     esac
 done
-for command in docker sha256sum realpath flock mktemp find sort xargs cp df tail tr cut uname id; do
+for command in docker sha256sum realpath flock mktemp find sort xargs cp mv rm df tail tr cut uname id; do
     command -v "$command" >/dev/null || die "缺少工具: $command"
 done
 [[ "$(uname -s)" == Linux && "$(uname -m)" == x86_64 ]] || die '需要 Linux x86_64'
@@ -56,7 +74,10 @@ mkdir -p -- "$PREFIX/.locks"
 exec 9>"$PREFIX/.locks/$BUNDLE_NAME.lock"
 flock -n 9 || die '该版本正在被另一个安装进程处理'
 DESTINATION="$PREFIX/$BUNDLE_NAME"
-if [[ ! -e "$DESTINATION" ]]; then
+if [[ -e "$DESTINATION" || -L "$DESTINATION" ]]; then
+    [[ -d "$DESTINATION" && ! -L "$DESTINATION" ]] || die '目标路径不是独立安装目录'
+fi
+if [[ ! -e "$DESTINATION" || "$REPLACE" == 1 ]]; then
     available_bytes="$(df --output=avail -B1 "$PREFIX" | tail -n1 | tr -d ' ')"
     ((available_bytes >= APP_INSTALL_BYTES)) || die "安装目录可用空间不足，至少需要 $APP_INSTALL_BYTES bytes"
 fi
@@ -149,11 +170,11 @@ elif docker image inspect "$RUNTIME_IMAGE_ID" >/dev/null 2>&1; then
     log '复用已存在且身份匹配的 runtime'
 else
     command -v gzip >/dev/null || die '缺少 gzip'
-    for candidate in "$BUNDLE_DIR/images/$RUNTIME_ARCHIVE" "$BUNDLE_DIR/../images/$RUNTIME_ARCHIVE" "$CACHE_DIR/$RUNTIME_ARCHIVE"; do
+    for candidate in "$BUNDLE_DIR/../$RUNTIME_ENV_DIR/$RUNTIME_ARCHIVE" "$BUNDLE_DIR/../../$RUNTIME_ENV_DIR/$RUNTIME_ARCHIVE" "$CACHE_DIR/$RUNTIME_ARCHIVE"; do
         if [[ -f "$candidate" ]]; then ARCHIVE="$candidate"; break; fi
     done
     if [[ -z "$ARCHIVE" ]]; then
-        ((OFFLINE == 0)) || die "离线模式缺少 runtime，请将 $RUNTIME_ARCHIVE 放入 images/ 或使用 --runtime-image"
+        ((OFFLINE == 0)) || die "离线模式缺少 runtime，请将 $RUNTIME_ENV_DIR 与产品目录平级放置，或使用 --runtime-image 指定 $RUNTIME_ARCHIVE"
         [[ -n "$RUNTIME_URL" ]] || die '本版本尚未配置下载地址，请提供离线 runtime 归档'
         [[ "$RUNTIME_URL" == https://* ]] || die 'runtime 下载地址必须使用 HTTPS'
         command -v curl >/dev/null || die '下载 runtime 需要 curl'
@@ -206,10 +227,9 @@ verify_installation() {
 @VERIFY_INSTALL@
 PY
 }
-if [[ -e "$DESTINATION" ]]; then
-    [[ -d "$DESTINATION" && ! -L "$DESTINATION" ]] || die '目标路径不是独立安装目录'
-    [[ "$(sha256sum "$DESTINATION/manifest.json" | cut -d ' ' -f1)" == "$MANIFEST_SHA256" ]] || die '目标目录已存在其他内容，请使用新的 --prefix'
-    (cd "$DESTINATION" && sha256sum --check --strict INSTALL_SHA256SUMS >/dev/null) || die '已有安装内容发生变化，请安装到新的 --prefix'
+if [[ -e "$DESTINATION" && "$REPLACE" == 0 ]]; then
+    [[ "$(sha256sum "$DESTINATION/manifest.json" | cut -d ' ' -f1)" == "$MANIFEST_SHA256" ]] || die '目标目录已存在其他内容，请使用 --replace 或新的 --prefix'
+    (cd "$DESTINATION" && sha256sum --check --strict INSTALL_SHA256SUMS >/dev/null) || die '已有安装内容发生变化，请使用 --replace 或新的 --prefix'
     verify_installation "$DESTINATION"
     log '相同版本已经完整安装，复用现有目录'
 else
@@ -245,8 +265,17 @@ PY
         find python examples -type f -print0 | sort -z | xargs -0 sha256sum > INSTALL_SHA256SUMS
         sha256sum manifest.json README.md CHANGELOG.md >> INSTALL_SHA256SUMS
     )
+    if [[ -e "$DESTINATION" ]]; then
+        BACKUP="$(mktemp -d "$PREFIX/.$BUNDLE_NAME.backup.XXXXXX")"
+        mv -T -- "$DESTINATION" "$BACKUP/previous"
+    fi
     mv -T -- "$STAGING" "$DESTINATION"
     STAGING=""
+    if [[ -n "$BACKUP" ]]; then
+        rm -rf -- "$BACKUP"
+        BACKUP=""
+        log '已替换同名安装目录'
+    fi
 fi
 log "安装完成: $DESTINATION"
 printf '\n按 README 选择 GPU、工作目录及数据目录。最小交互启动示例：\n\n'

@@ -39,6 +39,7 @@
 #include <curand_kernel.h>
 
 #include "DlQuantization/Quantization.hpp"
+#include "quantize_dequantize.hpp"
 
 namespace DlQuantization
 {
@@ -93,6 +94,15 @@ __device__ inline float round_stochastic(float val, int seed)
 __device__ inline double round_stochastic(double val, int seed)
 {
     return __double2int_rd(val + rand_uniform_double(seed));
+}
+
+template <typename DTYPE>
+__device__ inline DTYPE quantizeDequantizeValueDevice(DTYPE value, DTYPE minimum, DTYPE maximum, DTYPE scale,
+                                                     RoundingMode mode, int seed)
+{
+    const bool stochastic = mode == ROUND_STOCHASTIC;
+    const DTYPE noise = stochastic ? static_cast<DTYPE>(rand_uniform_double(seed)) : DTYPE(0);
+    return stableQuantizeDequantize(value, minimum, maximum, scale, stochastic, noise);
 }
 
 /**

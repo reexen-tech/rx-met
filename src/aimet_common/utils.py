@@ -180,6 +180,10 @@ class AimetLogger(metaclass=SingletonType):
 
         logging.config.dictConfig(config_dict)
 
+        from aimet_common.run_context import attach_aimet_logger
+        for area in AimetLogger.LogAreas:
+            attach_aimet_logger(logging.getLogger(area.value))
+
         # Validate JSON  file default_logging_config.json for correct Logging Areas
         # TODO This results in a pylint error: Instance of 'RootLogger' has no 'loggerDict' member.
         # Need to fix this issue and then remove the pylint disablement.
@@ -210,7 +214,8 @@ class AimetLogger(metaclass=SingletonType):
     def set_area_logger_level(area, level):
         """Sets a logging level for a single area logger."""
         area_logger = logging.getLogger(area.value)
-        area_logger.setLevel(level)
+        from aimet_common.run_context import set_console_level
+        set_console_level(area_logger, level)
 
     @staticmethod
     def set_level_for_all_areas(level):
@@ -382,7 +387,8 @@ class TqdmStreamHandler(logging.StreamHandler):
     """
 
     def emit(self, record):
-        with tqdm.external_write_mode(file=self.stream):
+        from aimet_common.run_context import console_passthrough
+        with console_passthrough(), tqdm.external_write_mode(file=self.stream):
             super().emit(record)
 
 

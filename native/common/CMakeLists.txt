@@ -18,6 +18,7 @@ add_library(aimet_quantization STATIC
     ${AIMET_QUANTIZATION_SRC}/TfQuantizer.hpp
     ${AIMET_QUANTIZATION_SRC}/trim_functions.cpp
     ${AIMET_QUANTIZATION_SRC}/trim_functions.hpp
+    ${AIMET_QUANTIZATION_SRC}/quantize_dequantize.hpp
     ${AIMET_QUANTIZATION_SRC}/tensor_utils.cpp
     ${AIMET_QUANTIZATION_SRC}/tensor_utils.hpp
     ${AIMET_QUANTIZATION_SRC}/ContiguousEncodingAnalyzer.cpp

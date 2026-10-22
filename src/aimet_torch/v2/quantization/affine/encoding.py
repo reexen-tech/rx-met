@@ -336,11 +336,15 @@ class AffineEncoding(EncodingBase, _GridMixin):
         min = self.min.flatten()
         max = self.max.flatten()
         scale = self.scale.flatten()
+        enc_type = {
+            "pertensor": EncodingType.PER_TENSOR.name,
+            "perchannel": EncodingType.PER_CHANNEL.name,
+            "blockwise": EncodingType.PER_BLOCK.name,
+        }.get(self.granularity)
+        if enc_type is None:
+            raise ValueError(f"Unsupported encoding granularity: {self.granularity}")
 
-        # ✅ 修改：直接导出 zero_point，不加 qmin
-        # 原始 AIMET 行为：offset = self.offset.flatten() + self.qmin（导出 -128）
-        # 新行为：offset = self.offset.flatten()（对称量化导出 0）
-        offset = self.offset.flatten()  # 直接使用 zero_point
+        offset = self.offset.flatten().to(torch.int64) + self.qmin
 
         return [
             {
@@ -348,9 +352,14 @@ class AffineEncoding(EncodingBase, _GridMixin):
                 "max": float(max_),
                 "scale": float(scale_),
                 "offset": int(offset_),
+                "offset_domain": "unsigned_index",
+                "signed": self.signed,
+                "qmin": self.qmin,
+                "qmax": self.qmax,
                 "bitwidth": self.bitwidth,
                 "dtype": "int",
                 "is_symmetric": str(self.symmetry),
+                "enc_type": enc_type,
             }
             for min_, max_, scale_, offset_ in zip(min, max, scale, offset)
         ]
@@ -400,10 +409,11 @@ class AffineEncoding(EncodingBase, _GridMixin):
             }
 
             # Compute signed offset if necessary
-            offset = self.offset
-            if self.signed:
-                offset = offset - 2 ** (self.bitwidth - 1)
-            encoding_dict["offset"] = offset.to(torch.int).flatten().tolist()
+            offset = self.offset.to(torch.int64) + self.qmin
+            encoding_dict["offset"] = offset.flatten().tolist()
+            encoding_dict["signed"] = self.signed
+            encoding_dict["qmin"] = self.qmin
+            encoding_dict["qmax"] = self.qmax
             if self.zero_point_shift != 0.0:
                 assert self.zero_point_shift == 0.5
                 assert self.symmetry

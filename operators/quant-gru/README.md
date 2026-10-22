@@ -84,7 +84,24 @@ gru.use_quantization = True
 JSON 字段、默认值和加载时机见[配置说明](pytorch/config/README.md)。
 
 QAT 在校准后使用 `gru.train()` 和 PyTorch 训练循环。量化前向记录截断 mask，
-反向传播使用浮点梯度。训练和部署评估分别记录损失、输出误差和任务指标。
+反向传播使用浮点梯度。候选门输入或输出发生截断时，其 reset gate 上游路径也按同一个
+clamp STE mask 截断；序列输出与最终隐藏状态的损失均遵循此链式法则。
+输入线性输出的截断同样作用于输入、权重和 bias 梯度，并在跨 stream 消费梯度前完成。
+训练和部署评估分别记录损失、输出误差和任务指标。
+非零更新门 zero point 下，`q_one-q_z` 已经是 `(1-z)` 的 centered 码，隐藏状态
+更新直接使用该差值；主整数核、浮点参考与独立 CPU 参考均遵守此约定。
+
+`quant_storage_dtype="float32"` 与 `"int32"` 共用整数/LUT 前向，包括量化、重缩放、门值和
+截断 mask；该选项只改变提供给反向传播的量化码缓存类型。FP32 carrier 通过临时 INT32
+缓存再转换为 FP32，增加分配和转换成本。8/16 位码可精确表示；超过 2^24 的整数码不能
+保证 FP32 缓存精度。标准 STE 反向继续使用反量化门值，未改为 LUT 的分段导数。
+底层 `ForwardPassQuantFP` 是保留的真实激活参考，不再是公共 QAT 前向。
+
+公共 AIMET 编码重载根据所有标准 scale 是否为精确 2 的幂恢复 Po2/affine 执行模式，
+与 LSTM 的重载约定一致；不向编译器编码添加执行元数据。锁定前会完成尚未执行的网格
+更新（例如 affine 切换 Po2），避免冻结旧 scale 与新执行模式的混合状态；若缺少用于
+推导新网格的校准数据则报错，保持未锁定。验证见
+`tests/test_gru_carrier_contract.py` 的输出/缓存/mask/梯度和单向/双向重载对照。
 
 ## 保存与重载
 
@@ -134,6 +151,23 @@ gru.cuda()
 产物使用标准 ONNX `GRU` 节点，量化参数单独导出。下游整图工具负责组合模型图、
 节点命名和部署 encodings。
 
+## ONNX 输入校准
+
+`pytorch/quant_gru_onnx.py` 提供标准 ONNX GRU 的输入适配，转换门顺序、方向、
+W/R/B 和输入输出布局，直接调用 QuantGRU 的校准、量化前向、Po2 与编码接口。
+`pytorch/lib/gru_onnx_runtime.cc` 只负责 ONNX Runtime 与 Python 接口之间的张量传递，
+不实现门计算。桥接经主机缓冲区调用原生 CUDA 算子，存在额外数据拷贝。
+
+RX-MET 的 `create_onnx_ptq_sim` 自动接入此能力，读取相同的 `GRU_config`。
+导出保存标准 GRU，双向参数编码按方向组合，内部编码沿用原生 schema。
+当前支持范围和验证见 [ONNX PTQ 文档](../../docs/ONNX_PTQ_COMPILER.md#gru-原生适配)
+及 [集成测试](../../tests/test_onnx_gru_native.py)。
+
+构建 wheel 时，仓库内的 ONNX Runtime 1.20.1 头文件用于构建
+`quant_gru_onnx_runtime` 扩展，支持本项目使用的 ONNX Runtime 1.20.1 及以上版本。
+独立构建可用 `QUANT_GRU_ONNXRUNTIME_INCLUDE` 指定头文件目录；没有头文件时仍可
+构建仅用于 Torch 的 wheel，ONNX 输入校准会提示缺少运行时扩展。
+
 ## 接口与验证
 
 | 接口 | 用途 |
@@ -172,3 +206,16 @@ python3 tests/test_quant_gru.py
 
 项目使用的 GRU 实现源自 [Haste](https://github.com/lmnt-com/haste)，并与
 [PyTorch GRU 接口](https://pytorch.org/docs/stable/generated/torch.nn.GRU.html) 集成。
+
+### 固定 bias 网格的训练余量
+
+新校准的输入/循环 bias 在各自粒度下，由观测到的最大绝对值建立 scale
+`max(2 * max_abs_bias, 0.01) / qmax`；Po2 模式再严格向上取整为 2 的幂。
+此策略将观测范围至少扩大一倍，并为零 bias 提供至少 ±0.01 的可训练区间。
+8 位下最小 affine 步长约 7.87e-5、Po2 步长约 1.22e-4，可表示 1e-4 量级的更新。
+位宽、对称零点和部署算术保持原有约定。MinMax、Percentile、SQNR 均对 bias 使用此规则；bias 不使用直方图裁剪或常数 bin 扩展范围。
+
+已加载的编码与 QAT 期间的固定编码不会被扩张。
+
+余量以较粗的 bias 分辨率为代价，不能保证任意学习率/训练时长都不饱和；应同时检查
+偏置饱和、梯度与任务指标。可加载经过独立验证的显式编码以采用其他范围策略。

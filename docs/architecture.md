@@ -91,7 +91,7 @@ QuantGRU 与其他模块共享同一次 `compute_encodings` 前向过程。Quant
 
 ## 5. ONNX PTQ 流程
 
-标准入口位于 [`examples/onnx_ptq_quick_start.py`](../examples/onnx_ptq_quick_start.py)，
+标准入口位于 [`examples/quick_start_onnx_ptq.py`](../examples/quick_start_onnx_ptq.py)，
 主要实现位于 [`src/aimet_onnx/rx_ptq`](../src/aimet_onnx/rx_ptq/)。
 
 ```mermaid
@@ -111,7 +111,8 @@ flowchart LR
 ```
 
 `run_onnx_ptq()` 提供端到端接口。`CompilerEncodingConverter` 把已启用量化器映射到
-节点输入、节点输出或参数条目，并输出 `schema_version: 3`。导出过程检查覆盖率和
+节点输入、节点输出或参数条目，并输出 `schema_version: 4`，统一使用
+`real = scale * (q - zero_point)`。导出过程检查覆盖率和
 孤立键。Clean ONNX 与编译器 encodings 作为同一组部署制品使用。
 
 独立 ONNX 适配器的设计理由见

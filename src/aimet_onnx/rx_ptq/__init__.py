@@ -1,7 +1,8 @@
 """Direct ONNX PTQ and compiler-compatible artifact export."""
 
-from .calibration import iter_calibration_feeds, inspect_model_inputs
+from .calibration import iter_calibration_feeds, inspect_model_inputs, inspect_model_input_dtypes
 from .compiler_encodings import CompilerEncodingConverter
+from .evaluation import evaluate_onnx_dataset, load_onnx_validation_inputs
 from .mixed_precision import apply_onnx_mixed_precision_bitwidth
 from .pipeline import (
     DEFAULT_BITWIDTH_CONFIG,
@@ -10,10 +11,12 @@ from .pipeline import (
     create_onnx_ptq_sim,
     evaluate_onnx_outputs,
     export_onnx_compiler_artifacts,
+    export_onnx_json,
     force_model_io_quantizers,
     load_onnx_ptq_inputs,
     run_onnx_feed,
     run_onnx_ptq,
+    verify_onnx_ptq_artifacts,
     write_onnx_ptq_metadata,
 )
 
@@ -43,12 +46,17 @@ __all__ = [
     "create_onnx_ptq_sim",
     "disable_onnx_bias_quantizers",
     "evaluate_onnx_outputs",
+    "evaluate_onnx_dataset",
     "export_onnx_compiler_artifacts",
+    "export_onnx_json",
     "force_model_io_quantizers",
     "inspect_model_inputs",
+    "inspect_model_input_dtypes",
     "iter_calibration_feeds",
     "load_onnx_ptq_inputs",
+    "load_onnx_validation_inputs",
     "run_onnx_feed",
     "run_onnx_ptq",
+    "verify_onnx_ptq_artifacts",
     "write_onnx_ptq_metadata",
 ]

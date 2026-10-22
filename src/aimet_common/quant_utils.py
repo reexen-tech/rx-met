@@ -121,6 +121,9 @@ def _convert_encoding_format_0_6_1_to_1_0_0(encodings: Dict[str, Dict]):
                 offset.append(enc["offset"])
             new_encoding["scale"] = scale
             new_encoding["offset"] = offset
+            for key in ('signed', 'qmin', 'qmax'):
+                if key in encoding[0]:
+                    new_encoding[key] = encoding[0][key]
         new_encodings.append(new_encoding)
 
     return new_encodings
