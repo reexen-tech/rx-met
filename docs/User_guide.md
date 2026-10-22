@@ -125,7 +125,7 @@ FP 训练 → prepare_model → QuantizationSimModel + 混合精度位宽
   → compute_encodings 校准 (PTQ)
   → apply_power_of_2_workflow (NPU 友好的 Po2 量化)
   → freeze_quantizer_parameters + QAT 微调
-  → 保存 state_dict + ONNX + .encodings 三件套
+  → 保存 state_dict + ONNX + .json 编码文件三件套
   → 重建 sim → load_state_dict → load_quantizer_encodings → 精度对比
 ```
 
@@ -167,7 +167,8 @@ python3 quick_start_kws.py --rnn_type lstm
 一致；否则量化器名称或参数会错位。
 
 两侧统一使用 `export_onnx_json()`：PyTorch 入口位于 `aimet_torch.rx_export`，保留
-原参数、默认值和 `(onnx_path, encodings_path)` 字符串元组返回值；ONNX PTQ 入口
+原参数、默认值和 `(onnx_path, encodings_path)` 字符串元组返回值，最终编码文件名为
+`{filename_prefix}.json`；ONNX PTQ 入口
 位于 `aimet_onnx.rx_ptq`，返回包含 `onnx`、`encodings`、`aimet_encodings` 和
 `coverage` 的字典。旧 ONNX 名称 `export_onnx_compiler_artifacts()` 也保留原字典
 返回值。两侧共用编译器编码规范化和校验，框架相关的图处理分别维护。

@@ -98,7 +98,9 @@ class TorchExportValidationTest(unittest.TestCase):
             self.export(self.sim(calibrate=False))
 
     def test_normal_export(self):
-        self.export(self.sim())
+        onnx_path, enc_path = self.export(self.sim())
+        self.assertEqual(Path(onnx_path).suffix, '.onnx')
+        self.assertEqual(Path(enc_path).name, 'model.json')
 
     def test_two_input_add_exports_numpy_inputs_and_both_encodings(self):
         import onnxruntime as ort

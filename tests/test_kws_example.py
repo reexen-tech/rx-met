@@ -122,7 +122,7 @@ class KwsExampleWorkflowTest(unittest.TestCase):
                     self.assertFalse(any(n.op_type == 'BatchNormalization' for n in graph.graph.node))
                     nodes = [node for node in graph.graph.node if node.op_type in ('GRU', 'LSTM')]
                     self.assertEqual([node.op_type for node in nodes], [rnn_type.upper()] * 2)
-                    encodings = json.loads((output / 'att_mh_rnn_kws.encodings').read_text())
+                    encodings = json.loads((output / 'att_mh_rnn_kws.json').read_text())
                     assert_public_encoding_document(self, encodings)
                     node_names = {n.name for n in graph.graph.node}
                     initializer_names = {t.name for t in graph.graph.initializer}
