@@ -220,7 +220,7 @@ from aimet_torch.staged_quantization_utils import load_quantizer_encodings
 fresh_sim.model.load_state_dict(state, strict=False)
 load_quantizer_encodings(
     fresh_sim.model,
-    load_path="output/model.encodings",
+    load_path="output/model.json",
     verbose=True,
 )
 ```
