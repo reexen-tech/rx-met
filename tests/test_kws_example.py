@@ -9,6 +9,8 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
+from aimet_common import run_context as runtime
+
 import onnx
 import torch
 from torch import nn
@@ -79,6 +81,14 @@ class KwsExampleConfigurationTest(unittest.TestCase):
 @unittest.skipUnless(torch.cuda.is_available(), 'CUDA is required')
 class KwsExampleWorkflowTest(unittest.TestCase):
     def test_gru_and_lstm_customer_workflow(self):
+        self.check_workflow(timestamp_output=True)
+
+    def test_gru_and_lstm_fixed_output_workflow(self):
+        self.check_workflow(timestamp_output=False)
+
+    def check_workflow(self, *, timestamp_output):
+        runtime.configure_output(timestamp_output=timestamp_output)
+        self.addCleanup(runtime.configure_output)
         # Run the actual entry point. Small dimensions and random waveforms keep
         # this regression independent of Speech Commands and training accuracy.
         torch.manual_seed(23)
@@ -97,8 +107,11 @@ class KwsExampleWorkflowTest(unittest.TestCase):
                      contextlib.redirect_stdout(io.StringIO()):
                     kws.main(['--rnn_type', rnn_type, '--output-dir', directory])
                     root = Path(directory) / rnn_type
-                    record_path, = root.glob('*/run.json')
-                    execution = record_path.parent
+                    if timestamp_output:
+                        record_path, = root.glob('*/run.json')
+                        execution = record_path.parent
+                    else:
+                        execution = root
                     output = execution / 'exports'
                     checkpoint = torch.load(execution / 'checkpoints/att_mh_rnn_kws_qat.pth', weights_only=True)
                     self.assertEqual(checkpoint['rnn_type'], rnn_type)

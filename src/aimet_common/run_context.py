@@ -7,6 +7,7 @@ import contextlib
 import contextvars
 import datetime
 import errno
+import fcntl
 import functools
 import hashlib
 import inspect
@@ -40,6 +41,57 @@ _exception_hook_installed = False
 _capture_lock = threading.RLock()
 _capture_depth = 0
 _capture_state = None
+_timestamp_output = True
+
+
+def configure_output(*, timestamp_output: bool = True) -> None:
+    """Configure output directories for subsequently created RX tasks.
+
+    Call before creating QuantSim or starting a quantization workflow. False
+    writes directly into the output root, replacing same-named files and logs.
+    Existing tasks retain their configuration. Calling without arguments
+    restores timestamped output, which is the default.
+    """
+    if type(timestamp_output) is not bool:
+        raise TypeError('timestamp_output must be a bool')
+    global _timestamp_output
+    with _lock:
+        _timestamp_output = timestamp_output
+
+
+def _lock_directory(directory):
+    descriptor = os.open(directory, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BaseException as error:
+        os.close(descriptor)
+        if isinstance(error, BlockingIOError):
+            raise RuntimeError(f'输出目录正在被另一个任务使用: {directory}') from error
+        raise
+    return descriptor
+
+
+def _output_state(root):
+    state = {}
+    for directory in ('exports', 'checkpoints'):
+        for path in (root / directory).rglob('*'):
+            if path.is_file():
+                stat = path.stat()
+                state[path.relative_to(root).as_posix()] = (
+                    stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns)
+    return state
+
+
+def _prepare_fixed_directory(root):
+    for name in ('run.log', 'run.json', 'config', 'exports', 'checkpoints', '_work'):
+        path = root / name
+        if path.is_symlink():
+            raise ValueError(f'固定输出目录中的工具路径不能是符号链接: {path}')
+        if path.is_dir():
+            for item in path.rglob('*'):
+                if item.is_symlink():
+                    raise ValueError(f'固定输出目录中的工具路径不能是符号链接: {item}')
+    return _output_state(root)
 
 
 class _PlainFormatter(logging.Formatter):
@@ -126,6 +178,8 @@ class Execution:
 
     def __init__(self, output_root=None, task='quantization', *, provisional=False):
         self.output_root = _resolve_root(output_root)
+        with _lock:
+            self.timestamp_output = _timestamp_output
         self.task = task
         self.pid = os.getpid()
         self.provisional = provisional
@@ -134,32 +188,57 @@ class Execution:
         self._lock = threading.RLock()
         self._errors = set()
         self._started = time.monotonic()
-        self._temporary_root = False
+        self._temporary_root = None
+        self._run_dir = None
+        self._directory_lock = None
+        self._baseline_outputs = {}
+        self._work_dir = None
         timestamp = _now().strftime('%Y%m%dT%H%M%S%fZ')
         try:
-            self._reserve(timestamp)
-        except OSError as error:
-            if (not provisional or output_root is not None or 'RX_MET_OUTPUT_DIR' in os.environ
-                    or error.errno not in (errno.EACCES, errno.EROFS)):
-                raise
-            self.output_root = Path(tempfile.mkdtemp(prefix='rx-met-run-'))
-            self._temporary_root = True
-            self._reserve(timestamp)
-        self._handler = self._open_handler()
-        self.record = {'schema_version': 1, 'execution_id': self.execution_id, 'task': task,
-                       'status': 'running', 'started_at': _now().isoformat(), 'pid': self.pid,
-                       'tool': _tool_identity(), 'inputs': {}, 'config': {}, 'outputs': {}, 'operations': {}}
-        self.save()
+            try:
+                self._reserve(timestamp)
+            except OSError as error:
+                if (not provisional or output_root is not None or 'RX_MET_OUTPUT_DIR' in os.environ
+                        or error.errno not in (errno.EACCES, errno.EROFS)):
+                    raise
+                self.output_root = Path(tempfile.mkdtemp(prefix='rx-met-run-'))
+                self._temporary_root = self.output_root
+                self._reserve(timestamp)
+            self._handler = self._open_handler(fresh=not self.timestamp_output)
+            self.record = {'schema_version': 1, 'execution_id': self.execution_id, 'task': task,
+                           'status': 'running', 'started_at': _now().isoformat(), 'pid': self.pid,
+                           'output_config': {'timestamp_output': self.timestamp_output},
+                           'tool': _tool_identity(), 'inputs': {}, 'config': {}, 'outputs': {}, 'operations': {}}
+            self.save()
+        except BaseException:
+            if hasattr(self, '_handler'):
+                self._handler.close()
+            self._release_directory()
+            if self._temporary_root is not None:
+                shutil.rmtree(self._temporary_root, ignore_errors=True)
+            raise
         _runs.add(self)
         self.message(f'RX-MET execution {self.execution_id}: {task}', console=False)
         self.message('Tool identity: ' + json.dumps(self.record['tool'], ensure_ascii=False), console=False)
         builtins.print(f'[rx-met] 日志: {self.root / "run.log"}', flush=True)
 
     def _reserve(self, timestamp):
+        self.execution_id = timestamp
+        if not self.timestamp_output and self.provisional:
+            # Unknown final roots must not make independent models share a log.
+            self._temporary_root = Path(tempfile.mkdtemp(prefix='rx-met-run-'))
+            self._run_dir = self._temporary_root
+            return
         self.output_root.mkdir(parents=True, exist_ok=True)
+        if not self.timestamp_output:
+            self._run_dir = self.output_root
+            self._directory_lock = _lock_directory(self.output_root)
+            self._baseline_outputs = _prepare_fixed_directory(self.output_root)
+            return
         index = 0
         while True:
             self.execution_id = timestamp if not index else f'{timestamp}-{index}'
+            self._run_dir = self.output_root / self.execution_id
             try:
                 self.root.mkdir()
                 break
@@ -168,10 +247,23 @@ class Execution:
 
     @property
     def root(self):
-        return self.output_root / self.execution_id
+        return self._run_dir
+
+    def _release_directory(self):
+        if self._directory_lock is not None:
+            os.close(self._directory_lock)
+            self._directory_lock = None
+
+    def _assert_current(self):
+        if not self.timestamp_output and self.closed:
+            record = json.loads((self.root / 'run.json').read_text(encoding='utf-8'))
+            if record.get('execution_id') != self.execution_id:
+                raise RuntimeError(f'输出目录已被后续任务覆盖，不能修改旧任务记录: {self.root}')
 
     def directory(self, name):
         path = self.root / name
+        if not self.timestamp_output and path.is_symlink():
+            raise ValueError(f'固定输出目录中的工具路径不能是符号链接: {path}')
         path.mkdir(exist_ok=True)
         return path
 
@@ -185,9 +277,17 @@ class Execution:
 
     @property
     def work(self):
-        return self.directory('_work')
+        if self._work_dir is None:
+            parent = self.directory('_work')
+            self._work_dir = parent if self.timestamp_output else Path(
+                tempfile.mkdtemp(prefix='run-', dir=parent))
+        return self._work_dir
 
-    def _open_handler(self):
+    def _open_handler(self, *, fresh=False):
+        if fresh:
+            with (self.root / 'run.log').open('w', encoding='utf-8'):
+                pass
+        # Append handlers can reopen after an external logging.dictConfig closes them.
         handler = logging.FileHandler(self.root / 'run.log', mode='a', encoding='utf-8')
         formatter = _PlainFormatter('%(asctime)sZ %(levelname)s %(name)s: %(message)s',
                                       datefmt='%Y-%m-%dT%H:%M:%S')
@@ -198,52 +298,90 @@ class Execution:
     def bind_root(self, output_root):
         """Move early library diagnostics with the task once its export root is known."""
         output_root = Path(output_root).resolve()
-        if output_root in (self.output_root, self.root, self.root / 'exports'):
+        if (self.timestamp_output or not self.provisional) and output_root in (
+                self.output_root, self.root, self.root / 'exports'):
             self.provisional = False
             return
+        if not self.timestamp_output and output_root in (self.root, self.root / 'exports'):
+            output_root = self.output_root
         if not self.provisional:
             raise ValueError(f'当前任务的输出根目录为 {self.output_root}，不能改为 {output_root}')
         with self._lock:
             old = self.root
             output_root.mkdir(parents=True, exist_ok=True)
-            name = self.execution_id
-            index = 0
-            while True:
-                candidate = output_root / (name if not index else f'{name}-{index}')
+            directory_lock = None
+            baseline = {}
+            if self.timestamp_output:
+                name = self.execution_id
+                index = 0
+                while True:
+                    candidate = output_root / (name if not index else f'{name}-{index}')
+                    try:
+                        candidate.mkdir()
+                        break
+                    except FileExistsError:
+                        index += 1
+            else:
+                candidate = output_root
+                directory_lock = _lock_directory(candidate)
                 try:
-                    candidate.mkdir()
-                    break
-                except FileExistsError:
-                    index += 1
+                    baseline = _prepare_fixed_directory(candidate)
+                except BaseException:
+                    os.close(directory_lock)
+                    raise
             self._handler.close()
             try:
-                try:
-                    os.replace(old, candidate)
-                except OSError as error:
-                    if error.errno != errno.EXDEV:
-                        raise
-                    shutil.copytree(old, candidate, dirs_exist_ok=True)
+                if not self.timestamp_output:
+                    # Keep the user's output root permissions when merging a private stage.
+                    for entry in old.iterdir():
+                        target = candidate / entry.name
+                        if entry.is_dir():
+                            shutil.copytree(entry, target, dirs_exist_ok=True)
+                        else:
+                            shutil.copy2(entry, target)
                     shutil.rmtree(old, ignore_errors=True)
+                else:
+                    try:
+                        os.replace(old, candidate)
+                    except OSError as error:
+                        if error.errno != errno.EXDEV:
+                            raise
+                        shutil.copytree(old, candidate, dirs_exist_ok=True)
+                        shutil.rmtree(old, ignore_errors=True)
             except BaseException:
-                shutil.rmtree(candidate, ignore_errors=True)
+                if self.timestamp_output:
+                    shutil.rmtree(candidate, ignore_errors=True)
+                elif directory_lock is not None:
+                    os.close(directory_lock)
                 self._handler = self._open_handler()
                 raise
             self.output_root = output_root
-            self.execution_id = candidate.name
-            self._handler = self._open_handler()
+            self._run_dir = candidate
+            self._directory_lock = directory_lock
+            self._baseline_outputs = baseline
+            if self._work_dir is not None:
+                self._work_dir = candidate / self._work_dir.relative_to(old)
+            if self.timestamp_output:
+                self.execution_id = candidate.name
+            try:
+                self._handler = self._open_handler()
+            except BaseException:
+                self._release_directory()
+                raise
             self.provisional = False
-            if self._temporary_root:
+            if self._temporary_root is not None:
                 try:
-                    old.parent.rmdir()
+                    self._temporary_root.rmdir()
                 except OSError:
                     pass
-                self._temporary_root = False
+                self._temporary_root = None
             self.record['execution_id'] = self.execution_id
             self.save()
             builtins.print(f'[rx-met] 日志: {self.root / "run.log"}', flush=True)
 
     def save(self):
         with self._lock:
+            self._assert_current()
             _atomic_json(self.root / 'run.json', self.record)
 
     def emit(self, record):
@@ -311,14 +449,23 @@ class Execution:
         with self._lock:
             if self.closed:
                 return
-            if error is not None:
-                self.exception(error)
-            self.record['status'] = 'failed' if error is not None else 'success'
-            self.record['finished_at'] = _now().isoformat()
-            self.record['elapsed_s'] = round(time.monotonic() - self._started, 6)
-            for directory in ('exports', 'checkpoints'):
-                for path in sorted((self.root / directory).rglob('*')):
-                    if path.is_file():
+            try:
+                if error is not None:
+                    self.exception(error)
+                self.record['status'] = 'failed' if error is not None else 'success'
+                self.record['finished_at'] = _now().isoformat()
+                self.record['elapsed_s'] = round(time.monotonic() - self._started, 6)
+                if not self.timestamp_output and self.provisional:
+                    self.save()
+                    try:
+                        self.bind_root(self.output_root)
+                    except BaseException as binding_error:
+                        self.record['status'] = 'failed'
+                        self.exception(binding_error)
+                        raise
+                for name, state in sorted(_output_state(self.root).items()):
+                    if self.timestamp_output or self._baseline_outputs.get(name) != state:
+                        path = self.root / name
                         identity = {
                             'size_bytes': path.stat().st_size, 'sha256': _sha256(path)}
                         if path.suffix == '.encodings':
@@ -329,12 +476,21 @@ class Execution:
                                                      if key in document})
                             except (OSError, ValueError):
                                 pass
-                        self.record['outputs'][path.relative_to(self.root).as_posix()] = identity
-            self.save()
-            if self.record['status'] == 'success':
-                shutil.rmtree(self.root / '_work', ignore_errors=True)
-            self._handler.close()
-            self.closed = True
+                        self.record['outputs'][name] = identity
+                self.save()
+                if self.record['status'] == 'success':
+                    if self.timestamp_output:
+                        shutil.rmtree(self.root / '_work', ignore_errors=True)
+                    elif self._work_dir is not None:
+                        shutil.rmtree(self._work_dir, ignore_errors=True)
+                        try:
+                            self._work_dir.parent.rmdir()
+                        except OSError:
+                            pass
+            finally:
+                self._handler.close()
+                self.closed = True
+                self._release_directory()
 
 
 def _key():
@@ -551,7 +707,7 @@ def export_execution(output_root, task='export', *, source=None):
         _current.reset(token)
 
 
-def metadata_directory(output_dir):
+def _metadata_run(output_dir):
     run = active_run()
     if run is not None:
         run.bind_root(output_dir)
@@ -561,16 +717,43 @@ def metadata_directory(output_dir):
         if run is None:
             run = next((candidate for candidate in _last_runs.values()
                         if requested in (candidate.root, candidate.root / 'exports')), None)
+    return run
+
+
+def metadata_directory(output_dir):
+    run = _metadata_run(output_dir)
+    if run is not None:
+        run._assert_current()
     return run.exports if run else Path(output_dir)
+
+
+@contextlib.contextmanager
+def metadata_output(output_dir):
+    """Keep post-export metadata writes within the fixed directory's ownership."""
+    run = _metadata_run(output_dir)
+    descriptor = None
+    try:
+        if run is not None:
+            if run.closed and not run.timestamp_output:
+                descriptor = _lock_directory(run.root)
+            run._assert_current()
+        yield run.exports if run else Path(output_dir)
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
 
 
 def note_output(path):
     path = Path(path).resolve()
-    candidates = [active_run(), *_last_runs.values()]
+    candidates = [active_run(), *sorted(set(_last_runs.values()), key=lambda run: run._started, reverse=True)]
     for run in candidates:
         if run is not None and path.is_relative_to(run.root):
+            relative = path.relative_to(run.root)
+            if not relative.parts or relative.parts[0] not in ('exports', 'checkpoints'):
+                continue
             if run.closed:
-                run.record['outputs'][path.relative_to(run.root).as_posix()] = {
+                run._assert_current()
+                run.record['outputs'][relative.as_posix()] = {
                     'size_bytes': path.stat().st_size, 'sha256': _sha256(path)}
                 run.save()
             return
@@ -712,9 +895,16 @@ def get_logger(name):
 
 
 def _finish_implicit():
-    for run in list(_runs):
+    for run in sorted(list(_runs), key=lambda run: run._started):
         if run.pid == os.getpid() and not run.closed:
             run.finish()
+
+
+def _close_inherited_directory_locks():
+    # DataLoader workers must not keep their parent's fixed output directory locked.
+    for run in list(_runs):
+        if run.pid != os.getpid():
+            run._release_directory()
 
 
 def _install_exception_hook():
@@ -735,4 +925,5 @@ def _install_exception_hook():
     _exception_hook_installed = True
 
 
+os.register_at_fork(after_in_child=_close_inherited_directory_locks)
 atexit.register(_finish_implicit)

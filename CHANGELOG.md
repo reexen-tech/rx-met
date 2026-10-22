@@ -18,7 +18,7 @@
 
 - **量化配置**：Torch、ONNX 和原生 GRU/LSTM 默认使用对称量化，仍支持显式非对称配置。普通 Torch/ONNX 量化器的整数符号与对称性独立，默认使用 INT，可显式选择 UINT。
 - **编译器编码**：统一 Torch/ONNX 的编码转换、零点语义和循环层元数据，升级为 `schema_version=4`；兼容性要求见下方升级说明。
-- **输出目录**：RX 导出接口将指定目录作为输出根目录，每次任务创建 UTC 时间戳子目录，最终产物放入 `exports/`，KWS 检查点放入 `checkpoints/`。默认输出基于当前运行目录，原有输出目录覆盖参数继续有效。
+- **输出目录**：RX 导出接口将指定目录作为输出根目录，默认创建 UTC 时间戳子目录；可用 `configure_output(timestamp_output=False)` 切换为固定目录并覆盖同名输出。最终产物放入 `exports/`，KWS 检查点放入 `checkpoints/`，默认根目录基于当前运行目录，原有输出目录覆盖参数继续有效。
 - **ONNX 示例**：入口统一命名为 `quick_start_onnx_ptq.py`。MobileNetV2 + ImageNette 准备脚本只需模型和 parquet 路径，生成可复用的模型、校准数据和带标签的验证数据；准备与量化分两步执行，默认路径相互对应，原始输入可只读挂载。
 - **离线交付**：产品包和公共运行环境分别交付、独立校验。应用包按精确镜像 ID 复用 runtime，同一镜像重新导出的归档可继续使用；安装器核对归档内容并准备可读的镜像标签，宿主机无需 Python。
 - **构建与安装**：构建前检查已有交付目录，默认在临时目录完成安装验收并清理。构建和安装分别支持 `--replace`，新内容验收通过后才替换目标，失败保留或恢复原内容。
@@ -69,7 +69,7 @@
 - **编码格式**：schema v4 统一使用 `real = scale * (q - zero_point)`。外部消费者需按版本处理非对称零点符号；Torch 重载兼容无版本和 schema 1/2/3 的旧文件。格式转换不改变实际量化网格。
 - **循环层字段**：整数记录补齐 `enc_type` 和 `n`；顶层 `input/output` 改为端口字典，如 `{"0": {...}}`，内部 `output` 保留单元素列表。加载接口兼容旧端口列表和缺少 `n` 的文件。
 - **整数符号**：需要非对称或无符号量化时显式配置。JSON2 支持 `*_signed`、`input_signeds` 和 `default_config.signed`，更改对称性或位宽不会自动切换 INT/UINT；UINT 对称模式将负值截为零。
-- **产物路径**：加载时使用导出接口返回的路径。示例输出根目录为当前运行目录下的 `output/quick_start_kws/<gru|lstm>/` 或 `output/onnx_ptq_quick_start/`，实际文件位于本次时间戳目录的 `exports/`。
+- **产物路径**：加载时使用导出接口返回的路径。示例输出根目录为当前运行目录下的 `output/quick_start_kws/<gru|lstm>/` 或 `output/onnx_ptq_quick_start/`；默认产物位于时间戳目录的 `exports/`，关闭时间戳后位于根目录的 `exports/`。
 - **示例入口**：原 `onnx_ptq_quick_start.py` 更名为 `quick_start_onnx_ptq.py`，命令及引用需同步更新；下载与两步运行方式见[示例说明](examples/README.md)。
 - **安装与更新**：首次离线使用需同时提供产品目录和对应的 `rx-quant-env` v1 环境目录，后续产品更新可复用兼容 runtime。`install.sh --replace` 仅替换同名安装；其他版本、模型、数据和用户工作目录独立保留。
 
