@@ -232,7 +232,7 @@ def _fold_constant_if_nodes(model: onnx.ModelProto) -> onnx.ModelProto:
     return model
 
 
-def postprocess_onnx_graph_inplace(onnx_path: str, input_shape: Tuple[int, int, int]) -> None:
+def postprocess_onnx_graph_inplace(onnx_path: str, input_shape: Tuple[int, ...] | None = None) -> None:
     """
     对导出的 ONNX 执行强制图清理（inplace 写回原文件）。
     """
@@ -422,7 +422,23 @@ def postprocess_onnx_graph_inplace(onnx_path: str, input_shape: Tuple[int, int, 
     # Mul-by-one/Add-zero and single-input Concat can carry quantization boundaries.
     # Keep those compute nodes and their names in sync with sidecar encodings.
 
-    m, ok = simplify(m, overwrite_input_shapes={"input": list(input_shape)},
+    def exported_input_shapes(model):
+        initializers = {value.name for value in model.graph.initializer}
+        shapes = {}
+        graph_inputs = [value for value in model.graph.input if value.name not in initializers]
+        if input_shape is not None and len(graph_inputs) != 1:
+            raise ValueError("input_shape can only override a single ONNX graph input")
+        for value in graph_inputs:
+            if not value.type.HasField("tensor_type"):
+                continue
+            dims = value.type.tensor_type.shape.dim
+            if all(dim.HasField("dim_value") for dim in dims):
+                shapes[value.name] = [int(dim.dim_value) for dim in dims]
+        if input_shape is not None:
+            shapes[graph_inputs[0].name] = list(input_shape)
+        return shapes
+
+    m, ok = simplify(m, overwrite_input_shapes=exported_input_shapes(m),
                      skipped_optimizers=["eliminate_nop_with_unit", "eliminate_nop_concat"])
     if not ok:
         raise RuntimeError("onnx-simplifier 校验失败")
@@ -430,14 +446,14 @@ def postprocess_onnx_graph_inplace(onnx_path: str, input_shape: Tuple[int, int, 
     m = _fold_static_reshape_shapes(m)
     m = _fold_constant_if_nodes(m)
 
-    m, ok = simplify(m, overwrite_input_shapes={"input": list(input_shape)},
+    m, ok = simplify(m, overwrite_input_shapes=exported_input_shapes(m),
                      skipped_optimizers=["eliminate_nop_with_unit", "eliminate_nop_concat"])
     if not ok:
         raise RuntimeError("onnx-simplifier（二次）校验失败")
     m = shape_inference.infer_shapes(m, data_prop=True)
 
     m = _fold_constant_if_nodes(m)
-    m, ok = simplify(m, overwrite_input_shapes={"input": list(input_shape)},
+    m, ok = simplify(m, overwrite_input_shapes=exported_input_shapes(m),
                      skipped_optimizers=["eliminate_nop_with_unit", "eliminate_nop_concat"])
     if not ok:
         raise RuntimeError("onnx-simplifier（三次）校验失败")
