@@ -172,6 +172,18 @@ python3 quick_start_kws.py --rnn_type lstm
 `coverage` 的字典。旧 ONNX 名称 `export_onnx_compiler_artifacts()` 也保留原字典
 返回值。两侧共用编译器编码规范化和校验，框架相关的图处理分别维护。
 
+PyTorch 多输入模型可将按 `forward` 参数顺序排列的多个 shape、Tensor 或 NumPy 数组
+作为 `dummy_input_shape` 传入。数组输入保留实际值、dtype 和 shape，并自动转到 CPU；
+shape 输入生成浮点零张量。ONNX 输入名由导出器生成，后处理从生成的图读取各输入名和
+静态 shape。单输入模型原有的 shape tuple 调用方式继续可用。例如双输入 Add：
+
+```python
+onnx_path, encodings_path = export_onnx_json(
+    sim, export_dir, "two_input_add",
+    dummy_input_shape=(left_array, right_array),
+)
+```
+
 导出器在所有图后处理和循环算子编码合并完成后，强制校验最终 ONNX
 及 encodings，通过后才返回文件路径。校验以 `sim.model` 中启用的量化器为基准，检查：
 

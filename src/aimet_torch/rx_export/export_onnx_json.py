@@ -12,6 +12,7 @@
 
 from __future__ import annotations
 
+from numbers import Integral
 from typing import Tuple
 from contextlib import ExitStack
 import os
@@ -19,6 +20,7 @@ import shutil
 from collections import Counter
 
 import onnx
+import numpy as np
 import torch
 from aimet_common.compiler_encodings import normalize_compiler_encodings
 from aimet_common.run_context import logged_export, log_print as print
@@ -36,7 +38,7 @@ from .validation import (
 
 from aimet_torch.optimized_quantizable_gru import OptimizedQuantizableGRU
 
-# 静态输入（你要求固定）
+# 单输入调用的兼容默认值。
 STATIC_DUMMY_INPUT_SHAPE: Tuple[int, int, int] = (1, 16000, 1)
 
 
@@ -45,6 +47,32 @@ from aimet_torch.native_recurrent import (
 )
 
 # ---------- Internal helpers ----------
+def _prepare_export_inputs(dummy_input_shape):
+    """Accept one shape, multiple shapes, or positional Tensor/NumPy inputs."""
+    def is_shape(value):
+        return isinstance(value, (tuple, list)) and all(
+            isinstance(dim, Integral) and not isinstance(dim, bool) for dim in value
+        )
+
+    if is_shape(dummy_input_shape) or isinstance(dummy_input_shape, (torch.Tensor, np.ndarray)):
+        inputs = (dummy_input_shape,)
+    elif isinstance(dummy_input_shape, (tuple, list)) and dummy_input_shape:
+        inputs = tuple(dummy_input_shape)
+    else:
+        raise TypeError("dummy_input_shape must be a shape or a tuple of input shapes/arrays")
+
+    tensors = []
+    for index, value in enumerate(inputs):
+        if is_shape(value):
+            value = torch.zeros(tuple(value), device="cpu")
+        elif isinstance(value, np.ndarray):
+            value = torch.from_numpy(np.array(value, copy=True))
+        if not isinstance(value, torch.Tensor):
+            raise TypeError(f"dummy_input_shape[{index}] must be a shape, Tensor, or NumPy array")
+        tensors.append(value.detach().cpu())
+    return tuple(tensors)
+
+
 def _is_truthy_env(name: str) -> bool:
     v = os.getenv(name, "").strip()
     return v not in ("", "0", "false", "False", "FALSE", "no", "No", "NO")
@@ -118,13 +146,11 @@ def _postprocess_with_retry(
     onnx_path: str,
     enc_in_path: str,
     enc_out_path: str,
-    input_shape: Tuple[int, int, int],
 ) -> None:
     def _postprocess_and_verify(tag: str) -> None:
         postprocess_all(
             onnx_path=onnx_path,
             encodings_path=enc_in_path,
-            input_shape=input_shape,
             output_onnx_path=onnx_path,
             output_encodings_path=enc_out_path,
             verbose=True,
@@ -152,7 +178,7 @@ def export_onnx_json(
     sim,
     export_dir: str,
     filename_prefix: str,
-    dummy_input_shape: Tuple[int, int, int] = STATIC_DUMMY_INPUT_SHAPE,
+    dummy_input_shape: Tuple | torch.Tensor | np.ndarray = STATIC_DUMMY_INPUT_SHAPE,
     opset: int = 18,
 ) -> Tuple[str, str]:
     """
@@ -167,12 +193,12 @@ def export_onnx_json(
     - torch.onnx.export 强制 legacy：dynamo=False
     - 返回前统一校验最终 ONNX 及启用量化器的编码；缺失或不一致时抛出 RuntimeError
     - 保留既有接口：返回 (onnx_path, encodings_path) 字符串元组
+    - dummy_input_shape 可传单个 shape，或按 forward 参数顺序排列的多个 shape/数组
+    - 数组输入保留实际值和 dtype；shape 输入生成浮点零张量
     """
     os.makedirs(export_dir, exist_ok=True)
-    # if tuple(dummy_input_shape) != STATIC_DUMMY_INPUT_SHAPE:
-    #     raise ValueError(f"导出要求静态 dummy_input_shape={STATIC_DUMMY_INPUT_SHAPE}，当前为 {dummy_input_shape}")
-
-    dummy_input = torch.zeros(*dummy_input_shape, device="cpu")
+    export_inputs = _prepare_export_inputs(dummy_input_shape)
+    export_dummy_input = export_inputs[0] if len(export_inputs) == 1 else export_inputs
 
     if not hasattr(sim, "get_original_model"):
         raise RuntimeError("sim 没有 get_original_model()，无法走 sim.export 链路")
@@ -197,7 +223,6 @@ def export_onnx_json(
 
         onnx_export_args = {
             "opset_version": opset,
-            "input_names": ["input"],
             "output_names": ["output"],
             "do_constant_folding": True,
             # 关键：强制 legacy exporter，避免 dynamo/export 路径导致自定义 symbolic 不命中
@@ -205,6 +230,8 @@ def export_onnx_json(
             # 关键：告诉 exporter 这些自定义 domain 的 opset version
             "custom_opsets": custom_opsets,
         }
+        if len(export_inputs) == 1:
+            onnx_export_args["input_names"] = ["input"]
 
         onnx_path = os.path.join(export_dir, filename_prefix + ".onnx")
         with observe_non_tensor_inputs(original_model) as scalar_inputs:
@@ -213,7 +240,7 @@ def export_onnx_json(
                 filename_prefix,
                 original_model,
                 sim.model,
-                dummy_input,
+                export_dummy_input,
                 onnx_export_args,
                 propagate_encodings=False,
                 module_marker_map=getattr(sim, "_module_marker_map", None),
@@ -247,7 +274,6 @@ def export_onnx_json(
             onnx_path=onnx_path,
             enc_in_path=enc_in_path,
             enc_out_path=enc_out_path,
-            input_shape=dummy_input_shape,
         )
 
         try:

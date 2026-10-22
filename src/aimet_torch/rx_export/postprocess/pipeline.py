@@ -30,7 +30,7 @@ def postprocess_all(
     *,
     onnx_path: str,
     encodings_path: str,
-    input_shape: Tuple[int, int, int],
+    input_shape: Tuple[int, ...] | None = None,
     output_onnx_path: str | None = None,
     output_encodings_path: str | None = None,
     verbose: bool = True,

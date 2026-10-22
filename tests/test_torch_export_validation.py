@@ -6,6 +6,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
+import numpy as np
 import onnx
 import torch
 from torch import nn
@@ -98,6 +99,41 @@ class TorchExportValidationTest(unittest.TestCase):
 
     def test_normal_export(self):
         self.export(self.sim())
+
+    def test_two_input_add_exports_numpy_inputs_and_both_encodings(self):
+        import onnxruntime as ort
+
+        class TwoInputAdd(nn.Module):
+            def forward(self, left, right):
+                return left + right
+
+        left = torch.randn(2, 4)
+        right = torch.randn(2, 4)
+        sim = QuantizationSimModel(
+            prepare_model(TwoInputAdd().eval()), (left, right),
+            quant_scheme='tf', config_file=str(CONFIG),
+        )
+        with torch.no_grad(), compute_encodings(sim.model):
+            sim.model(left, right)
+
+        for label, inputs in (
+            ('arrays', (np.asarray(left), np.asarray(right))),
+            ('shapes', (tuple(left.shape), tuple(right.shape))),
+        ):
+            with self.subTest(inputs=label):
+                onnx_path, enc_path = exporter.export_onnx_json(
+                    sim, self.tmp.name, f'two_input_add_{label}', dummy_input_shape=inputs,
+                )
+                graph = onnx.load(onnx_path)
+                graph_inputs = [value.name for value in graph.graph.input]
+                self.assertEqual(len(graph_inputs), 2)
+                encodings = json.loads(Path(enc_path).read_text())
+                self.assertEqual(set(encodings['activation_encodings']['module_add']['input']), {'0', '1'})
+                feeds = dict(zip(graph_inputs, (left.numpy(), right.numpy())))
+                result = ort.InferenceSession(onnx_path, providers=['CPUExecutionProvider']).run(
+                    None, feeds,
+                )[0]
+                np.testing.assert_allclose(result, (left + right).numpy(), rtol=1e-6, atol=1e-6)
 
     def test_export_preserves_string_tuple_and_repeatable_encodings(self):
         sim = self.sim()
