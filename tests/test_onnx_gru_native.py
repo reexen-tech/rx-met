@@ -124,7 +124,7 @@ class NativeOnnxGruTest(unittest.TestCase):
         del payload["native_recurrent_encodings"]
         path.write_text(json.dumps(payload))
         restored = self.sim(model, feed)
-        with self.assertRaisesRegex(ValueError, "Missing native GRU"):
+        with self.assertRaisesRegex(ValueError, "Missing native recurrent"):
             load_encodings_to_sim(restored, str(path), strict=False)
 
     def test_missing_gate_encoding_is_rejected(self):

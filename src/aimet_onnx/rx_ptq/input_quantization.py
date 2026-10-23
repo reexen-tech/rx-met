@@ -64,7 +64,7 @@ class InputQuantizationSim(QuantizationSimModel):
             raise NotImplementedError("A Concat input also exposed as a graph output requires an Identity output node")
         pending = []
         for node in original_nodes:
-            if not is_compute_op(node.op_type) or node.name in getattr(self, "_rx_native_grus", {}):
+            if not is_compute_op(node.op_type) or node.name in getattr(self, "_rx_native_recurrent", {}):
                 continue
             shared = None
             for index, name in enumerate(node.input):

@@ -38,6 +38,7 @@
 
 #### Torch 与循环算子
 
+- ONNX LSTM PTQ 复用 QuantLSTM 原生校准、量化前向、Po2 和编码导入导出，修复逐通道配置下初始化失败及 `LSTM_config` 被忽略；GRU/LSTM 共用循环算子调度，支持双向、可选 h/c 状态、编码恢复和同图运行。
 - FX 展开的 BN、自定义模块在参数读取处执行 QDQ，避免重复量化，并遵循所选校准方案、类型和位宽；保留原始浮点参数的梯度、重新校准和禁用能力。
 - QuantGRU 统一 FP32/INT32 carrier 的整数与 LUT 前向，修复更新门 zero point 重复扣减和截断 mask 的梯度传播，确保 mask 在 bias 累加与跨 CUDA stream 同步前生效；在 eval 模式需要梯度时保留反向状态。
 - QuantGRU/QuantLSTM 为固定 bias 网格保留训练余量，避免零偏置的微小 QAT 更新立即饱和；加载已有编码时保留其网格。

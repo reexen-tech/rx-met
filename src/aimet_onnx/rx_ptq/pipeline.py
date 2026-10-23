@@ -122,9 +122,9 @@ def create_onnx_ptq_sim(
     from .input_quantization import InputQuantizationSim
 
     sim_type = InputQuantizationSim
-    if any(node.op_type == "GRU" and not node.domain for node in original_model.graph.node):
-        from .recurrent import NativeGRUSim
-        sim_type = NativeGRUSim
+    if any(node.op_type in ("GRU", "LSTM") and not node.domain for node in original_model.graph.node):
+        from .recurrent import NativeRecurrentSim
+        sim_type = NativeRecurrentSim
     sim = sim_type(
         copy.deepcopy(original_model),
         param_type=param_type,
@@ -240,7 +240,7 @@ def verify_onnx_ptq_artifacts(
         restored._rx_expected_quantizers = frozenset(
             artifacts["coverage"]["enabled_quantizer_names"]
         )
-        restored._rx_expected_native_grus = frozenset(
+        restored._rx_expected_native_recurrent = frozenset(
             artifacts["coverage"].get("enabled_native_recurrent_nodes", ())
         )
         load_encodings_to_sim(

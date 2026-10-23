@@ -1,6 +1,6 @@
 """KWS float checkpoint -> Torch PTQ/Po2 -> ONNX PTQ/Po2, without QAT.
 
-Requires CUDA and the updated RX-MET/QuantGRU native runtime. Example:
+Requires CUDA and the updated RX-MET/native recurrent runtime. Example:
     python3 tests/verify_kws_ptq_roundtrip.py --fp-checkpoint /models/model_fp_kws.pth
 
 Both passes consume the same saved batch-1 feeds and the same JSON snapshots.
@@ -40,7 +40,8 @@ from aimet_onnx.rx_ptq.evaluation import evaluate_onnx_dataset
 from aimet_onnx.rx_ptq.mixed_precision import apply_onnx_mixed_precision_bitwidth
 from aimet_onnx.quantsim import load_encodings_to_sim
 
-ENCODING_FIELDS = ("bitwidth", "dtype", "is_symmetric", "scale", "zero_point", "real_min", "real_max")
+ENCODING_FIELDS = ("bitwidth", "dtype", "is_symmetric", "enc_type", "scale", "n",
+                   "zero_point", "qmin", "qmax", "real_min", "real_max")
 
 
 def sha256(path):
@@ -158,13 +159,18 @@ def compare_encodings(left, right):
             "added_records": [list(path) for path in sorted(br.keys() - ar.keys())],
             "removed_records": [list(path) for path in sorted(ar.keys() - br.keys())],
         }
-    owners = {name for name, entry in left["activation_encodings"].items() if entry.get("is_GRU")}
-    result["gru_equal"] = {
+    owners = {name: kind for name, entry in left["activation_encodings"].items()
+              for kind in ("GRU", "LSTM") if entry.get(f'is_{kind}')}
+    result["recurrent_equal"] = {
         name: {"activation": left["activation_encodings"][name] == right["activation_encodings"].get(name),
+               "kind": owners[name],
                "parameters": {key: value == right["param_encodings"].get(key)
                               for key, value in left["param_encodings"].items() if key.startswith(name + ".")}}
         for name in sorted(owners)
     }
+    for kind in ("GRU", "LSTM"):
+        result[f'{kind.lower()}_equal'] = {name: entry for name, entry in result['recurrent_equal'].items()
+                                         if entry['kind'] == kind}
     return result
 
 
@@ -225,6 +231,7 @@ def write_summary(output, report):
             "| Check | Result |", "| --- | --- |",
             f"| ONNX file identical | {report['onnx']['file_equal']} |",
             f"| Encoding JSON identical | {report['encodings']['json_equal']} |",
+            f"| Torch/ONNX PTQ outputs identical | {all(item['max_abs'] == 0 for item in report['torch_vs_onnx_ptq']['comparison'])} |",
             f"| Torch/ONNX Po2 outputs identical | {report['functional_match']} |",
             f"| PTQ prediction differences | {report['torch_vs_onnx_ptq']['prediction_differences']} |",
             f"| Floating weights unchanged by PTQ | {report['weights_unchanged_by_ptq']} |",
@@ -233,25 +240,25 @@ def write_summary(output, report):
         part = report["encodings"][section]
         rows.append(f"| {section}: Torch / ONNX entries | {part['entry_count']['torch']} / {part['entry_count']['onnx']} |")
         rows.append(f"| {section}: changed common records | {len(part['changed_records'])} |")
-    for name, part in report["encodings"]["gru_equal"].items():
+    for name, part in report["encodings"]["recurrent_equal"].items():
         rows.append(f"| {name}: full native encodings identical | {part['activation'] and all(part['parameters'].values())} |")
     metrics = report["evaluation"]
     rows.extend(["", "## Top-1", "", "| Stage | Torch | ONNX |", "| --- | --- | --- |",
                  f"| PTQ | {metrics['torch_ptq']['top1_accuracy']:.2%} | {metrics['onnx']['ptq']['top1_accuracy']:.2%} |",
                  f"| Po2 | {metrics['torch_po2']['top1_accuracy']:.2%} | {metrics['onnx']['po2']['top1_accuracy']:.2%} |"])
-    rows.extend(["", "## Operand Precision Differences", "",
-                 "| Input | Torch | ONNX |", "| --- | --- | --- |"])
+    rows.extend(["", "## Operand Encoding Differences", "",
+                 "| Input | Changed fields |", "| --- | --- |"])
     for change in report["operand_differences"]:
-        if "bitwidth" in change["fields"] or "dtype" in change["fields"]:
+        if change["fields"]:
             rows.append(f"| {change['node']}.input[{change['input_index']}] | "
-                        f"{change['torch']['dtype']} | {change['onnx']['dtype']} |")
+                        f"{', '.join(change['fields'])} |")
     rows.extend(["", "See comparison.json for every changed, added and removed encoding record."])
     (output / "report.md").write_text("\n".join(rows) + "\n")
 
 
 def run(args):
     if not torch.cuda.is_available():
-        raise RuntimeError("This test requires CUDA and the native QuantGRU ONNX runtime")
+        raise RuntimeError("This test requires CUDA and the native recurrent runtime")
     for path in (args.fp_checkpoint, args.config_file, args.bitwidth_config):
         if not path.is_file():
             raise FileNotFoundError(path)
@@ -277,8 +284,8 @@ def run(args):
     labels = manifest["val_labels"]
 
     print("2. Load floating checkpoint; KWS PTQ -> Po2 -> export (no QAT)", flush=True)
-    model = kws._new_model("gru").eval()
-    kws.load_checkpoint(model, args.fp_checkpoint, "gru", kws.DEVICE)
+    model = kws._new_model(args.rnn_type).eval()
+    kws.load_checkpoint(model, args.fp_checkpoint, args.rnn_type, kws.DEVICE)
     prepared = kws.model_preparer.prepare_model(model)
     before = state_fingerprint(prepared)
     sim = kws.quantsim.QuantizationSimModel(prepared,
@@ -349,6 +356,7 @@ def run(args):
     identical = onnx_comparison["file_equal"] and enc_comparison["json_equal"] and functional_match
     report = {
         "status": "identical" if identical else "different", "qat_steps": 0,
+        "rnn_type": args.rnn_type,
         "functional_match": functional_match, "torch_vs_onnx_po2": cross_evaluation,
         "torch_vs_onnx_ptq": {"comparison": ptq_comparison,
                               "prediction_differences": ptq_prediction_differences},
@@ -382,8 +390,8 @@ def run(args):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--fp-checkpoint", type=Path,
-        default=Path("output/quick_start_kws/gru/model_fp_kws.pth"))
+    parser.add_argument("--rnn-type", "--rnn_type", choices=("gru", "lstm"), default="gru")
+    parser.add_argument("--fp-checkpoint", type=Path)
     parser.add_argument("--data-dir", type=Path, default=Path(kws.DATA_ROOT))
     parser.add_argument("--config-file", type=Path, default=kws.CONFIG_FILE)
     parser.add_argument("--bitwidth-config", type=Path, default=kws.BITWIDTH_CONFIG_FILE)
@@ -393,6 +401,8 @@ def main():
         default=Path("output/kws_ptq_roundtrip") / datetime.now().strftime("%Y%m%d_%H%M%S_%f"))
     parser.add_argument("--report-only", action="store_true", help="Return 0 even when artifacts differ")
     args = parser.parse_args()
+    if args.fp_checkpoint is None:
+        args.fp_checkpoint = Path('output/quick_start_kws') / args.rnn_type / 'model_fp_kws.pth'
     if args.samples_per_class < 1:
         parser.error("--samples-per-class must be positive")
     return run(args)

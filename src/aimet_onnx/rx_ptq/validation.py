@@ -8,14 +8,14 @@ from aimet_common.defs import QuantizationDataType
 def validate_quantizer_state(sim, *, allow_pending_bias: bool = False) -> None:
     """Reject missing required quantizers and invalid enabled integer grids."""
     quantizers = sim.qc_quantize_op_dict
-    native = getattr(sim, "_rx_native_grus", {})
-    missing_native = [name for name in getattr(sim, "_rx_expected_native_grus", ())
+    native = getattr(sim, "_rx_native_recurrent", {})
+    missing_native = [name for name in getattr(sim, "_rx_expected_native_recurrent", ())
                       if name not in native or not native[name].module.use_quantization]
     if missing_native:
-        raise RuntimeError("Required native GRU quantization is missing or disabled: " + ", ".join(missing_native))
-    for name, adapter in getattr(sim, "_rx_native_grus", {}).items():
+        raise RuntimeError("Required native recurrent quantization is missing or disabled: " + ", ".join(missing_native))
+    for name, adapter in getattr(sim, "_rx_native_recurrent", {}).items():
         if adapter.module.use_quantization and not adapter.module.is_calibrated():
-            raise RuntimeError(f"GRU {name}: internal quantizers are not calibrated")
+            raise RuntimeError(f"Recurrent node {name}: internal quantizers are not calibrated")
     pending_bias = set(getattr(sim, "_rx_calibration_bias_quantizers", ()))
     if pending_bias and not allow_pending_bias:
         raise RuntimeError("Bias quantizers still await scale alignment: " + ", ".join(sorted(pending_bias)))

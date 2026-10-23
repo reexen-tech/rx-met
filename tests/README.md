@@ -8,17 +8,21 @@
 `verify_kws_ptq_roundtrip.py` 从 KWS 浮点检查点开始，调用示例的模型、数据集和量化接口，
 执行 PTQ、Po2 并导出，跳过 QAT；再将该 ONNX 作为输入重新 PTQ。
 两轮使用相同 JSON 快照、相同顺序的真实校准样本和 batch size 1，并检查 PTQ 未改变浮点权重。
-需要 CUDA 和包含 ONNX 桥接的新版本 QuantGRU。
+通过 `--rnn-type gru|lstm` 选择循环层，默认 GRU；需要 CUDA 和对应原生算子包。
+对应的 QuantGRU / QuantLSTM 包须包含 ONNX Runtime 桥接扩展。
 
 ```bash
 python3 tests/verify_kws_ptq_roundtrip.py \
+  --rnn-type lstm \
   --fp-checkpoint /path/to/model_fp_kws.pth \
   --data-dir /datasets/speech_commands_v0.02
 ```
 
 默认每类取 20 条训练校准及验证样本，输出到运行目录的
 `output/kws_ptq_roundtrip/<时间>/`。`torch_ptq/`、`onnx_ptq/` 保存两轮产物，
-`comparison.json` 逐项记录 ONNX、编码、GRU 编码和验证结果，`report.md` 提供摘要。
+成功完成两轮后，`comparison.json` 逐项记录 ONNX、编码、GRU/LSTM 内部编码和验证结果，
+`report.md` 提供摘要。创建仿真或校准中途失败时保留已生成的第一轮产物并抛出异常，
+此时不能将失败当作两份产物已经完成比较。
 `quantized_outputs.npz` 保存两框架 PTQ/Po2 的逐样本 logits；报告同时记录跨框架的
 输出误差和预测差异，Po2 另从最终保存的编码恢复后与 Torch 逐样本核对。
 产物不一致时仍保存完整报告并返回 1；`--report-only` 可只生成报告而返回 0。
@@ -74,6 +78,8 @@ python3 -m unittest discover -s tests -p test_onnx_operand_precision.py -v
 
 `test_onnx_input_quantization.py` 检查 Concat 的独立共享输入网格、校准顺序、配置冲突和
 编码重载；`test_onnx_gru_native.py` 覆盖 GRU 中间帧按实际消费位置校准及端口编码导出。
+`test_onnx_lstm_native.py` 覆盖 LSTM 门顺序、双向和 batch-first 布局、可选 h/c 状态与
+输出、原生校准、Po2、编码恢复、缺失内部网格拒绝，以及 GRU/LSTM 同图运行。
 `test_onnx_encoding_tensor_roles.py` 验证网格只沿浮点数据端口传播，覆盖 Gather 整数索引、
 BOOL 控制输入、TopK/MaxPool 索引、Dropout mask、NonZero、浮点 Pad 控制和 Split 多输出，
 以及非法量化器与被篡改索引端口编码的导出/恢复拒绝。

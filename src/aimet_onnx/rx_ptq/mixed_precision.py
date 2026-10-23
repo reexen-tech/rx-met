@@ -297,10 +297,9 @@ def apply_onnx_mixed_precision_bitwidth(
         unsupported_types = sorted(set(layer_type_config) & (_UNMAPPED_TYPES - _INT_ONLY_TYPES))
         if unsupported_types:
             print(f"  没有单节点 ONNX 对应的类型配置: {unsupported_types}")
-        if config.get("LSTM_config"):
-            print("  ONNX PTQ 不执行 QuantLSTM 内部校准，忽略 LSTM_config")
-        if config.get("GRU_config") and not getattr(sim, "_rx_native_grus", {}):
-            print("  当前 ONNX 图没有 GRU，忽略 GRU_config")
+        for kind in ("GRU", "LSTM"):
+            if config.get(f"{kind}_config") and kind not in present_types:
+                print(f"  当前 ONNX 图没有 {kind}，忽略 {kind}_config")
 
     stats: Dict[str, Any] = {
         "applied_ops": 0,
@@ -317,7 +316,7 @@ def apply_onnx_mixed_precision_bitwidth(
         plan.request(quantizer, 'signed', config.get('default_config', {}).get('signed'),
                      f'default_config.{name}', fallback=True)
     for op in ops:
-        if op.name in getattr(sim, "_rx_native_grus", {}):
+        if op.name in getattr(sim, "_rx_native_recurrent", {}):
             continue
         type_config = {} if op.name in layer_name_config else _type_config_for_op(
             sim, op, layer_type_config
@@ -354,7 +353,7 @@ def apply_onnx_mixed_precision_bitwidth(
                     print(f"  [{match}] {op.name} ({op.type})")
 
     _apply_plan(plan)
-    for adapter in getattr(sim, "_rx_native_grus", {}).values():
+    for adapter in getattr(sim, "_rx_native_recurrent", {}).values():
         adapter.configure(config_file)
     with log_details(verbose):
         print(

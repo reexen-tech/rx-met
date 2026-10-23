@@ -318,7 +318,7 @@ def compute_encodings(sim: "QuantizationSimModel"):
         ...         _ = sim.session.run(None, {"input": input})
     """
     with contextlib.ExitStack() as stack:
-        for adapter in getattr(sim, "_rx_native_grus", {}).values():
+        for adapter in getattr(sim, "_rx_native_recurrent", {}).values():
             if adapter.module.use_quantization:
                 stack.enter_context(adapter.module.calibration_context())
         enabled_quantizers = {
@@ -2634,7 +2634,7 @@ def load_encodings_to_sim(
         quant_sim_model.qc_quantize_op_dict[quantizer_name]._load_encodings_dict(
             encodings_to_load, allow_overwrite=allow_overwrite
         )
-    if getattr(quant_sim_model, "_rx_native_grus", None) or encodings.get("native_recurrent_encodings"):
+    if getattr(quant_sim_model, "_rx_native_recurrent", None) or encodings.get("native_recurrent_encodings"):
         from aimet_onnx.rx_ptq.recurrent import restore_native_encodings
         restore_native_encodings(quant_sim_model, encodings, allow_overwrite=allow_overwrite)
     return mismatched_encodings

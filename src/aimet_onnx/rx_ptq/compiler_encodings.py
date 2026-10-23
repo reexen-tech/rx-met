@@ -96,7 +96,7 @@ class CompilerEncodingConverter:
         self, node_index: int, io_name: str, io_index: int, encoding: Dict[str, Any]
     ) -> None:
         node_name = self.graph.node_names[node_index]
-        if node_name in getattr(self.sim, "_rx_native_grus", {}):
+        if node_name in getattr(self.sim, "_rx_native_recurrent", {}):
             return  # The native operator supplies its complete port/internal schema.
         node = self.original_model.graph.node[node_index]
         tensor = node.input[io_index] if io_name == "input" else node.output[io_index]
@@ -221,14 +221,17 @@ class CompilerEncodingConverter:
             enabled_activations.append(name)
             self.mapped.add(name)
 
-        from .recurrent import export_native_encodings, native_grus
+        from .recurrent import export_native_encodings, native_recurrent
         native_payload = export_native_encodings(self.sim)
-        for name, adapter in native_grus(self.sim).items():
+        for name, adapter in native_recurrent(self.sim).items():
             native_activation = native_payload["activation_encodings"].get(name)
             if native_activation is not None:
-                for output in adapter.outputs:
+                for index, output in enumerate(adapter.outputs):
                     if output:
-                        tensor_encodings.setdefault(output, native_activation["output"]["0"])
+                        # Older GRU adapters expose one output grid; LSTM also owns a cell-state grid.
+                        encoding = (adapter.output_encoding(index, native_activation)
+                                    if hasattr(adapter, "output_encoding") else native_activation["output"]["0"])
+                        tensor_encodings.setdefault(output, encoding)
         self._propagate_grid_preserving(tensor_encodings)
 
         for name, encoding in tensor_encodings.items():
@@ -270,9 +273,9 @@ class CompilerEncodingConverter:
             "activation_entries": len(self.activation),
             "param_entries": len(self.params),
             "initializer_count": len(self.graph.initializers),
-            "native_recurrent_nodes": sorted(native_grus(self.sim)),
+            "native_recurrent_nodes": sorted(native_recurrent(self.sim)),
             "enabled_native_recurrent_nodes": sorted(
-                name for name, adapter in native_grus(self.sim).items() if adapter.module.use_quantization
+                name for name, adapter in native_recurrent(self.sim).items() if adapter.module.use_quantization
             ),
         }
         return normalize_compiler_encodings(payload, require_po2=True), report
