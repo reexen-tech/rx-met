@@ -269,8 +269,123 @@ def normalize_dtype_with_bitwidth(enc: dict, verbose: bool = True) -> tuple[dict
     return enc, changed
 
 
-def validate_compiler_encodings(enc: dict, *, require_po2: bool = False) -> None:
-    """Validate numbers, channel shapes and representable compiler integer grids."""
+def _strict_records(document):
+    """Traverse declared record locations, including damaged records lacking keys."""
+    for section in ('activation_encodings', 'param_encodings'):
+        if not isinstance(document.get(section), dict):
+            raise ValueError(f'{section}: expected a dictionary')
+
+    def ports(node, path):
+        for kind in ('input', 'output'):
+            if kind not in node:
+                continue
+            values = node[kind]
+            if not isinstance(values, dict):
+                raise ValueError(f'{path}.{kind}: expected a port-index dictionary')
+            for index, entry in values.items():
+                if (not isinstance(index, str) or not index.isascii() or not index.isdecimal()
+                        or str(int(index)) != index):
+                    raise ValueError(f'{path}.{kind}: invalid canonical port index {index!r}')
+                yield f'{path}.{kind}.{index}', entry, False
+
+    for name, node in document['activation_encodings'].items():
+        path = f'activation_encodings.{name}'
+        if not isinstance(node, dict):
+            raise ValueError(f'{path}: expected a node dictionary')
+        yield from ports(node, path)
+        native = node.get('is_GRU') is True or node.get('is_LSTM') is True
+        for direction in ('internal_ops', 'internal_ops_reverse'):
+            if direction not in node:
+                continue
+            internal = node[direction]
+            if not isinstance(internal, dict):
+                raise ValueError(f'{path}.{direction}: expected an operator dictionary')
+            for op, value in internal.items():
+                child = f'{path}.{direction}.{op}'
+                if not isinstance(value, dict):
+                    raise ValueError(f'{child}: expected an operator dictionary')
+                if native:
+                    if 'input' in value:
+                        raise ValueError(f'{child}.input: native internal records declare only output')
+                    output = value.get('output')
+                    if not isinstance(output, list) or len(output) != 1:
+                        raise ValueError(f'{child}.output: expected a single encoding list')
+                    yield f'{child}.output[0]', output[0], False
+                else:
+                    yield from ports(value, child)
+    for name, entry in document['param_encodings'].items():
+        yield f'param_encodings.{name}', entry, True
+
+
+def _validate_strict_record(entry, path, parameter, require_po2):
+    if not isinstance(entry, dict):
+        raise ValueError(f'{path}: expected an encoding dictionary')
+    try:
+        for legacy in ('offset', 'offset_domain', 'signed', 'min', 'max'):
+            if legacy in entry:
+                raise ValueError(f'{legacy}: legacy field is not valid in schema 4 output')
+        bits, dtype = entry['bitwidth'], entry['dtype']
+        if type(bits) is not int or not 1 <= bits <= 64:
+            raise ValueError('bitwidth: expected an integer between 1 and 64')
+        if dtype == f'FLOAT{bits}':
+            return
+        if dtype not in (f'INT{bits}', f'UINT{bits}'):
+            raise ValueError(f'dtype: unsupported compiler dtype {dtype!r}')
+        for field in ('is_symmetric', 'enc_type', 'scale', 'n', 'zero_point', 'real_min', 'real_max'):
+            if field not in entry:
+                raise ValueError(f'{field}: required integer encoding field is missing')
+        if entry['is_symmetric'] not in ('True', 'False'):
+            raise ValueError('is_symmetric: expected "True" or "False"')
+        if entry['enc_type'] not in ('PER_TENSOR', 'PER_CHANNEL', 'PER_GATE', 'PER_BLOCK'):
+            raise ValueError('enc_type: unsupported quantization granularity')
+        shape = _shape(entry['scale'])
+        fields = {}
+        for field in ('scale', 'n', 'zero_point', 'real_min', 'real_max'):
+            value = entry[field]
+            if parameter and not isinstance(value, list):
+                raise ValueError(f'{field}: parameter channel fields must be arrays')
+            if _shape(value) != shape:
+                raise ValueError(f'{field}: channel shape differs from scale')
+            values = list(_values(value))
+            if any(not _finite_number(item) for item in values):
+                raise ValueError(f'{field}: expected finite numbers')
+            if field == 'n' and any(type(item) is not int for item in values):
+                raise ValueError('n: expected integer exponents')
+            fields[field] = values
+        exponents = [_exponent(scale, path, require_po2) for scale in fields['scale']]
+        if require_po2 and any(math.frexp(scale)[0] != .5 for scale in fields['scale']):
+            raise ValueError('scale: scale is not exactly Po2')
+        if fields['n'] != exponents:
+            raise ValueError('n: exponent does not match scale')
+        grid = IntegerGrid.from_compiler_record(entry)
+        if entry['is_symmetric'] == 'True' and any(point != 0 for point in fields['zero_point']):
+            raise ValueError('symmetric grid requires zero_point=0')
+        if entry['enc_type'] == 'PER_TENSOR' and any(
+                any(value != values[0] for value in values[1:])
+                for values in (fields['scale'], fields['zero_point'])):
+            raise ValueError('PER_TENSOR: channel entries describe different grids')
+        for field, endpoint in (('real_min', grid.real_min), ('real_max', grid.real_max)):
+            for actual, expected in zip(fields[field], endpoint.flat):
+                expected = float(expected)
+                if not math.isfinite(expected):
+                    raise ValueError(f'{field}: integer grid endpoint is not finite')
+                tolerance = 4 * max(math.ulp(actual), math.ulp(expected))
+                if abs(actual - expected) > tolerance:
+                    raise ValueError(f'{field}: endpoint disagrees with integer grid')
+    except (KeyError, ValueError, TypeError, OverflowError) as exc:
+        raise ValueError(f'{path}: {exc}') from exc
+
+
+def validate_compiler_encodings(
+    enc: dict, *, require_po2: bool = False, strict: bool = False,
+) -> None:
+    """Validate new artifacts strictly, or retain legacy reader compatibility."""
+    if strict:
+        if not isinstance(enc, dict) or type(enc.get('schema_version')) is not int or enc['schema_version'] != COMPILER_SCHEMA_VERSION:
+            raise ValueError('schema_version: strict validation requires explicit schema_version=4')
+        for path, entry, parameter in _strict_records(enc):
+            _validate_strict_record(entry, path, parameter, require_po2)
+        return
     version = _schema_version(enc)
     for path, entry, native in _records(enc):
         try:
@@ -331,4 +446,33 @@ def normalize_compiler_encodings(enc: dict, *, require_po2: bool = False, verbos
     normalize_quant_fields_add_n(result, verbose, require_po2=require_po2)
     normalize_dtype_with_bitwidth(result, verbose)
     validate_compiler_encodings(result, require_po2=require_po2)
+    return result
+
+
+def finalize_compiler_encodings(enc: dict, *, require_po2: bool = False, verbose: bool = False) -> dict:
+    """Finalize live export records; never use this to validate saved artifacts.
+
+    Runtime float32 range endpoints can round INT32 qmax up by one code. The
+    exported endpoints come from the explicit integer grid in double precision.
+    Scale, zero point and the actual integer range are preserved.
+    """
+    result = normalize_compiler_encodings(enc, require_po2=require_po2, verbose=verbose)
+    for node in result.get('activation_encodings', {}).values():
+        if isinstance(node, dict) and (node.get('is_GRU') is True or node.get('is_LSTM') is True):
+            for field in ('input', 'output'):
+                if isinstance(node.get(field), list):
+                    node[field] = {str(index): entry for index, entry in enumerate(node[field])}
+    for path, entry, parameter in _strict_records(result):
+        if not isinstance(entry, dict) or entry.get('dtype', '').startswith('FLOAT'):
+            continue
+        if parameter:
+            for field in ('scale', 'zero_point', 'real_min', 'real_max', 'n'):
+                if field in entry and not isinstance(entry[field], list):
+                    entry[field] = [entry[field]]
+        if 'n' not in entry:
+            entry['n'] = _map_values(entry['scale'], lambda scale: _exponent(scale, path, require_po2))
+        grid = IntegerGrid.from_compiler_record(entry)
+        entry['real_min'] = grid.real_min.tolist()
+        entry['real_max'] = grid.real_max.tolist()
+    validate_compiler_encodings(result, require_po2=require_po2, strict=True)
     return result

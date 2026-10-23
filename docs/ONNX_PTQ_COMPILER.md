@@ -97,6 +97,30 @@ Po2 scale 满足 `scale = 2^(-n)`；非 Po2 scale 的 n 是舍入指数，实际
 `internal_ops` 和 `internal_ops_reverse` 仍采用 `算子名 -> output -> [encoding]`，
 其网格及字段由算子库生成，不由通用层重写。循环层加载接口兼容旧端口列表及缺少 n 的文件。
 
+新产物验收直接读取保存的 schema v4 JSON，拒绝缺失字段、重复键、非法端口和
+不符合整数网格公式的端点，不先迁移或补写。导出端使用公共
+`finalize_compiler_encodings` 按 `IntegerGrid` 的 double 精度计算 real_min/max；
+该函数不用于磁盘文件验收。旧文件加载仍使用兼容规范化接口。
+
+```bash
+python3 scripts/verify_compiler_artifacts.py \
+  --onnx /path/to/model.onnx \
+  --encodings /path/to/model.encodings
+```
+
+默认要求 Po2 和完整计算输入覆盖。已有 affine 产物使用 `--allow-affine`；
+有意只验证已声明编码时使用 `--allow-partial`，其结果不表示完整量化覆盖。
+独立脚本没有 live 模型来源信息，遇到无法从最终图证明端口的虚拟容器会明确拒绝。
+它验证文件契约和图映射，不代替下游编译器执行验证。
+
+普通参数的逐通道数量按 Conv、ConvTranspose、Gemm、MatMul 的已知通道轴或一维
+参数长度验证；无法确定轴及尚未支持的普通分块/逐门声明会明确拒绝，不通过维度猜测放行。
+原生循环参数采用自身的方向和 gate 打包规则单独验证。
+
+双向 GRU/LSTM 的 `output[0]` 是 forward 兼容摘要，完整方向网格保存在各自的内部记录。
+两个方向不同的网格可随未重新量化的保形路径保留，不能把摘要传播为整张张量的标量网格。
+独立的输出 QDQ 或普通计算输入 QDQ 会建立新的消费端网格；严格图验收会拒绝错误的标量声明。
+
 每次运行的 `exports/` 中生成：
 
 - `<prefix>.onnx`：移除 AIMET `QcQuantizeOp` 并显式保存中间张量 shape/dtype 的 clean ONNX；

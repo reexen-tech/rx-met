@@ -161,11 +161,6 @@ class OnnxLSTM:
         return {"activation_encodings": payload["activation_encodings"], "param_encodings": params,
                 "excluded_layers": []}
 
-    def output_encoding(self, index, entry):
-        if index == 2:
-            return entry["internal_ops"]["cell_state"]["output"][0]
-        return entry["output"]["0"]
-
     def load_encodings(self, payload, *, allow_overwrite=False):
         if self.name in payload.get("excluded_layers", []):
             self.module.use_quantization = False

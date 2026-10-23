@@ -9,14 +9,15 @@ from __future__ import annotations
 from collections import Counter
 from contextlib import ExitStack, contextmanager
 import inspect
-import json
 import math
 
 import onnx
 import torch
 
 from aimet_common.quantsim_config.compute_ops import is_compute_op
-from aimet_common.compiler_encodings import validate_compiler_encodings
+from aimet_common.compiler_artifacts import load_compiler_encodings
+from aimet_common.compiler_encodings import finalize_compiler_encodings
+from aimet_common.compiler_graph_validation import validate_compiler_encoding_graph
 from aimet_torch.native_recurrent import named_native_recurrent
 from aimet_torch.v2.utils import flatten_nn_module_list
 from .postprocess.encodings_ops import postprocess_encodings_inplace
@@ -145,7 +146,7 @@ def collect_expected_encodings(model, non_tensor_inputs=()) -> dict:
             continue
         module.export_quant_params_to_aimet_format(expected, module_name=name)
     _fail(errors)
-    return expected
+    return finalize_compiler_encodings(expected)
 
 
 def _compare(expected, actual, path: str, errors: list[str]) -> None:
@@ -159,6 +160,11 @@ def _compare(expected, actual, path: str, errors: list[str]) -> None:
                 errors.append(f'{path}.{key}: missing quantization parameters')
             else:
                 _compare(value, actual[key], f'{path}.{key}', errors)
+        # Export may add graph-derived keys and run metadata, but a calibrated
+        # record or module port map must not acquire undeclared fields/ports.
+        if path not in ('encodings', 'encodings.activation_encodings', 'encodings.param_encodings'):
+            for key in actual.keys() - expected.keys():
+                errors.append(f'{path}.{key}: unexpected encoding field or port')
     elif isinstance(expected, list):
         if not isinstance(actual, list) or len(actual) != len(expected):
             errors.append(f'{path}: encoding channel/entry count mismatch (expected {len(expected)})')
@@ -168,17 +174,10 @@ def _compare(expected, actual, path: str, errors: list[str]) -> None:
     elif isinstance(expected, (int, float)) and not isinstance(expected, bool):
         if (not isinstance(actual, (int, float)) or isinstance(actual, bool)
                 or not math.isfinite(actual)
-                or not math.isclose(expected, actual, rel_tol=1e-6, abs_tol=0)):
+                or actual != expected):
             errors.append(f'{path}: encoding value differs from QuantSim ({actual!r}, expected {expected!r})')
     elif actual != expected:
         errors.append(f'{path}: encoding value differs from QuantSim ({actual!r}, expected {expected!r})')
-
-
-def _check_scales(value, path: str, errors: list[str]) -> None:
-    try:
-        validate_compiler_encodings(value)
-    except ValueError as exc:
-        errors.append(f'{path}: {exc}')
 
 
 def _io_encoding(entry, index):
@@ -194,7 +193,7 @@ def _has_encoding(value):
             and (str(value['dtype']).upper().startswith('FLOAT') or 'scale' in value))
 
 
-def _check_node_encodings(graph, encodings, scalar_inputs, reference_graph, errors,
+def _check_node_encodings(graph, encodings, scalar_inputs, errors,
                           disabled_recurrent):
     """Check actual compute operands even if QuantSim never created a quantizer.
 
@@ -283,22 +282,6 @@ def _check_node_encodings(graph, encodings, scalar_inputs, reference_graph, erro
                 errors.append(f'ONNX {node.name} ({node.op_type}) input[{index}] '
                               f'({tensor}): missing encoding input[{slot}] or parameter encoding')
 
-    # Container encodings and entries for nodes eliminated by simplification
-    # are legitimate only when their provenance is present in the raw graph.
-    final_names = {node.name for node in nodes}
-    raw_names = {node.name for node in reference_graph.graph.node} if reference_graph else set()
-    raw_params = {tensor.name for tensor in reference_graph.graph.initializer} if reference_graph else set()
-    for name in activations:
-        if name in final_names or name in raw_names:
-            continue
-        if any(node.startswith(name + '.') or node.startswith(name + '#')
-               for node in final_names | raw_names):
-            continue
-        errors.append(f'activation_encodings.{name}: encoding key has no corresponding ONNX node')
-    for name in params:
-        if name not in initializers and name not in raw_params:
-            errors.append(f'param_encodings.{name}: encoding key has no corresponding ONNX initializer')
-
 
 def validate_exported_artifacts(onnx_path: str, encodings_path: str, expected: dict,
                                 *, scalar_inputs=(), reference_graph=None,
@@ -342,10 +325,8 @@ def validate_exported_artifacts(onnx_path: str, encodings_path: str, expected: d
     except Exception as exc:
         errors.append(f'ONNX {onnx_path}: {exc}')
     try:
-        with open(encodings_path, encoding='utf-8') as stream:
-            actual = json.load(stream)
+        actual = load_compiler_encodings(encodings_path)
         _compare(expected, actual, 'encodings', errors)
-        _check_scales(actual, 'encodings', errors)
         if graph is not None and isinstance(actual, dict):
             excluded = actual.get('excluded_layers') or []
             if not isinstance(excluded, list) or any(not isinstance(name, str) for name in excluded):
@@ -362,8 +343,11 @@ def validate_exported_artifacts(onnx_path: str, encodings_path: str, expected: d
                 if ((isinstance(activations, dict) and name in activations)
                         or (isinstance(params, dict) and any(key.startswith(name + '.') for key in params))):
                     errors.append(f'{name}: disabled recurrent layer has quantization encodings')
-            _check_node_encodings(graph, actual, scalar_inputs, reference_graph, errors,
+            _check_node_encodings(graph, actual, scalar_inputs, errors,
                                   disabled_recurrent)
+            validate_compiler_encoding_graph(
+                graph, actual, reference_graph=reference_graph, scalar_inputs=scalar_inputs,
+            )
     except (OSError, ValueError) as exc:
         errors.append(f'encodings {encodings_path}: {exc}')
     _fail(errors)

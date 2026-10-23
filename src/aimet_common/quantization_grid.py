@@ -1,6 +1,7 @@
 """Integer grids using real = scale * (q - zero_point), independent of symmetry."""
 
 from dataclasses import dataclass
+from numbers import Integral, Real
 from typing import Any
 
 import numpy as np
@@ -36,12 +37,17 @@ class IntegerGrid:
         if type(qmin) is not int or type(qmax) is not int or not low <= qmin < qmax <= high:
             raise ValueError('integer range does not fit dtype')
         scale = np.asarray(self.scale, dtype=np.float64)
-        point = np.asarray(self.zero_point, dtype=np.float64)
+        point = np.asarray(self.zero_point, dtype=object)
         if not scale.size or not np.isfinite(scale).all() or (scale <= 0).any():
             raise ValueError('scale must be positive and finite')
-        if (not np.isfinite(point).all() or (point != np.rint(point)).any()
-                or (point < low).any() or (point > high).any()):
-            raise ValueError('zero_point must be integral and fit dtype range')
+        # Comparing INT64 bounds in float64 rounds qmax up to the first invalid
+        # code. Keep the integer comparison exact before any numeric conversion.
+        for value in point.flat:
+            if (isinstance(value, (bool, np.bool_)) or not isinstance(value, Real)
+                    or (not isinstance(value, Integral)
+                        and (not np.isfinite(value) or value != int(value)))
+                    or not low <= int(value) <= high):
+                raise ValueError('zero_point must be integral and fit dtype range')
         if point.ndim and point.shape != scale.shape:
             raise ValueError('zero_point shape differs from scale')
         object.__setattr__(self, 'qmin', qmin)
@@ -53,11 +59,16 @@ class IntegerGrid:
 
     @property
     def real_min(self):
-        return np.asarray(self.scale, dtype=np.float64) * (self.qmin - np.asarray(self.zero_point, dtype=np.float64))
+        return self._real_bound(self.qmin)
 
     @property
     def real_max(self):
-        return np.asarray(self.scale, dtype=np.float64) * (self.qmax - np.asarray(self.zero_point, dtype=np.float64))
+        return self._real_bound(self.qmax)
+
+    def _real_bound(self, bound):
+        points = np.asarray(self.zero_point, dtype=object)
+        codes = np.asarray([bound - int(point) for point in points.flat], dtype=np.float64)
+        return np.asarray(self.scale, dtype=np.float64) * codes.reshape(points.shape)
 
     def additive_offset(self, *, index_domain=False):
         points = np.asarray(self.zero_point, dtype=object if self.bitwidth == 64 else np.int64)

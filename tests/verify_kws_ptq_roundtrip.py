@@ -33,6 +33,7 @@ import torch
 
 from examples import quick_start_kws as kws
 from aimet_common.evaluation import classification_accuracy, compare_output_batches
+from aimet_common.compiler_artifacts import validate_compiler_artifacts
 from aimet_onnx.rx_ptq import run_onnx_ptq, create_onnx_ptq_sim
 from aimet_onnx.rx_ptq import pipeline as ptq_pipeline
 from aimet_onnx.rx_ptq.calibration import iter_calibration_feeds
@@ -350,6 +351,10 @@ def run(args):
     functional_match = all(item["max_abs"] == 0 for item in cross_evaluation["comparison"])
     first = json.loads(Path(first_enc).read_text())
     second_enc = json.loads(second["encodings"].read_text())
+    strict_acceptance = {
+        "torch": validate_compiler_artifacts(first_onnx, first_enc),
+        "onnx": validate_compiler_artifacts(second["onnx"], second["encodings"]),
+    }
     metadata = json.loads(second["metadata"].read_text())
     onnx_comparison = compare_models(first_onnx, second["onnx"])
     enc_comparison = compare_encodings(first, second_enc)
@@ -357,6 +362,7 @@ def run(args):
     report = {
         "status": "identical" if identical else "different", "qat_steps": 0,
         "rnn_type": args.rnn_type,
+        "strict_acceptance": strict_acceptance,
         "functional_match": functional_match, "torch_vs_onnx_po2": cross_evaluation,
         "torch_vs_onnx_ptq": {"comparison": ptq_comparison,
                               "prediction_differences": ptq_prediction_differences},

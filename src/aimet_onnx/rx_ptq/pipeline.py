@@ -12,7 +12,8 @@ from typing import Any, Dict, List, Sequence
 import numpy as np
 import onnx
 
-from aimet_common.compiler_encodings import normalize_compiler_encodings
+from aimet_common.compiler_artifacts import load_compiler_encodings
+from aimet_common.compiler_graph_validation import validate_compiler_encoding_graph
 from aimet_common.evaluation import classification_accuracy, compare_outputs
 from aimet_common.run_context import (
     get_run, logged_export, logged_operation, logged_workflow, metadata_output, note_output,
@@ -233,6 +234,11 @@ def verify_onnx_ptq_artifacts(
     model = onnx.load(str(artifacts["onnx"]))
     validate_onnx_shapes(model)
     onnx.checker.check_model(str(artifacts["onnx"]), full_check=True)
+    try:
+        saved_payload = load_compiler_encodings(artifacts["encodings"], require_po2=True)
+        validate_compiler_encoding_graph(model, saved_payload)
+    except ValueError as error:
+        raise RuntimeError(f"Saved compiler encodings failed strict validation: {error}") from error
     with tempfile.TemporaryDirectory(prefix="rx-met-onnx-reload-") as work_dir:
         restored = create_onnx_ptq_sim(
             model, feed, config_file=config_file, param_type=param_type,
@@ -251,9 +257,6 @@ def verify_onnx_ptq_artifacts(
         )
         validate_quantizer_state(restored)
         loaded_payload, _ = CompilerEncodingConverter(restored, model).convert()
-        saved_payload = normalize_compiler_encodings(
-            json.loads(Path(artifacts["encodings"]).read_text(encoding="utf-8")), require_po2=True
-        )
         if loaded_payload != saved_payload:
             raise RuntimeError("Restored quantizers do not match the saved compiler encodings")
         outputs = run_onnx_feed(restored, feed, providers)

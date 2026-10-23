@@ -45,7 +45,12 @@ class OnnxGridAdapterTest(unittest.TestCase):
                                     export_encodings=lambda version: entries,
                                     _encoding_type=lambda: enc_type)
         sim = SimpleNamespace(qc_quantize_op_dict={'w': quantizer}, quant_args={})
-        payload, coverage = CompilerEncodingConverter(sim, graph()).convert()
+        model = graph()
+        if enc_type == EncodingType.PER_CHANNEL and len(entries) == 1:
+            weight = onnx.numpy_helper.to_array(model.graph.initializer[0])[:, :1].copy()
+            model.graph.initializer[0].CopyFrom(onnx.numpy_helper.from_array(weight, 'w'))
+            model.graph.output[0].type.tensor_type.shape.dim[1].dim_value = 1
+        payload, coverage = CompilerEncodingConverter(sim, model).convert()
         self.assertEqual(coverage['mapped_quantizers'], 1)
         validate_compiler_encodings(payload, require_po2=True)
         return payload['param_encodings']['w']
@@ -85,6 +90,7 @@ class OnnxGridAdapterTest(unittest.TestCase):
         result = self.convert(entries, unsigned=True)
         self.assertEqual(result['dtype'], 'INT8')
         self.assertEqual(result['zero_point'], [0, -128])
+        self.assertEqual(result['is_symmetric'], 'False')
         for index, entry in enumerate(entries):
             for unsigned_q in (0, 127, 255):
                 signed_q = unsigned_q - 128

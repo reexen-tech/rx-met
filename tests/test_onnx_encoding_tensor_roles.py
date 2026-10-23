@@ -173,7 +173,7 @@ class OnnxEncodingTensorRolesTest(unittest.TestCase):
         inputs = payload['activation_encodings']['gather']['input']
         inputs['1'] = inputs['0'].copy()
         artifacts['encodings'].write_text(json.dumps(payload))
-        with self.assertRaisesRegex(RuntimeError, 'Restored quantizers do not match'):
+        with self.assertRaisesRegex(RuntimeError, 'compiler encodings.*(strict validation|do not match)'):
             pipeline.verify_onnx_ptq_artifacts(artifacts, feed, output,
                 config_file=str(self.fixture.config), quant_scheme='tf')
 

@@ -252,12 +252,18 @@ def align_onnx_bias_scale(sim: Any, *, bias_bitwidth: int = 32) -> Dict[str, Any
             raise ValueError(f"{bias.name}: bias initializer is missing")
         validate_bias_values(onnx.numpy_helper.to_array(initializer),
                              [item["scale"] for item in aligned], bias_bitwidth, name=bias.name)
-        per_channel = len(aligned) > 1
+        per_channel = bool(bias_quantizer.quant_info.usePerChannelMode)
         if per_channel:
             params = bias_quantizer.tensor_quantizer_params
-            if (params is None or params.channel_axis is None
-                    or params.tensor_shape[params.channel_axis] != len(aligned)):
+            if params is None or params.channel_axis is None:
                 raise ValueError(f"{bias.name}: bias quantizer cannot represent output-channel scales")
+            channels = params.tensor_shape[params.channel_axis]
+            if len(aligned) == 1:
+                aligned = aligned * channels
+            if len(aligned) != channels:
+                raise ValueError(f"{bias.name}: bias quantizer cannot represent output-channel scales")
+        elif len(aligned) != 1:
+            raise ValueError(f"{bias.name}: per-tensor bias cannot represent output-channel weight scales")
         if bias_quantizer.is_encoding_frozen():
             raise ValueError(f"{bias.name}: bias quantizer is frozen")
         pending.append((bias, op, bias_quantizer, aligned, old_scales, per_channel))

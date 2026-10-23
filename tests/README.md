@@ -28,6 +28,20 @@ python3 tests/verify_kws_ptq_roundtrip.py \
 产物不一致时仍保存完整报告并返回 1；`--report-only` 可只生成报告而返回 0。
 已有输出目录拒绝覆盖，可用 `--output-dir` 指定新目录。
 
+## 严格产物验收
+
+`test_compiler_encodings_strict.py` 覆盖 schema v4 字段、通道数组、Po2、精确端点和整数域；
+`test_verify_compiler_artifacts.py` 检查独立 CLI 的退出码、只读行为和非法 JSON 拒绝。
+`test_torch_strict_export_validation.py` 验证真实导出拒绝端点单码/多码篡改、非法端口、
+缺失字段及单 ULP 的一致网格篡改。`test_recurrent_compiler_grids.py` 验证 GRU/LSTM
+不同方向网格的正确消费、输出状态、布局及编码恢复；`test_onnx_bias_granularity.py`
+核对单通道和显式 bias 粒度。
+
+```bash
+python3 scripts/verify_compiler_artifacts.py \
+  --onnx /path/to/model.onnx --encodings /path/to/model.encodings
+```
+
 ## 公共 Percentile 校准
 
 `test_percentile_calibration.py` 使用真实量化器和 ORT session，核对 Torch/ONNX 的动态

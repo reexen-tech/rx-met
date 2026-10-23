@@ -90,7 +90,7 @@ class TorchExportValidationTest(unittest.TestCase):
     def test_invalid_scale_fails_export(self):
         def corrupt(doc):
             doc['activation_encodings']['module_add']['output']['0']['scale'] = float('nan')
-        with self.corrupt_final_encodings(corrupt), self.assertRaisesRegex(RuntimeError, r'module_add.*scale'):
+        with self.corrupt_final_encodings(corrupt), self.assertRaisesRegex(RuntimeError, r'module_add.*scale|NaN'):
             self.export(self.sim())
 
     def test_uncalibrated_quantizer_fails_export(self):
@@ -304,7 +304,7 @@ class TorchExportValidationTest(unittest.TestCase):
         model = onnx.helper.make_model(graph, opset_imports=[onnx.helper.make_opsetid('', 18)])
         path = Path(self.tmp.name)
         onnx.save(model, path / 'integer.onnx')
-        expected = {'activation_encodings': {}, 'param_encodings': {}}
+        expected = {'schema_version': 4, 'activation_encodings': {}, 'param_encodings': {}}
         (path / 'integer.encodings').write_text(json.dumps(expected))
         validate_exported_artifacts(str(path / 'integer.onnx'), str(path / 'integer.encodings'), expected)
 
