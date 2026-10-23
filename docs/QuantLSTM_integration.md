@@ -104,7 +104,7 @@ INT16 `[-32768,32767]`；CPU/CUDA、QAT 饱和掩码和导出范围均遵循此�
 ## 导出和恢复约定
 
 `export_onnx_json()` 输出无 Q/DQ 的标准 ONNX LSTM。ONNX 表达浮点运算，量化参数
-写入配套 `.encodings`，顶层使用公共编译器格式 `schema_version: 4`，所有记录采用
+写入配套 `.json`，顶层使用公共编译器格式 `schema_version: 4`，所有记录采用
 `real = scale * (q - zero_point)`。独立算子阶段文件仍使用原有 schema 3；
 `version: "1.0.0"` 来自 AIMET 原有编码版本设置。LSTM 不新增专用顶层格式：
 

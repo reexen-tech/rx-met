@@ -121,7 +121,7 @@ class TorchEncodingMetadataTest(unittest.TestCase):
 
 class ExportEntryPointTest(unittest.TestCase):
     def test_old_onnx_entry_preserves_its_dictionary(self):
-        expected = {'onnx': Path('model.onnx'), 'encodings': Path('model.encodings'),
+        expected = {'onnx': Path('model.onnx'), 'encodings': Path('model.json'),
                     'aimet_encodings': Path('model.aimet.encodings'), 'coverage': {'mapped_quantizers': 3}}
         sim, model = object(), object()
         with patch.object(pipeline, 'export_onnx_json', return_value=expected) as export:
@@ -165,7 +165,13 @@ class ExportEntryPointTest(unittest.TestCase):
             result = pipeline.export_onnx_json(sim, model, path / 'export', 'model')
             self.assertTrue(all(isinstance(result[key], Path) and result[key].is_file()
                                 for key in ('onnx', 'encodings', 'aimet_encodings')))
+            self.assertEqual(result['encodings'], result['onnx'].with_suffix('.json'))
+            self.assertEqual(result['aimet_encodings'], result['onnx'].with_suffix('.aimet.encodings'))
             encoded = json.loads(result['encodings'].read_text())
+            raw = json.loads(result['aimet_encodings'].read_text())
+            self.assertEqual(encoded['schema_version'], 4)
+            self.assertNotIn('schema_version', raw)
+            self.assertEqual(raw, json.loads(result['onnx'].with_suffix('.encodings').read_text()))
             self.assertEqual(set(encoded['param_encodings']['w']['zero_point']), {0})
             self.assertEqual(encoded['param_encodings']['w']['dtype'], 'INT8')
             self.assertEqual(encoded['param_encodings']['w']['enc_type'], 'PER_CHANNEL')

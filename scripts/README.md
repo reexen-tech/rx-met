@@ -14,7 +14,7 @@
 ```bash
 python3 scripts/verify_compiler_artifacts.py \
   --onnx /path/to/model.onnx \
-  --encodings /path/to/model.encodings \
+  --encodings /path/to/model.json \
   --report /path/to/acceptance.json
 ```
 

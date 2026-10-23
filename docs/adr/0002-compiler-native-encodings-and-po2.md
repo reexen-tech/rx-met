@@ -14,7 +14,7 @@ Conv、Gemm 和 MatMul 的 bias 需要满足 `Sb = Sx * Sw`，才能与输入和
 
 ## 决策
 
-最终 `.encodings` 使用公共编译器格式；其字段规范化和校验由
+最终 `.json` 使用公共编译器格式；其字段规范化和校验由
 `src/aimet_common/compiler_encodings.py` 实现，各框架负责源网格转换及图映射，
 详见 [统一编码导出接口](0003-shared-compiler-encodings.md)。
 AIMET 原始 encodings 作为独立文件保留，用于调试、重载和结果追溯。

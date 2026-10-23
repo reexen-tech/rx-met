@@ -6,7 +6,7 @@ RX-MET 量化演示 — kws_streaming att_mh_rnn + QuantGRU / QuantLSTM
         → compute_encodings 校准 (PTQ)
         → apply_power_of_2_workflow (NPU 友好的 Po2 量化)
         → freeze_quantizer_parameters + QAT 微调
-        → state_dict + ONNX + .encodings 三件套保存
+        → state_dict + ONNX + .json 编码文件三件套保存
         → 重建 sim → load_state_dict → load_quantizer_encodings → 精度对比
 
 训练侧按 google-research/kws_streaming/models/att_mh_rnn.py：

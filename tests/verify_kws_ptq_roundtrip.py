@@ -379,7 +379,9 @@ def run(args):
         "clean_onnx_vs_fp32": metadata["clean_onnx_vs_fp32"],
         "restored_quantized_vs_pre_export": metadata["restored_quantized_vs_pre_export"],
         "artifacts": {"torch_onnx": str(first_onnx), "torch_encodings": str(first_enc),
-                      "onnx_onnx": str(second["onnx"]), "onnx_encodings": str(second["encodings"])},
+                      "onnx_onnx": str(second["onnx"]), "onnx_encodings": str(second["encodings"]),
+                      "onnx_metadata": str(second["metadata"]),
+                      "onnx_aimet_encodings": str(second["aimet_encodings"])},
     }
     for path, digest in fingerprints.items():
         if sha256(path) != digest:

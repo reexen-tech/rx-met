@@ -10,6 +10,8 @@
 两轮使用相同 JSON 快照、相同顺序的真实校准样本和 batch size 1，并检查 PTQ 未改变浮点权重。
 通过 `--rnn-type gru|lstm` 选择循环层，默认 GRU；需要 CUDA 和对应原生算子包。
 对应的 QuantGRU / QuantLSTM 包须包含 ONNX Runtime 桥接扩展。
+比较工具使用报告记录的实际产物路径，读取 Torch 与 ONNX PTQ 的最终 `.json`，
+不会将旁边的 AIMET 原始编码当作编译器编码；兼容读取历史 `.encodings` 产物。
 
 ```bash
 python3 tests/verify_kws_ptq_roundtrip.py \
@@ -39,7 +41,7 @@ python3 tests/verify_kws_ptq_roundtrip.py \
 
 ```bash
 python3 scripts/verify_compiler_artifacts.py \
-  --onnx /path/to/model.onnx --encodings /path/to/model.encodings
+  --onnx /path/to/model.onnx --encodings /path/to/model.json
 ```
 
 ## 公共 Percentile 校准

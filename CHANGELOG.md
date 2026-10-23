@@ -4,6 +4,22 @@
 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，正式版本遵循
 [Semantic Versioning](https://semver.org/lang/zh-CN/)。
 
+## [Unreleased]
+
+### Changed
+
+- **编码文件名**：Torch 与 ONNX PTQ 的最终编译器编码统一为 `<prefix>.json`，导出接口的参数和返回类型保持不变；编码结构、数值及 AIMET 原始编码命名不变。
+
+### Fixed
+
+- **运行记录**：`run.json` 按编码文档结构识别 `.json` 和 `.encodings` 中的格式版本，正确记录最终编译器编码的 schema 与 SHA-256，避免将普通 metadata 当作编码文件。
+- **KWS 验收**：定位本次运行的时间戳目录，从 `exports/` 读取最终 `.json` 并严格验收 schema v4，从 `checkpoints/` 检查 QAT 产物，修复旧目录和端口列表假设导致的验收失败。
+- **往返分析**：使用比较报告记录的模型、最终编码、原始 AIMET 编码和 metadata 路径，支持容器外迁移及历史 `.encodings` 产物，避免误读同目录的原始编码或其他运行的文件。
+
+### Upgrade notes
+
+- **编码路径**：读取最终编码时使用 `export_onnx_json()` 返回的路径；原先自行拼接 `<prefix>.encodings` 的调用需更新。历史编译器 `.encodings` 仍可验收和分析，新产物旁的 AIMET 原始 `.encodings` / `.aimet.encodings` 不能替代最终 `.json`。
+
 ## [1.1.0] - 2026-10-12
 
 ### Added
@@ -16,12 +32,11 @@
 
 ### Changed
 
-- 公共环境按版本标签复用兼容镜像，源码摘要和镜像 ID 仅供追踪；移除仓库身份记录依赖。ORT 构建材料统一迁入 `docker/environment/third_party/`。
-
 - **量化配置**：Torch、ONNX 和原生 GRU/LSTM 默认使用对称量化，仍支持显式非对称配置。普通 Torch/ONNX 量化器的整数符号与对称性独立，默认使用 INT，可显式选择 UINT。
 - **编译器编码**：统一 Torch/ONNX 的编码转换、零点语义和循环层元数据，升级为 `schema_version=4`；兼容性要求见下方升级说明。
 - **输出目录**：RX 导出接口将指定目录作为输出根目录，默认创建 UTC 时间戳子目录；可用 `configure_output(timestamp_output=False)` 切换为固定目录并覆盖同名输出。最终产物放入 `exports/`，KWS 检查点放入 `checkpoints/`，默认根目录基于当前运行目录，原有输出目录覆盖参数继续有效。
 - **ONNX 示例**：入口统一命名为 `quick_start_onnx_ptq.py`。MobileNetV2 + ImageNette 准备脚本只需模型和 parquet 路径，生成可复用的模型、校准数据和带标签的验证数据；准备与量化分两步执行，默认路径相互对应，原始输入可只读挂载。
+- **公共环境**：按版本标签复用兼容镜像，源码摘要和镜像 ID 仅供追踪；移除仓库身份记录依赖。ORT 构建材料统一迁入 `docker/environment/third_party/`。
 - **离线交付**：产品包和公共运行环境分别交付、独立校验。应用包按环境版本标签复用兼容 runtime，同一镜像重新导出的归档可继续使用；安装器核对归档内容并准备可读的镜像标签，宿主机无需 Python。
 - **构建与安装**：构建前检查已有交付目录，默认在临时目录完成安装验收并清理。构建和安装分别支持 `--replace`，新内容验收通过后才替换目标，失败保留或恢复原内容。
 - **项目组织**：源码、原生库、循环算子和发布脚本按职责分目录维护，保留现有 Python import 名称。算子 wheel 跟随产品版本并保留 CUDA 标识；配置资源随 wheel 分发，支持安装目录迁移。
@@ -31,8 +46,6 @@
 
 #### 校准与整数量化
 
-- 编译器新产物直接严格验收 schema v4 的字段、数组、整数网格端点、真实 ONNX 端口及循环方向映射，拒绝重复 JSON 键和非法端口；提供独立的 `scripts/verify_compiler_artifacts.py`。旧编码加载保留兼容，不用迁移或自动补写代替新产物验收。
-- Torch/ONNX 导出共用 double 精度整数网格生成端点，修复 INT32 上界多一个整数码及验收容差掩盖损坏的问题；bias 累加器对齐保留显式粒度，单通道不再自动改成逐张量。
 - ONNX Clip 的 min/max 按控制端口保留浮点值，修复 epsilon 被量化成 0 后导致 Log 非有限值的问题；共享数据分支继续量化，透明控制路径只在运行图中适配，配置、导出及编码重载共用端口角色校验。
 - Torch/ONNX Percentile 共用动态直方图、样本计数和范围计算，修复后续大值漏统计、常量及极小范围处理、逐通道累计和重复校准问题，减少两端 scale 差异。
 - 混合精度正确应用默认位宽、逐通道设置及输入端口配置，保留显式层配置的优先级；ONNX 的输入精度可穿过 Reshape/Transpose 传递，常量 MatMul 与权重、bias 按各自角色处理，共享量化器配置冲突提前报错。
@@ -52,6 +65,8 @@
 
 #### 导出与恢复
 
+- 编译器新产物直接严格验收 schema v4 的字段、数组、整数网格端点、真实 ONNX 端口及循环方向映射，拒绝重复 JSON 键和非法端口；提供独立的 `scripts/verify_compiler_artifacts.py`。旧编码加载保留兼容，不用迁移或自动补写代替新产物验收。
+- Torch/ONNX 导出共用 double 精度整数网格生成端点，修复 INT32 上界多一个整数码及验收容差掩盖损坏的问题；bias 累加器对齐保留显式粒度，单通道不再自动改成逐张量。
 - 编译器、原始 AIMET 和阶段编码按保存的类型、整数范围、scale 和零点精确恢复，避免 INT32 精度丢失、符号误判或重载时改变网格；兼容旧 offset 约定，拒绝冲突、无效或有歧义的编码。
 - 导出严格检查节点与编码对应关系、浮点输入覆盖、已启用量化器和循环层内部参数；恢复时拒绝缺失或篡改的编码、非有限输出及不一致的模型产物。
 - ONNX 按实际 dtype 处理校准输入，保留 INT64 索引、BOOL mask、FLOAT16 和标量形状；整数、布尔及控制端口不再错误传播浮点量化编码，拒绝索引截断、溢出和错误的端口编码。

@@ -144,24 +144,32 @@ import runpy
 import sys
 
 import onnx
+from aimet_common.compiler_artifacts import validate_compiler_artifacts
 
 rnn_type = sys.argv[1]
 entry = "/opt/rx-met/examples/quick_start_kws.py"
+root = Path("/output") / rnn_type
+previous_records = set(root.glob("*/run.json"))
 sys.argv = [entry, "--rnn_type", rnn_type]
 runpy.run_path(entry, run_name="__main__")
-output = Path("/output") / rnn_type
+record_path, = set(root.glob("*/run.json")) - previous_records
+execution = record_path.parent
+assert json.loads(record_path.read_text())["status"] == "success"
+output = execution / "exports"
 model = onnx.load(output / "att_mh_rnn_kws.onnx")
 onnx.checker.check_model(model)
 nodes = [node for node in model.graph.node if node.op_type in ("GRU", "LSTM")]
 assert len(nodes) == 2 and all(node.op_type == rnn_type.upper() for node in nodes)
-encodings = json.loads((output / "att_mh_rnn_kws.encodings").read_text())
+encoding_path = output / "att_mh_rnn_kws.json"
+validate_compiler_artifacts(output / "att_mh_rnn_kws.onnx", encoding_path)
+encodings = json.loads(encoding_path.read_text())
 for node in nodes:
     layer = encodings["activation_encodings"][node.name]
     assert layer["is_" + rnn_type.upper()]
     records = []
     for kind in ("input", "output"):
-        assert len(layer[kind]) == 1
-        records.extend(layer[kind])
+        assert set(layer[kind]) == {"0"}
+        records.extend(layer[kind].values())
     for kind in ("internal_ops", "internal_ops_reverse"):
         for operation in layer.get(kind, {}).values():
             assert len(operation["output"]) == 1
@@ -174,7 +182,7 @@ for node in nodes:
         assert "quant_lstm_encodings" not in encodings
         assert layer["internal_ops"]["cell_state"]["output"][0]["dtype"] == "INT16"
         assert "model_info" not in layer and "execution_metadata" not in layer
-assert (output / "att_mh_rnn_kws_qat.pth").is_file()
+assert (execution / "checkpoints/att_mh_rnn_kws_qat.pth").is_file()
 print(f"KWS {rnn_type.upper()} 模型、编码及完整示例验证通过")
 PYTHON
     done

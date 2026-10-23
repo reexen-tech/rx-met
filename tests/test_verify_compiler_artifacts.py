@@ -57,6 +57,18 @@ class CompilerArtifactCliTest(unittest.TestCase):
             "--encodings", str(self.enc_path)], capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
 
+    def test_json_final_is_selected_explicitly_when_raw_encodings_coexists(self):
+        raw = self.enc_path
+        final = raw.with_suffix('.json')
+        final.write_bytes(raw.read_bytes())
+        raw.write_text(json.dumps({'version': '1.0.0', 'activation_encodings': [], 'param_encodings': []}))
+        raw_bytes = raw.read_bytes()
+        self.enc_path = final
+        code, report = self.run_cli()
+        self.assertEqual(code, 0)
+        self.assertEqual(Path(report['encodings']), final.resolve())
+        self.assertEqual(raw.read_bytes(), raw_bytes)
+
     def test_invalid_schema_fields_are_rejected_without_repair(self):
         for label in ("old_schema", "missing_n", "bad_max", "bad_port"):
             with self.subTest(label=label):

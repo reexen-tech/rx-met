@@ -11,6 +11,7 @@ RX-MET 在库内部自动创建运行记录，用户无需初始化 logger 或�
     config/
     exports/
       <prefix>.onnx
+      <prefix>.json
       <prefix>.encodings
       <prefix>.aimet.encodings
       <prefix>.meta.json
@@ -68,7 +69,8 @@ configure_output(timestamp_output=False)
 | `checkpoints/` | KWS 浮点和 QAT 检查点 |
 | `_work/` | 本次流程由工具创建的中间文件 |
 
-ONNX PTQ 的 `.aimet.encodings` 用于恢复量化状态，随最终产物保留。
+Torch 与 ONNX PTQ 的最终编译器编码均为 `<prefix>.json`。
+`.encodings` 和 ONNX PTQ 的 `.aimet.encodings` 为 AIMET 原始编码，用于恢复量化状态，随最终产物保留。
 工具版本记录在 `run.json` 的 `tool` 中；编码文件中的 `version` / `schema_version`
 仍表示编码格式版本，不作为 RX-MET 软件版本。
 源码运行在 Git 可用时记录提交和修改状态，发布包运行记录包内清单的构建信息。

@@ -34,6 +34,24 @@ class ExecutionTest(unittest.TestCase):
     def read_record(self, run):
         return json.loads((run.root / 'run.json').read_text())
 
+    def test_encoding_versions_follow_document_structure_for_json_and_raw_outputs(self):
+        compiler = {'version': '1.0.0', 'schema_version': 4,
+                    'activation_encodings': {}, 'param_encodings': {}}
+        raw = {'version': '0.6.1', 'activation_encodings': {}, 'param_encodings': {}}
+        ordinary = {'version': 'application-1', 'schema_version': 99, 'model': 'demo'}
+        with runtime.execution(self.root / 'encoding-documents') as run:
+            for name, document in (('model.json', compiler), ('model.encodings', raw),
+                                   ('model.meta.json', ordinary), ('empty.encodings', ordinary)):
+                (run.exports / name).write_text(json.dumps(document))
+        outputs = self.read_record(run)['outputs']
+        self.assertEqual(outputs['exports/model.json']['schema_version'], 4)
+        self.assertEqual(outputs['exports/model.json']['version'], '1.0.0')
+        self.assertEqual(outputs['exports/model.encodings']['version'], '0.6.1')
+        self.assertNotIn('schema_version', outputs['exports/model.encodings'])
+        for name in ('model.meta.json', 'empty.encodings'):
+            self.assertNotIn('version', outputs['exports/' + name])
+            self.assertNotIn('schema_version', outputs['exports/' + name])
+
     def test_output_configuration_is_validated_and_snapshotted_per_task(self):
         for value in (None, 0, 1, 'False'):
             with self.subTest(value=value), self.assertRaises(TypeError):

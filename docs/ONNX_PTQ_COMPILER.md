@@ -7,6 +7,10 @@ PyTorch 保留原参数、默认值及两个字符串路径的元组返回值；
 `onnx`、`encodings`、`aimet_encodings` 路径、`coverage` 和 `onnx_shapes` 的字典。
 旧 ONNX 入口 `export_onnx_compiler_artifacts` 保留原参数及字典返回值。
 
+Torch 与 ONNX PTQ 的最终编译器编码统一为 `<prefix>.json`。
+目录中可能同时保留 AIMET 原始 `.encodings` 或 `.aimet.encodings`，调用方应使用
+导出接口返回的路径，不能扫描同名前缀或替换后缀来猜测最终编码。
+
 ## 术语
 
 - **Clean ONNX**：移除 AIMET 仿真量化节点后的部署模型。模型保留原始输入输出
@@ -105,7 +109,7 @@ Po2 scale 满足 `scale = 2^(-n)`；非 Po2 scale 的 n 是舍入指数，实际
 ```bash
 python3 scripts/verify_compiler_artifacts.py \
   --onnx /path/to/model.onnx \
-  --encodings /path/to/model.encodings
+  --encodings /path/to/model.json
 ```
 
 默认要求 Po2 和完整计算输入覆盖。已有 affine 产物使用 `--allow-affine`；
@@ -124,7 +128,7 @@ python3 scripts/verify_compiler_artifacts.py \
 每次运行的 `exports/` 中生成：
 
 - `<prefix>.onnx`：移除 AIMET `QcQuantizeOp` 并显式保存中间张量 shape/dtype 的 clean ONNX；
-- `<prefix>.encodings`：compiler-native schema，包含 node-level `input/output`
+- `<prefix>.json`：compiler-native schema，包含 node-level `input/output`
   和 parameter encodings；
 - `<prefix>.aimet.encodings`：AIMET 原始 encodings；
 - `<prefix>.meta.json`：输入 shape、校准数量、Po2 变化、覆盖率和 FP32 对比。

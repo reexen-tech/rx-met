@@ -183,7 +183,7 @@ def export_onnx_json(
     output_dir: str | Path,
     filename_prefix: str,
 ) -> Dict[str, Any]:
-    """Export clean ONNX, AIMET raw encodings, and compiler-native encodings."""
+    """Export clean ONNX, raw AIMET encodings, and compiler encodings as JSON."""
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -194,7 +194,7 @@ def export_onnx_json(
 
     onnx_output_path = output_dir / f"{filename_prefix}.onnx"
     shape_report = save_onnx_with_shapes(onnx_output_path)
-    compiler_encodings_path = output_dir / f"{filename_prefix}.encodings"
+    compiler_encodings_path = output_dir / f"{filename_prefix}.json"
     compiler_encodings_path.write_text(
         json.dumps(payload, indent=2, ensure_ascii=False) + "\n",
         encoding="utf-8",

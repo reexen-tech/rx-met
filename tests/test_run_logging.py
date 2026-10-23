@@ -131,7 +131,14 @@ class RuntimeLoggingIntegrationTest(unittest.TestCase):
         self.assertTrue(all(path.parent == directory / 'exports' for path in result.values()))
         record = json.loads((directory / 'run.json').read_text())
         encoding = json.loads(result['encodings'].read_text())
-        self.assertEqual(record['outputs']['exports/model.encodings']['schema_version'], encoding['schema_version'])
+        self.assertEqual(result['encodings'].name, 'model.json')
+        self.assertEqual(record['outputs']['exports/model.json']['schema_version'], encoding['schema_version'])
+        self.assertEqual(record['outputs']['exports/model.json']['sha256'], runtime._sha256(result['encodings']))
+        for suffix in ('.encodings', '.aimet.encodings'):
+            raw = result['encodings'].with_suffix(suffix)
+            self.assertTrue(raw.is_file())
+            self.assertNotIn('schema_version', json.loads(raw.read_text()))
+            self.assertNotIn('schema_version', record['outputs']['exports/' + raw.name])
         self.assertEqual(record['inputs']['model_path']['sha256'], runtime._sha256(source))
         self.assertEqual(record['status'], 'success')
         self.assertFalse((directory / '_work').exists())
@@ -185,6 +192,15 @@ class RuntimeLoggingIntegrationTest(unittest.TestCase):
         record = json.loads((root / 'run.json').read_text())
         self.assertEqual(record['status'], 'success')
         self.assertFalse(record['output_config']['timestamp_output'])
+        document = json.loads(Path(encodings_path).read_text())
+        self.assertEqual(record['outputs']['exports/model.json']['schema_version'],
+                         document['schema_version'])
+        self.assertEqual(record['outputs']['exports/model.json']['sha256'],
+                         runtime._sha256(Path(encodings_path)))
+        raw_path = root / 'exports/model.encodings'
+        self.assertTrue(raw_path.is_file())
+        self.assertNotIn('schema_version', json.loads(raw_path.read_text()))
+        self.assertNotIn('schema_version', record['outputs']['exports/model.encodings'])
         self.assertIn('model.json', (root / 'run.log').read_text())
         self.assertFalse(stage.exists())
 
