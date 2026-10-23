@@ -52,6 +52,8 @@ def force_model_io_quantizers(sim: Any, model: onnx.ModelProto) -> None:
     for name in sorted(input_names | output_names):
         if not sim._is_quantizable_dtype(name):
             continue
+        if name in sim._input_roles.control_only:
+            continue
         if (name in getattr(sim, "_rx_native_io", ())
                 or name in getattr(sim, "_rx_input_owned_io", ())):
             continue

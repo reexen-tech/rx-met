@@ -17,16 +17,24 @@ from aimet_onnx.utils import save_model_with_external_weights
 
 def input_quantizer(sim, op, index):
     """Resolve the grid actually used at an original ONNX input port."""
+    roles = getattr(sim, "_input_roles", None)
+    if roles is not None and roles.is_control_port(op.name, index):
+        return None
     alias = getattr(sim, "_rx_input_quantizers", {}).get((op.name, index))
     if alias is not None:
         return sim.qc_quantize_op_dict[alias]
-    product = op.inputs[index]
-    quantizer = sim.qc_quantize_op_dict.get(product.name)
+    names = roles.input_names(op.name) if roles is not None else None
+    if names is None:
+        names = [product.name for product in op.inputs]
+    if index >= len(names) or not names[index]:
+        return None
+    name = names[index]
+    quantizer = sim.qc_quantize_op_dict.get(name)
     if quantizer is not None:
         return quantizer
     resolver = getattr(sim, "_get_enabled_quantizer", None)
-    if resolver is not None and product.name in sim.connected_graph.get_all_products():
-        return resolver(product.name)
+    if resolver is not None and name in sim.connected_graph.get_all_products():
+        return resolver(name)
     return None
 
 
@@ -46,6 +54,7 @@ class InputQuantizationSim(QuantizationSimModel):
         super().__init__(model, **kwargs)
 
     def _prepare_runtime_model(self):
+        super()._prepare_runtime_model()
         original_nodes = list(self._rx_original_onnx.graph.node)
         producers = {name: node for node in original_nodes for name in node.output}
         runtime_nodes = {node.name: node for node in self.model.model.graph.node}
@@ -68,6 +77,8 @@ class InputQuantizationSim(QuantizationSimModel):
                 continue
             shared = None
             for index, name in enumerate(node.input):
+                if self._input_roles.is_control_port(node.name, index):
+                    continue
                 if not name or name in self.param_names or not self._is_quantizable_dtype(name):
                     continue
                 source = origin(name)

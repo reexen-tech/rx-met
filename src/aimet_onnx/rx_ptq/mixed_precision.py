@@ -118,11 +118,16 @@ def _quantizers_for_op(sim: Any, op: Any, *, matmul_operands: bool = False
         if bias is not None:
             parameter_names.add(bias.name)
             params["bias"] = sim.qc_quantize_op_dict.get(bias.name)
-    # Keep empty activation slots so input_bitwidths retains its input indices.
+    # ConnectedGraph omits optional empty ports; preserve the original ONNX indices.
+    roles = getattr(sim, "_input_roles", None)
+    names = roles.input_names(op.name) if roles is not None else None
+    if names is None:
+        names = [product.name for product in op.inputs]
+    products = {product.name: product for product in op.inputs}
     inputs = [
-        input_quantizer(sim, op, index)
-        for index, product in enumerate(op.inputs)
-        if matmul_operands or (not product.is_parm and product.name not in parameter_names)
+        input_quantizer(sim, op, index) if name and (matmul_operands or (
+            not products[name].is_parm and name not in parameter_names)) else None
+        for index, name in enumerate(names)
     ]
     outputs = [sim.qc_quantize_op_dict.get(product.name) for product in op.outputs]
     return inputs, outputs, params

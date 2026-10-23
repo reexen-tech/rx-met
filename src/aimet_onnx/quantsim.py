@@ -62,6 +62,7 @@ import json
 import warnings
 import numpy as np
 import onnx
+from aimet_onnx.quantization_roles import QuantizationInputRoles
 
 from onnx import helper
 from onnx.numpy_helper import to_array
@@ -437,6 +438,7 @@ class QuantizationSimModel:
 
         self.qc_quantize_op_dict = {}
         self.connected_graph = ConnectedGraph(self.model)
+        self._input_roles = QuantizationInputRoles(self.model.model)
         self._quant_scheme = quant_scheme
         self._param_type = param_type
         self._activation_type = activation_type
@@ -489,6 +491,8 @@ class QuantizationSimModel:
 
     def _prepare_runtime_model(self):
         """Allow operator-owned simulation nodes to be installed before ORT loads the graph."""
+        self._input_roles.prepare_runtime_model(self.model.model)
+        self._producers = {name: node for node in self.model.model.graph.node for name in node.output}
 
     @classmethod
     def _from_onnx_qdq(cls, model: ModelProto, **kwargs) -> "QuantizationSimModel":
@@ -627,6 +631,7 @@ class QuantizationSimModel:
             self.param_names,
             self.activation_names,
             self.input_quantizers_name,
+            input_roles=self._input_roles,
         )
 
         return quantsim_configurator
@@ -716,7 +721,7 @@ class QuantizationSimModel:
         :param name: Name of the tensor
         :return: True if the tensor should be quantized
         """
-        if not self._is_quantizable_dtype(name):
+        if name in self._input_roles.control_only or not self._is_quantizable_dtype(name):
             return False
 
         # Check if the tensor is param to certain ops (eg: Resize)
@@ -811,7 +816,7 @@ class QuantizationSimModel:
         for consumer in product.consumers:
             node = consumer.get_module()
             for idx, tensor in enumerate(node.input):
-                if tensor == old_name:
+                if tensor == old_name and not self._input_roles.is_control_port(node.name, idx):
                     node.input[idx] = new_name
 
     def _insert_param_quantization_nodes(self):
@@ -953,7 +958,16 @@ class QuantizationSimModel:
         param_quantizers = {}
 
         # Capture as input quantizer if tensor is not a layer output or parameter
-        for cg_product in op.inputs:
+        names = self._input_roles.input_names(op.name)
+        if names is None:
+            names = [product.name for product in op.inputs]
+        products = {product.name: product for product in op.inputs}
+        for index, name in enumerate(names):
+            if not name:
+                continue
+            if self._input_roles.is_control_port(op.name, index):
+                continue
+            cg_product = products[name]
             if not cg_product.producer and not cg_product.is_parm:
                 input_name = cg_product.name
                 if input_name in self.qc_quantize_op_dict:
@@ -2328,6 +2342,9 @@ class QuantizationSimModel:
         ]
 
         def propogate_quantizer(op: Op):
+            if (self._input_roles.is_control_port(op.name, 0)
+                    or any(output.name in self._input_roles.control_only for output in op.outputs)):
+                return
             input_qtzr = self.qc_quantize_op_dict.get(op.inputs[0].name)
             output_qtzr = self.qc_quantize_op_dict.get(op.outputs[0].name)
 
@@ -2656,6 +2673,9 @@ def validate_encodings_to_load(
         encodings_to_load["activation_encodings"], encodings_to_load["param_encodings"]
     ):
         name = encoding["name"]
+        roles = getattr(quant_sim_model, "_input_roles", None)
+        if roles is not None and name in roles.control_only:
+            raise ValueError(f"Quantization encoding on control-only ONNX tensor: {name}")
         quantizer = quant_sim_model.qc_quantize_op_dict.get(name)
         if quantizer is None:
             continue

@@ -8,6 +8,12 @@ from aimet_common.defs import QuantizationDataType
 def validate_quantizer_state(sim, *, allow_pending_bias: bool = False) -> None:
     """Reject missing required quantizers and invalid enabled integer grids."""
     quantizers = sim.qc_quantize_op_dict
+    roles = getattr(sim, "_input_roles", None)
+    if roles is not None:
+        invalid = sorted(name for name in roles.control_only
+                         if name in quantizers and quantizers[name].enabled)
+        if invalid:
+            raise ValueError("Enabled quantizers on control-only ONNX tensors: " + ", ".join(invalid))
     native = getattr(sim, "_rx_native_recurrent", {})
     missing_native = [name for name in getattr(sim, "_rx_expected_native_recurrent", ())
                       if name not in native or not native[name].module.use_quantization]

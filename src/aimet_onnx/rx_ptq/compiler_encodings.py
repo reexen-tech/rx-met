@@ -14,6 +14,7 @@ from aimet_common.compiler_encodings import (
 )
 from aimet_common.quantization_grid import IntegerGrid, integer_bounds
 from aimet_common.quantsim_config.compute_ops import is_grid_preserving_op
+from aimet_onnx.quantization_roles import QuantizationInputRoles
 from .validation import validate_quantizer_state
 
 _FLOAT_TENSOR_TYPES = frozenset({
@@ -86,6 +87,7 @@ class CompilerEncodingConverter:
         self.sim = sim
         self.graph = _GraphIndex.build(original_model, getattr(sim, "activation_dtypes", {}))
         self.original_model = original_model
+        self.input_roles = QuantizationInputRoles(original_model)
         self.activation: Dict[str, Dict[str, Dict[str, Any]]] = {}
         self.params: Dict[str, Dict[str, Any]] = {}
         self.mapped: set[str] = set()
@@ -99,6 +101,8 @@ class CompilerEncodingConverter:
         if node_name in getattr(self.sim, "_rx_native_recurrent", {}):
             return  # The native operator supplies its complete port/internal schema.
         node = self.original_model.graph.node[node_index]
+        if io_name == "input" and self.input_roles.is_control_port(node_name, io_index):
+            raise ValueError(f"Quantization encoding on ONNX control port: {node_name}.input[{io_index}]")
         tensor = node.input[io_index] if io_name == "input" else node.output[io_index]
         self.graph.validate_encoding_type(tensor)
         node_entry = self.activation.setdefault(node_name, {})
@@ -114,6 +118,8 @@ class CompilerEncodingConverter:
         mapped = False
         for node_index, input_index in self.graph.consumers.get(tensor_name, []):
             port = (self.graph.node_names[node_index], input_index)
+            if self.input_roles.is_control_port(*port):
+                continue
             alias = getattr(self.sim, "_rx_input_quantizers", {}).get(port)
             if alias is None or not self.sim.qc_quantize_op_dict[alias].enabled:
                 self._add_activation(node_index, "input", input_index, encoding)
@@ -166,6 +172,8 @@ class CompilerEncodingConverter:
             changed = False
             for node in self.original_model.graph.node:
                 if not is_grid_preserving_op(node.op_type):
+                    continue
+                if self.input_roles.is_control_port(node.name, 0):
                     continue
                 data_inputs = self.graph.data_inputs(node)
                 data_outputs = self.graph.data_outputs(node)
