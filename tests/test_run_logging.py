@@ -180,12 +180,12 @@ class RuntimeLoggingIntegrationTest(unittest.TestCase):
         onnx_path, encodings_path = export_onnx_json(
             sim, str(root), 'model', dummy_input_shape=(1, 4))
         self.assertEqual(Path(onnx_path), root / 'exports/model.onnx')
-        self.assertEqual(Path(encodings_path), root / 'exports/model.encodings')
+        self.assertEqual(Path(encodings_path), root / 'exports/model.json')
         onnx.checker.check_model(onnx.load(onnx_path))
         record = json.loads((root / 'run.json').read_text())
         self.assertEqual(record['status'], 'success')
         self.assertFalse(record['output_config']['timestamp_output'])
-        self.assertIn('model.encodings', (root / 'run.log').read_text())
+        self.assertIn('model.json', (root / 'run.log').read_text())
         self.assertFalse(stage.exists())
 
     def test_standalone_gru_still_loads_without_aimet_logging(self):

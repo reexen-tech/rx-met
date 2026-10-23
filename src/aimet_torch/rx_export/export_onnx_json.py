@@ -261,8 +261,8 @@ def export_onnx_json(
         if not enc_in_path:
             raise RuntimeError("未找到 AIMET 导出的 encodings 文件（.encodings/.json）")
 
-        # 最终对外输出路径固定为 {prefix}.encodings（避免调用侧需要跟随 *_torch.encodings）
-        enc_out_path = os.path.join(export_dir, filename_prefix + ".encodings")
+        # 最终对外输出为 JSON 文件；AIMET 原始 .encodings 仍作为后处理输入。
+        enc_out_path = os.path.join(export_dir, filename_prefix + ".json")
 
         _maybe_keep_raw_exports(
             export_dir=export_dir,
