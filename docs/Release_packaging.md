@@ -73,6 +73,23 @@ CPU 的三个项目 wheel 使用 `+cpu` 版本后缀；构建原生库时设置
 用户运行 install.sh 后按 README 使用原生 Docker 命令，不提供 run.sh。
 每个变体的应用包只生成对应的一套启动命令；安装器核对环境元数据并准备可读的版本标签，用户无需填写长 SHA-256。
 
+### Wheel 命名
+
+三个项目的发行包名及 wheel 文件名前缀使用以下固定形式：
+
+| 发行包名（METADATA Name） | Wheel 文件名前缀 |
+| --- | --- |
+| `rx-met` | `rx_met-` |
+| `quant-gru` | `quant_gru-` |
+| `quant-lstm` | `quant_lstm-` |
+
+wheel 格式将发行包名中的连字符转为下划线，各字段之间使用连字符，例如
+`quant_gru-1.1.0+cpu-cp310-cp310-linux_x86_64.whl`。Python 导入继续使用
+`quant_gru`、`quant_lstm` 等模块名。
+
+发布校验同时检查包内发行名和标准 wheel 文件名。修改命名声明后，通过正常构建重新
+生成 wheel 及应用包，使 METADATA、RECORD 和发布校验值对应同一份产物。
+
 ## 首次离线交付
 
 本机已有匹配的 build/runtime 镜像时，一条命令生成应用包及镜像附件：

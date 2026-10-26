@@ -104,11 +104,14 @@ def inspect_wheels(directory, wheel_version, python_version):
         with zipfile.ZipFile(path) as wheel:
             metadata_path, = [name for name in wheel.namelist() if name.endswith('.dist-info/METADATA')]
             metadata = BytesParser().parsebytes(wheel.read(metadata_path))
-            name = metadata['Name'].lower().replace('_', '-')
+            name = metadata['Name']
             if name in names or name not in ('rx-met', 'quant-gru', 'quant-lstm') or metadata['Version'] != wheel_version:
                 raise RuntimeError(f'意外的 wheel: {path.name}')
             if not path.name.endswith(f'-{tag}-{tag}-linux_x86_64.whl'):
                 raise RuntimeError(f'wheel ABI 不匹配: {path.name}')
+            expected_filename = f'{name.replace("-", "_")}-{wheel_version}-{tag}-{tag}-linux_x86_64.whl'
+            if path.name != expected_filename:
+                raise RuntimeError(f'wheel 文件名不匹配: {path.name}，需要 {expected_filename}')
             required = {'quant-lstm': ['quant_lstm_resources/lstm_quant_default_v1.json'],
                         'quant-gru': ['lib/libgru_quant_shared.so'],
                         'rx-met': ['aimet_onnx/rx_ptq/config/quick_start_full_quant.json']}[name]
