@@ -33,8 +33,8 @@ CUDA Toolkit、驱动和 CUDA-enabled PyTorch 需要按照目标 GPU 和 PyTorch
 ## 2. 安装 PyTorch CUDA 模块
 
 Python package 支持普通环境安装和 wheel 安装。以下构建命令均从仓库根目录执行，
-且原生核心必须构建到固定的 `build/` 目录，因为 `pytorch/setup.py` 从该目录链接
-`libquant_lstm.a`。
+原生核心默认从 `build/` 目录链接 `libquant_lstm.a`，可通过
+`RX_MET_QUANT_LSTM_BUILD_DIR` 指定其他构建目录。
 
 新构建目录默认启用 CUDA，关闭测试和示例；单配置生成器默认使用 `Release`。
 普通安装无需显式指定这些开关。需要开发构建时可传入
@@ -152,6 +152,13 @@ rx-met 中的副本由工具包发布流程构建；同步源码后也应更新�
 (cd pytorch && python -m unittest -v tests.test_aimet_interface)
 ```
 
+### 2.2 ONNX Runtime PTQ Bridge
+
+可选的 `quant_lstm_onnx_runtime` bridge 在构建时读取 rx-met 公共目录
+`docker/environment/third_party/onnxruntime/include`。独立仓库构建时，通过
+`QUANT_LSTM_ONNXRUNTIME_INCLUDE` 指向包含 `onnxruntime_cxx_api.h` 的目录后重建
+wheel。未提供头文件时不构建 bridge；普通 PyTorch 执行和标准 ONNX 导出不依赖它。
+
 ## 3. 安装 CUDA C++ package
 
 使用自定义安装前缀可以避免修改系统目录：
@@ -251,8 +258,8 @@ docker run --rm -it --gpus all \
 | 错误 | 原因与处理 |
 | --- | --- |
 | `未找到 CUDA 编译器` | `QUANT_LSTM_ENABLE_CUDA=ON`，但 `nvcc` 不在 `PATH` 或 CUDA Toolkit 未安装 |
-| `未找到 build/libquant_lstm.a` | Python extension 构建前未在固定 `build/` 目录完成 CMake 构建 |
+| `未找到 build/libquant_lstm.a` | Python extension 构建前未在默认 `build/` 或 `RX_MET_QUANT_LSTM_BUILD_DIR` 指定目录完成 CMake 构建 |
 | `_quant_lstm 扩展未找到` | wheel 安装尚未完成、当前 Python 环境错误，或 extension 与 Python ABI 不匹配 |
-| `PyTorch ... 只支持 CUDA input` | 输入或状态位于 CPU；将模块、输入和状态移动到 CUDA |
+| `PyTorch ... 只支持 CUDA input` | CUDA wheel 收到 CPU 输入或状态；将模块、输入和状态移动到 CUDA，或显式构建 CPU wheel 后以 eval/no-grad 执行 |
 | `Could not find quant-lstm` | 下游没有设置安装 prefix 的 `CMAKE_PREFIX_PATH` |
 | `Could not find CUDAToolkit` | 下游正在消费 CUDA package，但 CMake 无法定位 CUDA Toolkit |
