@@ -19,7 +19,7 @@ RUN apt-get -o Acquire::Retries=5 update \
     && apt-get -o Acquire::Retries=5 install -y --no-install-recommends \
        build-essential ca-certificates cmake curl diffutils libeigen3-dev libgomp1 ninja-build python3-dev python3-pip \
     && rm -rf /var/lib/apt/lists/* \
-    && ln -sf libcuda.so /usr/local/cuda/lib64/stubs/libcuda.so.1
+    && if [[ "${CUDA_VARIANT}" != cpu ]]; then ln -sf libcuda.so /usr/local/cuda/lib64/stubs/libcuda.so.1; fi
 COPY . /opt/rx-quant-env/
 RUN python3 scripts/environment/common.py download "${CUDA_VARIANT}" --output-dir /opt/rx-quant-env/wheelhouse \
     && cd wheelhouse && sha256sum --check --strict SHA256SUMS \
@@ -30,7 +30,7 @@ RUN CUDA_VARIANT="${CUDA_VARIANT}" python3 - <<'PY'
 import json,os,subprocess
 from pathlib import Path
 spec=json.loads(Path('docker/variants.json').read_text())['variants'][os.environ['CUDA_VARIANT']]
-subprocess.run(['scripts/internal/prepare_onnxruntime_headers.sh',spec['onnxruntime']['packages']['onnxruntime-gpu'],
+subprocess.run(['scripts/internal/prepare_onnxruntime_headers.sh',next(iter(spec['onnxruntime']['packages'].values())),
                 '/opt/rx-quant-env/onnxruntime',spec['onnxruntime']['source_sha256']],check=True)
 PY
 RUN python3 - <<'PY'
@@ -48,7 +48,7 @@ from pathlib import Path
 matrix=json.loads(Path('docker/variants.json').read_text());variant=os.environ['CUDA_VARIANT'];spec=matrix['variants'][variant]
 values={'environment_name':matrix['environment_name'],'environment_role':'build','environment_version':matrix['environment_version'],
         'config_sha256':os.environ['ENV_CONFIG_SHA256'],'cuda_variant':variant,'cuda_version':spec['cuda_version'],
-        'torch_version':spec['torch']['packages']['torch'].split('+')[0], 'onnxruntime_version':spec['onnxruntime']['packages']['onnxruntime-gpu'],
+        'torch_version':spec['torch']['packages']['torch'].split('+')[0], 'onnxruntime_version':next(iter(spec['onnxruntime']['packages'].values())),
         'python_version':spec['python_version']}
 Path('environment.env').write_text(''.join(f'{key}={value}\n' for key,value in values.items()))
 PY
@@ -56,7 +56,8 @@ LABEL com.reexen.rx-quant.environment.name="rx-quant-env" \
       com.reexen.rx-quant.environment.role="build" \
       com.reexen.rx-quant.environment.version="${ENV_VERSION}" \
       com.reexen.rx-quant.environment.config-sha256="${ENV_CONFIG_SHA256}" \
-      com.reexen.rx-quant.cuda.variant="${CUDA_VARIANT}"
+      com.reexen.rx-quant.cuda.variant="${CUDA_VARIANT}" \
+      com.reexen.rx-quant.platform.variant="${CUDA_VARIANT}"
 
 FROM ${BASE_IMAGE} AS runtime-env
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
@@ -96,6 +97,7 @@ LABEL com.reexen.rx-quant.environment.name="rx-quant-env" \
       com.reexen.rx-quant.environment.role="runtime" \
       com.reexen.rx-quant.environment.version="${ENV_VERSION}" \
       com.reexen.rx-quant.environment.config-sha256="${ENV_CONFIG_SHA256}" \
-      com.reexen.rx-quant.cuda.variant="${CUDA_VARIANT}"
+      com.reexen.rx-quant.cuda.variant="${CUDA_VARIANT}" \
+      com.reexen.rx-quant.platform.variant="${CUDA_VARIANT}"
 WORKDIR /workspace
 CMD ["bash"]

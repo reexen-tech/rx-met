@@ -8,21 +8,41 @@
 `verify_kws_ptq_roundtrip.py` 从 KWS 浮点检查点开始，调用示例的模型、数据集和量化接口，
 执行 PTQ、Po2 并导出，跳过 QAT；再将该 ONNX 作为输入重新 PTQ。
 两轮使用相同 JSON 快照、相同顺序的真实校准样本和 batch size 1，并检查 PTQ 未改变浮点权重。
-需要 CUDA 和包含 ONNX 桥接的新版本 QuantGRU。
+通过 `--rnn-type gru|lstm` 选择循环层，默认 GRU；需要 CUDA 和对应原生算子包。
+对应的 QuantGRU / QuantLSTM 包须包含 ONNX Runtime 桥接扩展。
+比较工具使用报告记录的实际产物路径，读取 Torch 与 ONNX PTQ 的最终 `.json`，
+不会将旁边的 AIMET 原始编码当作编译器编码；兼容读取历史 `.encodings` 产物。
 
 ```bash
 python3 tests/verify_kws_ptq_roundtrip.py \
+  --rnn-type lstm \
   --fp-checkpoint /path/to/model_fp_kws.pth \
   --data-dir /datasets/speech_commands_v0.02
 ```
 
 默认每类取 20 条训练校准及验证样本，输出到运行目录的
 `output/kws_ptq_roundtrip/<时间>/`。`torch_ptq/`、`onnx_ptq/` 保存两轮产物，
-`comparison.json` 逐项记录 ONNX、编码、GRU 编码和验证结果，`report.md` 提供摘要。
+成功完成两轮后，`comparison.json` 逐项记录 ONNX、编码、GRU/LSTM 内部编码和验证结果，
+`report.md` 提供摘要。创建仿真或校准中途失败时保留已生成的第一轮产物并抛出异常，
+此时不能将失败当作两份产物已经完成比较。
 `quantized_outputs.npz` 保存两框架 PTQ/Po2 的逐样本 logits；报告同时记录跨框架的
 输出误差和预测差异，Po2 另从最终保存的编码恢复后与 Torch 逐样本核对。
 产物不一致时仍保存完整报告并返回 1；`--report-only` 可只生成报告而返回 0。
 已有输出目录拒绝覆盖，可用 `--output-dir` 指定新目录。
+
+## 严格产物验收
+
+`test_compiler_encodings_strict.py` 覆盖 schema v4 字段、通道数组、Po2、精确端点和整数域；
+`test_verify_compiler_artifacts.py` 检查独立 CLI 的退出码、只读行为和非法 JSON 拒绝。
+`test_torch_strict_export_validation.py` 验证真实导出拒绝端点单码/多码篡改、非法端口、
+缺失字段及单 ULP 的一致网格篡改。`test_recurrent_compiler_grids.py` 验证 GRU/LSTM
+不同方向网格的正确消费、输出状态、布局及编码恢复；`test_onnx_bias_granularity.py`
+核对单通道和显式 bias 粒度。
+
+```bash
+python3 scripts/verify_compiler_artifacts.py \
+  --onnx /path/to/model.onnx --encodings /path/to/model.json
+```
 
 ## 公共 Percentile 校准
 
@@ -74,9 +94,14 @@ python3 -m unittest discover -s tests -p test_onnx_operand_precision.py -v
 
 `test_onnx_input_quantization.py` 检查 Concat 的独立共享输入网格、校准顺序、配置冲突和
 编码重载；`test_onnx_gru_native.py` 覆盖 GRU 中间帧按实际消费位置校准及端口编码导出。
+`test_onnx_lstm_native.py` 覆盖 LSTM 门顺序、双向和 batch-first 布局、可选 h/c 状态与
+输出、原生校准、Po2、编码恢复、缺失内部网格拒绝，以及 GRU/LSTM 同图运行。
 `test_onnx_encoding_tensor_roles.py` 验证网格只沿浮点数据端口传播，覆盖 Gather 整数索引、
 BOOL 控制输入、TopK/MaxPool 索引、Dropout mask、NonZero、浮点 Pad 控制和 Split 多输出，
 以及非法量化器与被篡改索引端口编码的导出/恢复拒绝。
+`test_onnx_clip_controls.py` 检查 Clip 的常量及动态 min/max 不被数据 QDQ 改写，覆盖
+epsilon 后的 Log、共享数据分支、Identity/Cast 控制路径、JSON1/JSON2、可选 min、
+同一张量占据数据及阈值端口，以及导出/恢复时拒绝控制端口编码。
 `test_fx_parameter_quantization.py` 检查展开 BN、自定义参数与普通 Conv 使用一致的校准
 方案，覆盖字符串/枚举、CPU/CUDA、百分位值调整后重新校准、整数/FP8/FP16，以及无
 参数校准 metadata 特殊适配的 ONNX 再校准、导出和恢复。

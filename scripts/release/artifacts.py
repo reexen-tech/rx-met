@@ -91,7 +91,7 @@ def runtime_compatibility(image_id, matrix, variant):
         if actual['packages'].get(name) != version:
             raise RuntimeError(f'{variant}: runtime {name}={actual["packages"].get(name)}, expected {version}')
     spec = matrix['variants'][variant]
-    return {'python_abi': actual['python_abi'], 'python_version': spec['python_version'], 'cuda_version': spec['cuda_version'],
+    return {'python_abi': actual['python_abi'], 'python_version': spec['python_version'], 'cuda_version': spec['cuda_version'] or None,
             'platform': 'linux/amd64', 'packages': packages, 'cuda_architectures': spec['cuda_architectures'],
             'minimum_driver_version': spec['minimum_driver_version']}
 
@@ -130,11 +130,15 @@ def runtime_requirement(record, url=''):
             'checksum_url': url + '.sha256' if url else ''}
 
 
+def bundle_name(version, variant):
+    return f'rx-met-v{version}-{variant}-linux-amd64'
+
+
 def assemble(args, matrix, variant, runtime, build, runtime_record, archive, wheel_dir, compatibility, *, version, changelog):
     env_version = matrix['environment_version']
     runtime_tag = common.image_ref('runtime', variant)
     runtime_record = {**runtime_record, 'image_tag': runtime_tag}
-    name = f'rx-met-v{version}-{variant}-linux-amd64'
+    name = bundle_name(version, variant)
     packed = args.output_dir / (name + '.tar.gz')
     if packed.exists() and not args.replace:
         raise RuntimeError(f'应用产物已存在: {packed}；开发时可显式 --replace')
@@ -181,9 +185,11 @@ def assemble(args, matrix, variant, runtime, build, runtime_record, archive, whe
         run('bash', '-n', staged / 'install.sh')
         install_prefix = args.install_prefix if args.install_prefix is not None else Path(temporary) / 'install'
         run(staged / 'install.sh', '--offline', '--prefix', install_prefix)
-        with tarfile.open(packed.with_name(packed.name + '.partial'), 'w:gz', compresslevel=1) as tar:
-            tar.add(staged, arcname=name)
-        packed.with_name(packed.name + '.partial').replace(packed)
+        with tempfile.TemporaryDirectory(prefix='.archive-', dir=args.output_dir) as archive_directory:
+            temporary_archive = Path(archive_directory) / packed.name
+            with tarfile.open(temporary_archive, 'w:gz', compresslevel=1) as tar:
+                tar.add(staged, arcname=name)
+            temporary_archive.replace(packed)
     print('Application bundle:', packed, packed.stat().st_size, 'bytes', flush=True)
     return manifest
 
@@ -191,7 +197,7 @@ def assemble(args, matrix, variant, runtime, build, runtime_record, archive, whe
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('action', choices=['build', 'export-runtime'])
-    parser.add_argument('variants', nargs='*', choices=['cu118', 'cu126', 'cu130'])
+    parser.add_argument('variants', nargs='*', help='默认选择全部 CUDA 变体；CPU 需显式指定 cpu')
     parser.add_argument('--output-dir', type=Path, help='最终产品交付目录；环境附件放在其父目录下的 <环境名>-<环境版本>/')
     parser.add_argument('--build-env-dir', type=Path, help='本地缺少 build 镜像时，从此目录校验并导入归档')
     parser.add_argument('--runtime-env-dir', type=Path, help='运行环境归档的导入、复用及导出缓存；默认 .release/runtime-images/<环境版本>')
@@ -199,14 +205,17 @@ def main():
     parser.add_argument('--install-prefix', type=Path, help='保留安装验收结果的根目录；默认使用临时目录并自动清理')
     parser.add_argument('--with-env', action='store_true', help='将公共运行环境归档导出或复用到产品目录平级的环境目录；不附带构建环境')
     parser.add_argument('--skip-build', action='store_true', help='只重新组装源码和环境身份未变的已有 wheels')
-    parser.add_argument('--replace', action='store_true', help='按本次所选变体整体替换候选产品目录；不覆盖安装目录和公共环境')
+    parser.add_argument('--replace', action='store_true', help='仅替换本次所选同名应用归档及校验文件；保留其他变体、安装目录和公共环境')
     parser.add_argument('--jobs', type=int, default=8)
     args = parser.parse_intermixed_args()
     if args.action == 'export-runtime':
         raise RuntimeError('请使用 scripts/environment/export_runtime.sh 导出公共环境')
     matrix = dependencies.load_matrix()
     dependencies.check_generated_artifacts(matrix)
-    targets = args.variants or list(matrix['variants'])
+    targets = args.variants or common.default_variants(matrix)
+    unsupported = sorted(set(targets) - set(matrix['variants']))
+    if unsupported:
+        parser.error('不支持的变体: ' + ', '.join(unsupported))
     if len(set(targets)) != len(targets):
         parser.error('CUDA 变体重复')
     if args.runtime_base_url and not args.runtime_base_url.startswith('https://'):
@@ -226,10 +235,10 @@ def main():
         args.build_env_dir = args.build_env_dir.resolve()
     if args.install_prefix is not None:
         args.install_prefix = args.install_prefix.resolve()
-    delivery.check_destination(destination, args.replace)
+    archives = [bundle_name(version, variant) + '.tar.gz' for variant in targets]
+    delivery.check_destination(destination, archives, args.replace)
     changelog = release_changelog(version)
-    with delivery.stage_release(destination, replace=args.replace) as args.output_dir:
-        bundles = []
+    with delivery.stage_release(destination, archives, replace=args.replace) as args.output_dir:
         for variant in targets:
             build_ref = common.image_ref('build', variant)
             runtime = environment_archives.ensure_image('runtime', variant, args.runtime_env_dir)
@@ -256,8 +265,7 @@ def main():
                 write_json(build_record, fingerprint)
             elif not build_record.is_file() or json.loads(build_record.read_text()) != fingerprint:
                 raise RuntimeError('--skip-build 的源码或环境身份与已有 wheels 不匹配')
-            bundles.append(assemble(args, matrix, variant, runtime, build, record, archive, wheel_output / 'wheels', compatibility, version=version, changelog=changelog))
-        delivery.write_release_index(args.output_dir, 'rx-met', version, changelog, bundles, with_env=args.with_env)
+            assemble(args, matrix, variant, runtime, build, record, archive, wheel_output / 'wheels', compatibility, version=version, changelog=changelog)
     print('Product delivery:', destination)
 
 

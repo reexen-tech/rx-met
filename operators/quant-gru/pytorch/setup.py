@@ -19,10 +19,17 @@ here = os.path.abspath(os.path.dirname(__file__))
 SHARED_LIB_NAME = 'libgru_quant_shared.so'
 SOURCE_LIB = os.path.join(here, 'lib', SHARED_LIB_NAME)
 VERSION_FILE = os.path.join(here, '_version.py')
+ENABLE_CUDA = os.environ.get('RX_MET_ENABLE_CUDA', '1') != '0'
+if not ENABLE_CUDA:
+    SOURCE_LIB = os.path.join(os.environ.get('RX_MET_QUANT_GRU_BUILD_DIR',
+                             os.path.join(here, '../build_release')), SHARED_LIB_NAME)
 
 
 def read_version():
     """Read package version without importing quant_gru."""
+    override = os.environ.get('RX_MET_QUANT_GRU_VERSION')
+    if override:
+        return override
     namespace = {}
     with open(VERSION_FILE, 'r', encoding='utf-8') as f:
         exec(f.read(), namespace)
@@ -168,15 +175,17 @@ class BuildExtWithChecks(BuildExtension):
 
     def run(self):
         ensure_supported_platform()
-        ensure_cuda_build_environment()
         ensure_prebuilt_shared_library()
-        resolved_cuda_arch_list = resolve_cuda_arch_list()
-        print(f'Using TORCH_CUDA_ARCH_LIST={resolved_cuda_arch_list}')
+        if ENABLE_CUDA:
+            ensure_cuda_build_environment()
+            resolved_cuda_arch_list = resolve_cuda_arch_list()
+            print(f'Using TORCH_CUDA_ARCH_LIST={resolved_cuda_arch_list}')
         super().run()
 
 
-onnx_headers = os.environ.get('QUANT_GRU_ONNXRUNTIME_INCLUDE', os.path.join(
-    here, '../../../native/third_party/onnxruntime-prepared/1.20.1/include'))
+onnx_root = os.environ.get('RX_MET_ONNXRUNTIME_ROOT', os.path.join(
+    here, '../../../docker/environment/third_party/onnxruntime'))
+onnx_headers = os.environ.get('QUANT_GRU_ONNXRUNTIME_INCLUDE', os.path.join(onnx_root, 'include'))
 onnx_extensions = []
 if os.path.isfile(os.path.join(onnx_headers, 'onnxruntime_cxx_api.h')):
     onnx_extensions.append(CppExtension(
@@ -184,12 +193,23 @@ if os.path.isfile(os.path.join(onnx_headers, 'onnxruntime_cxx_api.h')):
         include_dirs=[onnx_headers], extra_compile_args=['-std=c++17', '-O2'],
     ))
 
+cpu_extension = CppExtension(
+    name='gru_interface_binding',
+    sources=['lib/gru_interface_binding.cc'],
+    include_dirs=[os.path.join(here, '../include')],
+    define_macros=[('RX_MET_CPU_ONLY', '1')],
+    libraries=['gru_quant_shared'],
+    library_dirs=[os.path.dirname(SOURCE_LIB)],
+    extra_compile_args=['-std=c++17', '-O3', '-fopenmp', '-Wno-unused-variable'],
+    extra_link_args=['-fopenmp', '-Wl,-rpath,$ORIGIN/lib'],
+) if not ENABLE_CUDA else None
+
 setup(
     name='quant_gru',
     version=read_version(),
     description='Quantized GRU implementation with C++ backend',
     py_modules=['quant_gru', 'quant_gru_onnx', '_version'],
-    ext_modules=[
+    ext_modules=([cpu_extension] if not ENABLE_CUDA else [
         CUDAExtension(
             name='gru_interface_binding',
             sources=['lib/gru_interface_binding.cc'],
@@ -215,7 +235,7 @@ setup(
                 '-Wl,-rpath,$ORIGIN/lib',
             ]
         )
-    ] + onnx_extensions,
+    ]) + onnx_extensions,
     cmdclass={
         'build_ext': BuildExtWithChecks,
         'install': InstallWithLib,

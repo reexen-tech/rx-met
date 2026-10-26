@@ -6,7 +6,7 @@ RX-MET 量化演示 — kws_streaming att_mh_rnn + QuantGRU / QuantLSTM
         → compute_encodings 校准 (PTQ)
         → apply_power_of_2_workflow (NPU 友好的 Po2 量化)
         → freeze_quantizer_parameters + QAT 微调
-        → state_dict + ONNX + .encodings 三件套保存
+        → state_dict + ONNX + .json 编码文件三件套保存
         → 重建 sim → load_state_dict → load_quantizer_encodings → 精度对比
 
 训练侧按 google-research/kws_streaming/models/att_mh_rnn.py：
@@ -41,6 +41,7 @@ from __future__ import annotations
 import argparse
 import contextlib
 import hashlib
+import json
 import math
 import os
 import random
@@ -85,7 +86,7 @@ from quant_lstm import QuantLSTM
 # 全局配置（kws_streaming base_parser / att_mh_rnn 默认值）
 # ============================================================================
 SEED = 42
-DEVICE = torch.device("cuda")  # QuantGRU / QuantLSTM 的 Python 运行时要求 CUDA。
+DEVICE = torch.device("cuda")
 
 DATA_ROOT = os.environ.get(
     "RX_MET_SPEECH_COMMANDS_ROOT", "/datasets/speech_commands_v0.02"
@@ -882,7 +883,162 @@ def parse_args(argv=None):
                         help="输出根目录；自动追加 gru/ 或 lstm/，默认读取 RX_MET_KWS_OUTPUT_DIR")
     parser.add_argument("--quant-config", type=Path, default=BITWIDTH_CONFIG_FILE,
                         help="完整的量化配置 JSON；编辑其中的 GRU_config 或 LSTM_config")
-    return parser.parse_args(argv)
+    parser.add_argument("--device", choices=("cpu", "cuda"), default="cuda")
+    parser.add_argument("--ptq-only", action="store_true",
+                        help="加载浮点检查点，执行校准、Po2、导出和恢复；不训练")
+    parser.add_argument("--fp-checkpoint", type=Path,
+                        default=Path(os.environ["RX_MET_KWS_FP_MODEL"]) if "RX_MET_KWS_FP_MODEL" in os.environ else None)
+    parser.add_argument("--calib-dir", type=Path, help="复用 batch-1 的 input NPY/NPZ 样本")
+    parser.add_argument("--validation-dir", type=Path)
+    parser.add_argument("--export-feeds-dir", type=Path,
+                        help="保存固定的 calib/、val/ 和 manifest.json，供 CPU/GPU 和 ONNX 复用")
+    parser.add_argument("--samples-per-class", type=int, default=20)
+    parser.add_argument("--calib-limit", type=int)
+    parser.add_argument("--validation-limit", type=int)
+    args = parser.parse_args(argv)
+    if args.device == "cpu" and not args.ptq_only:
+        parser.error("CPU 仅支持 --ptq-only；浮点训练和 QAT 请使用 CUDA")
+    if args.ptq_only and args.fp_checkpoint is None:
+        parser.error("--ptq-only 需要 --fp-checkpoint 或 RX_MET_KWS_FP_MODEL")
+    if args.validation_dir is not None and args.calib_dir is None:
+        parser.error("--validation-dir 需要 --calib-dir")
+    for name in ("samples_per_class", "calib_limit", "validation_limit"):
+        value = getattr(args, name)
+        if value is not None and value < 1:
+            parser.error(f"--{name.replace('_', '-')} 必须大于 0")
+    return args
+
+
+def load_ptq_feeds(directory: Path, limit=None):
+    """Read the same static batch-1 feed files as the ONNX PTQ example."""
+    from aimet_onnx.rx_ptq.calibration import iter_calibration_feeds
+    feeds = list(iter_calibration_feeds(directory, {"input": [1, TARGET_LEN]},
+                 input_dtypes={"input": np.dtype("float32")}))
+    files = sorted(directory.glob("*.npz")) or sorted(directory.glob("*.npy"))
+    manifest_path = directory.parent / "manifest.json"
+    labels = None
+    if manifest_path.is_file():
+        manifest = json.loads(manifest_path.read_text())
+        key = "val" if directory.name == "val" else "calib"
+        if f"{key}_labels" in manifest:
+            by_name = dict(zip(manifest[f"{key}_files"], manifest[f"{key}_labels"], strict=True))
+            if set(by_name) != {path.name for path in files}:
+                raise ValueError(f"{directory} 样本与 manifest 不一致")
+            labels = [by_name[path.name] for path in files]
+    return feeds[:limit], labels[:limit] if labels is not None else None
+
+
+def prepare_ptq_feeds(data_dir: Path, output_dir: Path, samples_per_class: int):
+    """Select reproducible unaugmented samples and persist the ONNX input feeds."""
+    output_dir.mkdir(parents=True, exist_ok=True)
+    manifest = {"labels": list(LABELS), "seed": SEED, "batch_size": 1, "augmentation": False}
+    for split, folder in (("train", "calib"), ("val", "val")):
+        dataset = SpeechCommandsKWS(str(data_dir), split=split)
+        dataset.train_mode = False
+        rng = random.Random(SEED)
+        selected = []
+        for label in LABELS:
+            indices = [index for index, (_, name) in enumerate(dataset.items) if name == label]
+            if len(indices) < samples_per_class:
+                raise ValueError(f"{split}/{label} 样本少于 {samples_per_class}")
+            selected.extend(rng.sample(indices, samples_per_class))
+        rng.shuffle(selected)
+        directory = output_dir / folder
+        directory.mkdir()
+        files, labels, sources = [], [], []
+        for number, index in enumerate(selected):
+            waveform, label = dataset[index]
+            filename = f"{number:05d}.npz"
+            np.savez(directory / filename, input=waveform.unsqueeze(0).numpy())
+            files.append(filename)
+            labels.append(int(label))
+            sources.append(str(dataset.items[index][0]))
+        manifest.update({f"{folder}_files": files, f"{folder}_labels": labels,
+                         f"{folder}_sources": sources})
+    (output_dir / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
+    return output_dir / "calib", output_dir / "val"
+
+
+def _run_kws_ptq(args, run):
+    from aimet_common.evaluation import classification_accuracy
+
+    if not args.fp_checkpoint.is_file():
+        raise FileNotFoundError(args.fp_checkpoint)
+    run.note_inputs(checkpoint=args.fp_checkpoint)
+    if args.calib_dir is None:
+        calib_dir, validation_dir = prepare_ptq_feeds(
+            args.data_dir, args.export_feeds_dir or run.root / "data", args.samples_per_class)
+    else:
+        calib_dir = args.calib_dir
+        validation_dir = args.validation_dir or calib_dir.parent / "val"
+    feeds, _ = load_ptq_feeds(calib_dir, args.calib_limit)
+    validation, labels = load_ptq_feeds(validation_dir, args.validation_limit)
+    if not feeds or not validation:
+        raise ValueError("校准和验证样本均不能为空")
+    run.note_inputs(calibration=calib_dir, validation=validation_dir)
+    set_seed(SEED)
+    model = _new_model(args.rnn_type).eval()
+    load_checkpoint(model, args.fp_checkpoint, args.rnn_type, DEVICE)
+
+    def outputs(module):
+        module.eval()
+        with torch.no_grad():
+            result = [module(torch.from_numpy(feed["input"]).to(DEVICE)).detach().cpu().numpy()
+                      for feed in validation]
+        if not all(np.isfinite(value).all() for value in result):
+            raise RuntimeError("KWS 输出含非有限值")
+        return np.concatenate(result)
+
+    stage_outputs = {"fp32": outputs(model)}
+    prepared = model_preparer.prepare_model(model.cpu()).to(DEVICE).eval()
+    dummy = torch.from_numpy(feeds[0]["input"]).to(DEVICE)
+    sim_options = dict(dummy_input=dummy, quant_scheme=QUANT_SCHEME,
+                       config_file=str(CONFIG_FILE), default_output_bw=DEFAULT_BW,
+                       default_param_bw=DEFAULT_BW)
+    sim = quantsim.QuantizationSimModel(prepared, **sim_options)
+    sim.set_percentile_value(PERCENTILE_VALUE)
+    apply_mixed_precision_bitwidth(sim.model, config_file=str(args.quant_config), verbose=True)
+    sim.model.eval()
+    with torch.no_grad(), aimet.nn.compute_encodings(sim.model):
+        for feed in tqdm(feeds, desc="PTQ calibration"):
+            sim.model(torch.from_numpy(feed["input"]).to(DEVICE))
+    stage_outputs["ptq"] = outputs(sim.model)
+    apply_power_of_2_workflow(sim.model, align_bias_scale=True, verbose=True)
+    stage_outputs["po2"] = outputs(sim.model)
+    checkpoint = run.checkpoints / "att_mh_rnn_kws_ptq.pth"
+    save_checkpoint(sim.get_original_model(sim.model, qdq_weights=False), checkpoint, args.rnn_type)
+    sim.model.cpu().eval()
+    onnx_path, enc_path = export_onnx_json(
+        sim, export_dir=str(run.exports), filename_prefix="att_mh_rnn_kws_ptq",
+        dummy_input_shape=(1, *WAVEFORM_SHAPE), opset=18)
+    fresh = model_preparer.prepare_model(_new_model(args.rnn_type).eval())
+    load_checkpoint(fresh, checkpoint, args.rnn_type, DEVICE)
+    restored = quantsim.QuantizationSimModel(fresh, **sim_options)
+    restored.set_percentile_value(PERCENTILE_VALUE)
+    apply_mixed_precision_bitwidth(restored.model, config_file=str(args.quant_config), verbose=True)
+    load_quantizer_encodings(restored.model, load_path=str(enc_path), skip_if_not_found=False,
+                             allow_overwrite=False, verbose=True)
+    stage_outputs["restored"] = outputs(restored.model)
+    np.savez(run.exports / "outputs.npz", **{f"{name}_output0": value for name, value in stage_outputs.items()
+                                           if name != "restored"})
+    restore_delta = float(np.abs(stage_outputs["restored"] - stage_outputs["po2"]).max())
+    metadata = {
+        "mode": "ptq-only", "device": str(DEVICE), "rnn_type": args.rnn_type,
+        "fp_checkpoint": str(args.fp_checkpoint.resolve()),
+        "fp_checkpoint_sha256": hashlib.sha256(args.fp_checkpoint.read_bytes()).hexdigest(),
+        "calibration_dir": str(calib_dir.resolve()), "calibration_count": len(feeds),
+        "validation_dir": str(validation_dir.resolve()), "validation_count": len(validation),
+        "calibration_sha256": hashlib.sha256(b"".join(feed["input"].tobytes() for feed in feeds)).hexdigest(),
+        "validation_sha256": hashlib.sha256(b"".join(feed["input"].tobytes() for feed in validation)).hexdigest(),
+        "restore_max_abs": restore_delta, "restore_atol": 1e-5, "restore_rtol": 1e-4,
+        "onnx": str(onnx_path), "encodings": str(enc_path),
+    }
+    if labels is not None:
+        metadata["accuracy"] = {name: classification_accuracy([[array]], labels)
+                                for name, array in stage_outputs.items()}
+    (run.exports / "att_mh_rnn_kws_ptq.metadata.json").write_text(json.dumps(metadata, indent=2) + "\n")
+    np.testing.assert_allclose(stage_outputs["restored"], stage_outputs["po2"], atol=1e-5, rtol=1e-4)
+    print(f"PTQ-only 完成: {onnx_path}; encodings: {enc_path}; 恢复误差: {restore_delta:.6g}")
 
 
 # ============================================================================
@@ -898,10 +1054,14 @@ def main(argv=None):
 
 
 def _run_kws(args, run):
-    if not torch.cuda.is_available():
+    global DEVICE
+    DEVICE = torch.device(args.device)
+    if args.device == "cuda" and not torch.cuda.is_available():
         raise RuntimeError("此示例需要 CUDA GPU，请在 rx-met GPU 镜像中使用 --gpus 启动容器")
+    if args.ptq_only:
+        return _run_kws_ptq(args, run)
     output_dir = run.exports
-    fp_model_path = Path(os.environ.get("RX_MET_KWS_FP_MODEL", str(run.checkpoints / "model_fp_kws.pth")))
+    fp_model_path = args.fp_checkpoint or run.checkpoints / "model_fp_kws.pth"
     if not args.quant_config.is_file():
         raise FileNotFoundError(f"量化配置不存在: {args.quant_config}")
     set_seed(SEED)

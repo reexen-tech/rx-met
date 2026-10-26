@@ -169,7 +169,7 @@ else:
         curl.chmod(0o755)
 
     def write_bundle(self, url='', revision='original', variant='cu126'):
-        self.env['FAKE_ENVIRONMENT_METADATA'] = ('linux/amd64|rx-lm-quant-env|deps-v2|runtime|cpu' if variant == 'cpu' else 'linux/amd64|rx-quant-env|v1|runtime|cu126')
+        self.env['FAKE_ENVIRONMENT_METADATA'] = f'linux/amd64|rx-quant-env|v1|runtime|{variant}'
         manifest = self.bundle / 'manifest.json'
         manifest.write_text(json.dumps({'version': '1.1.0', 'revision': revision}))
         for name in ('README.md', 'CHANGELOG.md', 'examples/example.py'):
@@ -179,7 +179,8 @@ else:
         bootstrap = {'BUNDLE_NAME': 'rx-met-test', 'MANIFEST_SHA256': hashlib.sha256(manifest.read_bytes()).hexdigest(),
                      'RUNTIME_IMAGE_TAG': self.env['FAKE_RUNTIME_TAG'],
                      'RUNTIME_VARIANT': variant, 'RUNTIME_ENV_NAME': 'rx-quant-env', 'RUNTIME_ENV_VERSION': 'v1',
-                     'RUNTIME_LABEL_PREFIX': 'com.reexen.rx-quant.', 'RUNTIME_VARIANT_LABEL': 'cuda.variant',
+                     'RUNTIME_LABEL_PREFIX': 'com.reexen.rx-quant.',
+                     'RUNTIME_VARIANT_LABEL': 'platform.variant' if variant == 'cpu' else 'cuda.variant',
                      'RUNTIME_ENV_DIR': 'rx-quant-env-v1', 'RUNTIME_ARCHIVE': 'runtime.tar.gz',
                      'RUNTIME_URL': url, 'RUNTIME_CHECKSUM_URL': url + '.sha256' if url else '', 'APP_INSTALL_BYTES': '1'}
         script = (ROOT / 'packaging/release-bundle/install.sh.in').read_text()
@@ -290,6 +291,18 @@ os.execv(os.environ['REAL_MV'], ['mv', *sys.argv[1:]])
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn('--replace', result.stdout)
         self.assertFalse((self.root / 'docker.log').exists())
+
+    def test_cpu_installation_and_startup_command_do_not_require_gpu(self):
+        self.env['FAKE_RUNTIME_TAG'] = 'rx-quant-env-runtime:v1-cpu'
+        self.write_bundle(variant='cpu')
+        self.env['FAKE_IMAGE_PRESENT'] = '1'
+        self.env['FAKE_INSTALL_SUCCESS'] = '1'
+        result = self.invoke('--offline')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertNotIn('--gpus', result.stdout)
+        log = (self.root / 'docker.log').read_text()
+        self.assertIn('platform.variant', log)
+        self.assertNotIn('--gpus', log)
 
     def test_replace_installs_fresh_when_destination_is_absent(self):
         self.env['FAKE_IMAGE_PRESENT'] = '1'

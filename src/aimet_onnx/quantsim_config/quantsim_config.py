@@ -157,6 +157,7 @@ class QuantSimConfigurator(AimetCommonQuantSimConfigurator):
         param_names: List[str],
         activation_names: List[str],
         input_activations: List[str],
+        input_roles=None,
     ):
         """
         Configures quantizers based on config file
@@ -165,6 +166,7 @@ class QuantSimConfigurator(AimetCommonQuantSimConfigurator):
         self._param_names = param_names
         self._activation_names = activation_names
         self._input_quantizers = input_activations
+        self._input_roles = input_roles
 
         self._op_to_quantizers = self._map_quantizers_to_ops()
 
@@ -199,7 +201,9 @@ class QuantSimConfigurator(AimetCommonQuantSimConfigurator):
             if node is None:
                 continue
             op_to_quantizers[node.name] = OpToQuantizers()
-            for input_product in node.input:
+            for index, input_product in enumerate(node.input):
+                if self._input_roles is not None and self._input_roles.is_control_port(node.name, index):
+                    continue
                 self._populate_input_quantizer(
                     op_to_quantizers[node.name], input_product
                 )

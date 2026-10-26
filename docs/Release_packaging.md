@@ -1,6 +1,6 @@
 # rx-met 应用包发布
 
-产品 VERSION 保持独立；公共 GPU 环境使用 rx-quant-env v1，详见 [公共环境](Shared_environment.md)。
+产品 VERSION 保持独立；公共 CPU/GPU 环境使用 rx-quant-env v1，详见 [公共环境](Shared_environment.md)。
 两个仓库独立保存公共环境定义和版本标签约定，无跨仓库运行依赖。
 
 ## 日常发布
@@ -10,6 +10,23 @@
 ```bash
 ./scripts/release/build.sh cu118 cu126 cu130
 ```
+
+省略变体时默认仅构建 `cu118`、`cu126`、`cu130`；CPU 必须显式指定 `cpu`。
+环境构建、runtime 导出及 Docker bake 默认组遵循相同规则。可同时指定 CPU/CUDA，
+例如 `./scripts/release/build.sh cu126 cpu`。
+
+CPU 变体使用普通 Ubuntu、CPU PyTorch 和 ONNX Runtime，支持校准与 PTQ，不需要
+NVIDIA Driver 或 Container Toolkit：
+
+```bash
+./scripts/environment/build.sh --no-export cpu
+./scripts/release/build.sh cpu
+./scripts/release/verify_bundle.sh --no-gpu cpu
+```
+
+CPU 的三个项目 wheel 使用 `+cpu` 版本后缀；构建原生库时设置
+`RX_MET_ENABLE_CUDA=0`，算子扩展不链接 CUDA。KWS CPU 验证加载现成浮点检查点并
+指定 `--ptq-only`，两个示例的固定输入及制品对照见 [示例说明](../examples/README.md)。
 
 新构建机器可直接指定已归档的环境目录，两个参数可以指向同一目录：
 
@@ -27,9 +44,25 @@
 输出目录为 `.release/export/rx-met-v<VERSION>/`。每个应用包默认在独立临时目录
 完成安装验收，成功或失败后自动清理，不受已有安装目录影响。
 
-未指定 `--replace` 时，产品交付目录已存在则在调用 Docker、编译或导出前退出。
-使用 `--replace` 时按本次选择的变体重新组装整个产品目录，全部验收通过后才替换旧目录；
-构建失败保留原产品交付，其他产品版本和公共环境不会被替换，不继承旧目录中未选择的变体。
+产品交付目录可以存在，脚本只检查本次所选变体的目标应用归档是否已存在。
+未指定 `--replace` 且任一目标归档重名时，在调用 Docker、编译或导出前一次性报告所有冲突。
+不同变体可分批追加到同一产品目录，例如先构建 CPU 并附带环境，再追加默认 CUDA 包：
+
+```bash
+./scripts/release/build.sh cpu --with-env
+./scripts/release/build.sh
+```
+
+上述命令要求本机已准备好对应的 build/runtime 镜像。第二次构建保留 CPU 归档及其校验文件，
+追加三个 CUDA 归档；未带 `--with-env` 不会补齐 CUDA 环境附件。
+
+使用 `--replace` 时，仅替换本次所选变体的目标归档及其 `.sha256`。
+本次全部目标先在暂存区完成构建和安装验收，再发布到产品目录；构建或发布失败时保留或恢复原有产物。
+未选择的归档、已解压的应用目录及目录内其他内容保留，已有安装目录和公共环境不受此参数影响。
+首次成功发布到旧版产品目录时，会清理原外层 `README.md`、`CHANGELOG.md`、`release.json`
+和聚合 `SHA256SUMS`；应用包内及已解压应用目录中的同名文件保留。
+已有归档缺少独立 `.sha256` 时会补齐；旧聚合清单中有对应校验值的，先核对再迁移，
+校验不匹配则停止发布并保留原目录。
 展开的应用及临时验收内容位于 `.release/staging/`，完成后自动清理。
 产品发布和环境导出的互斥锁位于 `.release/locks/`，不写入 `export/` 或环境交付目录。
 锁按输出目录的规范绝对路径区分，构建结束自动释放，锁文件保留以供后续复用。
@@ -48,7 +81,8 @@
 ./scripts/release/build.sh --with-env cu126
 ```
 
-省略 `cu126` 时处理全部三个 CUDA 变体。归档默认缓存于 `.release/runtime-images/<环境版本>/`：
+省略变体时仅处理 CUDA 变体，`--with-env` 也不会隐式加入 CPU；交付 CPU 包及环境时执行
+`./scripts/release/build.sh --with-env cpu`。归档默认缓存于 `.release/runtime-images/<环境版本>/`：
 已有完整归档则校验复用，缺失则从本机版本标签 自动导出。删除 `.release` 后也可重新执行，
 无需先手动导出镜像。Docker 中的环境镜像和构建缓存不会随 `.release` 删除；脚本不会重建已发布环境。
 
@@ -62,10 +96,7 @@
 .release/export/
 ├── rx-met-v<VERSION>/
 │   ├── rx-met-v<VERSION>-cu126-linux-amd64.tar.gz
-│   ├── README.md
-│   ├── CHANGELOG.md
-│   ├── release.json
-│   └── SHA256SUMS
+│   └── rx-met-v<VERSION>-cu126-linux-amd64.tar.gz.sha256
 └── rx-quant-env-v1/                  # 仅 --with-env 导出或复用
     ├── rx-quant-env-runtime-v1-cu126-linux-amd64.tar.gz
     ├── rx-quant-env-runtime-v1-cu126-linux-amd64.tar.gz.json
@@ -82,17 +113,26 @@
 首次离线交付同时提供产品目录和对应环境目录；后续已安装相同环境的用户只需产品目录。
 在产品目录内解压所选应用包并运行包内 `install.sh`，安装器自动查找平级环境目录；
 也支持将解压后的应用目录与环境目录直接平级放置，或使用 `--runtime-image FILE` 显式指定归档。
-`release.json` 记录本次变体、应用包校验值、所需环境身份、环境目录及是否附带环境。
-产品和环境分别维护校验清单，产品清单不绑定环境归档文件的字节校验值。
-README 仅列出所需公共运行环境的完整归档文件名，不展示是否附带环境或归档路径。
+产品目录只生成应用归档及各自的 `.sha256`，不再生成外层 README、CHANGELOG、
+`release.json` 或聚合 `SHA256SUMS`。版本、变体和环境要求由每个应用包内的
+`manifest.json` 描述，使用说明和当前版本日志分别保存在包内 README、CHANGELOG 中，
+包内 `SHA256SUMS` 校验应用文件。所需公共环境的完整归档文件名也列在包内 README 中。
+
+分发或解压前，在应用归档所在目录检查对应的独立校验文件，例如 1.1.0 的 cu126 包：
+
+```bash
+sha256sum -c rx-met-v1.1.0-cu126-linux-amd64.tar.gz.sha256
+```
+
+公共环境目录继续维护 README、manifest、导出元数据和校验清单；应用归档校验不绑定环境归档文件的字节校验值。
 
 ### 环境标签与文件校验
 
 应用包通过版本标签要求公共环境，不绑定本地镜像 ID、构建脚本摘要或归档文件的 SHA256。
 镜像 ID 自动记录在构建资料中，供问题排查和编译缓存判断使用。
 
-归档实际 SHA256 单独保存在同名 `.sha256`、导出元数据 `.json` 和交付 `SHA256SUMS` 中。
-安装器支持同名 `.sha256`（一行 SHA256 或标准 sha256sum 格式），以及归档同目录
+环境归档实际 SHA256 单独保存在同名 `.sha256`、导出元数据 `.json` 和环境交付 `SHA256SUMS` 中。
+安装器支持环境归档同名 `.sha256`（一行 SHA256 或标准 sha256sum 格式），以及归档同目录
 `SHA256SUMS` 中对应文件的记录。有校验记录时必须通过检查；没有记录时检查 gzip 完整性，
 由 Docker 加载并验证镜像内容。应用文件和已安装内容继续独立校验。
 
@@ -115,11 +155,12 @@ README 仅列出所需公共运行环境的完整归档文件名，不展示是�
 - `--output-dir DIR`：最终产品交付目录；环境附件放在其父目录下的 `<环境名>-<环境版本>/`。
 - `--install-prefix DIR`：指定并保留安装验收目录；默认使用临时目录并自动清理。
 - `--skip-build`：源码和 build/runtime 身份完全匹配时复用已有编译产物，重新组装交付文档。
-- `--replace`：验收通过后整体替换当前产品交付目录，仅保留本次所选变体；不覆盖已有安装目录或公共环境。
+- `--replace`：验收通过后，仅替换本次所选变体的同名应用归档及其 `.sha256`；保留未选择的归档、已解压应用目录及其他内容，不覆盖已有安装目录或公共环境。
 - `--runtime-base-url https://...`：预留固定归档下载地址，当前留空、离线交付。
 
 根 CHANGELOG 保留历史；打包前按 VERSION 校验并提取唯一且非空的当前版本，
-应用包、交付总目录和安装目录均只保留当前版本内容。已安装内容参与完整性校验。
+应用包和安装目录内的 CHANGELOG 均只保留当前版本内容，产品外层不再放置 CHANGELOG。
+已安装内容参与完整性校验。
 
 ## 验证
 

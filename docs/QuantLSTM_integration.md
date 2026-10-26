@@ -49,10 +49,15 @@ QuantLSTM 的 `load_quant_config()`、`percentile_value`、量化参数锁和安
 
 ## 使用与配置
 
-支持单层、`dropout=0`、无 projection、CUDA float32，单向/双向及有/无 bias。
+支持单层、`dropout=0`、无 projection、CPU/CUDA float32，单向/双向及有/无 bias。
+CPU 支持校准、PTQ、Po2、编码保存恢复及 ONNX 导出，要求 `eval()` 和
+`torch.no_grad()` 或 `torch.inference_mode()`；浮点训练与 QAT 继续使用 CUDA。
+CPU 算子 wheel 通过 `RX_MET_ENABLE_CUDA=0` 构建，不能用仅含 CUDA binding 的 wheel 代替。
 用户示例统一为 `examples/quick_start_kws.py`，使用真实 Speech Commands v0.02，
 通过 `--rnn_type gru|lstm` 选择循环层，完成浮点训练、PTQ、Po2、QAT、导出和恢复。
 默认每个训练阶段 1 epoch，用于学习流程；随机数据回归保留在 `tests/`。
+CPU 使用 `--device cpu --ptq-only --fp-checkpoint /path/to/model_fp_kws.pth`；
+共享样本及 CPU/GPU 制品比较命令见 [示例说明](../examples/README.md)。
 运行条件、配置和制品说明随发布包放在 [examples/README.md](../examples/README.md)。
 
 ```bash
@@ -94,17 +99,91 @@ LSTM 按新 scale 重算非对称 zero point，并更新 `real_min/real_max`，�
 或在首次配置中指定 `scale_mode: "pot2"`。更新后的校准接口需要配套重建 QuantLSTM
 extension / wheel，并更新运行镜像，见[升级说明](../operators/quant-lstm/docs/installation.md#21-升级已有安装)。
 
-Signed symmetric 校准采用 `scale=max_abs/qmax`、`zero_point=0`，其中 8 位的
+普通 signed symmetric MinMax 校准采用 `scale=max_abs/qmax`、`zero_point=0`，其中 8 位的
 `qmax=127`、16 位的 `qmax=32767`。运行时允许完整有符号范围：INT8 `[-128,127]`、
 INT16 `[-32768,32767]`；CPU/CUDA、QAT 饱和掩码和导出范围均遵循此约定。
 `real_min=(qmin-zero_point)*scale`、`real_max=(qmax-zero_point)*scale`，与 GRU 一致。
 旧版 LSTM 编码若使用窄范围下界，需保留 scale/zero_point 并按完整范围重新导出，
 同时更新算子库；仅替换 JSON 而沿用旧运行库会造成训练与部署语义不一致。
 
+## Bias 编码差异
+
+记录日期：2026-10-26。状态：待讨论。本节记录当前实现与常见整数部署方案的差异，
+不作统一方案的决定；现有代码、位宽配置、校准及编码导入导出行为保持不变。
+
+### 乘积 scale 与独立 bias scale
+
+矩阵乘法的中心化整数累加器使用 `Sacc = Sx * Sw`；逐通道权重对应
+`Sacc[c] = Sx * Sw[c]`。若 bias 直接量化到该域，则 `Sb[c] = Sacc[c]`，
+通常使用 INT32，量化后的 bias 可直接与整数累加结果相加。
+
+当前仓库存在两条不同路径：
+
+| 项目 | 普通 Conv/Linear 等的 bias 对齐路径 | 原生 QuantGRU/QuantLSTM |
+| --- | --- | --- |
+| bias 编码 scale | 对齐后为 `Sx * Sw` | 根据 bias 自身范围独立计算 `Sb` |
+| bias 量化位宽 | 对齐后默认有符号 32 位，可显式指定并检查范围 | 由算子配置控制的 8/16 位；当前 KWS 示例两种 RNN 均配置为 8 位 |
+| 加入累加器前 | 同一 scale，可直接相加 | 先将 bias 从 `Sb` 重缩放到 `Sacc` |
+| Po2 工作流 | 启用 bias 对齐时执行乘积 scale 和 bias 位宽对齐 | 调用算子自身的 `enable_pot2()`，不自动改为 INT32 或乘积 bias scale |
+
+普通层在统计 PTQ 阶段仍可按配置校准 bias；上表的乘积 scale 指启用
+`align_bias_scale=True` 后的对齐结果，不能泛化为所有阶段始终使用乘积 scale。
+PyTorch 工作流的 `align_bias_scale` 默认关闭，ONNX 工作流默认开启；启用对齐后
+`bias_bitwidth` 默认值为 32，当前 KWS 示例显式开启对齐。
+PyTorch 的该对齐覆盖 Conv/Linear，ONNX 的对应路径覆盖带 bias 的
+Conv/ConvTranspose/Gemm/MatMul，不覆盖原生 GRU/LSTM 内部 bias。
+
+原生循环层有输入和循环两条线性分支，概念关系为：
+
+```text
+Sacc_ih[c] = Sx * Sw_ih[c]
+Sacc_hh[c] = Sh * Sw_hh[c]
+
+q_bias_ih = Quantize(bias_ih, Sb_ih, bias_bitwidth)
+bias_acc_ih[c] = Rescale(q_bias_ih[c], Sb_ih[c] -> Sacc_ih[c])
+linear_ih = Rescale(acc_ih + bias_acc_ih, Sacc_ih -> Slinear_ih)
+```
+
+循环分支同样先把 `bias_hh` 转换到 `Sacc_hh`。实际重缩放使用算子定义的
+M+shift 或 Po2 编码。bias 编码位宽、物理存储载体和累加器宽度是不同概念；
+用 int32/FP32 容器保存低位宽整数码不会增加其量化精度。独立低位宽 bias
+可能先丢失信息，随后重缩放到更宽的累加域不能恢复这些信息。
+
+### 训练余量及待讨论事项
+
+当前两种原生算子对新校准的 `bias_ih` / `bias_hh`，在各自量化组内采用：
+
+```text
+M = max(abs(bias_min), abs(bias_max))
+Sb = max(2 * M, 0.01) / qmax
+```
+
+Po2 模式再将该 scale 严格向上取为 2 的幂。此策略扩大的是独立 bias 编码范围，
+不会放大实际浮点 bias；目的是为固定网格下的 QAT 更新预留空间，代价是步长变粗。
+新 CPU 校准/PTQ 也复用该策略，但 CPU 不因此支持训练。已导入或锁定的编码
+不会被自动扩张，QAT 期间也不会持续扩大范围。
+
+若采用 INT32 且 `Sb = Sx * Sw` 的直接累加方案，通常应检查该网格下的 bias
+可表示范围，而不是另按 bias 观测值推导独立 scale。低位宽独立 bias 加训练余量
+并不等价于该方案。现有 native 测试预期与余量策略的同步问题，也不能替代部署
+规范是否允许独立 bias scale 的确认。
+
+后续再讨论以下事项，当前不修改实现：
+
+- 目标编译器/硬件是否要求原生 GRU/LSTM 的 bias 为 INT32 且使用对应分支的乘积 scale。
+- CPU 纯 PTQ 是否应与 QAT 区分训练余量策略，并验证精度差异。
+- 如统一 bias 方案，配置类型、校准、重缩放、参数导入导出和测试需要怎样同步。
+
+相关实现见 [普通层 bias 对齐](../src/aimet_torch/utils_rx.py)、
+[ONNX bias 对齐](../src/aimet_onnx/rx_ptq/po2.py)、
+[GRU 整数线性计算](../operators/quant-gru/src/gru_forward_cpu_quant.cc)、
+[LSTM 执行参数](../operators/quant-lstm/src/lstm/lstm_execution_params.cc) 和
+[LSTM bias 校准](../operators/quant-lstm/src/lstm/quant_params.cc)。
+
 ## 导出和恢复约定
 
 `export_onnx_json()` 输出无 Q/DQ 的标准 ONNX LSTM。ONNX 表达浮点运算，量化参数
-写入配套 `.encodings`，顶层使用公共编译器格式 `schema_version: 4`，所有记录采用
+写入配套 `.json`，顶层使用公共编译器格式 `schema_version: 4`，所有记录采用
 `real = scale * (q - zero_point)`。独立算子阶段文件仍使用原有 schema 3；
 `version: "1.0.0"` 来自 AIMET 原有编码版本设置。LSTM 不新增专用顶层格式：
 

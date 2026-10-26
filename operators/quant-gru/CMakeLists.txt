@@ -1,6 +1,23 @@
 cmake_minimum_required(VERSION 3.18)
 
-project(quant-gru LANGUAGES CXX CUDA)
+project(quant-gru LANGUAGES CXX)
+
+option(RX_MET_ENABLE_CUDA "Build the CUDA GRU backend" ON)
+if(DEFINED ENV{RX_MET_ENABLE_CUDA} AND "$ENV{RX_MET_ENABLE_CUDA}" STREQUAL "0")
+    set(RX_MET_ENABLE_CUDA OFF)
+endif()
+if(NOT RX_MET_ENABLE_CUDA)
+    add_library(gru_quant_shared SHARED
+        src/gru_host.cc src/gru_forward_cpu.cc src/gru_forward_cpu_quant.cc src/quantize_lut.cc)
+    target_compile_features(gru_quant_shared PUBLIC cxx_std_17)
+    target_compile_definitions(gru_quant_shared PUBLIC RX_MET_CPU_ONLY=1)
+    target_include_directories(gru_quant_shared PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
+    set_target_properties(gru_quant_shared PROPERTIES POSITION_INDEPENDENT_CODE ON)
+    find_package(OpenMP REQUIRED)
+    target_link_libraries(gru_quant_shared PUBLIC OpenMP::OpenMP_CXX)
+    return()
+endif()
+enable_language(CUDA)
 
 # ------------------------------
 # C++ / CUDA 标准

@@ -26,6 +26,20 @@ rx-met 发布镜像包含 QuantGRU，环境说明见
 和 CUDA 版 PyTorch。项目 wheel 构建流程使用 Python 3.10 至 3.12。编译工具链与
 PyTorch CUDA 版本保持兼容。
 
+CPU 发布包支持浮点推理、MinMax/SQNR/Percentile 校准、PTQ、整数输入输出和 ONNX
+适配，不支持浮点训练或 QAT。使用 CPU 版 PyTorch，在仓库根目录构建：
+
+```bash
+RX_MET_ENABLE_CUDA=0 bash scripts/internal/build_quant_gru_wheel.sh
+```
+
+CPU 构建不需要 CUDA Toolkit，生成的 wheel 包含 CPU 原生共享库。使用时将模块和输入
+放在 CPU，校准和推理均要求 `eval()` 且在 `torch.no_grad()` 或 `torch.inference_mode()`
+上下文中调用；量化参数导入导出接口与 CUDA 包相同。单独构建
+CPU 原生库可使用 `cmake -S operators/quant-gru -B build/gru-cpu -DRX_MET_ENABLE_CUDA=OFF`。
+ONNX Runtime 适配还需要构建时提供 C++ headers，可通过
+`QUANT_GRU_ONNXRUNTIME_INCLUDE` 指定其目录。
+
 先进入包含本 README 的 QuantGRU 目录，再执行：
 
 ```bash

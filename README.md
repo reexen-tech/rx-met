@@ -1,7 +1,7 @@
 # rx-met
 
-rx-met 是面向 Linux x86_64 NVIDIA GPU 的小模型量化工具包，提供定制 AIMET、
-QuantGRU、QuantLSTM 和可复现的多 CUDA 运行环境。
+rx-met 是面向 Linux x86_64 CPU 和 NVIDIA GPU 的小模型量化工具包，提供定制 AIMET、
+QuantGRU、QuantLSTM 和可复现的 CPU / 多 CUDA 运行环境。CPU 支持校准与 PTQ；浮点训练和 QAT 使用 GPU。
 
 ## 核心能力
 
@@ -16,14 +16,15 @@ QuantGRU、QuantLSTM 和可复现的多 CUDA 运行环境。
 ## 支持范围
 
 
-| 镜像变体    | 系统 / Python         | CUDA | PyTorch | ONNX Runtime GPU | 最低 NVIDIA Driver |
+| 镜像变体    | 系统 / Python         | CUDA | PyTorch | ONNX Runtime | 最低 NVIDIA Driver |
 | ------- | ------------------- | ---- | ------- | ---------------- | ---------------- |
+| `cpu` | Ubuntu 22.04 / 3.10 | 无 | 2.8.0 CPU | 1.23.2 CPU | 无 |
 | `cu118` | Ubuntu 22.04 / 3.10 | 11.8 | 2.7.1   | 1.20.1           | 520.61.05        |
 | `cu126` | Ubuntu 22.04 / 3.10 | 12.6 | 2.8.0   | 1.23.2           | 560.35.05        |
 | `cu130` | Ubuntu 24.04 / 3.12 | 13.0 | 2.10.0  | 1.27.0           | 580.126.20       |
 
 
-宿主机需要 Docker、NVIDIA Driver 和 NVIDIA Container Toolkit。精确依赖、基础镜像
+宿主机需要 Docker；GPU 变体另需 NVIDIA Driver 和 NVIDIA Container Toolkit。精确依赖、基础镜像
 和 CUDA 架构以 `[docker/variants.json](docker/variants.json)` 为准。
 
 ## 获取与运行
@@ -81,8 +82,14 @@ python3 quick_start_kws.py
 
 ```bash
 ./scripts/environment/build.sh --no-export cu126
-./scripts/release/build.sh cu126
+./scripts/release/build.sh cu126 --with-env
 ```
+
+不指定变体时默认仅构建 `cu118`、`cu126`、`cu130`；CPU 需在环境构建和应用打包命令中
+显式指定 `cpu`，可与 CUDA 变体同时指定。Docker bake 默认组也仅包含 CUDA。
+CPU 与 CUDA 应用包可分批追加到同一版本的交付目录；同名归档已存在时才需要
+`--replace`，该参数只替换本次选中的归档及独立 `.sha256`，保留其他变体。
+安装说明、版本日志及 manifest 均在各应用包内。
 
 完整构建矩阵、环境镜像复用和 GPU 验收流程见
 [构建与发布](docs/Release_packaging.md)。

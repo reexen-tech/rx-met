@@ -13,6 +13,9 @@ import tempfile
 from environment import common
 
 
+LEGACY_PRODUCT_FILES = {'README.md', 'CHANGELOG.md', 'release.json', 'SHA256SUMS'}
+
+
 def lock_path(directory):
     """Share the same lock across repositories publishing to the same directory."""
     directory = directory.resolve()
@@ -33,27 +36,104 @@ def _publication_lock(directory):
         yield
 
 
-def check_destination(directory, replace):
+def check_destination(directory, archives, replace):
     if directory.is_symlink() or (directory.exists() and not directory.is_dir()):
         raise RuntimeError(f'产品交付路径不是独立目录: {directory}')
-    if directory.exists() and not replace:
-        raise RuntimeError(f'产品交付目录已存在: {directory}；开发时可显式 --replace')
+    conflicts = []
+    for name in archives:
+        if Path(name).name != name or not name.endswith('.tar.gz'):
+            raise ValueError(f'无效的应用归档文件名: {name}')
+        archive = directory / name
+        for path in (archive, archive.with_name(name + '.sha256')):
+            if path.is_symlink() or (path.exists() and not path.is_file()):
+                raise RuntimeError(f'应用产物路径不是普通文件: {path}')
+        if archive.exists() and not replace:
+            conflicts.append(str(archive))
+    if conflicts:
+        raise RuntimeError('应用产物已存在: ' + ', '.join(conflicts) + '；可显式 --replace 替换同名归档')
+
+
+def _link_or_copy(source, destination):
+    try:
+        os.link(source, destination)
+    except OSError:
+        shutil.copy2(source, destination)
+
+
+def _retain_release_files(destination, staged, archives):
+    replaced = set(archives) | {name + '.sha256' for name in archives}
+    if not destination.exists():
+        return
+    for source in destination.iterdir():
+        if source.name in replaced or source.name in LEGACY_PRODUCT_FILES:
+            continue
+        target = staged / source.name
+        if source.is_symlink():
+            target.symlink_to(os.readlink(source))
+        elif source.is_dir():
+            shutil.copytree(source, target, symlinks=True, copy_function=_link_or_copy)
+        else:
+            _link_or_copy(source, target)
+
+
+def _legacy_archive_checksums(directory):
+    manifest = directory / 'SHA256SUMS'
+    if manifest.is_symlink() or not manifest.is_file():
+        return {}
+    checksums = {}
+    for line in manifest.read_text().splitlines():
+        parts = line.split(maxsplit=1)
+        if len(parts) != 2:
+            continue
+        digest, name = parts
+        name = name.removeprefix('*').removeprefix('./')
+        if Path(name).name != name or not name.endswith('.tar.gz'):
+            continue
+        if len(digest) != 64 or any(character not in '0123456789abcdefABCDEF' for character in digest):
+            raise RuntimeError(f'无效的旧应用归档校验值: {manifest}: {name}')
+        digest = digest.lower()
+        if name in checksums and checksums[name] != digest:
+            raise RuntimeError(f'冲突的旧应用归档校验值: {manifest}: {name}')
+        checksums[name] = digest
+    return checksums
+
+
+def _write_archive_checksums(staged, archives, legacy_checksums):
+    for name in archives:
+        archive = staged / name
+        if archive.is_symlink() or not archive.is_file():
+            raise RuntimeError(f'缺少已验收的应用归档: {archive}')
+        (staged / (name + '.sha256')).write_text(f'{common.sha256(archive)}  {name}\n')
+    # Old deliveries only had a combined checksum file; migrate retained archives as well.
+    for archive in staged.glob('*.tar.gz'):
+        checksum = archive.with_name(archive.name + '.sha256')
+        if archive.is_symlink() or not archive.is_file() or checksum.exists() or checksum.is_symlink():
+            continue
+        actual = common.sha256(archive)
+        expected = legacy_checksums.get(archive.name)
+        if expected is not None and actual != expected:
+            raise RuntimeError(f'旧应用归档 SHA-256 不匹配: {archive.name}')
+        checksum.write_text(f'{actual}  {archive.name}\n')
 
 
 @contextmanager
-def stage_release(destination, *, replace):
-    """Publish all selected variants together, retaining the previous release on failure."""
-    check_destination(destination, replace)
+def stage_release(destination, archives, *, replace):
+    """Add or replace selected archives together, retaining other files and failure recovery."""
+    archives = tuple(archives)
+    check_destination(destination, archives, replace)
     destination.parent.mkdir(parents=True, exist_ok=True)
     with _publication_lock(destination):
-        check_destination(destination, replace)
+        check_destination(destination, archives, replace)
         temporary = Path(tempfile.mkdtemp(prefix=f'.{destination.name}-', dir=destination.parent))
         staged = temporary / destination.name
         previous = temporary / 'previous'
         staged.mkdir()
         try:
+            legacy_checksums = _legacy_archive_checksums(destination)
+            _retain_release_files(destination, staged, archives)
             yield staged
-            check_destination(destination, replace)
+            _write_archive_checksums(staged, archives, legacy_checksums)
+            check_destination(destination, archives, replace)
             if destination.exists():
                 destination.replace(previous)
             try:
@@ -114,33 +194,3 @@ def publish_environment(archive, record, directory):
                        if path.is_file() and not path.name.startswith('.') and path.name != 'SHA256SUMS')
         (directory / 'SHA256SUMS').write_text(''.join(
             f'{verified.get(path.name) or common.sha256(path)}  {path.name}\n' for path in files))
-
-
-def write_release_index(directory, product, version, changelog, bundles, *, with_env):
-    lines = [f'# {product} v{version} 产品交付', '',
-             '在本目录内解压所选应用包，然后运行包内 ./install.sh。',
-             '首次离线部署时，将所需公共环境目录与本产品目录平级放置。',
-             '安装和运行参数见应用包 README。', '',
-             '| 变体 | 应用包 | 应用大小（MiB） | 所需公共环境 |',
-             '| --- | --- | ---: | --- |']
-    entries = []
-    for manifest in bundles:
-        filename = manifest['bundle_name'] + '.tar.gz'
-        archive = directory / filename
-        runtime = manifest['runtime']
-        environment = f"{runtime['environment_name']}-{runtime['environment_version']}"
-        lines.append(f"| {manifest['variant']} | [{filename}]({filename}) | "
-                     f"{archive.stat().st_size / 1024**2:.1f} | {runtime['filename']} |")
-        entries.append({'variant': manifest['variant'], 'filename': filename,
-                        'sha256': common.sha256(archive), 'size_bytes': archive.stat().st_size,
-                        'runtime': runtime, 'environment_directory': f'../{environment}',
-                        'environment_included': with_env})
-    lines += ['', '本目录 SHA256SUMS 只校验产品文件；公共环境目录维护独立的 manifest.json 和 SHA256SUMS。',
-              '每个应用包另有自己的 SHA256SUMS，install.sh 会自动校验。', '']
-    (directory / 'README.md').write_text('\n'.join(lines))
-    (directory / 'CHANGELOG.md').write_text(changelog, encoding='utf-8')
-    common.write_json(directory / 'release.json',
-                      {'schema_version': 1, 'product': product, 'version': version, 'bundles': entries})
-    files = sorted(path for path in directory.iterdir() if path.is_file() and path.name != 'SHA256SUMS')
-    (directory / 'SHA256SUMS').write_text(''.join(
-        f'{common.sha256(path)}  {path.name}\n' for path in files))

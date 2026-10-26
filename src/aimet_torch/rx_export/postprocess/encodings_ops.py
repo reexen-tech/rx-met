@@ -7,6 +7,7 @@ from aimet_common.compiler_encodings import (
     flatten_activation_io_index_dict,
     normalize_quant_fields_add_n,
     normalize_dtype_with_bitwidth,
+    finalize_compiler_encodings,
 )
 
 from aimet_common.run_context import log_details, log_print as print, logged_operation, get_logger
@@ -419,13 +420,9 @@ def postprocess_encodings_inplace(enc: Dict[str, Any], verbose: bool = True) -> 
     enc, c4_5 = merge_bidirectional_gru_param_encodings(enc, verbose=verbose)
     changed_any |= c4_5
 
-    enc, c5 = flatten_activation_io_index_dict(enc, verbose=verbose)
-    changed_any |= c5
-
-    enc, c6 = normalize_quant_fields_add_n(enc, verbose=verbose)
-    changed_any |= c6
-
-    enc, c7 = normalize_dtype_with_bitwidth(enc, verbose=verbose)
-    changed_any |= c7
+    finalized = finalize_compiler_encodings(enc, verbose=verbose)
+    changed_any |= finalized != enc
+    enc.clear()
+    enc.update(finalized)
 
     return enc, changed_any

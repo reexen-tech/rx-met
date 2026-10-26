@@ -12,7 +12,8 @@ from typing import Any, Dict, List, Sequence
 import numpy as np
 import onnx
 
-from aimet_common.compiler_encodings import normalize_compiler_encodings
+from aimet_common.compiler_artifacts import load_compiler_encodings
+from aimet_common.compiler_graph_validation import validate_compiler_encoding_graph
 from aimet_common.evaluation import classification_accuracy, compare_outputs
 from aimet_common.run_context import (
     get_run, logged_export, logged_operation, logged_workflow, metadata_output, note_output,
@@ -51,6 +52,8 @@ def force_model_io_quantizers(sim: Any, model: onnx.ModelProto) -> None:
     added = False
     for name in sorted(input_names | output_names):
         if not sim._is_quantizable_dtype(name):
+            continue
+        if name in sim._input_roles.control_only:
             continue
         if (name in getattr(sim, "_rx_native_io", ())
                 or name in getattr(sim, "_rx_input_owned_io", ())):
@@ -122,9 +125,9 @@ def create_onnx_ptq_sim(
     from .input_quantization import InputQuantizationSim
 
     sim_type = InputQuantizationSim
-    if any(node.op_type == "GRU" and not node.domain for node in original_model.graph.node):
-        from .recurrent import NativeGRUSim
-        sim_type = NativeGRUSim
+    if any(node.op_type in ("GRU", "LSTM") and not node.domain for node in original_model.graph.node):
+        from .recurrent import NativeRecurrentSim
+        sim_type = NativeRecurrentSim
     sim = sim_type(
         copy.deepcopy(original_model),
         param_type=param_type,
@@ -180,7 +183,7 @@ def export_onnx_json(
     output_dir: str | Path,
     filename_prefix: str,
 ) -> Dict[str, Any]:
-    """Export clean ONNX, AIMET raw encodings, and compiler-native encodings."""
+    """Export clean ONNX, raw AIMET encodings, and compiler encodings as JSON."""
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -191,7 +194,7 @@ def export_onnx_json(
 
     onnx_output_path = output_dir / f"{filename_prefix}.onnx"
     shape_report = save_onnx_with_shapes(onnx_output_path)
-    compiler_encodings_path = output_dir / f"{filename_prefix}.encodings"
+    compiler_encodings_path = output_dir / f"{filename_prefix}.json"
     compiler_encodings_path.write_text(
         json.dumps(payload, indent=2, ensure_ascii=False) + "\n",
         encoding="utf-8",
@@ -231,6 +234,11 @@ def verify_onnx_ptq_artifacts(
     model = onnx.load(str(artifacts["onnx"]))
     validate_onnx_shapes(model)
     onnx.checker.check_model(str(artifacts["onnx"]), full_check=True)
+    try:
+        saved_payload = load_compiler_encodings(artifacts["encodings"], require_po2=True)
+        validate_compiler_encoding_graph(model, saved_payload)
+    except ValueError as error:
+        raise RuntimeError(f"Saved compiler encodings failed strict validation: {error}") from error
     with tempfile.TemporaryDirectory(prefix="rx-met-onnx-reload-") as work_dir:
         restored = create_onnx_ptq_sim(
             model, feed, config_file=config_file, param_type=param_type,
@@ -240,7 +248,7 @@ def verify_onnx_ptq_artifacts(
         restored._rx_expected_quantizers = frozenset(
             artifacts["coverage"]["enabled_quantizer_names"]
         )
-        restored._rx_expected_native_grus = frozenset(
+        restored._rx_expected_native_recurrent = frozenset(
             artifacts["coverage"].get("enabled_native_recurrent_nodes", ())
         )
         load_encodings_to_sim(
@@ -249,9 +257,6 @@ def verify_onnx_ptq_artifacts(
         )
         validate_quantizer_state(restored)
         loaded_payload, _ = CompilerEncodingConverter(restored, model).convert()
-        saved_payload = normalize_compiler_encodings(
-            json.loads(Path(artifacts["encodings"]).read_text(encoding="utf-8")), require_po2=True
-        )
         if loaded_payload != saved_payload:
             raise RuntimeError("Restored quantizers do not match the saved compiler encodings")
         outputs = run_onnx_feed(restored, feed, providers)

@@ -22,7 +22,7 @@ from collections import Counter
 import onnx
 import numpy as np
 import torch
-from aimet_common.compiler_encodings import normalize_compiler_encodings
+from aimet_common.compiler_encodings import finalize_compiler_encodings
 from aimet_common.run_context import logged_export, log_print as print
 from .custom_gru_onnx import (
     ensure_custom_gru_op_registered,
@@ -277,7 +277,7 @@ def export_onnx_json(
         )
 
         try:
-            encodings = normalize_compiler_encodings(load_encodings(enc_out_path))
+            encodings = finalize_compiler_encodings(load_encodings(enc_out_path))
         except ValueError as exc:
             raise RuntimeError(f"Export artifact validation failed: {exc}") from exc
         save_encodings(encodings, enc_out_path)

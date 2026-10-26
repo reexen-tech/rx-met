@@ -1,10 +1,13 @@
 """Public GPU environment identity remains independent of product and CPU releases."""
+import contextlib
 import importlib.util
+import io
 import json
 from pathlib import Path
 import tempfile
+from types import SimpleNamespace
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 ROOT = Path(__file__).resolve().parents[1]
 spec = importlib.util.spec_from_file_location('shared_environment', ROOT / 'scripts/environment/common.py')
@@ -13,6 +16,38 @@ spec.loader.exec_module(common)
 
 
 class SharedEnvironmentTest(unittest.TestCase):
+    def test_default_variants_exclude_cpu_and_preserve_matrix_order(self):
+        matrix = {'variants': {'cu126': {}, 'cpu': {}, 'cu118': {}}}
+        self.assertEqual(common.default_variants(matrix), ['cu126', 'cu118'])
+
+    def test_cli_cpu_environment_requires_explicit_selection(self):
+        matrix = common.config()
+        defaults = [variant for variant in matrix['variants'] if variant != 'cpu']
+        selections = [([], defaults), (['cpu'], ['cpu']),
+                      (['cu126', '--gpu', 'cpu'], ['cu126', 'cpu'])]
+        for action in ('build', 'verify', 'export', 'load', 'download'):
+            for selection, expected in selections:
+                with self.subTest(action=action, selection=selection), contextlib.ExitStack() as stack:
+                    operations = {name: Mock() for name in ('build', 'verify', 'export', 'load', 'download')}
+                    for name in ('build', 'verify', 'export', 'download'):
+                        stack.enter_context(patch.object(common, name, operations[name]))
+                    stack.enter_context(patch.dict('sys.modules', {
+                        'environment.runtime_archives': SimpleNamespace(load_runtime=operations['load'])}))
+                    stack.enter_context(patch('sys.argv', ['common.py', action, '--directory', '/tmp/runtime',
+                                                          '--output-dir', '/tmp/runtime', *selection]))
+                    common.main()
+                    self.assertEqual([call.args[0] for call in operations[action].call_args_list], expected)
+                    if action == 'build':
+                        self.assertEqual([call.args[0] for call in operations['verify'].call_args_list], expected)
+
+    def test_cli_rejects_unknown_environment_variants(self):
+        with patch('sys.argv', ['common.py', 'build', 'unknown']), \
+                contextlib.redirect_stderr(io.StringIO()), patch.object(common, 'build') as build:
+            with self.assertRaises(SystemExit) as error:
+                common.main()
+        self.assertEqual(error.exception.code, 2)
+        build.assert_not_called()
+
     def test_product_and_cpu_versions_do_not_change_public_gpu_identity(self):
         original = json.loads((ROOT / 'docker/variants.json').read_text())
         modified = json.loads(json.dumps(original))
@@ -49,10 +84,11 @@ class SharedEnvironmentTest(unittest.TestCase):
         with patch.object(common.subprocess, 'check_output', return_value=json.dumps([info]).encode()):
             with self.assertRaises(RuntimeError): common.inspect('a-tag', 'runtime', 'cu126')
 
-    def test_prepared_headers_match_every_gpu_variant(self):
+    def test_prepared_headers_match_every_variant(self):
         matrix = common.config()
         for variant, spec in matrix['variants'].items():
-            version = spec['onnxruntime']['packages']['onnxruntime-gpu']
+            package = 'onnxruntime' if variant == 'cpu' else 'onnxruntime-gpu'
+            version = spec['onnxruntime']['packages'][package]
             if spec['onnxruntime']['source_sha256'] != 'vendored':
                 self.assertTrue((ROOT / 'docker/environment/third_party/onnxruntime-prepared' / version / 'SHA256SUMS').is_file())
             with self.subTest(variant=variant), tempfile.TemporaryDirectory() as temporary:

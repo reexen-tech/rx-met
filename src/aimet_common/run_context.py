@@ -468,10 +468,12 @@ class Execution:
                         path = self.root / name
                         identity = {
                             'size_bytes': path.stat().st_size, 'sha256': _sha256(path)}
-                        if path.suffix == '.encodings':
+                        if path.suffix in ('.encodings', '.json'):
                             try:
                                 document = json.loads(path.read_text(encoding='utf-8'))
-                                if isinstance(document, dict):
+                                if isinstance(document, dict) and all(
+                                        isinstance(document.get(key), (dict, list))
+                                        for key in ('activation_encodings', 'param_encodings')):
                                     identity.update({key: document[key] for key in ('version', 'schema_version')
                                                      if key in document})
                             except (OSError, ValueError):

@@ -274,6 +274,10 @@ Po2 和参数锁见 [LSTM 接入说明](QuantLSTM_integration.md)。
 所选 bias 位宽；不能仅修改元数据而让部署继续按 bias16 执行。对齐只检查当前参数，QAT
 期间仍应监测固定编码下的参数饱和；重复调用不会改变已经对齐的网格。
 
+该对齐不覆盖原生 QuantGRU/QuantLSTM 内部 bias。循环算子当前保留独立低位宽
+bias 编码，再重缩放到乘积 scale 的累加域；它与 INT32、`Sb = Sx * Sw` 的直接
+累加方案存在设计差异，详见 [Bias 编码差异（待讨论）](QuantLSTM_integration.md#bias-编码差异)。
+
 ### FX 展开模块的参数量化
 
 自定义 BN 等模块展开后，`weight/bias` 仍由原模块的 `param_quantizers` 管理。

@@ -45,7 +45,12 @@ class OnnxGridAdapterTest(unittest.TestCase):
                                     export_encodings=lambda version: entries,
                                     _encoding_type=lambda: enc_type)
         sim = SimpleNamespace(qc_quantize_op_dict={'w': quantizer}, quant_args={})
-        payload, coverage = CompilerEncodingConverter(sim, graph()).convert()
+        model = graph()
+        if enc_type == EncodingType.PER_CHANNEL and len(entries) == 1:
+            weight = onnx.numpy_helper.to_array(model.graph.initializer[0])[:, :1].copy()
+            model.graph.initializer[0].CopyFrom(onnx.numpy_helper.from_array(weight, 'w'))
+            model.graph.output[0].type.tensor_type.shape.dim[1].dim_value = 1
+        payload, coverage = CompilerEncodingConverter(sim, model).convert()
         self.assertEqual(coverage['mapped_quantizers'], 1)
         validate_compiler_encodings(payload, require_po2=True)
         return payload['param_encodings']['w']
@@ -85,6 +90,7 @@ class OnnxGridAdapterTest(unittest.TestCase):
         result = self.convert(entries, unsigned=True)
         self.assertEqual(result['dtype'], 'INT8')
         self.assertEqual(result['zero_point'], [0, -128])
+        self.assertEqual(result['is_symmetric'], 'False')
         for index, entry in enumerate(entries):
             for unsigned_q in (0, 127, 255):
                 signed_q = unsigned_q - 128
@@ -115,7 +121,7 @@ class TorchEncodingMetadataTest(unittest.TestCase):
 
 class ExportEntryPointTest(unittest.TestCase):
     def test_old_onnx_entry_preserves_its_dictionary(self):
-        expected = {'onnx': Path('model.onnx'), 'encodings': Path('model.encodings'),
+        expected = {'onnx': Path('model.onnx'), 'encodings': Path('model.json'),
                     'aimet_encodings': Path('model.aimet.encodings'), 'coverage': {'mapped_quantizers': 3}}
         sim, model = object(), object()
         with patch.object(pipeline, 'export_onnx_json', return_value=expected) as export:
@@ -159,7 +165,13 @@ class ExportEntryPointTest(unittest.TestCase):
             result = pipeline.export_onnx_json(sim, model, path / 'export', 'model')
             self.assertTrue(all(isinstance(result[key], Path) and result[key].is_file()
                                 for key in ('onnx', 'encodings', 'aimet_encodings')))
+            self.assertEqual(result['encodings'], result['onnx'].with_suffix('.json'))
+            self.assertEqual(result['aimet_encodings'], result['onnx'].with_suffix('.aimet.encodings'))
             encoded = json.loads(result['encodings'].read_text())
+            raw = json.loads(result['aimet_encodings'].read_text())
+            self.assertEqual(encoded['schema_version'], 4)
+            self.assertNotIn('schema_version', raw)
+            self.assertEqual(raw, json.loads(result['onnx'].with_suffix('.encodings').read_text()))
             self.assertEqual(set(encoded['param_encodings']['w']['zero_point']), {0})
             self.assertEqual(encoded['param_encodings']['w']['dtype'], 'INT8')
             self.assertEqual(encoded['param_encodings']['w']['enc_type'], 'PER_CHANNEL')

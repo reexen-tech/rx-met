@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""在产品 builder 中准备指定 CUDA 变体的 rx-met wheel 源码树。"""
+"""在产品 builder 中准备指定 CPU/CUDA 变体的 rx-met wheel 源码树。"""
 
 from __future__ import annotations
 
@@ -42,7 +42,7 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--root", type=Path, required=True)
     parser.add_argument("--version", required=True)
-    parser.add_argument("--cuda-variant", required=True)
+    parser.add_argument("--cuda-variant", "--variant", required=True)
     args = parser.parse_args()
 
     root: Path = args.root
@@ -50,7 +50,7 @@ def main() -> None:
         (root / "docker" / "variants.json").read_text(encoding="utf-8")
     )["variants"]
     if args.cuda_variant not in variants:
-        raise SystemExit(f"unsupported CUDA variant: {args.cuda_variant}")
+        raise SystemExit(f"unsupported variant: {args.cuda_variant}")
     version = args.version.strip()
     # Wheel / PEP 440 cannot start with "v". Use the component MAJOR.MINOR.PATCH.
     if not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", version):
@@ -59,7 +59,10 @@ def main() -> None:
     variant = args.cuda_variant
     wheel_version = f"{version}+{variant}"
     pyproject = root / "pyproject.toml"
-    pyproject.write_text(_strip_pyproject(pyproject.read_text(encoding="utf-8")), encoding="utf-8")
+    project_text = _strip_pyproject(pyproject.read_text(encoding="utf-8"))
+    if variant == "cpu":
+        project_text = project_text.replace('"onnxruntime-gpu', '"onnxruntime')
+    pyproject.write_text(project_text, encoding="utf-8")
     (root / "VERSION").write_text(f"{wheel_version}\n", encoding="utf-8")
 
     quant_version = root / "operators" / "quant-gru" / "pytorch" / "_version.py"

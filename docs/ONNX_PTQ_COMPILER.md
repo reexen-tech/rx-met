@@ -7,6 +7,10 @@ PyTorch 保留原参数、默认值及两个字符串路径的元组返回值；
 `onnx`、`encodings`、`aimet_encodings` 路径、`coverage` 和 `onnx_shapes` 的字典。
 旧 ONNX 入口 `export_onnx_compiler_artifacts` 保留原参数及字典返回值。
 
+Torch 与 ONNX PTQ 的最终编译器编码统一为 `<prefix>.json`。
+目录中可能同时保留 AIMET 原始 `.encodings` 或 `.aimet.encodings`，调用方应使用
+导出接口返回的路径，不能扫描同名前缀或替换后缀来猜测最终编码。
+
 ## 术语
 
 - **Clean ONNX**：移除 AIMET 仿真量化节点后的部署模型。模型保留原始输入输出
@@ -32,9 +36,9 @@ python3 /examples/quick_start_onnx_ptq.py
 ## 运行前提
 
 - Linux x86_64，CPython 3.10（cu118/cu126）或 3.12（cu130）；
-- 已安装与 CUDA 变体匹配的 ONNX Runtime GPU；
-- 默认使用 `CUDAExecutionProvider`，需要 CPU 调试时显式设置
-  `RX_MET_ONNX_PTQ_DEVICE=cpu`；
+- CPU 变体安装 ONNX Runtime CPU；GPU 变体安装对应版本的 ONNX Runtime GPU；
+- 默认使用 `CUDAExecutionProvider`，CPU 包运行时指定 `--device cpu` 或
+  `RX_MET_ONNX_PTQ_DEVICE=cpu`，GRU/LSTM 同样支持 CPU 校准和 PTQ；
 - 已构建 rx-met 的 ONNX native runtime；
 - 正式制品使用真实的代表性数据完成校准。
 
@@ -97,10 +101,34 @@ Po2 scale 满足 `scale = 2^(-n)`；非 Po2 scale 的 n 是舍入指数，实际
 `internal_ops` 和 `internal_ops_reverse` 仍采用 `算子名 -> output -> [encoding]`，
 其网格及字段由算子库生成，不由通用层重写。循环层加载接口兼容旧端口列表及缺少 n 的文件。
 
+新产物验收直接读取保存的 schema v4 JSON，拒绝缺失字段、重复键、非法端口和
+不符合整数网格公式的端点，不先迁移或补写。导出端使用公共
+`finalize_compiler_encodings` 按 `IntegerGrid` 的 double 精度计算 real_min/max；
+该函数不用于磁盘文件验收。旧文件加载仍使用兼容规范化接口。
+
+```bash
+python3 scripts/verify_compiler_artifacts.py \
+  --onnx /path/to/model.onnx \
+  --encodings /path/to/model.json
+```
+
+默认要求 Po2 和完整计算输入覆盖。已有 affine 产物使用 `--allow-affine`；
+有意只验证已声明编码时使用 `--allow-partial`，其结果不表示完整量化覆盖。
+独立脚本没有 live 模型来源信息，遇到无法从最终图证明端口的虚拟容器会明确拒绝。
+它验证文件契约和图映射，不代替下游编译器执行验证。
+
+普通参数的逐通道数量按 Conv、ConvTranspose、Gemm、MatMul 的已知通道轴或一维
+参数长度验证；无法确定轴及尚未支持的普通分块/逐门声明会明确拒绝，不通过维度猜测放行。
+原生循环参数采用自身的方向和 gate 打包规则单独验证。
+
+双向 GRU/LSTM 的 `output[0]` 是 forward 兼容摘要，完整方向网格保存在各自的内部记录。
+两个方向不同的网格可随未重新量化的保形路径保留，不能把摘要传播为整张张量的标量网格。
+独立的输出 QDQ 或普通计算输入 QDQ 会建立新的消费端网格；严格图验收会拒绝错误的标量声明。
+
 每次运行的 `exports/` 中生成：
 
 - `<prefix>.onnx`：移除 AIMET `QcQuantizeOp` 并显式保存中间张量 shape/dtype 的 clean ONNX；
-- `<prefix>.encodings`：compiler-native schema，包含 node-level `input/output`
+- `<prefix>.json`：compiler-native schema，包含 node-level `input/output`
   和 parameter encodings；
 - `<prefix>.aimet.encodings`：AIMET 原始 encodings；
 - `<prefix>.meta.json`：输入 shape、校准数量、Po2 变化、覆盖率和 FP32 对比。
@@ -117,6 +145,11 @@ Po2 scale 满足 `scale = 2^(-n)`；非 Po2 scale 的 n 是舍入指数，实际
 - 默认整数类型固定为 INT；可通过 JSON2 `*_signed=false` 选择 UINT。整数符号与 `*_symmetric` 独立，UINT 对称模式将负值截为零，不自动退回 INT。
 - Power-of-2 使用与 `src/aimet_torch/power_of_2_quantization.py` 相同的 `cover_range`（容差 2%）
 - 权重默认 per-channel；Gemm 保持 per-channel；无 Conv+Relu supergroup
+
+上述普通 bias 的乘积 scale 对齐不覆盖原生 GRU/LSTM。循环层内部 bias 当前按
+独立 8/16 位网格量化并重缩放到累加器域，不能将其默认视为 INT32 乘积 scale
+编码。两种方案的差异和待确认的部署约束见
+[Bias 编码差异（待讨论）](QuantLSTM_integration.md#bias-编码差异)。
 
 ONNX 适配器仅在校准期间使用临时 session 采集中间张量，并将公共模块计算出的网格
 写回原生量化器。公共模块使用 Torch 张量运算，统计与范围计算跟随 CPU/CUDA provider，
@@ -171,14 +204,14 @@ ONNX QuantSim。GRU 后的普通计算层保留自己的输入网格，用于混
 `is_GRU`、双向 `internal_ops` 和原生参数编码。原始 AIMET encodings 附加
 `native_recurrent_encodings`，恢复时缺少门内信息、参数或方向信息会报错。
 
-当前支持 CUDA float32、常量 W/R/B、`linear_before_reset=1`、默认 Sigmoid/Tanh、
+当前支持 CPU/CUDA float32、常量 W/R/B、`linear_before_reset=1`、默认 Sigmoid/Tanh、
 单向前向或双向、layout 0/1，以及可选的初始状态。无 bias、变长 `sequence_lens`、
 自定义激活、clip、反向单向和可覆盖或共享的权重暂不支持，进入校准前报错。
-桥接使用主机缓冲区与原生 CUDA 算子交换数据，会产生额外拷贝，不是零拷贝执行。
+桥接使用主机缓冲区与对应设备的原生算子交换数据，CUDA 路径会产生额外设备拷贝。
 
 ## 限制
 
 - 该流程适用于 PTQ；QAT 使用 PyTorch 流程。
 - 校准数据必须与模型输入名称、shape 和 dtype 一致。
 - 编译器 encodings 是 rx-met 的部署格式，必须与同次导出的 Clean ONNX 配套使用。
-- CPU 模式用于普通 ONNX 模型调试；原生 GRU 校准要求 CUDA，发布验证在目标 CUDA 环境执行。
+- CPU 支持普通 ONNX 算子和原生 GRU/LSTM 的 PTQ；CPU 算子不提供训练或 QAT。

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 在 NVIDIA CUDA devel builder 中构建 rx-met、QuantGRU 和 QuantLSTM wheel。
+# 在匹配的 CPU/CUDA builder 中构建 rx-met、QuantGRU 和 QuantLSTM wheel。
 set -euo pipefail
 
 SRC="${RX_MET_SRC:-/opt/rx-met-src}"
@@ -38,7 +38,11 @@ python3 scripts/internal/prepare_packaging.py \
     --version "${RX_MET_VERSION}" \
     --cuda-variant "${CUDA_VARIANT}"
 
-export RX_MET_ENABLE_CUDA=1
+if [[ "${CUDA_VARIANT}" == "cpu" ]]; then
+    export RX_MET_ENABLE_CUDA=0
+else
+    export RX_MET_ENABLE_CUDA=1
+fi
 export RX_MET_PYTHON="${RX_MET_PYTHON:-python3}"
 export RX_MET_WHEEL_OUT="${OUT}"
 export RX_MET_AIMET_BUILD_DIR="${RX_MET_AIMET_BUILD_DIR:-/tmp/rx-met-aimet-build}"

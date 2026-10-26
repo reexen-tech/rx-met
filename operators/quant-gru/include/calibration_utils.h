@@ -16,7 +16,6 @@
 #include <utility>
 #include <vector>
 
-#include "dev_vector.h"
 #include "gru_quantization_ranges.h"
 
 // =====================================================================

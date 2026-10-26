@@ -10,10 +10,14 @@ from typing import Any, Dict, List, Tuple
 import onnx
 
 from aimet_common.compiler_encodings import (
-    COMPILER_SCHEMA_VERSION, compact_encoding_records, normalize_compiler_encodings,
+    COMPILER_SCHEMA_VERSION, compact_encoding_records, finalize_compiler_encodings,
+)
+from aimet_common.compiler_graph_validation import (
+    common_native_recurrent_output_grid, validate_compiler_encoding_graph,
 )
 from aimet_common.quantization_grid import IntegerGrid, integer_bounds
 from aimet_common.quantsim_config.compute_ops import is_grid_preserving_op
+from aimet_onnx.quantization_roles import QuantizationInputRoles
 from .validation import validate_quantizer_state
 
 _FLOAT_TENSOR_TYPES = frozenset({
@@ -86,19 +90,23 @@ class CompilerEncodingConverter:
         self.sim = sim
         self.graph = _GraphIndex.build(original_model, getattr(sim, "activation_dtypes", {}))
         self.original_model = original_model
+        self.input_roles = QuantizationInputRoles(original_model)
         self.activation: Dict[str, Dict[str, Dict[str, Any]]] = {}
         self.params: Dict[str, Dict[str, Any]] = {}
         self.mapped: set[str] = set()
         self.unmapped: List[str] = []
         self.propagated: List[str] = []
+        self.mixed_native_outputs: set[str] = set()
 
     def _add_activation(
         self, node_index: int, io_name: str, io_index: int, encoding: Dict[str, Any]
     ) -> None:
         node_name = self.graph.node_names[node_index]
-        if node_name in getattr(self.sim, "_rx_native_grus", {}):
+        if node_name in getattr(self.sim, "_rx_native_recurrent", {}):
             return  # The native operator supplies its complete port/internal schema.
         node = self.original_model.graph.node[node_index]
+        if io_name == "input" and self.input_roles.is_control_port(node_name, io_index):
+            raise ValueError(f"Quantization encoding on ONNX control port: {node_name}.input[{io_index}]")
         tensor = node.input[io_index] if io_name == "input" else node.output[io_index]
         self.graph.validate_encoding_type(tensor)
         node_entry = self.activation.setdefault(node_name, {})
@@ -114,6 +122,8 @@ class CompilerEncodingConverter:
         mapped = False
         for node_index, input_index in self.graph.consumers.get(tensor_name, []):
             port = (self.graph.node_names[node_index], input_index)
+            if self.input_roles.is_control_port(*port):
+                continue
             alias = getattr(self.sim, "_rx_input_quantizers", {}).get(port)
             if alias is None or not self.sim.qc_quantize_op_dict[alias].enabled:
                 self._add_activation(node_index, "input", input_index, encoding)
@@ -151,7 +161,41 @@ class CompilerEncodingConverter:
                 if (qmin, qmax) != integer_bounds(bits, signed):
                     entry['qmin'], entry['qmax'] = qmin, qmax
             entries.append(entry)
+        if symmetric and any(entry.get("zero_point", 0) != 0 for entry in entries):
+            # Legacy unsigned-index calibration may rebase a positive-only
+            # channel into a signed target grid. Describe that target honestly.
+            for entry in entries:
+                entry["is_symmetric"] = "False"
         return compact_encoding_records(entries, force_list=name in self.graph.initializers)
+
+    def _track_mixed_native_outputs(self, tensor_encodings, ports):
+        pending = list(self.mixed_native_outputs)
+        visited = set()
+        while pending:
+            output = pending.pop()
+            if output in visited:
+                continue
+            visited.add(output)
+            for node_index, input_index in self.graph.consumers.get(output, []):
+                consumer = self.original_model.graph.node[node_index]
+                if consumer.op_type in ("Shape", "Size"):
+                    continue
+                if is_grid_preserving_op(consumer.op_type) and input_index == 0:
+                    # A real output QDQ ends compound directional ownership.
+                    # Its grid must never be propagated back onto the input.
+                    for name in self.graph.data_outputs(consumer):
+                        if name not in tensor_encodings and name not in self.mixed_native_outputs:
+                            self.mixed_native_outputs.add(name)
+                            pending.append(name)
+                    continue
+                if consumer.name in getattr(self.sim, "_rx_native_recurrent", {}) and input_index == 0:
+                    continue
+                alias = ports.get((consumer.name, input_index))
+                if alias is None or not self.sim.qc_quantize_op_dict[alias].enabled:
+                    raise ValueError(
+                        f"{output} -> {consumer.name}.input[{input_index}]: different native direction grids "
+                        "require an independent compute input quantizer"
+                    )
 
     def _propagate_grid_preserving(
         self, tensor_encodings: Dict[str, Dict[str, Any]]
@@ -166,6 +210,8 @@ class CompilerEncodingConverter:
             changed = False
             for node in self.original_model.graph.node:
                 if not is_grid_preserving_op(node.op_type):
+                    continue
+                if self.input_roles.is_control_port(node.name, 0):
                     continue
                 data_inputs = self.graph.data_inputs(node)
                 data_outputs = self.graph.data_outputs(node)
@@ -191,7 +237,7 @@ class CompilerEncodingConverter:
                 if source is None:
                     continue
                 for name in data_inputs + data_outputs:
-                    if name in tensor_encodings:
+                    if name in tensor_encodings or name in self.mixed_native_outputs:
                         continue
                     tensor_encodings[name] = copy.deepcopy(source)
                     self.propagated.append(name)
@@ -221,14 +267,22 @@ class CompilerEncodingConverter:
             enabled_activations.append(name)
             self.mapped.add(name)
 
-        from .recurrent import export_native_encodings, native_grus
+        from .recurrent import export_native_encodings, native_recurrent
         native_payload = export_native_encodings(self.sim)
-        for name, adapter in native_grus(self.sim).items():
+        for name, adapter in native_recurrent(self.sim).items():
             native_activation = native_payload["activation_encodings"].get(name)
             if native_activation is not None:
-                for output in adapter.outputs:
+                node = next(node for node in self.original_model.graph.node if node.name == name)
+                for index, output in enumerate(adapter.outputs):
                     if output:
-                        tensor_encodings.setdefault(output, native_activation["output"]["0"])
+                        encoding = common_native_recurrent_output_grid(node, native_activation, index)
+                        if encoding is not None:
+                            tensor_encodings.setdefault(output, encoding)
+                            continue
+                        # A packed ONNX tensor can contain independently calibrated
+                        # directions. Its forward summary is never its tensor grid.
+                        self.mixed_native_outputs.add(output)
+        self._track_mixed_native_outputs(tensor_encodings, ports)
         self._propagate_grid_preserving(tensor_encodings)
 
         for name, encoding in tensor_encodings.items():
@@ -270,9 +324,11 @@ class CompilerEncodingConverter:
             "activation_entries": len(self.activation),
             "param_entries": len(self.params),
             "initializer_count": len(self.graph.initializers),
-            "native_recurrent_nodes": sorted(native_grus(self.sim)),
+            "native_recurrent_nodes": sorted(native_recurrent(self.sim)),
             "enabled_native_recurrent_nodes": sorted(
-                name for name, adapter in native_grus(self.sim).items() if adapter.module.use_quantization
+                name for name, adapter in native_recurrent(self.sim).items() if adapter.module.use_quantization
             ),
         }
-        return normalize_compiler_encodings(payload, require_po2=True), report
+        payload = finalize_compiler_encodings(payload, require_po2=True)
+        validate_compiler_encoding_graph(self.original_model, payload)
+        return payload, report

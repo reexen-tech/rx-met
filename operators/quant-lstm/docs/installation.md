@@ -1,8 +1,8 @@
 # quant-lstm 安装指南
 
-quant-lstm 提供两个安装界面：PyTorch CUDA 模块和 CMake C++ package。Python
-模块面向训练、校准和推理；CMake package 面向独立 C++ 集成，也支持不依赖 CUDA
-的 reference-only 安装。
+quant-lstm 提供 PyTorch CPU/CUDA 模块和 CMake C++ package。CPU Python 模块支持
+校准和 PTQ；CUDA 模块另支持浮点训练和 QAT。CMake package 面向独立 C++ 集成，
+也支持不依赖 CUDA 的 reference-only 安装。
 
 ## 1. 环境要求
 
@@ -13,10 +13,11 @@ quant-lstm 提供两个安装界面：PyTorch CUDA 模块和 CMake C++ package�
 | `nlohmann_json` | 3.11.2 或更高版本 | 配置与参数 JSON |
 | CUDA Toolkit | 提供 `nvcc`、cuBLAS 和 CUDA Runtime | CUDA C++ 与 Python 模块 |
 | Python | 具有开发头文件 | 构建 PyTorch extension |
-| PyTorch | CUDA-enabled，且 CUDA ABI 与构建环境兼容 | Python 接口 |
+| PyTorch | CPU 或 CUDA 版，与 extension 构建环境 ABI 兼容 | Python 接口 |
 
-CPU-only C++ package 不要求 CUDA Toolkit 或 PyTorch。Python 模块始终要求 CUDA；
-它不会在 CUDA 不可用时回退到 CPU reference。
+CPU-only C++ package 不要求 CUDA Toolkit 或 PyTorch。CPU Python 模块需要 CPU
+PyTorch，不要求 CUDA Toolkit；通过 `RX_MET_ENABLE_CUDA=0` 选择 CPU extension。
+CUDA wheel 不会自动转换为 CPU wheel。
 
 Ubuntu 可以使用系统包提供 CMake、编译器和 `nlohmann_json`：
 
@@ -85,6 +86,22 @@ python -m pip install \
 wheel 绑定构建时的 Python ABI、平台、PyTorch C++ ABI 和 CUDA 依赖，不能跨不兼容
 环境复用。项目没有让 pip 自动选择 PyTorch CUDA variant，因此 PyTorch 必须由用户
 根据目标环境先行安装。
+
+### CPU Python 模块
+
+先安装 CPU PyTorch，从算子仓库根目录执行：
+
+```bash
+cmake -S . -B build_cpu -DQUANT_LSTM_ENABLE_CUDA=OFF
+cmake --build build_cpu --parallel 2
+RX_MET_ENABLE_CUDA=0 RX_MET_QUANT_LSTM_BUILD_DIR="$PWD/build_cpu" \
+  python -m pip wheel ./pytorch --no-build-isolation --no-deps --wheel-dir dist
+```
+
+安装生成的 CPU wheel 后，模块、输入和状态保持在 CPU，调用 `eval()` 并在
+`torch.no_grad()` 或 `torch.inference_mode()` 内执行校准和 PTQ。CPU 不提供
+训练 checkpoint、反向传播或 QAT。构建 rx-met 发布包时使用 `cpu` 变体，三个
+wheel 的版本与 CPU PyTorch / ONNX Runtime 锁文件配套。
 
 在可访问 CUDA GPU 的环境执行验证：
 

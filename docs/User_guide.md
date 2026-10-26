@@ -167,11 +167,11 @@ python3 quick_start_kws.py --rnn_type lstm
 一致；否则量化器名称或参数会错位。
 
 两侧统一使用 `export_onnx_json()`：PyTorch 入口位于 `aimet_torch.rx_export`，保留
-原参数、默认值和 `(onnx_path, encodings_path)` 字符串元组返回值，最终编码文件名为
-`{filename_prefix}.json`；ONNX PTQ 入口
+原参数、默认值和 `(onnx_path, encodings_path)` 字符串元组返回值；ONNX PTQ 入口
 位于 `aimet_onnx.rx_ptq`，返回包含 `onnx`、`encodings`、`aimet_encodings` 和
 `coverage` 的字典。旧 ONNX 名称 `export_onnx_compiler_artifacts()` 也保留原字典
-返回值。两侧共用编译器编码规范化和校验，框架相关的图处理分别维护。
+返回值。两侧最终编译器编码文件名统一为 `{filename_prefix}.json`，共用编码规范化
+和校验，框架相关的图处理分别维护。加载时使用返回路径，避免与 AIMET 原始编码混淆。
 
 PyTorch 多输入模型可将按 `forward` 参数顺序排列的多个 shape、Tensor 或 NumPy 数组
 作为 `dummy_input_shape` 传入。数组输入保留实际值、dtype 和 shape，并自动转到 CPU；

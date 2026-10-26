@@ -25,7 +25,9 @@
 #include <array>
 #include <vector>
 
+#ifndef RX_MET_CPU_ONLY
 #include "dev_vector.h"
+#endif
 #include "quantize_bitwidth_config.h"
 #include "quantize_lut_types.h"
 
@@ -203,6 +205,7 @@ using GateQuantParamsMShift = GateQuantParamsT<FixedPointScale>;
  * 设备层只保留 per-channel 数组（已删除 per-tensor/per-gate 快路径与 granularity 分支）。
  * 每条 rescale 只存一份 R 表示。
  */
+#ifndef RX_MET_CPU_ONLY
 template <class R>
 struct LinearQuantParamsGPUT {
     int32_t zp_x_ = 0;
@@ -213,6 +216,7 @@ struct LinearQuantParamsGPUT {
     dev::vector<R> rescale_gemm_h_to_weight_hh_linear_;  ///< R*h per-channel rescale
     dev::vector<R> rescale_br_to_weight_hh_linear_;      ///< br per-channel rescale
 };
+#endif
 
 /**
  * @brief Linear 层量化参数（CPU 版本，std::vector）。

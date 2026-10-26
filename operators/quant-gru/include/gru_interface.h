@@ -22,17 +22,12 @@
 #include "gru.h"
 #include "gru_quant.h"
 #include "gru_quantization_ranges.h"
+#include "gru_host.h"
 
 // =====================================================================
 // 校准方法枚举
 // =====================================================================
 
-enum class CalibrationMethod : int8_t {
-    NONE = 0,        // 不校准，正常 forward
-    MINMAX = 1,      // 收集 min/max 范围
-    SQNR = 2,        // 收集直方图，使用 SQNR 优化
-    PERCENTILE = 3   // 收集直方图，使用百分位裁剪
-};
 
 // 辅助函数：判断是否需要直方图
 inline bool needsHistogram(CalibrationMethod method) {

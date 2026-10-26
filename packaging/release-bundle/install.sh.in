@@ -266,14 +266,14 @@ PY
     fi
 fi
 log "安装完成: $DESTINATION"
-printf '\n按 README 选择 GPU、工作目录及数据目录。最小交互启动示例：\n\n'
+printf '\n按 README 选择工作目录及数据目录。最小交互启动示例：\n\n'
 printf 'docker run --rm -it --pull=never --shm-size=2g \\\n'
 printf '  --user %q \\\n' "$(id -u):$(id -g)"
 printf '  -e HOME=/tmp \\\n'
 printf '  -e USER=%q -e LOGNAME=%q \\\n' "$(id -un)" "$(id -un)"
 printf '  -w /workspace \\\n'
 printf '  -e PYTHONPATH=/opt/rx-met/python \\\n'
-printf '  --gpus device=0 \\\n'
+if [[ "$RUNTIME_VARIANT" != cpu ]]; then printf '  --gpus device=0 \\\n'; fi
 printf '  -v %q \\\n' "${DESTINATION}:/opt/rx-met:ro"
 printf '  -v "/path/to/datasets:/datasets:ro" \\\n'
 printf '  -v "/path/to/workspace:/workspace" \\\n'

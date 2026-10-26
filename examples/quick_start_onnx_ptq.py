@@ -33,10 +33,14 @@ main() 只编排已有模块，不复制量化规则。
 from __future__ import annotations
 
 import contextlib
+import argparse
+import hashlib
 import os
 import sys
 import time
 from pathlib import Path
+
+import numpy as np
 
 _HERE = Path(__file__).resolve().parent
 _ROOT = _HERE.parent
@@ -61,7 +65,7 @@ from aimet_common.run_context import execution
 
 
 # ============================================================================
-# 全局配置（复制后改这里即可，无 CLI）
+# 全局配置（命令行参数也可以覆盖模型、样本与设备）
 # ============================================================================
 EXAMPLE = os.environ.get("RX_MET_ONNX_PTQ_EXAMPLE", "mobilenetv2")
 
@@ -102,10 +106,11 @@ CALIB_LIMIT = None
 # ============================================================================
 # 辅助：provider / 阶段计时 / 结果打印
 # ============================================================================
-def choose_providers() -> tuple[str, ...]:
-    if DEVICE == "cpu":
+def choose_providers(device=None) -> tuple[str, ...]:
+    device = DEVICE if device is None else device
+    if device == "cpu":
         return ("CPUExecutionProvider",)
-    if DEVICE != "cuda":
+    if device != "cuda":
         raise ValueError("RX_MET_ONNX_PTQ_DEVICE 只能是 cuda 或 cpu")
     import onnxruntime as ort
 
@@ -118,9 +123,9 @@ def choose_providers() -> tuple[str, ...]:
     return ("CUDAExecutionProvider", "CPUExecutionProvider")
 
 
-def require_active_cuda_session(session) -> None:
+def require_active_cuda_session(session, device=None) -> None:
     """拒绝 CUDA provider 初始化失败后整条 session 静默回退到 CPU。"""
-    if DEVICE != "cuda":
+    if (DEVICE if device is None else device) != "cuda":
         return
     active = session.get_providers()
     if not active or active[0] != "CUDAExecutionProvider":
@@ -184,23 +189,47 @@ def print_stage_timings(timings: dict) -> None:
 # ============================================================================
 # 主流程：与 quick_start_kws.py 对齐的步骤编号
 # ============================================================================
-def main() -> None:
-    with execution(OUTPUT_DIR, 'onnx_ptq') as run:
-        run.snapshot_config(CONFIG_FILE, 'quantsim')
-        run.snapshot_config(BITWIDTH_CONFIG_FILE, 'mixed_precision')
-        _run_onnx_ptq(run)
+def parse_args(argv=None):
+    parser = argparse.ArgumentParser(description="对静态 ONNX 执行 CPU/CUDA PTQ、Po2、导出和恢复。")
+    parser.add_argument("--model", type=Path)
+    parser.add_argument("--calib-dir", type=Path)
+    parser.add_argument("--validation-dir", type=Path)
+    parser.add_argument("--device", choices=("cpu", "cuda"), default=DEVICE)
+    parser.add_argument("--output-dir", type=Path, default=OUTPUT_DIR)
+    parser.add_argument("--prefix")
+    parser.add_argument("--config-file", type=Path, default=CONFIG_FILE)
+    parser.add_argument("--quant-config", type=Path, default=BITWIDTH_CONFIG_FILE)
+    parser.add_argument("--calib-limit", type=int, default=CALIB_LIMIT)
+    parser.add_argument("--validation-limit", type=int)
+    args = parser.parse_args(argv)
+    for name in ("calib_limit", "validation_limit"):
+        value = getattr(args, name)
+        if value is not None and value < 1:
+            parser.error(f"--{name.replace('_', '-')} 必须大于 0")
+    return args
 
 
-def _run_onnx_ptq(run) -> None:
+def main(argv=None) -> None:
+    args = parse_args(argv)
+    with execution(args.output_dir, 'onnx_ptq') as run:
+        run.snapshot_config(args.config_file, 'quantsim')
+        run.snapshot_config(args.quant_config, 'mixed_precision')
+        _run_onnx_ptq(run, args)
+
+
+def _run_onnx_ptq(run, args=None) -> None:
+    args = parse_args([]) if args is None else args
     if EXAMPLE not in EXAMPLES:
         raise KeyError(f"未知 EXAMPLE={EXAMPLE}，当前支持: {sorted(EXAMPLES)}")
 
     spec = EXAMPLES[EXAMPLE]
-    model_path = Path(os.environ.get("RX_MET_ONNX_PTQ_MODEL", spec["model"]))
-    calib_dir = Path(os.environ.get("RX_MET_ONNX_PTQ_CALIB", spec["calib_dir"]))
-    filename_prefix = spec["prefix"]
+    model_path = args.model or Path(os.environ.get("RX_MET_ONNX_PTQ_MODEL", spec["model"]))
+    calib_dir = args.calib_dir or Path(os.environ.get("RX_MET_ONNX_PTQ_CALIB", spec["calib_dir"]))
+    filename_prefix = args.prefix or spec["prefix"]
     run.note_inputs(model=model_path, calibration=calib_dir)
-    providers = choose_providers()
+    providers = choose_providers(args.device)
+    config_file = args.config_file
+    bitwidth_config = args.quant_config
     timings: dict = {}
 
     print("=" * 70)
@@ -209,8 +238,8 @@ def _run_onnx_ptq(run) -> None:
     print(f"example:    {EXAMPLE}")
     print(f"model:      {model_path}")
     print(f"calib:      {calib_dir}")
-    print(f"config:     {CONFIG_FILE}")
-    print(f"bitwidth:   {BITWIDTH_CONFIG_FILE}")
+    print(f"config:     {config_file}")
+    print(f"bitwidth:   {bitwidth_config}")
     print(f"providers:  {providers}")
     print(
         f"scheme:     {QUANT_SCHEME}={PERCENTILE_VALUE}  "
@@ -223,14 +252,17 @@ def _run_onnx_ptq(run) -> None:
     #   对应 quick_start 的 build_dataloaders + 构建模型。
     # ------------------------------------------------------------------
     with stage("步骤 1: 加载数据和模型", timings):
-        if not CONFIG_FILE.is_file():
-            raise FileNotFoundError(f"量化配置不存在: {CONFIG_FILE}")
+        if not config_file.is_file():
+            raise FileNotFoundError(f"量化配置不存在: {config_file}")
         original_model, input_shapes, feeds = load_onnx_ptq_inputs(
-            model_path, calib_dir, CALIB_LIMIT
+            model_path, calib_dir, args.calib_limit
         )
-        validation_dir = Path(os.environ.get("RX_MET_ONNX_PTQ_VAL", str(calib_dir.parent / "val")))
-        if validation_dir.is_dir() or "RX_MET_ONNX_PTQ_VAL" in os.environ:
+        validation_dir = args.validation_dir or Path(os.environ.get("RX_MET_ONNX_PTQ_VAL", str(calib_dir.parent / "val")))
+        if validation_dir.is_dir() or args.validation_dir is not None or "RX_MET_ONNX_PTQ_VAL" in os.environ:
             evaluation_feeds, validation_labels = load_onnx_validation_inputs(original_model, validation_dir)
+            evaluation_feeds = evaluation_feeds[:args.validation_limit]
+            if validation_labels is not None:
+                validation_labels = validation_labels[:args.validation_limit]
         else:
             evaluation_feeds, validation_labels = feeds, None
             validation_dir = None
@@ -258,13 +290,13 @@ def _run_onnx_ptq(run) -> None:
     #   + apply_mixed_precision_bitwidth。两份 JSON 与 quick_start_kws.py 相同。
     # ------------------------------------------------------------------
     with stage("步骤 3: 创建 sim", timings):
-        OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-        if not BITWIDTH_CONFIG_FILE.is_file():
-            raise FileNotFoundError(f"混合精度配置不存在: {BITWIDTH_CONFIG_FILE}")
+        args.output_dir.mkdir(parents=True, exist_ok=True)
+        if not bitwidth_config.is_file():
+            raise FileNotFoundError(f"混合精度配置不存在: {bitwidth_config}")
         sim = create_onnx_ptq_sim(
             original_model,
             feeds[0],
-            config_file=str(CONFIG_FILE),
+            config_file=str(config_file),
             param_type=PARAM_TYPE,
             activation_type=ACTIVATION_TYPE,
             quant_scheme=QUANT_SCHEME,
@@ -272,9 +304,9 @@ def _run_onnx_ptq(run) -> None:
             providers=providers,
             work_dir=run.work / "aimet",
         )
-        require_active_cuda_session(sim.session)
+        require_active_cuda_session(sim.session, args.device)
         apply_mixed_precision_bitwidth(
-            sim, config_file=str(BITWIDTH_CONFIG_FILE), verbose=True
+            sim, config_file=str(bitwidth_config), verbose=True
         )
         force_model_io_quantizers(sim, original_model)
         disabled_biases = disable_onnx_bias_quantizers(
@@ -291,7 +323,7 @@ def _run_onnx_ptq(run) -> None:
     # ------------------------------------------------------------------
     with stage("步骤 4: 校准 (PTQ)", timings):
         sim.compute_encodings(feeds)
-        _, ptq_evaluation = evaluate_onnx_dataset(
+        ptq_batches, ptq_evaluation = evaluate_onnx_dataset(
             sim, evaluation_feeds, reference=fp32_batches, labels=validation_labels, providers=providers
         )
         ptq_report = ptq_evaluation["comparison"]
@@ -357,7 +389,7 @@ def _run_onnx_ptq(run) -> None:
         if any(item["max_abs"] > 0 for item in clean_report):
             raise RuntimeError("clean ONNX 与 FP32 不一致，请检查 export 是否改图")
         reload_report = verify_onnx_ptq_artifacts(
-            artifacts, evaluation_feeds[0], quantized_batches[0], config_file=str(CONFIG_FILE),
+            artifacts, evaluation_feeds[0], quantized_batches[0], config_file=str(config_file),
             param_type=PARAM_TYPE, activation_type=ACTIVATION_TYPE,
             quant_scheme=QUANT_SCHEME, percentile_value=PERCENTILE_VALUE,
             providers=providers,
@@ -368,15 +400,34 @@ def _run_onnx_ptq(run) -> None:
         print_accuracy_report("恢复验证", reload_report[0])
         print("✅ ONNX 维度、量化输出和 compiler encodings 恢复验证通过")
 
+    archived_outputs = {}
+    for stage_name, batches in (("fp32", fp32_batches), ("ptq", ptq_batches), ("po2", quantized_batches)):
+        count = len(batches[0])
+        if any(len(batch) != count for batch in batches):
+            raise ValueError(f"{stage_name}: output count changed between batches")
+        for index in range(count):
+            values = [np.asarray(batch[index]) for batch in batches]
+            rank, nonbatch_shape = values[0].ndim, values[0].shape[1:]
+            if any(value.ndim != rank or value.shape[1:] != nonbatch_shape for value in values):
+                raise ValueError(f"{stage_name}: output {index} rank or nonbatch shape changed between batches")
+            archived_outputs[f"{stage_name}_output{index}"] = (
+                np.stack(values) if rank == 0 else np.concatenate(values, axis=0))
+    np.savez(run.exports / "outputs.npz", **archived_outputs)
+
     metadata_path = write_onnx_ptq_metadata(
         run.exports,
         filename_prefix,
         {
             "example": EXAMPLE,
+            "device": args.device,
             "model": str(model_path),
             "input_shapes": input_shapes,
             "calibration_dir": str(calib_dir.resolve()),
             "calibration_count": len(feeds),
+            "calibration_sha256": hashlib.sha256(b"".join(
+                feed[name].tobytes() for feed in feeds for name in sorted(feed))).hexdigest(),
+            "validation_sha256": hashlib.sha256(b"".join(
+                feed[name].tobytes() for feed in evaluation_feeds for name in sorted(feed))).hexdigest(),
             "evaluation_source": "validation" if validation_dir is not None else "calibration",
             "validation_dir": str(validation_dir.resolve()) if validation_dir is not None else None,
             "evaluation": {"fp32": fp32_evaluation, "ptq": ptq_evaluation, "po2": po2_evaluation},

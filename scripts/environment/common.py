@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Public rx-quant GPU environment contract; kept independently in both products."""
+"""Public rx-quant CPU/CUDA environment contract."""
 from __future__ import annotations
 import argparse
 import hashlib
@@ -45,6 +45,10 @@ def config():
     return {key: matrix[key] for key in ('schema_version', 'environment_name', 'environment_version', 'build_packages', 'common_packages', 'variants')}
 
 
+def default_variants(matrix):
+    return [variant for variant in matrix['variants'] if variant != 'cpu']
+
+
 def config_digest():
     h = hashlib.sha256(json.dumps(config(), sort_keys=True, separators=(',', ':')).encode())
     for name in BUILD_FILES:
@@ -66,8 +70,9 @@ def image_ref(role, variant):
 
 def inspect(reference, role, variant):
     info = json.loads(subprocess.check_output(['docker', 'image', 'inspect', reference]))[0]
+    variant_label = 'platform.variant' if variant == 'cpu' else 'cuda.variant'
     expected = {'environment.name': NAME, 'environment.version': config()['environment_version'],
-                'environment.role': role, 'cuda.variant': variant}
+                'environment.role': role, variant_label: variant}
     labels = info['Config'].get('Labels') or {}
     for key, value in expected.items():
         if labels.get(LABEL + key) != value:
@@ -87,7 +92,7 @@ def verify(variant, gpu=False):
             expected.update(matrix['build_packages'])
         command = ['docker', 'run', '--rm', '-i', '--network', 'none', '--read-only', '--tmpfs', '/tmp:rw,exec,size=2g',
                    '-e', 'HOME=/tmp', '-e', 'PYTHONDONTWRITEBYTECODE=1']
-        if gpu:
+        if gpu and variant != 'cpu':
             command += ['--gpus', 'device=' + os.environ.get('RX_QUANT_GPU_DEVICE', '0')]
         command += ['--entrypoint', 'python3', info['Id'], '-B', '-']
         code = f'''import importlib.metadata as m,sys,subprocess
@@ -95,10 +100,10 @@ import torch,onnxruntime,transformers,datasets,gguf
 expected={expected!r}
 for name,version in expected.items(): assert m.version(name)==version,(name,m.version(name),version)
 assert f"{{sys.version_info.major}}.{{sys.version_info.minor}}"=={spec['python_version']!r}
-assert torch.version.cuda=={spec['cuda_version']!r}
-assert "CUDAExecutionProvider" in onnxruntime.get_available_providers()
+assert torch.version.cuda=={(spec['cuda_version'] or None)!r}
+assert {('CPUExecutionProvider' if variant == 'cpu' else 'CUDAExecutionProvider')!r} in onnxruntime.get_available_providers()
 subprocess.run([sys.executable,'-m','pip','check'],check=True)
-if {gpu!r}:
+if {bool(gpu and variant != 'cpu')!r}:
  assert torch.cuda.is_available()
  assert (torch.tensor([2.],device='cuda')*3).item()==6
 print({variant!r},{role!r},"public environment verified")
@@ -188,9 +193,11 @@ def export(variant, directory):
 
 
 def main():
+    matrix = config()
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('action', choices=['build', 'verify', 'export', 'load', 'digest', 'download'])
-    parser.add_argument('variants', nargs='*', choices=['cu118', 'cu126', 'cu130'])
+    parser.add_argument('variants', nargs='*', choices=list(matrix['variants']),
+                        help='Environment variants (default: CUDA variants; CPU requires cpu)')
     parser.add_argument('--output-dir', '--export-dir', dest='output_dir', type=Path)
     parser.add_argument('--directory', type=Path)
     parser.add_argument('--wheelhouse-dir', type=Path)
@@ -199,8 +206,8 @@ def main():
     parser.add_argument('--no-export', action='store_true', help='Compatibility option; build never exports implicitly')
     args = parser.parse_intermixed_args()
     if args.action == 'digest': print(config_digest()); return
-    directory = args.output_dir or ROOT / '.release/runtime-images' / config()['environment_version']
-    for variant in args.variants or config()['variants']:
+    directory = args.output_dir or ROOT / '.release/runtime-images' / matrix['environment_version']
+    for variant in args.variants or default_variants(matrix):
         if args.action == 'build':
             build(variant, args.wheelhouse_dir / variant if args.wheelhouse_dir else None, args.builder)
             verify(variant, args.gpu)
