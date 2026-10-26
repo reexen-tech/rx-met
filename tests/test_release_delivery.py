@@ -5,7 +5,7 @@ from pathlib import Path
 import subprocess
 import tempfile
 import unittest
-from contextlib import ExitStack
+from contextlib import ExitStack, contextmanager
 from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -30,10 +30,14 @@ class ReleaseDeliveryTest(unittest.TestCase):
                 'variant': variant, 'image_id': 'sha256:pinned-' + variant,
                 'filename': f'rx-quant-env-runtime-v1-{variant}-linux-amd64.tar.gz'}
 
+    def bundle_filename(self, variant='cu126'):
+        return f'{self.product}-v1.1.0-{variant}-linux-amd64.tar.gz'
+
     def bundle(self, directory, variant='cu126'):
-        name = f'{self.product}-v1.1.0-{variant}-linux-amd64'
-        (directory / (name + '.tar.gz')).write_bytes(b'application-' + variant.encode())
-        return {'bundle_name': name, 'variant': variant, 'runtime': self.runtime(variant)}
+        filename = self.bundle_filename(variant)
+        (directory / filename).write_bytes(b'application-' + variant.encode())
+        return {'bundle_name': filename.removesuffix('.tar.gz'),
+                'variant': variant, 'runtime': self.runtime(variant)}
 
     def archive(self, variant='cu126'):
         record = self.runtime(variant)
@@ -49,6 +53,22 @@ class ReleaseDeliveryTest(unittest.TestCase):
                                 cwd=directory, capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
+    def assert_product_checksums(self, directory, variants):
+        for variant in variants:
+            filename = self.bundle_filename(variant)
+            checksum = directory / (filename + '.sha256')
+            self.assertEqual(checksum.read_text(),
+                             f'{artifacts.sha256(directory / filename)}  {filename}\n')
+            result = subprocess.run(['sha256sum', '--check', '--strict', checksum.name],
+                                    cwd=directory, capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        for filename in ('README.md', 'CHANGELOG.md', 'release.json', 'SHA256SUMS'):
+            self.assertFalse((directory / filename).exists(), filename)
+
+    def snapshot(self, directory):
+        return {str(path.relative_to(directory)): path.read_bytes()
+                for path in directory.rglob('*') if path.is_file()}
+
     def probe_lock(self, directory):
         return subprocess.run(['flock', '--nonblock', str(delivery.lock_path(directory)), 'true'],
                               capture_output=True, timeout=5).returncode
@@ -57,7 +77,7 @@ class ReleaseDeliveryTest(unittest.TestCase):
         export = self.root / '.release/export'
         product = export / self.destination.name
         environment = export / self.environment.name
-        with delivery.stage_release(product, replace=False) as staged:
+        with delivery.stage_release(product, [self.bundle_filename()], replace=False) as staged:
             self.bundle(staged)
         archive, record = self.archive()
         delivery.publish_environment(archive, record, environment)
@@ -82,7 +102,7 @@ class ReleaseDeliveryTest(unittest.TestCase):
         self.assertEqual(delivery.lock_path(custom_export).parent, parent / '.release/locks')
 
     def test_product_lock_is_exclusive_and_released_after_publication(self):
-        with delivery.stage_release(self.destination, replace=False) as staged:
+        with delivery.stage_release(self.destination, [self.bundle_filename()], replace=False) as staged:
             self.bundle(staged)
             self.assertTrue(delivery.lock_path(self.destination).is_file())
             self.assertEqual(self.probe_lock(self.destination), 1)
@@ -99,78 +119,156 @@ class ReleaseDeliveryTest(unittest.TestCase):
             delivery.publish_environment(archive, record, self.environment)
         self.assertEqual(self.probe_lock(self.environment), 0)
 
-    def test_app_only_release_has_no_environment_links_or_directory(self):
-        with delivery.stage_release(self.destination, replace=False) as staged:
-            bundle = self.bundle(staged)
-            delivery.write_release_index(staged, self.product, '1.1.0', 'notes', [bundle], with_env=False)
+    def test_app_only_release_contains_only_archive_and_its_checksum(self):
+        with delivery.stage_release(self.destination, [self.bundle_filename()], replace=False) as staged:
+            self.bundle(staged)
         self.assertFalse(self.environment.exists())
-        self.assertFalse(any(path.is_dir() for path in self.destination.iterdir()))
-        readme = (self.destination / 'README.md').read_text()
-        self.assertIn('| rx-quant-env-runtime-v1-cu126-linux-amd64.tar.gz |', readme)
-        self.assertNotIn('附带', readme)
-        self.assertNotIn('../rx-quant-env-v1', readme)
-        document = json.loads((self.destination / 'release.json').read_text())
-        entry, = document['bundles']
-        self.assertFalse(entry['environment_included'])
-        self.assertEqual(entry['runtime']['image_id'], 'sha256:pinned-cu126')
-        self.assertNotIn('sha256', entry['runtime'])
-        self.assert_checksums(self.destination)
+        self.assertEqual({path.name for path in self.destination.iterdir()},
+                         {self.bundle_filename(), self.bundle_filename() + '.sha256'})
+        self.assert_product_checksums(self.destination, ['cu126'])
 
     def test_environment_and_product_have_independent_checksums(self):
         archive, record = self.archive()
         delivery.publish_environment(archive, record, self.environment)
-        with delivery.stage_release(self.destination, replace=False) as staged:
-            bundle = self.bundle(staged)
-            delivery.write_release_index(staged, self.product, '1.1.0', 'notes', [bundle], with_env=True)
-        readme = (self.destination / 'README.md').read_text()
-        self.assertIn(f'| {archive.name} |', readme)
-        self.assertNotIn('附带', readme)
-        self.assertNotIn('../rx-quant-env-v1', readme)
-        delivery.write_release_index(self.destination, self.product, '1.1.0', 'notes', [bundle], with_env=False)
-        self.assertEqual((self.destination / 'README.md').read_text(), readme)
-        self.assertNotIn(record['sha256'], (self.destination / 'SHA256SUMS').read_text())
-        self.assert_checksums(self.destination)
+        with delivery.stage_release(self.destination, [self.bundle_filename()], replace=False) as staged:
+            self.bundle(staged)
+        self.assertNotIn(record['sha256'],
+                         (self.destination / (self.bundle_filename() + '.sha256')).read_text())
+        self.assert_product_checksums(self.destination, ['cu126'])
         self.assert_checksums(self.environment)
 
-    def test_existing_product_directory_requires_replace(self):
+    def test_existing_directory_accepts_new_archive_and_preserves_other_contents(self):
         self.destination.mkdir()
-        (self.destination / 'old').write_text('preserve')
-        with self.assertRaisesRegex(RuntimeError, '--replace'):
-            with delivery.stage_release(self.destination, replace=False):
-                self.fail('existing release accepted')
-        self.assertEqual((self.destination / 'old').read_text(), 'preserve')
+        (self.destination / 'operator-notes.txt').write_text('preserve')
+        unpacked = self.destination / 'unpacked-cpu'
+        unpacked.mkdir()
+        (unpacked / 'manifest.json').write_text('preserve unpacked bundle')
+        with delivery.stage_release(self.destination, [self.bundle_filename()], replace=False) as staged:
+            self.bundle(staged)
+        self.assertEqual((self.destination / 'operator-notes.txt').read_text(), 'preserve')
+        self.assertEqual((unpacked / 'manifest.json').read_text(), 'preserve unpacked bundle')
+        self.assert_product_checksums(self.destination, ['cu126'])
 
-    def test_replace_removes_unselected_variants_and_preserves_shared_environment(self):
+    def test_existing_selected_archive_requires_replace_even_in_a_batch(self):
         self.destination.mkdir()
-        (self.destination / 'old-cu118.tar.gz').write_text('previous')
+        self.bundle(self.destination, 'cpu')
+        before = self.snapshot(self.destination)
+        archives = [self.bundle_filename('cu126'), self.bundle_filename('cpu')]
+        with self.assertRaisesRegex(RuntimeError, '--replace'):
+            delivery.check_destination(self.destination, archives, False)
+        with self.assertRaisesRegex(RuntimeError, '--replace'):
+            with delivery.stage_release(self.destination, archives, replace=False):
+                self.fail('conflicting archive accepted')
+        self.assertEqual(self.snapshot(self.destination), before)
+
+    def test_orphan_checksum_does_not_require_replace(self):
+        self.destination.mkdir()
+        checksum = self.destination / (self.bundle_filename() + '.sha256')
+        checksum.write_text('orphan checksum')
+        with delivery.stage_release(self.destination, [self.bundle_filename()], replace=False) as staged:
+            self.bundle(staged)
+        self.assert_product_checksums(self.destination, ['cu126'])
+
+    def test_replace_updates_only_selected_archive_and_preserves_shared_environment(self):
+        self.destination.mkdir()
+        self.bundle(self.destination, 'cpu')
+        unselected = self.destination / self.bundle_filename('cpu')
+        unselected_checksum = unselected.with_name(unselected.name + '.sha256')
+        unselected_checksum.write_text(f'{artifacts.sha256(unselected)}  {unselected.name}\n')
+        (self.destination / self.bundle_filename()).write_bytes(b'old selected archive')
+        (self.destination / (self.bundle_filename() + '.sha256')).write_text('old selected checksum')
+        unselected_before = (unselected.read_bytes(), unselected_checksum.read_bytes())
         archive, record = self.archive()
         delivery.publish_environment(archive, record, self.environment)
-        environment_before = {path.name: path.read_bytes() for path in self.environment.iterdir()}
-        with delivery.stage_release(self.destination, replace=True) as staged:
-            bundle = self.bundle(staged)
-            delivery.write_release_index(staged, self.product, '1.1.0', 'notes', [bundle], with_env=False)
-        self.assertFalse((self.destination / 'old-cu118.tar.gz').exists())
-        self.assertEqual(environment_before, {path.name: path.read_bytes() for path in self.environment.iterdir()})
+        environment_before = self.snapshot(self.environment)
+        with delivery.stage_release(self.destination, [self.bundle_filename()], replace=True) as staged:
+            self.bundle(staged)
+        self.assertEqual((unselected.read_bytes(), unselected_checksum.read_bytes()), unselected_before)
+        self.assertEqual((self.destination / self.bundle_filename()).read_bytes(), b'application-cu126')
+        self.assertEqual(environment_before, self.snapshot(self.environment))
+        self.assert_product_checksums(self.destination, ['cpu', 'cu126'])
+
+    def test_successful_append_removes_legacy_aggregate_files(self):
+        self.destination.mkdir()
+        for name in ('README.md', 'CHANGELOG.md', 'release.json', 'SHA256SUMS'):
+            (self.destination / name).write_text('obsolete aggregate')
+        with delivery.stage_release(self.destination, [self.bundle_filename()], replace=False) as staged:
+            self.bundle(staged)
+        self.assert_product_checksums(self.destination, ['cu126'])
+
+    def test_legacy_cpu_release_gains_archive_checksum_when_appending_cuda(self):
+        self.destination.mkdir()
+        self.bundle(self.destination, 'cpu')
+        cpu_archive = self.destination / self.bundle_filename('cpu')
+        previous_cpu = cpu_archive.read_bytes()
+        for name in ('README.md', 'CHANGELOG.md', 'release.json'):
+            (self.destination / name).write_text('obsolete aggregate')
+        (self.destination / 'SHA256SUMS').write_text(
+            f'{artifacts.sha256(cpu_archive)}  {cpu_archive.name}\n')
+        with delivery.stage_release(self.destination, [self.bundle_filename()], replace=False) as staged:
+            self.bundle(staged)
+        self.assertEqual(cpu_archive.read_bytes(), previous_cpu)
+        self.assert_product_checksums(self.destination, ['cpu', 'cu126'])
+
+    def test_corrupt_legacy_unselected_archive_blocks_migration_without_changes(self):
+        self.destination.mkdir()
+        self.bundle(self.destination, 'cpu')
+        cpu_archive = self.destination / self.bundle_filename('cpu')
+        (self.destination / 'SHA256SUMS').write_text(
+            f'{artifacts.sha256(cpu_archive)}  {cpu_archive.name}\n')
+        cpu_archive.write_bytes(b'corrupt legacy CPU archive')
+        (self.destination / 'README.md').write_text('legacy readme')
+        before = self.snapshot(self.destination)
+        with self.assertRaises(RuntimeError):
+            with delivery.stage_release(self.destination, [self.bundle_filename()], replace=False) as staged:
+                self.bundle(staged)
+        self.assertEqual(self.snapshot(self.destination), before)
+        self.assertFalse(list(self.root.glob('.' + self.destination.name + '-*')))
+        self.assertEqual(self.probe_lock(self.destination), 0)
 
     def test_later_variant_failure_retains_entire_previous_release(self):
         self.destination.mkdir()
         (self.destination / 'previous').write_text('preserve')
+        (self.destination / 'README.md').write_text('legacy metadata survives failed publication')
+        self.bundle(self.destination, 'cpu')
+        (self.destination / self.bundle_filename('cu118')).write_bytes(b'old selected archive')
+        (self.destination / (self.bundle_filename('cu118') + '.sha256')).write_text('old checksum')
+        before = self.snapshot(self.destination)
         with self.assertRaisesRegex(RuntimeError, 'second variant'):
-            with delivery.stage_release(self.destination, replace=True) as staged:
+            with delivery.stage_release(self.destination,
+                                        [self.bundle_filename('cu118'), self.bundle_filename('cu126')],
+                                        replace=True) as staged:
                 self.bundle(staged, 'cu118')
                 raise RuntimeError('second variant failed')
-        self.assertEqual([path.name for path in self.destination.iterdir()], ['previous'])
+        self.assertEqual(self.snapshot(self.destination), before)
+        self.assertFalse(list(self.root.glob('.' + self.destination.name + '-*')))
+        self.assertEqual(self.probe_lock(self.destination), 0)
+
+    def test_missing_selected_archive_prevents_incomplete_publication(self):
+        self.destination.mkdir()
+        self.bundle(self.destination, 'cpu')
+        before = self.snapshot(self.destination)
+        with self.assertRaises(RuntimeError):
+            with delivery.stage_release(self.destination,
+                                        [self.bundle_filename('cu118'), self.bundle_filename('cu126')],
+                                        replace=False) as staged:
+                self.bundle(staged, 'cu118')
+        self.assertEqual(self.snapshot(self.destination), before)
         self.assertFalse(list(self.root.glob('.' + self.destination.name + '-*')))
         self.assertEqual(self.probe_lock(self.destination), 0)
 
     def test_publish_failure_restores_previous_release(self):
         self.destination.mkdir()
         (self.destination / 'previous').write_text('preserve')
+        self.bundle(self.destination, 'cpu')
+        (self.destination / self.bundle_filename()).write_bytes(b'old selected archive')
+        (self.destination / (self.bundle_filename() + '.sha256')).write_text('old checksum')
+        before = self.snapshot(self.destination)
         original = Path.replace
         patcher = None
         try:
             with self.assertRaisesRegex(OSError, 'injected rename failure'):
-                with delivery.stage_release(self.destination, replace=True) as staged:
+                with delivery.stage_release(self.destination, [self.bundle_filename()], replace=True) as staged:
                     self.bundle(staged)
                     def replace(path, target):
                         if path == staged:
@@ -181,7 +279,8 @@ class ReleaseDeliveryTest(unittest.TestCase):
         finally:
             if patcher is not None:
                 patcher.stop()
-        self.assertEqual((self.destination / 'previous').read_text(), 'preserve')
+        self.assertEqual(self.snapshot(self.destination), before)
+        self.assertEqual(self.probe_lock(self.destination), 0)
 
     def test_environment_is_reused_and_variants_are_added(self):
         archive, record = self.archive('cu118')
@@ -240,30 +339,21 @@ class ReleaseDeliveryTest(unittest.TestCase):
             delivery.publish_environment(other, other_record, self.environment)
         self.assertFalse((self.environment / other.name).exists())
 
-    def test_cli_replaces_only_selected_product_files_without_touching_environment(self):
+    @contextmanager
+    def mocked_build(self):
         (self.root / 'VERSION').write_text('1.1.0\n')
-        output = self.root / '.release/export' / (self.product + '-v1.1.0')
-        output.mkdir(parents=True)
-        (output / 'unselected.tar.gz').write_bytes(b'old variant')
-        environment = output.parent / 'rx-quant-env-v1'
-        environment.mkdir()
-        (environment / 'keep').write_bytes(b'shared environment')
-        targets = ['cu126', 'cpu' if hasattr(artifacts, 'cpu') else 'cu118']
-        published = {'runtime_image_id': 'image', 'build_image_id': 'image'}
         def runtime_archive(role, variant, *args, **kwargs):
-            record = self.runtime(variant)
-            if variant == 'cpu':
-                record.update(environment_name='rx-lm-quant-env', environment_version='deps-v2')
-            return self.root / record['filename'], record
+            return self.archive(variant)
         def build(*command, **kwargs):
             output_path = next(arg.split('dest=', 1)[1] for arg in command
                                if isinstance(arg, str) and '.output=type=local,dest=' in arg)
-            Path(output_path).mkdir(parents=True)
+            Path(output_path).mkdir(parents=True, exist_ok=True)
         def assemble(args, matrix, variant, runtime, build, record, *rest, **kwargs):
             manifest = self.bundle(args.output_dir, variant)
             manifest['runtime'] = record
             return manifest
         with ExitStack() as stack:
+            mocks = {}
             for obj, name, options in [
                 (artifacts, 'ROOT', {'new': self.root}),
                 (artifacts.dependencies, 'check_generated_artifacts', {}),
@@ -277,20 +367,96 @@ class ReleaseDeliveryTest(unittest.TestCase):
                 (artifacts, 'run', {'side_effect': build}),
                 (artifacts, 'assemble', {'side_effect': assemble}),
             ]:
-                stack.enter_context(patch.object(obj, name, **options))
-            if hasattr(artifacts, 'cpu'):
-                stack.enter_context(patch.object(artifacts.cpu, 'config', return_value={'environment_version': 'deps-v2'}))
-            stack.enter_context(patch('sys.argv', ['artifacts.py', 'build', *targets, '--replace']))
+                mocks[name] = stack.enter_context(patch.object(obj, name, **options))
+            yield mocks
+
+    def run_build_cli(self, *arguments):
+        with patch('sys.argv', ['artifacts.py', 'build', *arguments]):
             artifacts.main()
-        entries = json.loads((output / 'release.json').read_text())['bundles']
-        self.assertEqual([entry['variant'] for entry in entries], targets)
-        self.assertEqual(entries[1]['environment_directory'],
-                         '../rx-lm-quant-env-deps-v2' if targets[1] == 'cpu' else '../rx-quant-env-v1')
-        self.assertFalse(any(entry['environment_included'] for entry in entries))
-        self.assertFalse((output / 'unselected.tar.gz').exists())
+
+    def test_cli_cpu_with_environment_then_default_cuda_preserves_both(self):
+        output = self.root / '.release/export' / (self.product + '-v1.1.0')
+        environment = output.parent / self.environment.name
+        defaults = artifacts.common.default_variants(artifacts.dependencies.load_matrix())
+        self.assertNotIn('cpu', defaults)
+        with self.mocked_build() as mocks:
+            self.run_build_cli('cpu', '--with-env')
+            cpu_archive = output / self.bundle_filename('cpu')
+            cpu_before = (cpu_archive.read_bytes(),
+                          cpu_archive.with_name(cpu_archive.name + '.sha256').read_bytes())
+            environment_before = self.snapshot(environment)
+            self.run_build_cli()
+        self.assertEqual((cpu_archive.read_bytes(),
+                          cpu_archive.with_name(cpu_archive.name + '.sha256').read_bytes()), cpu_before)
+        self.assertEqual([call.args[2] for call in mocks['assemble'].call_args_list], ['cpu', *defaults])
+        self.assertEqual(self.snapshot(environment), environment_before)
+        self.assertEqual({path.name for path in output.glob('*.tar.gz')},
+                         {self.bundle_filename(variant) for variant in ['cpu', *defaults]})
+        self.assert_product_checksums(output, ['cpu', *defaults])
+        self.assert_checksums(environment)
+
+    def test_cli_default_cuda_then_cpu_appends_without_replace(self):
+        output = self.root / '.release/export' / (self.product + '-v1.1.0')
+        defaults = artifacts.common.default_variants(artifacts.dependencies.load_matrix())
+        with self.mocked_build():
+            self.run_build_cli()
+            before = self.snapshot(output)
+            self.run_build_cli('cpu')
+        self.assertTrue(all((output / name).read_bytes() == contents
+                            for name, contents in before.items()))
+        self.assert_product_checksums(output, [*defaults, 'cpu'])
+        self.assertFalse((output.parent / self.environment.name).exists())
+
+    def test_cli_conflicting_later_target_is_rejected_before_docker(self):
+        output = self.root / '.release/export' / (self.product + '-v1.1.0')
+        output.mkdir(parents=True)
+        self.bundle(output, 'cpu')
+        before = self.snapshot(output)
+        with self.mocked_build() as mocks, self.assertRaisesRegex(RuntimeError, '--replace'):
+            self.run_build_cli('cu126', 'cpu')
+        mocks['run'].assert_not_called()
+        mocks['ensure_image'].assert_not_called()
+        mocks['assemble'].assert_not_called()
+        self.assertEqual(self.snapshot(output), before)
+
+    def test_cli_replaces_only_selected_product_files_without_touching_environment(self):
+        output = self.root / '.release/export' / (self.product + '-v1.1.0')
+        output.mkdir(parents=True)
+        self.bundle(output, 'cpu')
+        (output / self.bundle_filename('cu126')).write_bytes(b'old cu126')
+        (output / (self.bundle_filename('cu126') + '.sha256')).write_text('old checksum')
+        environment = output.parent / self.environment.name
+        environment.mkdir()
+        (environment / 'keep').write_bytes(b'shared environment')
+        with self.mocked_build():
+            self.run_build_cli('cu126', '--replace')
+        self.assertEqual((output / self.bundle_filename('cpu')).read_bytes(), b'application-cpu')
+        self.assertEqual((output / self.bundle_filename('cu126')).read_bytes(), b'application-cu126')
         self.assertEqual((environment / 'keep').read_bytes(), b'shared environment')
         self.assertEqual([path.name for path in environment.iterdir()], ['keep'])
-        self.assert_checksums(output)
+        self.assert_product_checksums(output, ['cu126'])
+
+    def test_cli_later_build_failure_preserves_selected_and_unselected_archives(self):
+        output = self.root / '.release/export' / (self.product + '-v1.1.0')
+        output.mkdir(parents=True)
+        self.bundle(output, 'cpu')
+        (output / self.bundle_filename('cu118')).write_bytes(b'previous cu118 archive')
+        (output / (self.bundle_filename('cu118') + '.sha256')).write_text('previous checksum')
+        (output / 'README.md').write_text('previous release metadata')
+        before = self.snapshot(output)
+        with self.mocked_build() as mocks:
+            build = mocks['run'].side_effect
+            def fail_later(*command, **kwargs):
+                if command[-1] == 'cu126':
+                    raise RuntimeError('second variant failed')
+                return build(*command, **kwargs)
+            mocks['run'].side_effect = fail_later
+            with self.assertRaisesRegex(RuntimeError, 'second variant'):
+                self.run_build_cli('cu118', 'cu126', '--replace')
+        self.assertEqual(self.snapshot(output), before)
+        self.assertEqual([call.args[2] for call in mocks['assemble'].call_args_list], ['cu118'])
+        self.assertFalse(list(output.parent.glob('.' + output.name + '-*')))
+        self.assertEqual(self.probe_lock(output), 0)
 
 
 if __name__ == '__main__':

@@ -130,11 +130,15 @@ def runtime_requirement(record, url=''):
             'checksum_url': url + '.sha256' if url else ''}
 
 
+def bundle_name(version, variant):
+    return f'rx-met-v{version}-{variant}-linux-amd64'
+
+
 def assemble(args, matrix, variant, runtime, build, runtime_record, archive, wheel_dir, compatibility, *, version, changelog):
     env_version = matrix['environment_version']
     runtime_tag = common.image_ref('runtime', variant)
     runtime_record = {**runtime_record, 'image_tag': runtime_tag}
-    name = f'rx-met-v{version}-{variant}-linux-amd64'
+    name = bundle_name(version, variant)
     packed = args.output_dir / (name + '.tar.gz')
     if packed.exists() and not args.replace:
         raise RuntimeError(f'应用产物已存在: {packed}；开发时可显式 --replace')
@@ -181,9 +185,11 @@ def assemble(args, matrix, variant, runtime, build, runtime_record, archive, whe
         run('bash', '-n', staged / 'install.sh')
         install_prefix = args.install_prefix if args.install_prefix is not None else Path(temporary) / 'install'
         run(staged / 'install.sh', '--offline', '--prefix', install_prefix)
-        with tarfile.open(packed.with_name(packed.name + '.partial'), 'w:gz', compresslevel=1) as tar:
-            tar.add(staged, arcname=name)
-        packed.with_name(packed.name + '.partial').replace(packed)
+        with tempfile.TemporaryDirectory(prefix='.archive-', dir=args.output_dir) as archive_directory:
+            temporary_archive = Path(archive_directory) / packed.name
+            with tarfile.open(temporary_archive, 'w:gz', compresslevel=1) as tar:
+                tar.add(staged, arcname=name)
+            temporary_archive.replace(packed)
     print('Application bundle:', packed, packed.stat().st_size, 'bytes', flush=True)
     return manifest
 
@@ -199,7 +205,7 @@ def main():
     parser.add_argument('--install-prefix', type=Path, help='保留安装验收结果的根目录；默认使用临时目录并自动清理')
     parser.add_argument('--with-env', action='store_true', help='将公共运行环境归档导出或复用到产品目录平级的环境目录；不附带构建环境')
     parser.add_argument('--skip-build', action='store_true', help='只重新组装源码和环境身份未变的已有 wheels')
-    parser.add_argument('--replace', action='store_true', help='按本次所选变体整体替换候选产品目录；不覆盖安装目录和公共环境')
+    parser.add_argument('--replace', action='store_true', help='仅替换本次所选同名应用归档及校验文件；保留其他变体、安装目录和公共环境')
     parser.add_argument('--jobs', type=int, default=8)
     args = parser.parse_intermixed_args()
     if args.action == 'export-runtime':
@@ -229,10 +235,10 @@ def main():
         args.build_env_dir = args.build_env_dir.resolve()
     if args.install_prefix is not None:
         args.install_prefix = args.install_prefix.resolve()
-    delivery.check_destination(destination, args.replace)
+    archives = [bundle_name(version, variant) + '.tar.gz' for variant in targets]
+    delivery.check_destination(destination, archives, args.replace)
     changelog = release_changelog(version)
-    with delivery.stage_release(destination, replace=args.replace) as args.output_dir:
-        bundles = []
+    with delivery.stage_release(destination, archives, replace=args.replace) as args.output_dir:
         for variant in targets:
             build_ref = common.image_ref('build', variant)
             runtime = environment_archives.ensure_image('runtime', variant, args.runtime_env_dir)
@@ -259,8 +265,7 @@ def main():
                 write_json(build_record, fingerprint)
             elif not build_record.is_file() or json.loads(build_record.read_text()) != fingerprint:
                 raise RuntimeError('--skip-build 的源码或环境身份与已有 wheels 不匹配')
-            bundles.append(assemble(args, matrix, variant, runtime, build, record, archive, wheel_output / 'wheels', compatibility, version=version, changelog=changelog))
-        delivery.write_release_index(args.output_dir, 'rx-met', version, changelog, bundles, with_env=args.with_env)
+            assemble(args, matrix, variant, runtime, build, record, archive, wheel_output / 'wheels', compatibility, version=version, changelog=changelog)
     print('Product delivery:', destination)
 
 

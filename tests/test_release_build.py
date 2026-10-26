@@ -1,6 +1,7 @@
 """Check build-time installation isolation and artifact publication boundaries."""
 from argparse import Namespace
 from contextlib import ExitStack
+import hashlib
 import importlib.util
 from pathlib import Path
 import subprocess
@@ -122,6 +123,39 @@ class ReleaseBuildTest(unittest.TestCase):
         self.assertFalse(any(path.is_dir() for path in self.output.iterdir()))
         self.assertFalse(list((self.root / '.release/staging').glob('.bundle-*')))
 
+    def assert_existing_partial_is_preserved(self, *, symlink, fail_archive):
+        partial = self.output / (self.name + '.tar.gz.partial')
+        retained = self.root / 'partial symlink target' if symlink else partial
+        previous = b'existing partial content must remain untouched'
+        retained.write_bytes(previous)
+        if symlink:
+            partial.symlink_to(retained)
+        if fail_archive:
+            with patch.object(tarfile.TarFile, 'add', side_effect=RuntimeError('injected archive failure')), \
+                    self.assertRaisesRegex(RuntimeError, 'injected archive failure'):
+                self.assemble()
+        else:
+            self.assemble()
+        self.assertEqual(retained.read_bytes(), previous)
+        if symlink:
+            self.assertTrue(partial.is_symlink())
+            self.assertEqual(partial.readlink(), retained)
+        self.assertFalse(list(self.output.glob('.archive-*')))
+        self.assertFalse(list((self.root / '.release/staging').glob('.bundle-*')))
+        self.assertTrue(all(not prefix.exists() for prefix in self.prefixes))
+
+    def test_successful_archive_preserves_existing_partial_file(self):
+        self.assert_existing_partial_is_preserved(symlink=False, fail_archive=False)
+
+    def test_successful_archive_preserves_existing_partial_symlink_and_target(self):
+        self.assert_existing_partial_is_preserved(symlink=True, fail_archive=False)
+
+    def test_failed_archive_preserves_existing_partial_file(self):
+        self.assert_existing_partial_is_preserved(symlink=False, fail_archive=True)
+
+    def test_failed_archive_preserves_existing_partial_symlink_and_target(self):
+        self.assert_existing_partial_is_preserved(symlink=True, fail_archive=True)
+
 
 class ReleaseBuildPreflightTest(unittest.TestCase):
     def setUp(self):
@@ -159,14 +193,18 @@ class ReleaseBuildPreflightTest(unittest.TestCase):
         with patch('sys.argv', ['artifacts.py', 'build', *options]), \
                 self.assertRaisesRegex(RuntimeError, '--replace') as raised:
             artifacts.main()
-        self.assertIn(str(self.output), str(raised.exception))
+        self.assertIn(str(path), str(raised.exception))
         self.ensure_image.assert_not_called()
         self.assertFalse((self.root / '.release/wheels').exists())
         self.assertFalse((self.root / '.release/runtime-images').exists())
 
-    def test_existing_directory_is_rejected_before_docker(self):
-        path = self.existing('cu118')
+    def test_existing_selected_archive_is_rejected_before_docker(self):
+        path = self.existing('cu118', archive=True)
         self.assert_conflict_before_docker(path, 'cu118')
+
+    def test_existing_cpu_archive_is_rejected_before_docker(self):
+        path = self.existing('cpu', archive=True)
+        self.assert_conflict_before_docker(path, 'cpu')
 
     def test_later_archive_in_custom_output_blocks_all_selected_variants(self):
         self.output = self.root / 'custom output'
@@ -177,19 +215,87 @@ class ReleaseBuildPreflightTest(unittest.TestCase):
         self.assertEqual(list(self.output.iterdir()), [path])
 
     def test_default_targets_are_all_checked_before_starting(self):
-        path = self.existing('cu130')
+        path = self.existing('cu130', archive=True)
         self.assert_conflict_before_docker(path)
 
+    def test_all_conflicting_archives_are_reported_before_docker(self):
+        paths = [self.existing(variant, archive=True) for variant in ('cu118', 'cu130')]
+        with patch('sys.argv', ['artifacts.py', 'build']), \
+                self.assertRaisesRegex(RuntimeError, '--replace') as raised:
+            artifacts.main()
+        for path in paths:
+            self.assertIn(str(path), str(raised.exception))
+        self.ensure_image.assert_not_called()
+
     def test_replace_allows_existing_outputs_to_reach_environment_validation(self):
-        self.existing('cu118')
+        path = self.existing('cu118', archive=True)
         with patch('sys.argv', ['artifacts.py', 'build', 'cu118', '--replace']), \
                 self.assertRaisesRegex(RuntimeError, 'Docker work started'):
             artifacts.main()
         self.ensure_image.assert_called_once()
+        self.assertEqual(path.read_bytes(), b'existing archive')
 
-    def test_existing_product_directory_requires_explicit_replacement(self):
-        path = self.existing('cu130')
-        self.assert_conflict_before_docker(path, 'cu118')
+    def assert_reaches_environment_validation(self, *options):
+        with patch('sys.argv', ['artifacts.py', 'build', *options]), \
+                self.assertRaisesRegex(RuntimeError, 'Docker work started'):
+            artifacts.main()
+        self.ensure_image.assert_called_once()
+
+    def test_existing_extracted_bundle_does_not_block_selected_archive(self):
+        path = self.existing('cu118')
+        self.assert_reaches_environment_validation('cu118')
+        self.assertTrue(path.is_dir())
+
+    def test_unselected_archive_does_not_block_selected_variant(self):
+        path = self.existing('cpu', archive=True)
+        self.assert_reaches_environment_validation('cu118')
+        self.assertEqual(path.read_bytes(), b'existing archive')
+
+    def test_cpu_archive_does_not_block_default_cuda_variants(self):
+        path = self.existing('cpu', archive=True)
+        self.assert_reaches_environment_validation()
+        self.assertEqual(path.read_bytes(), b'existing archive')
+
+    def test_existing_readme_does_not_block_build(self):
+        self.output.mkdir(parents=True)
+        path = self.output / 'README.md'
+        path.write_text('retained delivery note\n')
+        self.assert_reaches_environment_validation('cu118')
+        self.assertEqual(path.read_text(), 'retained delivery note\n')
+
+    def test_checksum_without_selected_archive_does_not_block_build(self):
+        self.output.mkdir(parents=True)
+        path = self.output / 'rx-met-v1.1.0-cu118-linux-amd64.tar.gz.sha256'
+        path.write_text('orphan checksum\n')
+        self.assert_reaches_environment_validation('cu118')
+        self.assertEqual(path.read_text(), 'orphan checksum\n')
+
+    def test_selected_archive_directory_is_rejected_even_with_replace(self):
+        path = self.output / 'rx-met-v1.1.0-cu118-linux-amd64.tar.gz'
+        path.mkdir(parents=True)
+        with patch('sys.argv', ['artifacts.py', 'build', 'cu118', '--replace']), \
+                self.assertRaises(RuntimeError) as raised:
+            artifacts.main()
+        self.assertIn(str(path), str(raised.exception))
+        self.ensure_image.assert_not_called()
+
+    def test_selected_archive_symlink_is_rejected_even_with_replace(self):
+        self.output.mkdir(parents=True)
+        target = self.root / 'existing archive'
+        target.write_bytes(b'keep target')
+        path = self.output / 'rx-met-v1.1.0-cu118-linux-amd64.tar.gz'
+        path.symlink_to(target)
+        with patch('sys.argv', ['artifacts.py', 'build', 'cu118', '--replace']), \
+                self.assertRaises(RuntimeError) as raised:
+            artifacts.main()
+        self.assertIn(str(path), str(raised.exception))
+        self.ensure_image.assert_not_called()
+        self.assertEqual(target.read_bytes(), b'keep target')
+
+    def assemble_fixture(self, args, matrix, variant, *unused, **kwargs):
+        name = f'rx-met-v{kwargs["version"]}-{variant}-linux-amd64.tar.gz'
+        (args.output_dir / name).write_bytes(f'{variant} application archive'.encode())
+        return {}
 
     def assert_selected_targets(self, options, expected):
         self.ensure_image.side_effect = None
@@ -203,11 +309,10 @@ class ReleaseBuildPreflightTest(unittest.TestCase):
                 (artifacts, 'image_info', {'return_value': {'Id': 'image'}}),
                 (artifacts, 'run', {}),
                 (artifacts, 'write_json', {}),
-                (artifacts, 'assemble', {'return_value': {}}),
+                (artifacts, 'assemble', {'side_effect': self.assemble_fixture}),
                 (artifacts.environment_archives, 'image_archive',
                  {'return_value': (self.root / 'runtime.tar.gz', record)}),
                 (artifacts.delivery, 'publish_environment', {}),
-                (artifacts.delivery, 'write_release_index', {}),
             ):
                 mocks[name] = stack.enter_context(patch.object(obj, name, **values))
             stack.enter_context(patch('sys.argv', ['artifacts.py', 'build', *options]))
@@ -220,6 +325,14 @@ class ReleaseBuildPreflightTest(unittest.TestCase):
                             for call in mocks['image_archive'].call_args_list))
         self.assertEqual(mocks['publish_environment'].call_count,
                          len(expected) if '--with-env' in options else 0)
+        names = [f'rx-met-v1.1.0-{variant}-linux-amd64.tar.gz' for variant in expected]
+        self.assertEqual(sorted(path.name for path in self.output.iterdir()),
+                         sorted(name for archive in names for name in (archive, archive + '.sha256')))
+        for name in names:
+            archive = self.output / name
+            expected_checksum = hashlib.sha256(archive.read_bytes()).hexdigest()
+            self.assertEqual((self.output / (name + '.sha256')).read_text(),
+                             f'{expected_checksum}  {name}\n')
 
     def test_default_build_excludes_cpu(self):
         self.assert_selected_targets([], ['cu118', 'cu126', 'cu130'])

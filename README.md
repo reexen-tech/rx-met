@@ -82,11 +82,14 @@ python3 quick_start_kws.py
 
 ```bash
 ./scripts/environment/build.sh --no-export cu126
-./scripts/release/build.sh cu126
+./scripts/release/build.sh cu126 --with-env
 ```
 
 不指定变体时默认仅构建 `cu118`、`cu126`、`cu130`；CPU 需在环境构建和应用打包命令中
 显式指定 `cpu`，可与 CUDA 变体同时指定。Docker bake 默认组也仅包含 CUDA。
+CPU 与 CUDA 应用包可分批追加到同一版本的交付目录；同名归档已存在时才需要
+`--replace`，该参数只替换本次选中的归档及独立 `.sha256`，保留其他变体。
+安装说明、版本日志及 manifest 均在各应用包内。
 
 完整构建矩阵、环境镜像复用和 GPU 验收流程见
 [构建与发布](docs/Release_packaging.md)。
