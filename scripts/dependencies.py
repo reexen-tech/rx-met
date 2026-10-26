@@ -85,7 +85,7 @@ def load_matrix(path: Path = MATRIX_PATH) -> dict[str, Any]:
     variants = matrix.get("variants")
     if not isinstance(variants, dict) or not variants:
         raise DependencyError(f"{path}: variants must be a non-empty object")
-    invalid_names = [name for name in variants if not name.startswith("cu")]
+    invalid_names = [name for name in variants if name != "cpu" and not name.startswith("cu")]
     if invalid_names:
         raise DependencyError(f"{path}: invalid variant names: {', '.join(invalid_names)}")
 
@@ -106,7 +106,7 @@ def load_matrix(path: Path = MATRIX_PATH) -> dict[str, Any]:
             raise DependencyError(f"{name}: missing fields: {', '.join(sorted(missing))}")
         for field in ("cuda_architectures", "torch_cuda_arch_list"):
             values = variant[field]
-            if not isinstance(values, list) or not values or not all(
+            if not isinstance(values, list) or (name != "cpu" and not values) or not all(
                 isinstance(value, str) and value for value in values
             ):
                 raise DependencyError(f"{name}.{field}: expected a non-empty string list")
@@ -126,10 +126,19 @@ def load_matrix(path: Path = MATRIX_PATH) -> dict[str, Any]:
             raise DependencyError(
                 f"{name}.torch.packages: missing {', '.join(sorted(missing_torch))}"
             )
-        if set(variant["onnxruntime"]["packages"]) != {"onnxruntime-gpu"}:
+        ort_package = "onnxruntime" if name == "cpu" else "onnxruntime-gpu"
+        if set(variant["onnxruntime"]["packages"]) != {ort_package}:
             raise DependencyError(
-                f"{name}.onnxruntime.packages: expected only onnxruntime-gpu"
+                f"{name}.onnxruntime.packages: expected only {ort_package}"
             )
+        if name == "cpu":
+            if variant["cuda_version"] or variant["minimum_driver_version"] or any(
+                variant[field] for field in ("cuda_architectures", "torch_cuda_arch_list")
+            ):
+                raise DependencyError("cpu: CUDA and driver settings must be empty")
+            if any(package.startswith("nvidia-") or package == "triton"
+                   for package in variant["torch"]["packages"]):
+                raise DependencyError("cpu: CUDA packages are not allowed")
         source_sha256 = str(variant["onnxruntime"].get("source_sha256", ""))
         if source_sha256 != "vendored" and not (
             len(source_sha256) == 64
@@ -186,11 +195,14 @@ def validate_project_compatibility(
         name = canonicalize_name(requirement.name)
         for variant_name in matrix["variants"]:
             packages = runtime_packages(matrix, variant_name)
-            if name not in packages:
+            package_name = name
+            if name in {"onnxruntime", "onnxruntime-gpu"}:
+                package_name = "onnxruntime" if variant_name == "cpu" else "onnxruntime-gpu"
+            if package_name not in packages:
                 raise DependencyError(
                     f"{variant_name}: project dependency is not locked: {name}"
                 )
-            version = Version(packages[name])
+            version = Version(packages[package_name])
             if requirement.specifier and not requirement.specifier.contains(
                 version, prereleases=True
             ):
@@ -280,7 +292,7 @@ def render_bake(matrix: Mapping[str, Any]) -> str:
                 f'    TORCH_VERSION             = "{_base_version(torch["torch"])}"',
                 f'    TORCHVISION_VERSION       = "{_base_version(torch["torchvision"])}"',
                 f'    TORCHAUDIO_VERSION        = "{_base_version(torch["torchaudio"])}"',
-                f'    ONNXRUNTIME_VERSION       = "{ort["onnxruntime-gpu"]}"',
+                f'    ONNXRUNTIME_VERSION       = "{next(iter(ort.values()))}"',
                 f'    ONNXRUNTIME_SOURCE_SHA256 = "{variant["onnxruntime"]["source_sha256"]}"',
                 f'    PYTHON_VERSION            = "{variant["python_version"]}"',
                 f'    MIN_DRIVER_VERSION        = "{variant["minimum_driver_version"]}"',
@@ -376,7 +388,7 @@ def render_bake(matrix: Mapping[str, Any]) -> str:
         )
     # Public environment builds use a neutral context prepared by common.py.
     text = "\n".join(lines) + "\n"
-    text = re.sub(r'(?ms)^target "environment-(?:build|runtime)(?:-cu[0-9]+)?" \{.*?^\}\n?', '', text)
+    text = re.sub(r'(?ms)^target "environment-(?:build|runtime)(?:-cu[0-9]+|-cpu)?" \{.*?^\}\n?', '', text)
     text = re.sub(r'(?ms)^group "environments" \{.*?^\}\n?', '', text)
     return text.rstrip() + "\n"
 

@@ -47,7 +47,7 @@ def load_runtime(variant, directory, *, contract=common):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('action', choices=['export', 'load'])
-    parser.add_argument('variants', nargs='*', choices=['cu118', 'cu126', 'cu130'])
+    parser.add_argument('variants', nargs='*', choices=list(common.config()['variants']))
     parser.add_argument('--output-dir', '--export-dir', dest='output_dir', type=Path)
     parser.add_argument('--directory', type=Path)
     args = parser.parse_intermixed_args()

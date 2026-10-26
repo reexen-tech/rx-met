@@ -97,6 +97,31 @@
     "yarl": "1.24.5"
   },
   "variants": {
+    "cpu": {
+      "python_version": "3.10",
+      "cuda_version": "",
+      "devel_image": "public.ecr.aws/ubuntu/ubuntu:22.04",
+      "base_image": "public.ecr.aws/ubuntu/ubuntu:22.04",
+      "cuda_architectures": [],
+      "torch_cuda_arch_list": [],
+      "minimum_driver_version": "",
+      "torch": {
+        "index_url": "https://download.pytorch.org/whl/cpu",
+        "extra_index_urls": [],
+        "packages": {
+          "torch": "2.8.0+cpu",
+          "torchvision": "0.23.0+cpu",
+          "torchaudio": "2.8.0+cpu"
+        }
+      },
+      "onnxruntime": {
+        "index_url": "https://pypi.org/simple",
+        "source_sha256": "vendored",
+        "packages": {
+          "onnxruntime": "1.23.2"
+        }
+      }
+    },
     "cu118": {
       "python_version": "3.10",
       "cuda_version": "11.8",

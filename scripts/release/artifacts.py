@@ -91,7 +91,7 @@ def runtime_compatibility(image_id, matrix, variant):
         if actual['packages'].get(name) != version:
             raise RuntimeError(f'{variant}: runtime {name}={actual["packages"].get(name)}, expected {version}')
     spec = matrix['variants'][variant]
-    return {'python_abi': actual['python_abi'], 'python_version': spec['python_version'], 'cuda_version': spec['cuda_version'],
+    return {'python_abi': actual['python_abi'], 'python_version': spec['python_version'], 'cuda_version': spec['cuda_version'] or None,
             'platform': 'linux/amd64', 'packages': packages, 'cuda_architectures': spec['cuda_architectures'],
             'minimum_driver_version': spec['minimum_driver_version']}
 
@@ -191,7 +191,7 @@ def assemble(args, matrix, variant, runtime, build, runtime_record, archive, whe
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('action', choices=['build', 'export-runtime'])
-    parser.add_argument('variants', nargs='*', choices=['cu118', 'cu126', 'cu130'])
+    parser.add_argument('variants', nargs='*')
     parser.add_argument('--output-dir', type=Path, help='最终产品交付目录；环境附件放在其父目录下的 <环境名>-<环境版本>/')
     parser.add_argument('--build-env-dir', type=Path, help='本地缺少 build 镜像时，从此目录校验并导入归档')
     parser.add_argument('--runtime-env-dir', type=Path, help='运行环境归档的导入、复用及导出缓存；默认 .release/runtime-images/<环境版本>')
@@ -207,6 +207,9 @@ def main():
     matrix = dependencies.load_matrix()
     dependencies.check_generated_artifacts(matrix)
     targets = args.variants or list(matrix['variants'])
+    unsupported = sorted(set(targets) - set(matrix['variants']))
+    if unsupported:
+        parser.error('不支持的变体: ' + ', '.join(unsupported))
     if len(set(targets)) != len(targets):
         parser.error('CUDA 变体重复')
     if args.runtime_base_url and not args.runtime_base_url.startswith('https://'):

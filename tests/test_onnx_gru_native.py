@@ -62,6 +62,15 @@ class NativeOnnxGruTest(unittest.TestCase):
         sim.compute_encodings([feed, {name: value * 1.5 for name, value in feed.items()}])
         apply_power_of_2_workflow(sim, verbose=False)
 
+    def test_cpu_provider_requires_cpu_wheel(self):
+        model, feed = graph()
+        with self.assertRaisesRegex(RuntimeError, "CPU QuantGRU wheel"):
+            pipeline.create_onnx_ptq_sim(
+                model, feed,
+                config_file=str(CONFIG / "mrnn_quantsim_config_custom_mixed_precision_v2.json"),
+                providers=("CPUExecutionProvider",), work_dir=self.path / "cpu",
+            )
+
     def test_float_layout_and_gate_mapping_matches_original_ort(self):
         for directions in (1, 2):
             with self.subTest(directions=directions):

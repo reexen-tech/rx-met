@@ -1,7 +1,7 @@
 # rx-met
 
-rx-met 是面向 Linux x86_64 NVIDIA GPU 的小模型量化工具包，提供定制 AIMET、
-QuantGRU、QuantLSTM 和可复现的多 CUDA 运行环境。
+rx-met 是面向 Linux x86_64 CPU 和 NVIDIA GPU 的小模型量化工具包，提供定制 AIMET、
+QuantGRU、QuantLSTM 和可复现的 CPU / 多 CUDA 运行环境。CPU 支持校准与 PTQ；浮点训练和 QAT 使用 GPU。
 
 ## 核心能力
 
@@ -16,14 +16,15 @@ QuantGRU、QuantLSTM 和可复现的多 CUDA 运行环境。
 ## 支持范围
 
 
-| 镜像变体    | 系统 / Python         | CUDA | PyTorch | ONNX Runtime GPU | 最低 NVIDIA Driver |
+| 镜像变体    | 系统 / Python         | CUDA | PyTorch | ONNX Runtime | 最低 NVIDIA Driver |
 | ------- | ------------------- | ---- | ------- | ---------------- | ---------------- |
+| `cpu` | Ubuntu 22.04 / 3.10 | 无 | 2.8.0 CPU | 1.23.2 CPU | 无 |
 | `cu118` | Ubuntu 22.04 / 3.10 | 11.8 | 2.7.1   | 1.20.1           | 520.61.05        |
 | `cu126` | Ubuntu 22.04 / 3.10 | 12.6 | 2.8.0   | 1.23.2           | 560.35.05        |
 | `cu130` | Ubuntu 24.04 / 3.12 | 13.0 | 2.10.0  | 1.27.0           | 580.126.20       |
 
 
-宿主机需要 Docker、NVIDIA Driver 和 NVIDIA Container Toolkit。精确依赖、基础镜像
+宿主机需要 Docker；GPU 变体另需 NVIDIA Driver 和 NVIDIA Container Toolkit。精确依赖、基础镜像
 和 CUDA 架构以 `[docker/variants.json](docker/variants.json)` 为准。
 
 ## 获取与运行

@@ -36,9 +36,9 @@ python3 /examples/quick_start_onnx_ptq.py
 ## 运行前提
 
 - Linux x86_64，CPython 3.10（cu118/cu126）或 3.12（cu130）；
-- 已安装与 CUDA 变体匹配的 ONNX Runtime GPU；
-- 默认使用 `CUDAExecutionProvider`，需要 CPU 调试时显式设置
-  `RX_MET_ONNX_PTQ_DEVICE=cpu`；
+- CPU 变体安装 ONNX Runtime CPU；GPU 变体安装对应版本的 ONNX Runtime GPU；
+- 默认使用 `CUDAExecutionProvider`，CPU 包运行时指定 `--device cpu` 或
+  `RX_MET_ONNX_PTQ_DEVICE=cpu`，GRU/LSTM 同样支持 CPU 校准和 PTQ；
 - 已构建 rx-met 的 ONNX native runtime；
 - 正式制品使用真实的代表性数据完成校准。
 
@@ -146,6 +146,11 @@ python3 scripts/verify_compiler_artifacts.py \
 - Power-of-2 使用与 `src/aimet_torch/power_of_2_quantization.py` 相同的 `cover_range`（容差 2%）
 - 权重默认 per-channel；Gemm 保持 per-channel；无 Conv+Relu supergroup
 
+上述普通 bias 的乘积 scale 对齐不覆盖原生 GRU/LSTM。循环层内部 bias 当前按
+独立 8/16 位网格量化并重缩放到累加器域，不能将其默认视为 INT32 乘积 scale
+编码。两种方案的差异和待确认的部署约束见
+[Bias 编码差异（待讨论）](QuantLSTM_integration.md#bias-编码差异)。
+
 ONNX 适配器仅在校准期间使用临时 session 采集中间张量，并将公共模块计算出的网格
 写回原生量化器。公共模块使用 Torch 张量运算，统计与范围计算跟随 CPU/CUDA provider，
 避免跨设备标量运算的末位差异。观测值经主机缓冲区传输，增加校准阶段的传输和内存开销，
@@ -199,14 +204,14 @@ ONNX QuantSim。GRU 后的普通计算层保留自己的输入网格，用于混
 `is_GRU`、双向 `internal_ops` 和原生参数编码。原始 AIMET encodings 附加
 `native_recurrent_encodings`，恢复时缺少门内信息、参数或方向信息会报错。
 
-当前支持 CUDA float32、常量 W/R/B、`linear_before_reset=1`、默认 Sigmoid/Tanh、
+当前支持 CPU/CUDA float32、常量 W/R/B、`linear_before_reset=1`、默认 Sigmoid/Tanh、
 单向前向或双向、layout 0/1，以及可选的初始状态。无 bias、变长 `sequence_lens`、
 自定义激活、clip、反向单向和可覆盖或共享的权重暂不支持，进入校准前报错。
-桥接使用主机缓冲区与原生 CUDA 算子交换数据，会产生额外拷贝，不是零拷贝执行。
+桥接使用主机缓冲区与对应设备的原生算子交换数据，CUDA 路径会产生额外设备拷贝。
 
 ## 限制
 
 - 该流程适用于 PTQ；QAT 使用 PyTorch 流程。
 - 校准数据必须与模型输入名称、shape 和 dtype 一致。
 - 编译器 encodings 是 rx-met 的部署格式，必须与同次导出的 Clean ONNX 配套使用。
-- CPU 模式用于普通 ONNX 模型调试；原生 GRU 校准要求 CUDA，发布验证在目标 CUDA 环境执行。
+- CPU 支持普通 ONNX 算子和原生 GRU/LSTM 的 PTQ；CPU 算子不提供训练或 QAT。

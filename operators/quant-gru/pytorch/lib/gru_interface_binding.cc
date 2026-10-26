@@ -5,17 +5,25 @@
 #include <cmath>
 #include <iostream>
 
+#ifdef RX_MET_CPU_ONLY
+#include "gru_host.h"
+#else
 #include "gru_interface.h"
+#include "calibration_gpu.cuh"
+#endif
 #include "gru_quantization_ranges.h"
 #include "histogram_collector.h"
-#include "calibration_gpu.cuh"
 #include "quantize_ops_helper.h"
 
 // 全局 cublas handle
+#ifndef RX_MET_CPU_ONLY
 static cublasHandle_t g_blas_handle = nullptr;
 
 // 初始化 cublas handle 的包装函数
 void init_gru_cublas_wrapper() { init_gru_cublas(g_blas_handle); }
+#else
+void init_gru_cublas_wrapper() {}
+#endif
 
 // CalibrationMethod 字符串转换
 // Python 端只需要传字符串，C++ wrapper 内部转换
@@ -207,7 +215,11 @@ GRUQuantParamsPy calculate_gru_quantitative_parameters_wrapper(
 // GRUHistogramCollectors 的 Python 绑定包装
 // 内部使用 GPU 版本实现，Python 接口保持不变
 struct GRUHistogramCollectorsPy {
+#ifdef RX_MET_CPU_ONLY
+    GRUHistogramCollectors gpu_collectors;
+#else
     GRUGPUHistogramCollectors gpu_collectors;  // 使用 GPU 版本
+#endif
 
     GRUHistogramCollectorsPy() = default;
     explicit GRUHistogramCollectorsPy(int hidden, int num_bins = 2048) : gpu_collectors(hidden, num_bins) {}
@@ -219,7 +231,11 @@ struct GRUHistogramCollectorsPy {
     
     // 转换为 CPU 版本（内部使用）
     GRUHistogramCollectors to_cpu() const {
+#ifdef RX_MET_CPU_ONLY
+        return gpu_collectors;
+#else
         return convertGPUHistogramsToCPU(gpu_collectors);
+#endif
     }
     
     // 打印统计信息
@@ -242,6 +258,10 @@ GRUQuantParamsPy calculate_gru_quantitative_parameters_from_histograms_wrapper(
     OperatorQuantConfig cpp_bitwidth = bitwidth_config.to_cpp();
     GRUQuantParams quant_params;
     
+#ifdef RX_MET_CPU_ONLY
+    quant_params = calculateGRUQuantitativeParametersFromHistograms(
+        hist_collectors.gpu_collectors, cpp_bitwidth, use_percentile, percentile_value);
+#else
     if (use_percentile) {
         // Percentile 方案：转换为 CPU 直方图后计算
         GRUHistogramCollectors cpu_collectors = hist_collectors.to_cpu();
@@ -252,6 +272,7 @@ GRUQuantParamsPy calculate_gru_quantitative_parameters_from_histograms_wrapper(
         quant_params = calculateGRUQuantitativeParametersFromGPUHistograms(
             hist_collectors.gpu_collectors, cpp_bitwidth);
     }
+#endif
 
     GRUQuantParamsPy py_params;
     py_params.from_cpp(quant_params);
@@ -279,6 +300,9 @@ GRUQuantParamsPy calculate_gru_quantitative_parameters_from_histograms_wrapper(
 //   gate_input_mask: [T, B, H*3] 门输入 clamp mask
 //   gate_output_mask: [T, B, H*3] 门输出 clamp mask
 //   h_mask: [T, B, H] QAT mask
+#ifdef RX_MET_CPU_ONLY
+#include "gru_cpu_binding.h"
+#else
 std::tuple<torch::Tensor, torch::Tensor, 
            torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor,
            torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor,
@@ -1027,6 +1051,7 @@ backward_fp_wrapper(
 
 // 默认构造函数：从 C++ OperatorQuantConfig 获取默认值
 // 这样保证 Python 端和 C++ 端的默认值始终一致
+#endif
 OperatorQuantConfigPy::OperatorQuantConfigPy() {
     OperatorQuantConfig cpp_defaults;  // 使用 C++ 的默认值
     from_cpp(cpp_defaults);
@@ -1304,6 +1329,11 @@ float decode_effective_scale_wrapper(float scale, bool usePOT2) {
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.doc() = "GRU Interface Python Bindings";
+#ifdef RX_MET_CPU_ONLY
+    m.attr("cpu_only") = true;
+#else
+    m.attr("cpu_only") = false;
+#endif
 
     // 有效定点 scale 解码（供 get_io_quant_meta 返回 bit-exact 一致的 scale）
     m.def("decode_effective_scale", &decode_effective_scale_wrapper,
@@ -1659,6 +1689,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     // =====================================================================
     // backward_quant_float_storage: 量化反向传播（量化值 float32 存储）
     // =====================================================================
+#ifndef RX_MET_CPU_ONLY
     m.def("backward_quant_float_storage", &backward_quant_float_storage_wrapper,
           "GRU quantized backward pass with float32-storage quantized values.\n"
           "\n"
@@ -1742,4 +1773,5 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
           py::arg("time_steps"), py::arg("batch_size"), py::arg("input_size"), py::arg("hidden_size"),
           py::arg("W"), py::arg("R"), py::arg("bw"), py::arg("br"), py::arg("x"),
           py::arg("dh_new"), py::arg("h"), py::arg("v"));
+#endif
 }

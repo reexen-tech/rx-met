@@ -21,9 +21,27 @@ variable "RUNTIME_ENV_REPOSITORY" {
 }
 
 group "default" {
-  targets = ["cu118", "cu126", "cu130"]
+  targets = ["cpu", "cu118", "cu126", "cu130"]
 }
 
+
+target "variant-cpu" {
+  args = {
+    CUDA_VARIANT              = "cpu"
+    RX_MET_CUDA_VERSION       = ""
+    DEVEL_IMAGE               = "public.ecr.aws/ubuntu/ubuntu:22.04"
+    BASE_IMAGE                = "public.ecr.aws/ubuntu/ubuntu:22.04"
+    RX_MET_CUDA_ARCHITECTURES = ""
+    TORCH_CUDA_ARCH_LIST      = ""
+    TORCH_VERSION             = "2.8.0"
+    TORCHVISION_VERSION       = "0.23.0"
+    TORCHAUDIO_VERSION        = "2.8.0"
+    ONNXRUNTIME_VERSION       = "1.23.2"
+    ONNXRUNTIME_SOURCE_SHA256 = "vendored"
+    PYTHON_VERSION            = "3.10"
+    MIN_DRIVER_VERSION        = ""
+  }
+}
 
 target "variant-cu118" {
   args = {
@@ -87,6 +105,8 @@ target "variant-cu130" {
 
 
 
+
+
 target "release" {
   context    = "."
   dockerfile = "docker/Dockerfile"
@@ -102,6 +122,14 @@ target "release" {
     "org.opencontainers.image.title"    = "rx-met"
     "org.opencontainers.image.version"  = VERSION
     "org.opencontainers.image.revision" = SOURCE_REVISION
+  }
+}
+
+target "cpu" {
+  inherits = ["release", "variant-cpu"]
+  output   = ["type=local,dest=.release/wheels/${VERSION}/${ENV_VERSION}/cpu"]
+  args = {
+    BUILD_ENV_IMAGE   = "${BUILD_ENV_REPOSITORY}:${ENV_VERSION}-cpu"
   }
 }
 

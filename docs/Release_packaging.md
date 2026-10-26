@@ -1,6 +1,6 @@
 # rx-met 应用包发布
 
-产品 VERSION 保持独立；公共 GPU 环境使用 rx-quant-env v1，详见 [公共环境](Shared_environment.md)。
+产品 VERSION 保持独立；公共 CPU/GPU 环境使用 rx-quant-env v1，详见 [公共环境](Shared_environment.md)。
 两个仓库独立保存公共环境定义和版本标签约定，无跨仓库运行依赖。
 
 ## 日常发布
@@ -10,6 +10,19 @@
 ```bash
 ./scripts/release/build.sh cu118 cu126 cu130
 ```
+
+CPU 变体使用普通 Ubuntu、CPU PyTorch 和 ONNX Runtime，支持校准与 PTQ，不需要
+NVIDIA Driver 或 Container Toolkit：
+
+```bash
+./scripts/environment/build.sh --no-export cpu
+./scripts/release/build.sh cpu
+./scripts/release/verify_bundle.sh --no-gpu cpu
+```
+
+CPU 的三个项目 wheel 使用 `+cpu` 版本后缀；构建原生库时设置
+`RX_MET_ENABLE_CUDA=0`，算子扩展不链接 CUDA。KWS CPU 验证加载现成浮点检查点并
+指定 `--ptq-only`，两个示例的固定输入及制品对照见 [示例说明](../examples/README.md)。
 
 新构建机器可直接指定已归档的环境目录，两个参数可以指向同一目录：
 
@@ -48,7 +61,7 @@
 ./scripts/release/build.sh --with-env cu126
 ```
 
-省略 `cu126` 时处理全部三个 CUDA 变体。归档默认缓存于 `.release/runtime-images/<环境版本>/`：
+省略变体时处理依赖矩阵中的全部 CPU/CUDA 变体。归档默认缓存于 `.release/runtime-images/<环境版本>/`：
 已有完整归档则校验复用，缺失则从本机版本标签 自动导出。删除 `.release` 后也可重新执行，
 无需先手动导出镜像。Docker 中的环境镜像和构建缓存不会随 `.release` 删除；脚本不会重建已发布环境。
 

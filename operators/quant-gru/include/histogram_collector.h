@@ -217,8 +217,6 @@ class HistogramCollector {
         // 2. 如果 min == max，在 _add_to_histogram 时使用扩展的 bin_edges（与 _create_bin_edges 一致）
         // 3. 首次收集时，计算 range_limit 时使用 minimum_range 机制
         
-        hist_.observed_min = std::min(hist_.observed_min, data_min);
-        hist_.observed_max = std::max(hist_.observed_max, data_max);
         float original_min = data_min;
         float original_max = data_max;
         
@@ -288,6 +286,9 @@ class HistogramCollector {
                 _merge_with_extended_range(data, size, updated_min, updated_max);
             }
         }
+        // Initial histogram allocation resets these fields; preserve observations afterwards.
+        hist_.observed_min = std::min(hist_.observed_min, data_min);
+        hist_.observed_max = std::max(hist_.observed_max, data_max);
     }
 
     /**

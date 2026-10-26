@@ -1,7 +1,7 @@
 # QuantLSTM
 
-QuantLSTM 提供 PyTorch LSTM（长短期记忆网络）的量化实现，基于 CUDA 和 PyTorch，
-包含 CUDA 浮点计算、训练后量化（PTQ）、量化感知训练（QAT）和 ONNX 导出。
+QuantLSTM 提供 PyTorch LSTM（长短期记忆网络）的量化实现，支持 CPU 校准与
+训练后量化（PTQ）、CUDA 浮点训练与量化感知训练（QAT），以及 ONNX 导出。
 模型参数命名与支持范围内的单层 `torch.nn.LSTM` 对齐。
 
 ## 支持范围
@@ -9,15 +9,17 @@ QuantLSTM 提供 PyTorch LSTM（长短期记忆网络）的量化实现，基于
 - 浮点和量化两种模式，通过 `use_quantization` 切换；量化模式需要先校准或加载量化参数。
 - 模型使用 `num_layers=1`、`dropout=0`，支持单向和双向计算、可选 bias。
 - 输入为三维序列张量，`batch_first=True` 对应 `[B, T, I]`，默认布局为 `[T, B, I]`。
-- 常规前向和校准使用 CUDA float32 张量，返回 `output, (hidden, cell)`。
+- 常规前向和校准使用 CPU/CUDA float32 张量，返回 `output, (hidden, cell)`。
+- CPU 要求 `eval()` 与 `torch.no_grad()` / `torch.inference_mode()`，不支持训练和 QAT。
 - 隐藏状态和细胞状态形状均为 `[D, B, H]`，其中单向 `D=1`、双向 `D=2`。
 - 校准方法包括 MinMax、SQNR 和 Percentile，默认使用 MinMax。
 - 权重和偏置采用对称量化，支持 per-tensor、per-gate 和 per-channel 粒度。
 - 位宽支持 8 和 16，各量化点可独立配置；激活和状态固定使用 per-tensor 粒度。
 
 当前 CUDA 量化路径使用 FP32 承载量化后的整数网格值（q-carrier），线性运算由
-cuBLAS SGEMM 执行，sigmoid/tanh 使用浮点计算。CPU 浮点和 int32 reference
-用于数值验证与 C++ 集成；Python 运行时只支持 CUDA，CUDA int32 后端尚未实现。
+cuBLAS SGEMM 执行，sigmoid/tanh 使用浮点计算。CPU Python 接口复用浮点参考校准和
+FP32 q-carrier reference，并在实值 tensor 与整数网格之间转换；C++ 仍提供 int32
+reference，CUDA int32 后端尚未实现。CPU 与 CUDA 使用各自构建的 wheel。
 
 ## 环境与安装
 
@@ -25,8 +27,8 @@ cuBLAS SGEMM 执行，sigmoid/tanh 使用浮点计算。CPU 浮点和 int32 refe
 [安装指南](docs/installation.md)。
 
 源码构建需要 C++17 编译器、CMake 3.24 及以上版本、`nlohmann_json` 3.11.2 及以上
-版本、CUDA Toolkit 和 CUDA 版 PyTorch。Python 需要开发头文件、`pip`、`setuptools`
-和 `wheel`，编译工具链与 PyTorch CUDA 版本保持兼容。
+版本及目标设备对应的 PyTorch。CUDA 构建另需 CUDA Toolkit。Python 需要开发头文件、
+`pip`、`setuptools` 和 `wheel`，编译工具链与 PyTorch 保持兼容。
 
 默认构建 Release CUDA 库，测试和示例默认关闭。以下命令从本仓库根目录执行：
 
@@ -39,6 +41,15 @@ python -m pip install ./pytorch --no-deps --no-build-isolation
 CMake 生成 `build/libquant_lstm.a`，pip 构建 `_quant_lstm` 扩展并安装 `quant_lstm`
 和默认配置。Python 构建从固定的 `build/` 目录链接原生库，安装完成后运行不依赖
 源码目录。CPU-only C++ 安装不需要 CUDA 或 PyTorch，步骤见[安装指南](docs/installation.md)。
+
+CPU Python 模块先安装 CPU PyTorch，再从算子根目录执行：
+
+```bash
+cmake -S . -B build_cpu -DQUANT_LSTM_ENABLE_CUDA=OFF
+cmake --build build_cpu --parallel 2
+RX_MET_ENABLE_CUDA=0 RX_MET_QUANT_LSTM_BUILD_DIR="$PWD/build_cpu" \
+  python -m pip install ./pytorch --no-deps --no-build-isolation
+```
 
 ## 最小示例
 

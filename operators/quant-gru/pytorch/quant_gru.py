@@ -121,6 +121,14 @@ except ImportError:
         "gru_interface_binding 模块未找到，请先运行 setup.py 编译 C++ 扩展"
     )
 
+_CPU_ONLY = bool(getattr(gru_ops, "cpu_only", False))
+
+
+def _execution_device(tensor):
+    if _CPU_ONLY:
+        return torch.device("cpu")
+    return tensor.device if tensor.is_cuda else torch.device("cuda")
+
 # ============================================================
 #                   模块级常量与配置映射
 # ============================================================
@@ -684,7 +692,7 @@ def reorder_weights_haste_to_pytorch(w: torch.Tensor) -> torch.Tensor:
 
 def ensure_cuda_float32(tensor: torch.Tensor, device: torch.device) -> torch.Tensor:
     """确保张量在 CUDA 上且为 float32 类型"""
-    if not tensor.is_cuda:
+    if tensor.device != device:
         tensor = tensor.to(device)
     if tensor.dtype != torch.float32:
         tensor = tensor.float()
@@ -1330,6 +1338,8 @@ class QuantGRU(nn.Module):
 
     def _ensure_cublas_initialized(self):
         """延迟初始化 cublas handle"""
+        if _CPU_ONLY:
+            return
         if not self._cublas_initialized:
             gru_ops.init_gru_cublas()
             self._cublas_initialized = True
@@ -2024,12 +2034,11 @@ class QuantGRU(nn.Module):
         time_steps, batch_size, input_size = input.shape
         hidden_size = self.hidden_size
 
-        device = input.device if input.is_cuda else torch.device('cuda')
-        if not input.is_cuda:
-            input = input.to(device)
+        device = _execution_device(input)
+        input = ensure_cuda_float32(input, device).contiguous()
 
         # 确保模型在 GPU 上
-        if not next(self.parameters()).is_cuda:
+        if next(self.parameters()).device != device:
             for param in self.parameters():
                 param.data = param.data.to(device)
             for buffer in self.buffers():
@@ -2052,7 +2061,7 @@ class QuantGRU(nn.Module):
 
         # 前向传播 + 校准数据收集（原地累积）
         h, v = gru_ops.forward_calibrate(
-            is_training=True,
+            is_training=not _CPU_ONLY,
             time_steps=time_steps, batch_size=batch_size,
             input_size=input_size, hidden_size=hidden_size,
             W=W, R=R, bw=bw, br=br, x=input,
@@ -2081,7 +2090,7 @@ class QuantGRU(nn.Module):
             input_reversed = input.flip(0).contiguous()
 
             h_rev, v_rev = gru_ops.forward_calibrate(
-                is_training=True,
+                is_training=not _CPU_ONLY,
                 time_steps=time_steps, batch_size=batch_size,
                 input_size=input_size, hidden_size=hidden_size,
                 W=W_rev, R=R_rev, bw=bw_rev, br=br_rev, x=input_reversed,
@@ -2127,6 +2136,12 @@ class QuantGRU(nn.Module):
             - export_mode=False (默认): 使用 CUDA C++ 实现(高性能)
             - export_mode=True: 使用 ONNX 单节点 GRU 导出路径
         """
+        if _CPU_ONLY and not self.export_mode:
+            if self.training:
+                raise RuntimeError("CPU QuantGRU supports calibration and PTQ inference; call eval() before inference")
+            if torch.is_grad_enabled():
+                raise RuntimeError("CPU QuantGRU does not support backward; use torch.no_grad() for inference and calibration")
+
         # ===== 统一处理 batch_first 输入转换(唯一入口)=====
         if self.batch_first:
             input = input.transpose(0, 1).contiguous()
@@ -2187,6 +2202,9 @@ class QuantGRU(nn.Module):
                         "注意：pickle/deepcopy 后校准数据会丢失，需要重新校准。"
                     )
 
+        if _CPU_ONLY:
+            return self._forward_cpu(input, hx)
+
         seq_len, batch_size, input_size = input.shape
 
         device = input.device if input.is_cuda else torch.device('cuda')
@@ -2246,6 +2264,36 @@ class QuantGRU(nn.Module):
         "calibrating",
     )
 
+    def _forward_cpu(self, input, hx):
+        device = torch.device("cpu")
+        input = ensure_cuda_float32(input, device).contiguous()
+        states = self._parse_initial_state(hx, input.shape[1], device, to_cuda=True)
+
+        def run(reverse):
+            suffix = "_reverse" if reverse else ""
+            W, R, bw, br = convert_weights_to_haste_format(
+                getattr(self, "weight_ih_l0" + suffix), getattr(self, "weight_hh_l0" + suffix),
+                getattr(self, "bias_ih_l0" + suffix) if self.bias else None,
+                getattr(self, "bias_hh_l0" + suffix) if self.bias else None,
+                self.hidden_size, device)
+            value = input.flip(0).contiguous() if reverse else input
+            h0 = states[int(reverse)]
+            arguments = dict(is_training=False, time_steps=value.shape[0], batch_size=value.shape[1],
+                input_size=value.shape[2], hidden_size=self.hidden_size, W=W, R=R, bw=bw, br=br,
+                x=value, h0=h0.contiguous() if h0 is not None else value.new_empty(0))
+            if self.use_quantization:
+                arguments["quant_params"] = self.quant_params_reverse if reverse else self.quant_params
+                operation = gru_ops.forward_quant_int_storage if self.quant_storage_dtype == "int32" \
+                    else gru_ops.forward_quant_float_storage
+            else:
+                operation = gru_ops.forward_fp
+            h = operation(**arguments)[0]
+            return h[1:].flip(0).contiguous() if reverse else h[1:].contiguous(), h[-1:].contiguous()
+
+        output, state = run(False)
+        reverse_output, reverse_state = run(True) if self.bidirectional else (None, None)
+        return self._combine_bidirectional_outputs(output, state, reverse_output, reverse_state)
+
     def aimet_capabilities(self) -> dict:
         """返回 AIMET 适配能力报告（契约 v1 §1.8）。
 
@@ -2254,10 +2302,12 @@ class QuantGRU(nn.Module):
         """
         return {
             "adapter_version": "1.1",
-            "supported_modes": list(self._AIMET_SUPPORTED_MODES),
+            "supported_modes": [mode for mode in self._AIMET_SUPPORTED_MODES
+                                if not (_CPU_ONLY and "qat" in mode)],
             "forward_io_dtype": "float32",
-            "forward_io_device": "cuda",
-            "requires_calibration_for": ["int16_fixed_eval", "int16_fixed_qat_sim"],
+            "forward_io_device": "cpu" if _CPU_ONLY else "cuda",
+            "requires_calibration_for": ["int16_fixed_eval"] if _CPU_ONLY
+                else ["int16_fixed_eval", "int16_fixed_qat_sim"],
             "supports_forward_quantized": True,
             # forward_quantized 接受的输入 dtype（int 进 int 出纯定点链路）
             "forward_quantized_input_dtypes": ["int32"],
@@ -2270,6 +2320,8 @@ class QuantGRU(nn.Module):
         不引入新的内部计算路径。
         """
         normalized = str(mode).lower()
+        if _CPU_ONLY and "qat" in normalized:
+            raise RuntimeError("CPU QuantGRU does not support QAT")
         if normalized not in self._AIMET_SUPPORTED_MODES:
             raise ValueError(
                 f"Unsupported aimet_configure mode: {mode!r}. "
@@ -2426,7 +2478,7 @@ class QuantGRU(nn.Module):
             input = input.transpose(0, 1).contiguous()
 
         seq_len, batch_size, input_size = input.shape
-        device = input.device if input.is_cuda else torch.device('cuda')
+        device = _execution_device(input)
         input = input.to(device=device, dtype=torch.int32).contiguous()
 
         h0_forward, h0_reverse = self._parse_initial_state_quant(hx, batch_size, device)

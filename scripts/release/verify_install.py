@@ -47,7 +47,10 @@ for pattern in patterns:
     assert libraries, pattern
     for library in libraries:
         output = subprocess.check_output(['ldd', str(library)], text=True)
-        missing = [line for line in output.splitlines() if 'not found' in line and 'libcuda.so.1' not in line]
+        missing = [line for line in output.splitlines() if 'not found' in line
+                   and (manifest['variant'] == 'cpu' or 'libcuda.so.1' not in line)]
         assert not missing, (library, missing)
+        if manifest['variant'] == 'cpu':
+            assert not any(name in output for name in ('libcuda.', 'libcudart.', 'libcublas.', 'libtorch_cuda.')), (library, output)
 subprocess.run([sys.executable, '-m', 'pip', 'check'], check=True)
 print('Installation verified:', manifest['bundle_name'], 'from', root / 'python')

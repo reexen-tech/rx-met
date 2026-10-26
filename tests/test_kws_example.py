@@ -23,6 +23,21 @@ from tests.test_quant_lstm_integration import (
 
 
 class KwsExampleConfigurationTest(unittest.TestCase):
+    def test_ptq_only_accepts_shared_checkpoint_and_cpu_feeds(self):
+        args = kws.parse_args([
+            '--device', 'cpu', '--ptq-only', '--fp-checkpoint', '/models/gru.pth',
+            '--calib-dir', '/data/calib', '--validation-dir', '/data/val',
+            '--calib-limit', '2', '--validation-limit', '3',
+        ])
+        self.assertEqual(args.device, 'cpu')
+        self.assertTrue(args.ptq_only)
+        self.assertEqual(args.fp_checkpoint, Path('/models/gru.pth'))
+        self.assertEqual(args.calib_dir, Path('/data/calib'))
+        self.assertEqual(args.calib_limit, 2)
+        self.assertEqual(args.validation_limit, 3)
+        with self.assertRaises(SystemExit):
+            kws.parse_args(['--device', 'cpu'])
+
     def test_output_directory_uses_cwd_and_respects_overrides(self):
         with tempfile.TemporaryDirectory() as directory, patch.dict(os.environ, {}):
             root = Path(directory)

@@ -43,7 +43,9 @@
 
 #include "cuda_compat.h"
 #include "inline_ops.h"
+#ifndef RX_MET_CPU_ONLY
 #include <cublas_v2.h>
+#endif
 
 #include <algorithm>
 #include <array>
@@ -1002,6 +1004,7 @@ int32_t computeHiddenState(int32_t update_gate, int32_t new_gate, int32_t h_old,
  * @param in_dim 输入维度 (K)
  * @param stream CUDA 流
  */
+#ifndef RX_MET_CPU_ONLY
 template <typename T>
 void computeWeightSumMulzp(const T *W_q, int64_t *weight_sum, int32_t zp,
                            const int8_t *__restrict__ n, int out_dim, int in_dim,
@@ -1020,6 +1023,7 @@ void computeWeightSumMulzp(const T *W_q, int32_t *weight_sum, int32_t zp,
  */
 void applyZeroPointCompensation2D(int32_t *Y_int32, const int32_t *weight_sum, const int32_t *x_zp,
                                   int out_dim, int batch_size, cudaStream_t stream = 0);
+#endif
 
 // ============================================================================
 // 量化参数校准与量化/反量化函数
@@ -1198,6 +1202,7 @@ inline void quantificationPerChannelBitwidth(const float *src, int32_t *quant_da
 // GPU 量化/反量化 Kernel 声明
 // ============================================================================
 
+#ifndef RX_MET_CPU_ONLY
 namespace dev {
 
 /// @brief GPU 批量反量化
@@ -1388,6 +1393,7 @@ void dequantificationWeightFPInplace(float *data,
                                      const dev::vector<FixedPointScale> &shift_channel);
 
 }  // namespace dev
+#endif
 
 // ============================================================================
 // 工具函数

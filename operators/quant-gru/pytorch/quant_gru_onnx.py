@@ -7,6 +7,7 @@ execution, Po2 grids and encoding packing belong to QuantGRU.
 from __future__ import annotations
 
 import copy
+from contextlib import nullcontext
 import importlib
 import itertools
 from pathlib import Path
@@ -16,7 +17,7 @@ import numpy as np
 import onnx
 import torch
 
-from quant_gru import QuantGRU, reorder_weights_pytorch_to_haste
+from quant_gru import QuantGRU, reorder_weights_pytorch_to_haste, _CPU_ONLY
 
 DOMAIN = "rx.quant_gru"
 OP_TYPE = "NativeGRU"
@@ -46,7 +47,8 @@ def _run(identifier, value, initial_h):
 class OnnxGRU:
     """A standard ONNX GRU backed by the existing native QuantGRU interface."""
 
-    def __init__(self, node, initializers, *, device="cuda", method="minmax", percentile=99.99):
+    def __init__(self, node, initializers, *, device=None, method="minmax", percentile=99.99):
+        device = device or ("cpu" if _CPU_ONLY else "cuda")
         attrs = {item.name: onnx.helper.get_attribute_value(item) for item in node.attribute}
         self.name = node.name
         if not self.name:
@@ -93,8 +95,12 @@ class OnnxGRU:
         bias = read(inputs[3]) if inputs[3] else np.zeros((directions, 6 * hidden), np.float32)
         if bias.shape != (directions, 6 * hidden):
             raise ValueError(prefix + "invalid B shape")
-        if not torch.cuda.is_available() or torch.device(device).type != "cuda":
-            raise RuntimeError(prefix + "native QuantGRU calibration requires CUDA")
+        if _CPU_ONLY and torch.device(device).type != "cpu":
+            raise RuntimeError(prefix + "CPU QuantGRU package requires device='cpu'")
+        if not _CPU_ONLY and torch.device(device).type == "cpu":
+            raise RuntimeError(prefix + "CPU execution requires the CPU QuantGRU wheel")
+        if torch.device(device).type == "cuda" and not torch.cuda.is_available():
+            raise RuntimeError(prefix + "CUDA device requested but CUDA is unavailable")
         self.module = QuantGRU(w.shape[2], hidden, batch_first=self.layout == 1,
                                bidirectional=directions == 2, use_quantization=True).to(device).eval()
         self.module.set_module_name(self.name)
@@ -135,7 +141,8 @@ class OnnxGRU:
             h = torch.from_numpy(np.asarray(initial_h).copy()).to(device)
             if self.layout:
                 h = h.transpose(0, 1).contiguous()
-        with torch.cuda.device(device), torch.no_grad():
+        context = torch.cuda.device(device) if device.type == "cuda" else nullcontext()
+        with context, torch.no_grad():
             output, state = self.module(x, h)
             if self.layout:
                 output = output.reshape(output.shape[0], output.shape[1], self.module.num_directions,

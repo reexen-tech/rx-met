@@ -61,14 +61,12 @@ class NativeRecurrentSim(InputQuantizationSim):
 
     def __init__(self, model, **kwargs):
         providers = kwargs.get("providers") or ("CPUExecutionProvider",)
-        device = None
+        device = "cpu"
         for provider in providers:
             name, options = provider if isinstance(provider, tuple) else (provider, {})
             if name == "CUDAExecutionProvider":
                 device = f"cuda:{options.get('device_id', 0)}"
                 break
-        if device is None:
-            raise RuntimeError("Native ONNX recurrent calibration requires CUDAExecutionProvider")
         initializers = {value.name: value for value in model.graph.initializer}
         nodes = [node for node in model.graph.node if node.op_type in ("GRU", "LSTM") and not node.domain]
         if len({node.name for node in nodes}) != len(nodes):

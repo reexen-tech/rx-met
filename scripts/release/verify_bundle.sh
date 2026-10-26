@@ -14,8 +14,8 @@ while (($#)); do
             (($# >= 2)) || { echo "$1 缺少参数" >&2; exit 1; }
             if [[ "$1" == --gpu-device ]]; then GPU_DEVICE="$2"; else INSTALL_PREFIX="$2"; fi
             shift 2 ;;
-        cu118|cu126|cu130) TARGETS+=("$1"); shift ;;
-        -h|--help) echo '用法: verify_bundle.sh [--gpu] [--gpu-device ID] [--install-prefix DIR] [cu118|cu126|cu130 ...]'; exit 0 ;;
+        cpu|cu118|cu126|cu130) TARGETS+=("$1"); shift ;;
+        -h|--help) echo '用法: verify_bundle.sh [--gpu] [--gpu-device ID] [--install-prefix DIR] [cpu|cu118|cu126|cu130 ...]'; exit 0 ;;
         *) echo "未知参数: $1" >&2; exit 1 ;;
     esac
 done
@@ -27,19 +27,23 @@ import json, sys
 m = json.load(open(sys.argv[1]))
 c = m['compatibility']
 p = c['packages']
-print('\t'.join([m['variant'], c['cuda_version'], *[p[n].split('+')[0] for n in ('torch','torchvision','torchaudio')], p['onnxruntime-gpu'], c['python_version']]))
+ort_package = 'onnxruntime' if m['variant'] == 'cpu' else 'onnxruntime-gpu'
+print('\t'.join([m['variant'], c['cuda_version'] or 'none', *[p[n].split('+')[0] for n in ('torch','torchvision','torchaudio')], p[ort_package], c['python_version']]))
 PY
 )"
     IFS=$'\t' read -r variant cuda_version torch_version vision_version audio_version onnxruntime_version python_version <<< "$values"
+    target_verify_gpu="$VERIFY_GPU"
+    if [[ "$variant" == cpu ]]; then target_verify_gpu=0; fi
     docker_args=(--rm -i --network none --read-only --tmpfs /tmp:rw,exec,nosuid,size=2g
         --user "$(id -u):$(id -g)" -e HOME=/tmp -e OMP_NUM_THREADS=8 -e MKL_NUM_THREADS=8 -e USER=rx-met-validator -e LOGNAME=rx-met-validator -e PYTHONPATH=/opt/rx-met/python
+        -e RX_MET_OUTPUT_DIR=/tmp/rx-met-verification
         -e PYTHONDONTWRITEBYTECODE=1 --mount "type=bind,src=$RX_MET_INSTALLED_DIR,dst=/opt/rx-met,readonly"
         -e "EXPECTED_VARIANT=$variant" -e "EXPECTED_CUDA=$cuda_version"
         -e "EXPECTED_TORCH=$torch_version" -e "EXPECTED_TORCHVISION=$vision_version"
         -e "EXPECTED_TORCHAUDIO=$audio_version" -e "EXPECTED_ONNXRUNTIME=$onnxruntime_version"
-        -e "EXPECTED_PYTHON=$python_version" -e "VERIFY_GPU=$VERIFY_GPU")
-    if ((VERIFY_GPU)); then docker_args+=(--gpus "device=$GPU_DEVICE"); fi
-    printf 'Verify %s GPU=%s\n' "$RX_MET_INSTALLED_DIR" "$VERIFY_GPU"
+        -e "EXPECTED_PYTHON=$python_version" -e "VERIFY_GPU=$target_verify_gpu")
+    if ((target_verify_gpu)); then docker_args+=(--gpus "device=$GPU_DEVICE"); fi
+    printf 'Verify %s GPU=%s\n' "$RX_MET_INSTALLED_DIR" "$target_verify_gpu"
     docker run "${docker_args[@]}" "$RX_MET_RUNTIME_ID" python3 - <<'PY'
 import importlib.metadata
 import os
@@ -70,12 +74,19 @@ expected = {
 for package, version in expected.items():
     actual = importlib.metadata.version(package).split("+", 1)[0]
     assert actual == version, (package, actual, version)
-assert torch.version.cuda == os.environ["EXPECTED_CUDA"], torch.version.cuda
+cpu_variant = os.environ["EXPECTED_VARIANT"] == "cpu"
+expected_cuda = None if cpu_variant else os.environ["EXPECTED_CUDA"]
+assert torch.version.cuda == expected_cuda, torch.version.cuda
 environment = dict(line.split("=", 1) for line in Path("/opt/rx-quant-env/environment.env").read_text().splitlines())
 assert environment["cuda_variant"] == os.environ["EXPECTED_VARIANT"]
-assert importlib.metadata.version("quant-lstm").endswith("+" + os.environ["EXPECTED_VARIANT"])
-assert importlib.metadata.version("onnxruntime-gpu") == os.environ["EXPECTED_ONNXRUNTIME"]
-assert "CUDAExecutionProvider" in onnxruntime.get_available_providers()
+for package in ("rx-met", "quant-gru", "quant-lstm"):
+    assert importlib.metadata.version(package).endswith("+" + os.environ["EXPECTED_VARIANT"])
+ort_package = "onnxruntime" if cpu_variant else "onnxruntime-gpu"
+assert importlib.metadata.version(ort_package) == os.environ["EXPECTED_ONNXRUNTIME"]
+expected_provider = "CPUExecutionProvider" if cpu_variant else "CUDAExecutionProvider"
+assert expected_provider in onnxruntime.get_available_providers()
+if cpu_variant:
+    assert "CUDAExecutionProvider" not in onnxruntime.get_available_providers()
 assert f"{sys.version_info.major}.{sys.version_info.minor}" == os.environ["EXPECTED_PYTHON"]
 
 runpy.run_path("/opt/rx-met/examples/quick_start_kws.py", run_name="verify_rx_met")
@@ -112,16 +123,44 @@ onnx_sim.compute_encodings([feed])
 assert onnx_sim.session.run(None, feed)[0].shape == (1, 4)
 assert onnx_sim.session.get_providers()[0] == onnx_provider
 
+if cpu_variant:
+    # Exercise the native recurrent PTQ paths without a training or QAT graph.
+    from quant_gru import QuantGRU
+    from quant_lstm import QuantLSTM
+
+    value = torch.linspace(-0.5, 0.75, 24).reshape(2, 3, 4)
+    with torch.inference_mode():
+        for recurrent in (QuantGRU, QuantLSTM):
+            module = recurrent(4, 8, batch_first=True, bidirectional=True).eval()
+            module.calibrating = True
+            module(value)
+            module.calibrating = False
+            module.finalize_calibration()
+            module.use_quantization = True
+            sequence, state = module(value)
+            tensors = (sequence, *state) if isinstance(state, tuple) else (sequence, state)
+            assert sequence.shape == (2, 3, 16)
+            assert all(torch.isfinite(tensor).all() and not tensor.requires_grad for tensor in tensors)
+            assert module.export_quant_params_to_aimet_format({}, module_name="smoke")
+            print(recurrent.__name__, "CPU calibration/PTQ OK")
+
 site_roots = [Path("/opt/rx-met/python"), *[Path(value) for value in site.getsitepackages()]]
 patterns = [
     (site_roots, "aimet_common/_libpymo*.so"),
     (site_roots, "aimet_common/libquant_info*.so"),
     (site_roots, "aimet_common/libaimet_onnxrt_ops.so"),
-    (site_roots, "onnxruntime/capi/libonnxruntime_providers_cuda.so"),
     (site_roots, "gru_interface_binding*.so"),
     (site_roots, "_quant_lstm*.so"),
     (site_roots, "lib/libgru_quant_shared.so"),
 ]
+if cpu_variant:
+    patterns.extend([
+        (site_roots, "onnxruntime/capi/onnxruntime_pybind11_state*.so"),
+        (site_roots, "quant_gru_onnx_runtime*.so"),
+        (site_roots, "quant_lstm_onnx_runtime*.so"),
+    ])
+else:
+    patterns.append((site_roots, "onnxruntime/capi/libonnxruntime_providers_cuda.so"))
 libraries = []
 for roots, relative_pattern in patterns:
     matches = [match for root in roots for match in root.glob(relative_pattern)]
@@ -134,9 +173,14 @@ for library in libraries:
     unresolved = [
         line.strip()
         for line in output.splitlines()
-        if "not found" in line and "libcuda.so.1" not in line
+        if "not found" in line and (cpu_variant or "libcuda.so.1" not in line)
     ]
     assert not unresolved, (library, unresolved)
+    if cpu_variant:
+        cuda_dependencies = ("libcuda.", "libcudart.", "libcublas", "libcudnn", "libcurand",
+                             "libcusparse", "libcufft", "libnvrtc", "libnvJitLink",
+                             "libtorch_cuda", "libc10_cuda")
+        assert not any(name in output for name in cuda_dependencies), (library, output)
 
 if os.environ["VERIFY_GPU"] == "1":
     assert torch.cuda.is_available(), "容器内不可见 CUDA GPU"
