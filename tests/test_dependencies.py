@@ -44,6 +44,19 @@ class DependencyConfigurationTest(unittest.TestCase):
     def test_generated_artifacts_are_current(self) -> None:
         dependencies.check_generated_artifacts(self.matrix)
 
+    def test_public_cpu_uses_the_selected_compatible_torch_release(self) -> None:
+        self.assertEqual(self.matrix['variants']['cpu']['torch']['packages'], {
+            'torch': '2.9.1+cpu', 'torchvision': '0.24.1+cpu', 'torchaudio': '2.9.1+cpu'})
+
+    def test_environment_version_requires_a_fixed_month_string(self) -> None:
+        for value in (None, '', 202610, 'v1', '202600', '202613', '20261026'):
+            with self.subTest(value=value), tempfile.TemporaryDirectory() as temporary:
+                invalid = {**self.matrix, 'environment_version': value}
+                path = Path(temporary) / 'variants.json'
+                path.write_text(json.dumps(invalid))
+                with self.assertRaisesRegex(dependencies.DependencyError, 'fixed YYYYMM string'):
+                    dependencies.load_matrix(path)
+
     def test_bake_defaults_to_cuda_and_keeps_explicit_cpu_target(self) -> None:
         rendered = dependencies.render_bake(self.matrix)
         default = re.search(r'(?ms)^group "default" \{(.*?)^\}', rendered)

@@ -3,6 +3,7 @@ from argparse import Namespace
 from contextlib import ExitStack
 import hashlib
 import importlib.util
+import json
 from pathlib import Path
 import subprocess
 import tempfile
@@ -39,6 +40,8 @@ class ReleaseBuildTest(unittest.TestCase):
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text('fixture\n')
         (self.root / 'packaging/release-bundle/install.sh.in').write_text('#!/bin/bash\n@BOOTSTRAP@\n')
+        (self.root / 'packaging/release-bundle/README.md.in').write_text(
+            '@ENV_DIRECTORY@/@RUNTIME_ARCHIVE@\n@RUNTIME_IMAGE_TAG@\n')
         for target, options in (
             ('ROOT', {'new': self.root}),
             ('inspect_wheels', {'return_value': [{'filename': 'example.whl', 'unpacked_size_bytes': 1}]}),
@@ -71,15 +74,30 @@ class ReleaseBuildTest(unittest.TestCase):
             raise subprocess.CalledProcessError(1, command, stderr='injected verification failure')
 
     def assemble(self):
-        record = dict(schema_version=1, environment_name='rx-quant-env', environment_version='v1',
-                      variant='cu118', config_sha256='config', image_id='runtime', filename='runtime.tar.gz')
-        artifacts.assemble(self.args, {'environment_version': 'v1'}, 'cu118', {'Id': 'runtime'},
-                           {'Id': 'build'}, record, self.root / 'runtime.tar.gz', self.wheel_dir,
+        record = artifacts.environment_archives.requirement('runtime', 'cu118')
+        record.update(config_sha256='config', image_id='runtime')
+        artifacts.assemble(self.args, {'environment_version': '202610'}, 'cu118', {'Id': 'runtime'},
+                           {'Id': 'build'}, record, self.root / record['filename'], self.wheel_dir,
                            {'python_version': '3.10'}, version='1.1.0', changelog='# Changelog\n')
 
     def bundle_manifest(self):
         with tarfile.open(self.output / (self.name + '.tar.gz')) as archive:
             return archive.extractfile(self.name + '/manifest.json').read()
+
+    def test_application_records_month_and_docker_archive_with_independent_product_version(self):
+        self.assemble()
+        manifest = json.loads(self.bundle_manifest())
+        self.assertEqual(manifest['version'], '1.1.0')
+        self.assertEqual(manifest['wheel_version'], '1.1.0+cu118')
+        self.assertEqual(manifest['environment_version'], '202610')
+        filename = 'rx-quant-env-runtime-202610-cu118-linux-amd64.docker.tar.gz'
+        self.assertEqual(manifest['runtime']['filename'], filename)
+        with tarfile.open(self.output / (self.name + '.tar.gz')) as archive:
+            readme = archive.extractfile(self.name + '/README.md').read().decode()
+            installer = archive.extractfile(self.name + '/install.sh').read().decode()
+        self.assertIn('rx-quant-env-202610/' + filename, readme)
+        self.assertIn('rx-quant-env-runtime:202610-cu118', readme)
+        self.assertIn('RUNTIME_ARCHIVE=' + filename, installer)
 
     def test_replacing_changed_bundle_uses_fresh_installation_and_cleans_up(self):
         previous = self.root / '.release/installed' / self.name
@@ -164,7 +182,7 @@ class ReleaseBuildPreflightTest(unittest.TestCase):
         self.root = Path(temporary.name)
         (self.root / 'VERSION').write_text('1.1.0\n')
         self.output = self.root / '.release/export/rx-met-v1.1.0'
-        matrix = {'environment_version': 'v1', 'variants': {'cpu': {}, 'cu118': {}, 'cu126': {}, 'cu130': {}}}
+        matrix = {'environment_version': '202610', 'variants': {'cpu': {}, 'cu118': {}, 'cu126': {}, 'cu130': {}}}
         for obj, target, options in (
             (artifacts, 'ROOT', {'new': self.root}),
             (artifacts.dependencies, 'load_matrix', {'return_value': matrix}),
@@ -300,7 +318,7 @@ class ReleaseBuildPreflightTest(unittest.TestCase):
     def assert_selected_targets(self, options, expected):
         self.ensure_image.side_effect = None
         self.ensure_image.return_value = {'Id': 'image'}
-        record = {'environment_name': 'rx-quant-env', 'environment_version': 'v1'}
+        record = {'environment_name': 'rx-quant-env', 'environment_version': '202610'}
         with ExitStack() as stack:
             mocks = {}
             for obj, name, values in (

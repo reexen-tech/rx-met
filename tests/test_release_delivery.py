@@ -22,13 +22,13 @@ class ReleaseDeliveryTest(unittest.TestCase):
         self.root = Path(temporary.name)
         self.product = ROOT.name
         self.destination = self.root / (self.product + '-v1.1.0')
-        self.environment = self.root / 'rx-quant-env-v1'
+        self.environment = self.root / 'rx-quant-env-202610'
 
     def runtime(self, variant='cu126'):
         return {'schema_version': 1, 'environment_name': 'rx-quant-env',
-                'environment_version': 'v1', 'config_sha256': 'configuration',
-                'variant': variant, 'image_id': 'sha256:pinned-' + variant,
-                'filename': f'rx-quant-env-runtime-v1-{variant}-linux-amd64.tar.gz'}
+                'environment_version': '202610', 'config_sha256': 'configuration',
+                'variant': variant, 'role': 'runtime', 'image_id': 'sha256:pinned-' + variant,
+                'filename': f'rx-quant-env-runtime-202610-{variant}-linux-amd64.docker.tar.gz'}
 
     def bundle_filename(self, variant='cu126'):
         return f'{self.product}-v1.1.0-{variant}-linux-amd64.tar.gz'
@@ -295,6 +295,18 @@ class ReleaseDeliveryTest(unittest.TestCase):
         self.assertEqual((self.environment / archive.name).read_bytes(), b'cu118')
         self.assert_checksums(self.environment)
 
+    def test_runtime_publication_preserves_an_independently_exported_build_role(self):
+        archive, record = self.archive()
+        build = {**record, 'role': 'build', 'filename': record['filename'].replace('-runtime-', '-build-')}
+        build_archive = archive.with_name(build['filename'])
+        build_archive.write_bytes(archive.read_bytes())
+        delivery.publish_environment(build_archive, build, self.environment)
+        delivery.publish_environment(archive, record, self.environment)
+        manifest = json.loads((self.environment / 'manifest.json').read_text())
+        self.assertEqual(set(manifest['variants']['cu126']), {'build', 'runtime'})
+        self.assertTrue((self.environment / build['filename']).is_file())
+        self.assert_checksums(self.environment)
+
     def test_conflicting_environment_identity_is_rejected(self):
         archive, record = self.archive()
         delivery.publish_environment(archive, record, self.environment)
@@ -357,7 +369,7 @@ class ReleaseDeliveryTest(unittest.TestCase):
             for obj, name, options in [
                 (artifacts, 'ROOT', {'new': self.root}),
                 (artifacts.dependencies, 'check_generated_artifacts', {}),
-                (artifacts.common, 'config', {'return_value': {'environment_version': 'v1'}}),
+                (artifacts.common, 'config', {'return_value': {'environment_version': '202610'}}),
                 (artifacts.environment_archives, 'ensure_image', {'return_value': {'Id': 'image'}}),
                 (artifacts.environment_archives, 'image_archive', {'side_effect': runtime_archive}),
                 (artifacts, 'release_changelog', {'return_value': 'notes'}),

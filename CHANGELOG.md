@@ -17,11 +17,14 @@
 - **PTQ 示例对照**：KWS 支持加载浮点检查点并跳过训练和 QAT，两个示例支持显式选择 CPU/CUDA 和复用相同校准样本；新增 ONNX 结构、initializer、JSON 及阶段输出的逐项比较和四次示例运行编排。
 - **自动运行记录**：自动写入 `run.log` 和 `run.json`，记录详细日志、运行状态、版本、配置快照和产物 SHA-256，无需用户初始化 logger。`verbose` 只控制终端详细程度；失败保留日志和中间文件，成功清理临时工作目录。
 - **ONNX PTQ 验证**：报告完整验证集上 FP32、PTQ、Po2 和恢复后的 Top-1 与输出误差；导出补全中间张量的 shape/dtype，并检查恢复后的量化输出和编译器编码。
-- **公共运行环境**：提供可复用的 `rx-quant-env` v1，支持 `cpu`、`cu118`、`cu126`、`cu130`，以及独立的环境构建、验证、加载和离线导出命令。
+- **公共运行环境**：提供可复用的 `rx-quant-env` `202610`，支持 `cpu`、`cu118`、`cu126`、`cu130`，以及独立的环境构建、验证、加载和离线导出命令。
 - **Bias 设计差异说明**：记录普通层 INT32 乘积 scale 对齐与原生 GRU/LSTM 独立低位宽 bias 编码、训练余量及累加域重缩放的差异；部署约束与后续方案[待讨论](docs/QuantLSTM_integration.md#bias-编码差异)，仅记录现状，未调整 bias 策略。
 
 ### Changed
 
+- **版本记录**：QuantGRU、QuantLSTM 的集成变更统一记录在根目录 `CHANGELOG.md`，算子目录不再单独维护版本日志。
+- **公共环境版本与归档**：环境版本使用配置中的固定月份 `202610`，重复构建、跨月构建及产品升级保持该值；环境定义变化后再更新月份。CPU/CUDA build/runtime 镜像、内部元数据和缓存统一采用该版本，Docker 镜像归档使用 `.docker.tar.gz`，交付目录为 `rx-quant-env-202610/`，完整归档名后追加 `.json` / `.sha256`。独立导出和加载支持 `--role build|runtime|all`，默认 runtime；保留旧 `v1` 产物。
+- **公共 CPU PyTorch**：升级为 PyTorch `2.9.1+cpu`、torchvision `0.24.1+cpu`、torchaudio `2.9.1+cpu`，完成三个 wheel 的源码编译、安装及 42 项 CPU PTQ/ONNX 测试。原生扩展按新 Torch 重新编译，其余公共依赖保持不变。
 - GRU/LSTM 与独立算子仓库统一共有文件，保留一致的构建默认值、测试入口和 CPU/PTQ、公共编码说明。
 - **量化配置**：Torch、ONNX 和原生 GRU/LSTM 默认使用对称量化，仍支持显式非对称配置。普通 Torch/ONNX 量化器的整数符号与对称性独立，默认使用 INT，可显式选择 UINT。
 - **编译器编码**：统一 Torch/ONNX 的编码转换、零点语义和循环层元数据，升级为 `schema_version=4`；兼容性要求见下方升级说明。
@@ -53,6 +56,8 @@
 - FX 展开的 BN、自定义模块在参数读取处执行 QDQ，避免重复量化，并遵循所选校准方案、类型和位宽；保留原始浮点参数的梯度、重新校准和禁用能力。
 - QuantGRU 统一 FP32/INT32 carrier 的整数与 LUT 前向，修复更新门 zero point 重复扣减和截断 mask 的梯度传播，确保 mask 在 bias 累加与跨 CUDA stream 同步前生效；CUDA 版在 eval 模式需要梯度时保留反向状态。
 - QuantGRU/QuantLSTM 为固定 bias 网格保留训练余量，避免零偏置的微小 QAT 更新立即饱和；加载已有编码时保留其网格。
+- QuantLSTM 在校准后切换 Po2 时，按新 scale 重算非对称 zero point 和实数范围；复制模型时保留原始校准下界，导入编码后按已有网格完成转换。
+- QuantLSTM 的 CPU/CUDA standard-scale 量化先执行 RNE 再加 zero point，修复非对称 half-tie 舍入偏差；QAT 梯度 mask 按舍入后的整数是否实际越界设置，保留边界外半个 LSB 内未被截断的梯度。
 - QuantLSTM 正确导出单向、双向 `bias=False` 模型；有符号对称量化使用完整 INT8/INT16 运行范围，校准、QAT、导出和恢复保持一致。
 - GELU 展开和高维 Linear 导出保留计算语义及编码对应关系；修复 BN 的 running variance 更新、累计平均和 QAT 冻结识别。
 
@@ -71,6 +76,7 @@
 
 - GRU 验证脚本支持从任意目录调用并传播失败状态，异常退出时恢复位宽配置；使用示例失败时返回非零退出码。
 - LSTM 回归测试按 bias 训练余量规则验证网格，显式构造端点和饱和条件，保留原有梯度误差阈值。
+- LSTM 默认 E2E 增加独立量化前向和 QAT 梯度 oracle、非连续 tensor、CUDA stream 及状态生命周期验证；浮点比较器拒绝非有限值和长度不匹配，真实网络验证在无可用 CUDA 时失败退出。
 - KWS 使用可量化 BN 和无随机增强的校准样本；检查点记录网络类型，保存原始模型时移除辅助量化器，支持 `weights_only` 恢复，验证失败时退出。
 - `run.json` 按编码文档结构识别 `.json` 和 `.encodings` 中的格式版本，正确记录最终编译器编码的 schema 与 SHA-256，避免将普通 metadata 当作编码文件。
 - KWS 验收定位本次运行的时间戳目录，从 `exports/` 读取最终 `.json` 并严格验收 schema v4，从 `checkpoints/` 检查 QAT 产物，修复旧目录和端口列表假设导致的验收失败。
@@ -100,7 +106,7 @@
 - **产物路径**：示例输出根目录为当前运行目录下的 `output/quick_start_kws/<gru|lstm>/` 或 `output/onnx_ptq_quick_start/`；默认产物位于时间戳目录的 `exports/`，关闭时间戳后位于根目录的 `exports/`。
 - **示例入口**：原 `onnx_ptq_quick_start.py` 更名为 `quick_start_onnx_ptq.py`，命令及引用需同步更新；下载与两步运行方式见[示例说明](examples/README.md)。
 - **CPU 变体**：CPU 部署需安装对应 wheel 和 runtime；原生 GRU/LSTM 仅支持校准/PTQ，KWS 使用浮点检查点并启用 `--ptq-only --device cpu`，不在 CPU 上执行示例默认的训练/QAT 流程。
-- **安装与更新**：首次离线使用需同时提供产品目录和对应的 `rx-quant-env` v1 环境目录，后续产品更新可复用兼容 runtime。`install.sh --replace` 仅替换同名安装；其他版本、模型、数据和用户工作目录独立保留。
+- **安装与更新**：首次离线使用需同时提供产品目录和对应的 `rx-quant-env` `202610` 环境目录，后续产品更新可复用兼容 runtime。`install.sh --replace` 仅替换同名安装；其他版本、模型、数据和用户工作目录独立保留。
 
 发布相关命令使用以下参数，替代旧名称：
 

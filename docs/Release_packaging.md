@@ -1,7 +1,7 @@
 # rx-met 应用包发布
 
-产品 VERSION 保持独立；公共 CPU/GPU 环境使用 rx-quant-env v1，详见 [公共环境](Shared_environment.md)。
-两个仓库独立保存公共环境定义和版本标签约定，无跨仓库运行依赖。
+产品 VERSION 保持独立；公共 CPU/GPU 环境使用 rx-quant-env `202610`，详见 [公共环境](Shared_environment.md)。
+环境定义和构建脚本由本仓库维护，构建与安装按环境版本标签复用兼容镜像。
 
 ## 日常发布
 
@@ -15,7 +15,7 @@
 环境构建、runtime 导出及 Docker bake 默认组遵循相同规则。可同时指定 CPU/CUDA，
 例如 `./scripts/release/build.sh cu126 cpu`。
 
-CPU 变体使用普通 Ubuntu、CPU PyTorch 和 ONNX Runtime，支持校准与 PTQ，不需要
+CPU 变体使用普通 Ubuntu、PyTorch `2.9.1+cpu` 和 ONNX Runtime，支持校准与 PTQ，不需要
 NVIDIA Driver 或 Container Toolkit：
 
 ```bash
@@ -27,6 +27,7 @@ NVIDIA Driver 或 Container Toolkit：
 CPU 的三个项目 wheel 使用 `+cpu` 版本后缀；构建原生库时设置
 `RX_MET_ENABLE_CUDA=0`，算子扩展不链接 CUDA。KWS CPU 验证加载现成浮点检查点并
 指定 `--ptq-only`，两个示例的固定输入及制品对照见 [示例说明](../examples/README.md)。
+Torch 版本更新时须重新编译这三个 wheel，不能沿用旧版本环境下的原生扩展。
 
 新构建机器可直接指定已归档的环境目录，两个参数可以指向同一目录：
 
@@ -114,16 +115,18 @@ wheel 格式将发行包名中的连字符转为下划线，各字段之间使�
 ├── rx-met-v<VERSION>/
 │   ├── rx-met-v<VERSION>-cu126-linux-amd64.tar.gz
 │   └── rx-met-v<VERSION>-cu126-linux-amd64.tar.gz.sha256
-└── rx-quant-env-v1/                  # 仅 --with-env 导出或复用
-    ├── rx-quant-env-runtime-v1-cu126-linux-amd64.tar.gz
-    ├── rx-quant-env-runtime-v1-cu126-linux-amd64.tar.gz.json
-    ├── rx-quant-env-runtime-v1-cu126-linux-amd64.tar.gz.sha256
+└── rx-quant-env-202610/              # 仅 --with-env 导出或复用
+    ├── rx-quant-env-runtime-202610-cu126-linux-amd64.docker.tar.gz
+    ├── rx-quant-env-runtime-202610-cu126-linux-amd64.docker.tar.gz.json
+    ├── rx-quant-env-runtime-202610-cu126-linux-amd64.docker.tar.gz.sha256
     ├── README.md
     ├── manifest.json
     └── SHA256SUMS
 ```
 
 `--with-env` 只附带所选变体的公共运行环境，不附带构建环境镜像。
+开发交付可另用 `./scripts/environment/export.sh --role build` 导出 build 镜像；
+`--role all` 同时导出两种角色，目录清单按角色合并。
 归档通过硬链接或复制放入产品目录平级的 `<环境名>-<环境版本>/`；已有环境校验复用、
 按变体补齐，不覆盖其他变体或版本。不带此参数时已有环境目录保持原样。
 
@@ -162,6 +165,8 @@ sha256sum -c rx-met-v1.1.0-cu126-linux-amd64.tar.gz.sha256
 下载通过加载和环境检查后才写入缓存。更新兼容环境的归档不要求重新生成应用包。
 
 独立环境导出和加载命令采用相同的版本标签约定，不要求仓库内存在镜像身份记录。
+环境版本是配置中的固定月份，重复构建、跨月构建及产品版本更新不自动改变它。
+新的环境版本须重新构建和导出，不能只修改旧镜像标签；已有 `v1` 产物保留。
 
 ## 参数与版本记录
 

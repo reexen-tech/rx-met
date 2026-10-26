@@ -42,17 +42,20 @@ for root in map(Path,site.getsitepackages()):
         target.unlink(missing_ok=True)
         target.symlink_to(header)
 PY
-RUN CUDA_VARIANT="${CUDA_VARIANT}" ENV_CONFIG_SHA256="${ENV_CONFIG_SHA256}" python3 - <<'PY'
+ARG ENV_SOURCE_REVISION=unknown
+RUN CUDA_VARIANT="${CUDA_VARIANT}" ENV_CONFIG_SHA256="${ENV_CONFIG_SHA256}" ENV_SOURCE_REVISION="${ENV_SOURCE_REVISION}" python3 - <<'PY'
 import json,os
 from pathlib import Path
 matrix=json.loads(Path('docker/variants.json').read_text());variant=os.environ['CUDA_VARIANT'];spec=matrix['variants'][variant]
 values={'environment_name':matrix['environment_name'],'environment_role':'build','environment_version':matrix['environment_version'],
-        'config_sha256':os.environ['ENV_CONFIG_SHA256'],'cuda_variant':variant,'cuda_version':spec['cuda_version'],
+        'config_sha256':os.environ['ENV_CONFIG_SHA256'],'source_revision':os.environ['ENV_SOURCE_REVISION'],
+        'cuda_variant':variant,'cuda_version':spec['cuda_version'],
         'torch_version':spec['torch']['packages']['torch'].split('+')[0], 'onnxruntime_version':next(iter(spec['onnxruntime']['packages'].values())),
         'python_version':spec['python_version']}
 Path('environment.env').write_text(''.join(f'{key}={value}\n' for key,value in values.items()))
 PY
 LABEL com.reexen.rx-quant.environment.name="rx-quant-env" \
+      org.opencontainers.image.revision="${ENV_SOURCE_REVISION}" \
       com.reexen.rx-quant.environment.role="build" \
       com.reexen.rx-quant.environment.version="${ENV_VERSION}" \
       com.reexen.rx-quant.environment.config-sha256="${ENV_CONFIG_SHA256}" \
@@ -74,13 +77,11 @@ RUN apt-get -o Acquire::Retries=5 update \
     && apt-get -o Acquire::Retries=5 install -y --no-install-recommends ca-certificates libgomp1 python3 python3-pip \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=build-env /opt/rx-quant-env/requirements/runtime.lock /opt/rx-quant-env/requirements/runtime.lock
-COPY --from=build-env /opt/rx-quant-env/environment.env /opt/rx-quant-env/environment.env
 RUN --mount=from=build-env,source=/opt/rx-quant-env/wheelhouse,target=/tmp/wheelhouse,ro \
     cd /tmp/wheelhouse && sha256sum --check --strict SHA256SUMS \
     && python3 -m pip install --ignore-installed --no-index --no-deps --find-links=. \
        -r /opt/rx-quant-env/requirements/runtime.lock \
-    && python3 -m pip check \
-    && sed -i 's/environment_role=build/environment_role=runtime/' /opt/rx-quant-env/environment.env
+    && python3 -m pip check
 RUN python3 - <<'PY'
 from pathlib import Path
 import site
@@ -93,7 +94,11 @@ PY
 RUN ldconfig \
     && python3 -m pip freeze --all > /opt/rx-quant-env/pip-freeze.txt \
     && dpkg-query --show > /opt/rx-quant-env/dpkg-packages.txt
+COPY --from=build-env /opt/rx-quant-env/environment.env /opt/rx-quant-env/environment.env
+RUN sed -i 's/environment_role=build/environment_role=runtime/' /opt/rx-quant-env/environment.env
+ARG ENV_SOURCE_REVISION=unknown
 LABEL com.reexen.rx-quant.environment.name="rx-quant-env" \
+      org.opencontainers.image.revision="${ENV_SOURCE_REVISION}" \
       com.reexen.rx-quant.environment.role="runtime" \
       com.reexen.rx-quant.environment.version="${ENV_VERSION}" \
       com.reexen.rx-quant.environment.config-sha256="${ENV_CONFIG_SHA256}" \

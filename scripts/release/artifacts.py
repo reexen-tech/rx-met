@@ -179,7 +179,7 @@ def assemble(args, matrix, variant, runtime, build, runtime_record, archive, whe
         (staged / 'install.sh').write_text(script)
         (staged / 'install.sh').chmod(0o755)
         readme = (ROOT / 'packaging/release-bundle/README.md.in').read_text()
-        for key, value in {'VERSION': version, 'ENV_VERSION': env_version, 'ENV_DIRECTORY': f"{runtime_record['environment_name']}-{env_version}", 'VARIANT': variant, 'BUNDLE_NAME': name, 'RUNTIME_IMAGE_TAG': runtime_tag}.items():
+        for key, value in {'VERSION': version, 'ENV_VERSION': env_version, 'ENV_DIRECTORY': f"{runtime_record['environment_name']}-{env_version}", 'VARIANT': variant, 'BUNDLE_NAME': name, 'RUNTIME_IMAGE_TAG': runtime_tag, 'RUNTIME_ARCHIVE': archive.name}.items():
             readme = readme.replace('@' + key + '@', value)
         (staged / 'README.md').write_text(readme)
         (staged / 'CHANGELOG.md').write_text(changelog, encoding='utf-8')

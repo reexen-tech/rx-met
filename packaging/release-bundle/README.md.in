@@ -28,7 +28,7 @@ CPU 变体支持校准和 PTQ 推理，不支持浮点训练和 QAT。
 ./install.sh
 ```
 
-> 或指定镜像文件 `--runtime-image /path/to/runtime.tar.gz`。
+> 或指定镜像文件 `--runtime-image /path/to/@RUNTIME_ARCHIVE@`。
 
 默认安装位置为 `$HOME/.local/share/rx-met/@BUNDLE_NAME@`。
 同版本重新安装或修复损坏的安装时，执行 `./install.sh --replace`：新安装自检通过后

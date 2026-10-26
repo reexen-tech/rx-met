@@ -34,7 +34,7 @@ class InstallerFailureTest(unittest.TestCase):
         self.env['FAKE_DOCKER_LOG'] = str(self.root / 'docker.log')
         self.env['FAKE_IMAGE_PRESENT'] = '0'
         self.env['FAKE_IMAGE_STATE'] = str(self.root / 'image-loaded')
-        self.env['FAKE_RUNTIME_TAG'] = 'rx-quant-env-runtime:v1-cu126'
+        self.env['FAKE_RUNTIME_TAG'] = 'rx-quant-env-runtime:202610-cu126'
         self.env['FAKE_TAG_STATE'] = str(self.root / 'runtime-tag')
         self.config = b'{"architecture":"amd64","os":"linux","rootfs":{"diff_ids":[]}}'
         self.runtime_id = 'sha256:' + hashlib.sha256(self.config).hexdigest()
@@ -65,7 +65,7 @@ elif args[:2] == ['image', 'inspect']:
     if not image_id:
         sys.exit(1)
     if '--format' in args and '.Config.Labels' in args[args.index('--format') + 1]:
-        value = os.environ.get('FAKE_ENVIRONMENT_METADATA', 'linux/amd64|rx-quant-env|v1|runtime|cu126')
+        value = os.environ.get('FAKE_ENVIRONMENT_METADATA', 'linux/amd64|rx-quant-env|202610|runtime|cu126')
         print(value if image_id == expected or image_id == os.environ.get('FAKE_COMPATIBLE_IMAGE_ID') else 'wrong-environment')
     else:
         print(image_id)
@@ -169,7 +169,7 @@ else:
         curl.chmod(0o755)
 
     def write_bundle(self, url='', revision='original', variant='cu126'):
-        self.env['FAKE_ENVIRONMENT_METADATA'] = f'linux/amd64|rx-quant-env|v1|runtime|{variant}'
+        self.env['FAKE_ENVIRONMENT_METADATA'] = f'linux/amd64|rx-quant-env|202610|runtime|{variant}'
         manifest = self.bundle / 'manifest.json'
         manifest.write_text(json.dumps({'version': '1.1.0', 'revision': revision}))
         for name in ('README.md', 'CHANGELOG.md', 'examples/example.py'):
@@ -178,10 +178,10 @@ else:
             path.write_text(revision)
         bootstrap = {'BUNDLE_NAME': 'rx-met-test', 'MANIFEST_SHA256': hashlib.sha256(manifest.read_bytes()).hexdigest(),
                      'RUNTIME_IMAGE_TAG': self.env['FAKE_RUNTIME_TAG'],
-                     'RUNTIME_VARIANT': variant, 'RUNTIME_ENV_NAME': 'rx-quant-env', 'RUNTIME_ENV_VERSION': 'v1',
+                     'RUNTIME_VARIANT': variant, 'RUNTIME_ENV_NAME': 'rx-quant-env', 'RUNTIME_ENV_VERSION': '202610',
                      'RUNTIME_LABEL_PREFIX': 'com.reexen.rx-quant.',
                      'RUNTIME_VARIANT_LABEL': 'platform.variant' if variant == 'cpu' else 'cuda.variant',
-                     'RUNTIME_ENV_DIR': 'rx-quant-env-v1', 'RUNTIME_ARCHIVE': 'runtime.tar.gz',
+                     'RUNTIME_ENV_DIR': 'rx-quant-env-202610', 'RUNTIME_ARCHIVE': 'runtime.tar.gz',
                      'RUNTIME_URL': url, 'RUNTIME_CHECKSUM_URL': url + '.sha256' if url else '', 'APP_INSTALL_BYTES': '1'}
         script = (ROOT / 'packaging/release-bundle/install.sh.in').read_text()
         script = script.replace('@BOOTSTRAP@', '\n'.join(f'readonly {key}={shlex.quote(value)}' for key, value in bootstrap.items()))
@@ -293,7 +293,7 @@ os.execv(os.environ['REAL_MV'], ['mv', *sys.argv[1:]])
         self.assertFalse((self.root / 'docker.log').exists())
 
     def test_cpu_installation_and_startup_command_do_not_require_gpu(self):
-        self.env['FAKE_RUNTIME_TAG'] = 'rx-quant-env-runtime:v1-cpu'
+        self.env['FAKE_RUNTIME_TAG'] = 'rx-quant-env-runtime:202610-cpu'
         self.write_bundle(variant='cpu')
         self.env['FAKE_IMAGE_PRESENT'] = '1'
         self.env['FAKE_INSTALL_SUCCESS'] = '1'
@@ -408,7 +408,7 @@ os.execv(os.environ['REAL_MV'], ['mv', *sys.argv[1:]])
         self.bundle.rename(relocated)
         self.bundle = relocated
         self.installer = self.bundle / 'install.sh'
-        images = product.parent / 'rx-quant-env-v1'
+        images = product.parent / 'rx-quant-env-202610'
         images.mkdir()
         (images / 'runtime.tar.gz').write_bytes(base64.b64decode(self.env['FAKE_ARCHIVE']))
         self.assert_failed_with('injected container failure', self.invoke('--offline'))
@@ -416,7 +416,7 @@ os.execv(os.environ['REAL_MV'], ['mv', *sys.argv[1:]])
         self.assertFalse((self.prefix / 'rx-met-test').exists())
 
     def test_environment_next_to_unpacked_bundle_is_used_by_default_install(self):
-        images = self.bundle.parent / 'rx-quant-env-v1'
+        images = self.bundle.parent / 'rx-quant-env-202610'
         images.mkdir()
         (images / 'runtime.tar.gz').write_bytes(base64.b64decode(self.env['FAKE_ARCHIVE']))
         self.assert_failed_with('injected container failure', self.invoke())

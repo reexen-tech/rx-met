@@ -27,7 +27,7 @@ def requirement(role, variant, *, contract=common):
     return {'schema_version': 1, 'environment_name': contract.NAME,
             'environment_version': matrix['environment_version'], 'variant': variant, 'role': role,
             'image_tag': contract.image_ref(role, variant),
-            'filename': f"{contract.NAME}-{role}-{matrix['environment_version']}-{variant}-linux-amd64.tar.gz",
+            'filename': f"{contract.NAME}-{role}-{matrix['environment_version']}-{variant}-linux-amd64.docker.tar.gz",
             'url': ''}
 
 
@@ -70,8 +70,9 @@ def verified_archive(role, variant, directory, *, contract=common):
     if expected is not None and actual != expected:
         raise RuntimeError(f'镜像归档 SHA-256 不匹配: {archive}')
     record.update(sha256=actual, size_bytes=archive.stat().st_size)
-    if metadata.get('image_id'):
-        record['image_id'] = metadata['image_id']
+    for key in ('image_id', 'image_created_at', 'source_revision', 'config_sha256'):
+        if metadata.get(key):
+            record[key] = metadata[key]
     return archive, record
 
 
@@ -90,7 +91,7 @@ def _save_runtime(reference, destination):
             subprocess.run(compressor, stdin=saver.stdout, stdout=output, check=True)
             saver.stdout.close()
             if saver.wait():
-                raise RuntimeError('runtime 镜像导出失败')
+                raise RuntimeError('环境镜像导出失败')
         finally:
             saver.stdout.close()
             if saver.poll() is None:
@@ -129,6 +130,11 @@ def image_archive(role, variant, directory, *, export=False, contract=common):
             _save_runtime(record['image_tag'], staged)
             verify_runtime_payload(staged, image['Id'])
             record.update(image_id=image['Id'], sha256=common.sha256(staged), size_bytes=staged.stat().st_size)
+            labels = image.get('Config', {}).get('Labels') or {}
+            provenance = {'image_created_at': image.get('Created'),
+                          'source_revision': labels.get('org.opencontainers.image.revision'),
+                          'config_sha256': labels.get(common.LABEL + 'environment.config-sha256')}
+            record.update({key: value for key, value in provenance.items() if value})
             common.write_json(staged.with_name(staged.name + '.json'), record)
             staged.replace(archive)
             staged.with_name(staged.name + '.json').replace(archive.with_name(archive.name + '.json'))

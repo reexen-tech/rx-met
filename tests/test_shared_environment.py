@@ -20,6 +20,25 @@ class SharedEnvironmentTest(unittest.TestCase):
         matrix = {'variants': {'cu126': {}, 'cpu': {}, 'cu118': {}}}
         self.assertEqual(common.default_variants(matrix), ['cu126', 'cu118'])
 
+    def test_environment_month_is_fixed_by_configuration(self):
+        self.assertEqual(common.config()['environment_version'], '202610')
+        for role in ('build', 'runtime'):
+            for variant in common.config()['variants']:
+                self.assertEqual(common.image_ref(role, variant), f'rx-quant-env-{role}:202610-{variant}')
+        with patch.object(common, 'config', return_value={'environment_version': '200001'}):
+            self.assertEqual(common.image_ref('runtime', 'cpu'), 'rx-quant-env-runtime:200001-cpu')
+
+    def test_common_cli_exports_and_loads_each_selected_role(self):
+        for action in ('export', 'load'):
+            for selection, expected in (('build', ['build']), ('all', ['build', 'runtime'])):
+                operation = Mock()
+                with patch.object(common, 'export', operation), \
+                        patch.dict('sys.modules', {'environment.runtime_archives': SimpleNamespace(load_environment=operation)}), \
+                        patch('sys.argv', ['common.py', action, '--directory', '/tmp/environment',
+                                          '--role', selection, 'cpu']):
+                    common.main()
+                self.assertEqual([call.args[2] for call in operation.call_args_list], expected)
+
     def test_cli_cpu_environment_requires_explicit_selection(self):
         matrix = common.config()
         defaults = [variant for variant in matrix['variants'] if variant != 'cpu']
@@ -32,7 +51,7 @@ class SharedEnvironmentTest(unittest.TestCase):
                     for name in ('build', 'verify', 'export', 'download'):
                         stack.enter_context(patch.object(common, name, operations[name]))
                     stack.enter_context(patch.dict('sys.modules', {
-                        'environment.runtime_archives': SimpleNamespace(load_runtime=operations['load'])}))
+                        'environment.runtime_archives': SimpleNamespace(load_environment=operations['load'])}))
                     stack.enter_context(patch('sys.argv', ['common.py', action, '--directory', '/tmp/runtime',
                                                           '--output-dir', '/tmp/runtime', *selection]))
                     common.main()

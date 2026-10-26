@@ -68,6 +68,11 @@ def image_ref(role, variant):
     return f"{NAME}-{role}:{config()['environment_version']}-{variant}"
 
 
+def source_revision():
+    result = subprocess.run(['git', 'rev-parse', 'HEAD'], cwd=ROOT, capture_output=True, text=True)
+    return result.stdout.strip() if result.returncode == 0 else 'unknown'
+
+
 def inspect(reference, role, variant):
     info = json.loads(subprocess.check_output(['docker', 'image', 'inspect', reference]))[0]
     variant_label = 'platform.variant' if variant == 'cpu' else 'cuda.variant'
@@ -96,7 +101,11 @@ def verify(variant, gpu=False):
             command += ['--gpus', 'device=' + os.environ.get('RX_QUANT_GPU_DEVICE', '0')]
         command += ['--entrypoint', 'python3', info['Id'], '-B', '-']
         code = f'''import importlib.metadata as m,sys,subprocess
+from pathlib import Path
 import torch,onnxruntime,transformers,datasets,gguf
+metadata=dict(line.split('=',1) for line in Path('/opt/rx-quant-env/environment.env').read_text().splitlines())
+for key,value in {{'environment_name':{NAME!r},'environment_version':{matrix['environment_version']!r},'environment_role':{role!r},'cuda_variant':{variant!r}}}.items():
+ assert metadata.get(key)==value,(key,metadata.get(key),value)
 expected={expected!r}
 for name,version in expected.items(): assert m.version(name)==version,(name,m.version(name),version)
 assert f"{{sys.version_info.major}}.{{sys.version_info.minor}}"=={spec['python_version']!r}
@@ -173,7 +182,8 @@ def build(variant, wheelhouse=None, builder=None):
                 try: os.link(source, target)
                 except OSError: shutil.copy2(source, target)
     args = {'DEVEL_IMAGE': spec['devel_image'], 'BASE_IMAGE': spec['base_image'], 'CUDA_VARIANT': variant,
-            'ENV_VERSION': matrix['environment_version'], 'ENV_CONFIG_SHA256': config_digest()}
+            'ENV_VERSION': matrix['environment_version'], 'ENV_CONFIG_SHA256': config_digest(),
+            'ENV_SOURCE_REVISION': source_revision()}
     for role in missing:
         target = role + '-env'
         reference = image_ref(role, variant)
@@ -186,10 +196,10 @@ def build(variant, wheelhouse=None, builder=None):
         inspect(reference, role, variant)
 
 
-def export(variant, directory):
+def export(variant, directory, role='runtime'):
     sys.path.insert(0, str(ROOT / 'scripts'))
-    from environment.runtime_archives import export_runtime
-    export_runtime(variant, directory)
+    from environment.runtime_archives import export_environment
+    export_environment(variant, directory, role)
 
 
 def main():
@@ -200,11 +210,15 @@ def main():
                         help='Environment variants (default: CUDA variants; CPU requires cpu)')
     parser.add_argument('--output-dir', '--export-dir', dest='output_dir', type=Path)
     parser.add_argument('--directory', type=Path)
+    parser.add_argument('--role', choices=['runtime', 'build', 'all'], default='runtime',
+                        help='Image role for export/load (default: runtime)')
     parser.add_argument('--wheelhouse-dir', type=Path)
     parser.add_argument('--builder')
     parser.add_argument('--gpu', action='store_true')
     parser.add_argument('--no-export', action='store_true', help='Compatibility option; build never exports implicitly')
     args = parser.parse_intermixed_args()
+    if args.role != 'runtime' and args.action not in ('export', 'load'):
+        parser.error('--role only applies to export/load')
     if args.action == 'digest': print(config_digest()); return
     directory = args.output_dir or ROOT / '.release/runtime-images' / matrix['environment_version']
     for variant in args.variants or default_variants(matrix):
@@ -212,13 +226,16 @@ def main():
             build(variant, args.wheelhouse_dir / variant if args.wheelhouse_dir else None, args.builder)
             verify(variant, args.gpu)
         elif args.action == 'verify': verify(variant, args.gpu)
-        elif args.action == 'export': export(variant, directory)
+        elif args.action == 'export':
+            for role in ('build', 'runtime') if args.role == 'all' else (args.role,):
+                export(variant, directory, role)
         elif args.action == 'download': download(variant, directory)
         else:
             if not args.directory: parser.error('load requires --directory')
             sys.path.insert(0, str(ROOT / 'scripts'))
-            from environment.runtime_archives import load_runtime
-            load_runtime(variant, args.directory)
+            from environment.runtime_archives import load_environment
+            for role in ('build', 'runtime') if args.role == 'all' else (args.role,):
+                load_environment(variant, args.directory, role)
 
 
 if __name__ == '__main__':
