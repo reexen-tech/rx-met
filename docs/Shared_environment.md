@@ -1,11 +1,11 @@
-# 公共 GPU 环境
+# 公共 CPU/GPU 环境
 
 rx-met 与 rx-lm-quant 各自维护公共环境定义和脚本，不读取另一个仓库的文件。
 两个产品通过版本标签复用兼容环境，环境版本独立于产品 VERSION。
 
 ## 版本与复用
 
-公共 GPU 环境名为 `rx-quant-env`，当前环境版本为 `v1`，支持 cu118、cu126、cu130。
+公共环境名为 `rx-quant-env`，当前环境版本为 `v1`，支持 cpu、cu118、cu126、cu130。
 每个变体提供两个标签：
 
 - `rx-quant-env-build:v1-<变体>`：编译器、开发依赖和 ORT 构建头文件。
@@ -13,7 +13,7 @@ rx-met 与 rx-lm-quant 各自维护公共环境定义和脚本，不读取另一
 
 `docker/variants.json` 定义 Python、CUDA、Torch、ONNX Runtime 和精确依赖。
 环境构建入口优先复用已有版本标签，缺少对应角色的镜像时才构建。
-消费环境时检查环境名称、版本、build/runtime 角色、CUDA 变体和 linux/amd64 平台；
+消费环境时检查环境名称、版本、build/runtime 角色、CPU/CUDA 变体和 linux/amd64 平台；
 环境验收还检查实际包版本、导入、pip check 和可选 GPU 运算。
 
 镜像 ID 和构建来源摘要用于追踪，不作为跨仓库复用的前提。
@@ -48,7 +48,14 @@ python3 scripts/environment/common.py digest
 ./scripts/environment/verify.sh --gpu cu126
 ```
 
-`--wheelhouse-dir DIR` 可以指定本地依赖缓存，按 cu118/cu126/cu130 分目录。
+未指定变体时仅处理 `cu118`、`cu126`、`cu130`。CPU 需显式指定：
+
+```bash
+./scripts/environment/build.sh cpu
+./scripts/environment/verify.sh cpu
+```
+
+`--wheelhouse-dir DIR` 可以指定本地依赖缓存，按 cpu/cu118/cu126/cu130 分目录。
 缓存中的 wheel 必须与依赖定义匹配。build 不自动导出镜像。
 
 ## 离线导出与加载
@@ -57,6 +64,9 @@ python3 scripts/environment/common.py digest
 ./scripts/environment/export_runtime.sh cu126
 ./scripts/environment/load.sh --directory /path/to/rx-quant-env-v1 cu126
 ```
+
+导出和加载省略变体时同样仅处理 CUDA；CPU 使用显式参数，例如
+`./scripts/environment/export_runtime.sh cpu`。
 
 导出默认写入 `.release/runtime-images/v1/`，包含带版本标签的 runtime 归档、
 独立的 `.sha256` 校验文件、用于追踪的 `.json` 元数据和目录清单。

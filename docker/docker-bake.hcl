@@ -21,7 +21,7 @@ variable "RUNTIME_ENV_REPOSITORY" {
 }
 
 group "default" {
-  targets = ["cpu", "cu118", "cu126", "cu130"]
+  targets = ["cu118", "cu126", "cu130"]
 }
 
 

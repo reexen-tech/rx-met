@@ -45,17 +45,19 @@ def load_runtime(variant, directory, *, contract=common):
 
 
 def main():
+    matrix = common.config()
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('action', choices=['export', 'load'])
-    parser.add_argument('variants', nargs='*', choices=list(common.config()['variants']))
+    parser.add_argument('variants', nargs='*', choices=list(matrix['variants']),
+                        help='Environment variants (default: CUDA variants; CPU requires cpu)')
     parser.add_argument('--output-dir', '--export-dir', dest='output_dir', type=Path)
     parser.add_argument('--directory', type=Path)
     args = parser.parse_intermixed_args()
     if args.action == 'load' and args.directory is None:
         parser.error('load requires --directory')
     directory = (args.directory if args.action == 'load' else
-                 args.output_dir or ROOT / '.release/runtime-images' / common.config()['environment_version']).resolve()
-    for variant in args.variants or common.config()['variants']:
+                 args.output_dir or ROOT / '.release/runtime-images' / matrix['environment_version']).resolve()
+    for variant in args.variants or common.default_variants(matrix):
         if args.action == 'export':
             export_runtime(variant, directory)
         else:

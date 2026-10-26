@@ -85,6 +85,9 @@ python3 quick_start_kws.py
 ./scripts/release/build.sh cu126
 ```
 
+不指定变体时默认仅构建 `cu118`、`cu126`、`cu130`；CPU 需在环境构建和应用打包命令中
+显式指定 `cpu`，可与 CUDA 变体同时指定。Docker bake 默认组也仅包含 CUDA。
+
 完整构建矩阵、环境镜像复用和 GPU 验收流程见
 [构建与发布](docs/Release_packaging.md)。
 

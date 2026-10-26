@@ -256,7 +256,7 @@ def render_bake(matrix: Mapping[str, Any]) -> str:
         "",
         'group "default" {',
         "  targets = ["
-        + ", ".join(f'"{name}"' for name in matrix["variants"])
+        + ", ".join(f'"{name}"' for name in matrix["variants"] if name != "cpu")
         + "]",
         "}",
         "",

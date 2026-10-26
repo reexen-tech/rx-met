@@ -1,5 +1,6 @@
 """Check build-time installation isolation and artifact publication boundaries."""
 from argparse import Namespace
+from contextlib import ExitStack
 import importlib.util
 from pathlib import Path
 import subprocess
@@ -129,7 +130,7 @@ class ReleaseBuildPreflightTest(unittest.TestCase):
         self.root = Path(temporary.name)
         (self.root / 'VERSION').write_text('1.1.0\n')
         self.output = self.root / '.release/export/rx-met-v1.1.0'
-        matrix = {'environment_version': 'v1', 'variants': {'cu118': {}, 'cu126': {}, 'cu130': {}}}
+        matrix = {'environment_version': 'v1', 'variants': {'cpu': {}, 'cu118': {}, 'cu126': {}, 'cu130': {}}}
         for obj, target, options in (
             (artifacts, 'ROOT', {'new': self.root}),
             (artifacts.dependencies, 'load_matrix', {'return_value': matrix}),
@@ -189,6 +190,51 @@ class ReleaseBuildPreflightTest(unittest.TestCase):
     def test_existing_product_directory_requires_explicit_replacement(self):
         path = self.existing('cu130')
         self.assert_conflict_before_docker(path, 'cu118')
+
+    def assert_selected_targets(self, options, expected):
+        self.ensure_image.side_effect = None
+        self.ensure_image.return_value = {'Id': 'image'}
+        record = {'environment_name': 'rx-quant-env', 'environment_version': 'v1'}
+        with ExitStack() as stack:
+            mocks = {}
+            for obj, name, values in (
+                (artifacts, 'runtime_compatibility', {'return_value': {}}),
+                (artifacts, 'source_digest', {'return_value': 'source'}),
+                (artifacts, 'image_info', {'return_value': {'Id': 'image'}}),
+                (artifacts, 'run', {}),
+                (artifacts, 'write_json', {}),
+                (artifacts, 'assemble', {'return_value': {}}),
+                (artifacts.environment_archives, 'image_archive',
+                 {'return_value': (self.root / 'runtime.tar.gz', record)}),
+                (artifacts.delivery, 'publish_environment', {}),
+                (artifacts.delivery, 'write_release_index', {}),
+            ):
+                mocks[name] = stack.enter_context(patch.object(obj, name, **values))
+            stack.enter_context(patch('sys.argv', ['artifacts.py', 'build', *options]))
+            artifacts.main()
+        self.assertEqual([call.args[2] for call in mocks['assemble'].call_args_list], expected)
+        self.assertEqual([call.args[1] for call in self.ensure_image.call_args_list],
+                         [variant for variant in expected for _ in ('runtime', 'build')])
+        self.assertEqual([call.args[1] for call in mocks['image_archive'].call_args_list], expected)
+        self.assertTrue(all(call.kwargs['export'] == ('--with-env' in options)
+                            for call in mocks['image_archive'].call_args_list))
+        self.assertEqual(mocks['publish_environment'].call_count,
+                         len(expected) if '--with-env' in options else 0)
+
+    def test_default_build_excludes_cpu(self):
+        self.assert_selected_targets([], ['cu118', 'cu126', 'cu130'])
+
+    def test_default_build_with_environment_excludes_cpu(self):
+        self.assert_selected_targets(['--with-env'], ['cu118', 'cu126', 'cu130'])
+
+    def test_explicit_cpu_build_selects_only_cpu(self):
+        self.assert_selected_targets(['cpu'], ['cpu'])
+
+    def test_explicit_cpu_build_includes_requested_environment(self):
+        self.assert_selected_targets(['--with-env', 'cpu'], ['cpu'])
+
+    def test_explicit_mixed_build_preserves_requested_targets(self):
+        self.assert_selected_targets(['cu126', 'cpu', '--with-env'], ['cu126', 'cpu'])
 
 
 if __name__ == '__main__':

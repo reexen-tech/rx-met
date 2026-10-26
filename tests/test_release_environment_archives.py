@@ -267,6 +267,33 @@ class EnvironmentArchiveTest(unittest.TestCase):
                          [('runtime', self.variant, self.directory), ('build', self.variant, self.directory)])
 
 
+class RuntimeArchiveCliTest(unittest.TestCase):
+    def test_cpu_runtime_archive_requires_explicit_selection(self):
+        matrix = runtime_cli.common.config()
+        defaults = [variant for variant in matrix['variants'] if variant != 'cpu']
+        selections = [([], defaults), (['cpu'], ['cpu']),
+                      (['cu126', '--output-dir', '/tmp/runtime', 'cpu'], ['cu126', 'cpu'])]
+        for action in ('export', 'load'):
+            for selection, expected in selections:
+                with self.subTest(action=action, selection=selection), \
+                        patch.object(runtime_cli, 'export_runtime') as export, \
+                        patch.object(runtime_cli, 'load_runtime') as load, \
+                        patch('sys.argv', ['runtime_archives.py', action, '--directory', '/tmp/runtime', *selection]):
+                    runtime_cli.main()
+                    operation = export if action == 'export' else load
+                    self.assertEqual([call.args[0] for call in operation.call_args_list], expected)
+                    (load if action == 'export' else export).assert_not_called()
+
+    def test_unknown_runtime_archive_variant_is_rejected(self):
+        with patch('sys.argv', ['runtime_archives.py', 'export', 'unknown']), \
+                contextlib.redirect_stderr(io.StringIO()), \
+                patch.object(runtime_cli, 'export_runtime') as export:
+            with self.assertRaises(SystemExit) as error:
+                runtime_cli.main()
+        self.assertEqual(error.exception.code, 2)
+        export.assert_not_called()
+
+
 class OciArchiveIdentityTest(unittest.TestCase):
     def fixture(self, path, *, corrupt_layer=False, missing_layer=False, extra_root=False):
         files = {}

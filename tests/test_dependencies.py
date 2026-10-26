@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import importlib.util
 import json
+import re
 import subprocess
 import tempfile
 import unittest
@@ -42,6 +43,14 @@ class DependencyConfigurationTest(unittest.TestCase):
 
     def test_generated_artifacts_are_current(self) -> None:
         dependencies.check_generated_artifacts(self.matrix)
+
+    def test_bake_defaults_to_cuda_and_keeps_explicit_cpu_target(self) -> None:
+        rendered = dependencies.render_bake(self.matrix)
+        default = re.search(r'(?ms)^group "default" \{(.*?)^\}', rendered)
+        self.assertIsNotNone(default)
+        targets = re.findall(r'"([^"]+)"', default.group(1))
+        self.assertEqual(targets, ['cu118', 'cu126', 'cu130'])
+        self.assertIn('target "cpu" {', rendered)
 
     def test_variant_locks_are_complete_and_self_contained(self) -> None:
         for variant_name in self.matrix["variants"]:

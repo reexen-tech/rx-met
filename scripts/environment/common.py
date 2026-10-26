@@ -45,6 +45,10 @@ def config():
     return {key: matrix[key] for key in ('schema_version', 'environment_name', 'environment_version', 'build_packages', 'common_packages', 'variants')}
 
 
+def default_variants(matrix):
+    return [variant for variant in matrix['variants'] if variant != 'cpu']
+
+
 def config_digest():
     h = hashlib.sha256(json.dumps(config(), sort_keys=True, separators=(',', ':')).encode())
     for name in BUILD_FILES:
@@ -189,9 +193,11 @@ def export(variant, directory):
 
 
 def main():
+    matrix = config()
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('action', choices=['build', 'verify', 'export', 'load', 'digest', 'download'])
-    parser.add_argument('variants', nargs='*', choices=list(config()['variants']))
+    parser.add_argument('variants', nargs='*', choices=list(matrix['variants']),
+                        help='Environment variants (default: CUDA variants; CPU requires cpu)')
     parser.add_argument('--output-dir', '--export-dir', dest='output_dir', type=Path)
     parser.add_argument('--directory', type=Path)
     parser.add_argument('--wheelhouse-dir', type=Path)
@@ -200,8 +206,8 @@ def main():
     parser.add_argument('--no-export', action='store_true', help='Compatibility option; build never exports implicitly')
     args = parser.parse_intermixed_args()
     if args.action == 'digest': print(config_digest()); return
-    directory = args.output_dir or ROOT / '.release/runtime-images' / config()['environment_version']
-    for variant in args.variants or config()['variants']:
+    directory = args.output_dir or ROOT / '.release/runtime-images' / matrix['environment_version']
+    for variant in args.variants or default_variants(matrix):
         if args.action == 'build':
             build(variant, args.wheelhouse_dir / variant if args.wheelhouse_dir else None, args.builder)
             verify(variant, args.gpu)

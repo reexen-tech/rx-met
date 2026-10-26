@@ -11,6 +11,10 @@
 ./scripts/release/build.sh cu118 cu126 cu130
 ```
 
+省略变体时默认仅构建 `cu118`、`cu126`、`cu130`；CPU 必须显式指定 `cpu`。
+环境构建、runtime 导出及 Docker bake 默认组遵循相同规则。可同时指定 CPU/CUDA，
+例如 `./scripts/release/build.sh cu126 cpu`。
+
 CPU 变体使用普通 Ubuntu、CPU PyTorch 和 ONNX Runtime，支持校准与 PTQ，不需要
 NVIDIA Driver 或 Container Toolkit：
 
@@ -61,7 +65,8 @@ CPU 的三个项目 wheel 使用 `+cpu` 版本后缀；构建原生库时设置
 ./scripts/release/build.sh --with-env cu126
 ```
 
-省略变体时处理依赖矩阵中的全部 CPU/CUDA 变体。归档默认缓存于 `.release/runtime-images/<环境版本>/`：
+省略变体时仅处理 CUDA 变体，`--with-env` 也不会隐式加入 CPU；交付 CPU 包及环境时执行
+`./scripts/release/build.sh --with-env cpu`。归档默认缓存于 `.release/runtime-images/<环境版本>/`：
 已有完整归档则校验复用，缺失则从本机版本标签 自动导出。删除 `.release` 后也可重新执行，
 无需先手动导出镜像。Docker 中的环境镜像和构建缓存不会随 `.release` 删除；脚本不会重建已发布环境。
 
