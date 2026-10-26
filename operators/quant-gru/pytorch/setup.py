@@ -12,7 +12,7 @@ try:
 except ImportError as exc:
     raise RuntimeError(
         'PyTorch is required before building quant_gru. '
-        'Please install a CUDA-enabled PyTorch package first.'
+        'Please install PyTorch for the selected CPU or CUDA backend first.'
     ) from exc
 
 here = os.path.abspath(os.path.dirname(__file__))

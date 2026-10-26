@@ -39,7 +39,8 @@ python -m pip install ./pytorch --no-deps --no-build-isolation
 ```
 
 CMake 生成 `build/libquant_lstm.a`，pip 构建 `_quant_lstm` 扩展并安装 `quant_lstm`
-和默认配置。Python 构建从固定的 `build/` 目录链接原生库，安装完成后运行不依赖
+和默认配置。Python 构建默认从 `build/` 链接原生库，也可通过
+`RX_MET_QUANT_LSTM_BUILD_DIR` 指定目录；安装完成后运行不依赖
 源码目录。CPU-only C++ 安装不需要 CUDA 或 PyTorch，步骤见[安装指南](docs/installation.md)。
 
 CPU Python 模块先安装 CPU PyTorch，再从算子根目录执行：
@@ -200,7 +201,8 @@ CUDA 测试需要可用 GPU，真实网络测试还需要 Speech Commands v0.02 
 
 完整入口见[文档导航](docs/README.md)。
 
-rx-met 的 QuantSim、配置、校准和整模型导出流程见 [集成指南](../../docs/QuantLSTM_integration.md)。
+rx-met 的 QuantSim、配置、校准和整模型导出流程见 rx-met 仓库中的
+`docs/QuantLSTM_integration.md`。
 
 算子自身提供的通用接口见 [循环算子集成接口](docs/aimet_integration.md)。
 

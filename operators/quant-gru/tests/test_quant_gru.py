@@ -82,14 +82,14 @@ def configure_quant_scale_mode(quant_gru: QuantGRU, verbose: bool = True):
 def check_threshold(value, threshold, comparison: str, test_name: str, metric_name: str) -> bool:
     """
     检查阈值，失败时记录到全局列表
-    
+
     Args:
         value: 实际值
         threshold: 阈值
         comparison: 比较方式 ('<' 或 '>')
         test_name: 测试名称
         metric_name: 指标名称
-    
+
     Returns:
         True 如果通过，False 如果失败
     """
@@ -108,7 +108,7 @@ def print_test_summary():
     print("\n" + "=" * 80)
     print("测试总结")
     print("=" * 80)
-    
+
     total_failures = len(TEST_FAILURES)
     if total_failures == 0:
         print("✅ 所有测试通过！")
@@ -118,7 +118,7 @@ def print_test_summary():
         for i, failure in enumerate(TEST_FAILURES, 1):
             print(f"{i}. [{failure['test_name']}] {failure['message']}")
         print("-" * 80)
-    
+
     print("=" * 80)
     return total_failures == 0
 
@@ -128,14 +128,14 @@ def print_test_summary():
 def create_uniform_input(shape, device=None, dtype=None, low=None, high=None):
     """
     创建均匀分布的输入张量
-    
+
     Args:
         shape: 张量形状
         device: 设备（默认使用全局配置 INPUT_DEVICE）
         dtype: 数据类型（默认使用全局配置 INPUT_DTYPE）
         low: 下界（默认使用全局配置 INPUT_LOW）
         high: 上界（默认使用全局配置 INPUT_HIGH）
-    
+
     Returns:
         均匀分布在 [low, high] 的张量
     """
@@ -153,13 +153,13 @@ def create_uniform_input(shape, device=None, dtype=None, low=None, high=None):
 def create_test_input(batch_first=None, batch_size=None, seq_len=None, input_size=None):
     """
     根据全局配置创建测试输入数据
-    
+
     Args:
         batch_first: 是否 batch_first（默认使用全局配置 BATCH_FIRST）
         batch_size: batch 大小（默认使用全局配置 BATCH_SIZE）
         seq_len: 序列长度（默认使用全局配置 SEQ_LEN）
         input_size: 输入大小（默认使用全局配置 INPUT_SIZE）
-    
+
     Returns:
         测试输入张量
     """
@@ -640,7 +640,7 @@ def compare_gru_training(
 
     # 创建目标和损失函数
     target = torch.randn_like(output_pt)
-    
+
     # 计算损失（MSE Loss）
     loss_pt = torch.mean((output_pt - target) ** 2)
     loss_custom = torch.mean((output_custom - target) ** 2)
@@ -670,16 +670,16 @@ def compare_gru_training(
         """计算两个张量之间的比较指标"""
         if a is None or b is None:
             return {'name': name, 'available': False}
-        
+
         mse = torch.mean((a - b) ** 2).item()
         mae = torch.mean(torch.abs(a - b)).item()
         max_diff = torch.max(torch.abs(a - b)).item()
-        
+
         # 相对误差（使用整体范数，避免接近0的值导致虚高）
         diff_norm = torch.norm(a - b).item()
         ref_norm = torch.norm(a).item()
         rel_error = diff_norm / (ref_norm + 1e-8)
-        
+
         # 余弦相似度（clamp 防止浮点误差导致超出 [-1, 1]）
         a_flat = a.flatten()
         b_flat = b.flatten()
@@ -687,7 +687,7 @@ def compare_gru_training(
         norm_a = torch.norm(a_flat).item()
         norm_b = torch.norm(b_flat).item()
         cos_sim = max(-1.0, min(1.0, dot_product / (norm_a * norm_b + 1e-8)))
-        
+
         return {
             'name': name,
             'available': True,
@@ -701,7 +701,7 @@ def compare_gru_training(
     # 前向传播比较
     output_pt_cpu = output_pt.detach().cpu()
     output_custom_cpu = output_custom.detach().cpu()
-    
+
     results = {
         'loss_pt': loss_pt.item(),
         'loss_custom': loss_custom.item(),
@@ -794,7 +794,7 @@ def test_training_non_quantized():
 
 def test_training_quantized_int8():
     """测试 8bit 量化版本的训练比较
-    
+
     注意：量化版本的前向传播使用量化，但反向传播仍使用浮点计算。
     因此梯度差异主要来源于前向传播的量化误差。
     """
@@ -950,7 +950,7 @@ def test_training_long_run(num_steps=100, use_quantization=False, bitwidth=8, pr
                           mse_threshold=None, cos_sim_threshold=None):
     """
     长时间训练测试，观察误差累积情况
-    
+
     Args:
         num_steps: 训练步数
         use_quantization: 是否使用量化
@@ -967,7 +967,7 @@ def test_training_long_run(num_steps=100, use_quantization=False, bitwidth=8, pr
             mse_threshold = INT8_MSE_THRESHOLD
         else:
             mse_threshold = INT16_MSE_THRESHOLD
-    
+
     if cos_sim_threshold is None:
         if not use_quantization:
             cos_sim_threshold = NON_QUANT_COS_SIM_THRESHOLD
@@ -1065,11 +1065,11 @@ def test_training_long_run(num_steps=100, use_quantization=False, bitwidth=8, pr
         # 计算指标
         loss_diff = abs(loss_pt.item() - loss_custom.item())
         weight_mse = torch.mean((pytorch_gru.weight_ih_l0 - quant_gru.weight_ih_l0) ** 2).item()
-        
+
         # 计算输出余弦相似度（clamp 防止浮点误差导致超出 [-1, 1]）
         output_pt_flat = output_pt.detach().flatten()
         output_custom_flat = output_custom.detach().flatten()
-        cos_sim = (torch.dot(output_pt_flat, output_custom_flat) / 
+        cos_sim = (torch.dot(output_pt_flat, output_custom_flat) /
                    (torch.norm(output_pt_flat) * torch.norm(output_custom_flat) + 1e-8)).item()
         cos_sim = max(-1.0, min(1.0, cos_sim))
 
@@ -1085,7 +1085,7 @@ def test_training_long_run(num_steps=100, use_quantization=False, bitwidth=8, pr
         # 检查阈值（每步都检查，失败时记录）
         # 注意：这里检查的是输出的余弦相似度，而不是权重MSE
         if cos_sim <= cos_sim_threshold:
-            record_failure(f"test_training_long_run ({quant_str})", 
+            record_failure(f"test_training_long_run ({quant_str})",
                           f"步骤 {step}: 输出余弦相似度过低: {cos_sim:.8f} <= {cos_sim_threshold}")
 
     # 最终统计
@@ -1123,10 +1123,10 @@ def test_training_long_run(num_steps=100, use_quantization=False, bitwidth=8, pr
 
 def test_quantized_vs_non_quantized(bitwidth=8):
     """测试量化版本：QuantGRU 非量化 vs QuantGRU 量化
-    
+
     这个测试比较 QuantGRU 的非量化和量化版本，两者都使用相同的 Haste 格式权重
     这样可以更准确地评估量化带来的误差（类似 example/gru.cc 中的比较）
-    
+
     Args:
         bitwidth: 量化位宽（8 或 16）
     """
@@ -1327,7 +1327,7 @@ def main():
 
     # 打印测试总结
     all_passed = print_test_summary()
-    
+
     # 返回退出码
     return 0 if all_passed else 1
 

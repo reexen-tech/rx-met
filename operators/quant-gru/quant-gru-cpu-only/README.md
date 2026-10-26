@@ -11,7 +11,7 @@
 环境需要 CMake 3.14 及以上版本和 C++17 编译器。以下命令从 QuantGRU 目录执行：
 
 ```bash
-cmake -S operators/quant-gru/quant-gru-cpu-only \
+cmake -S quant-gru-cpu-only \
   -B quant-gru-cpu-only/build -DCMAKE_BUILD_TYPE=Release
 cmake --build quant-gru-cpu-only/build --parallel 2
 ctest --test-dir quant-gru-cpu-only/build --output-on-failure

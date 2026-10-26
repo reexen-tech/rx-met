@@ -1,6 +1,6 @@
 # QuantGRU
 
-QuantGRU 提供 PyTorch GRU(门控循环单元) 的高性能量化实现，基于 CUDA 和 PyTorch，包含 CUDA 浮点计算、PTQ、QAT、
+QuantGRU 提供 PyTorch GRU(门控循环单元) 的高性能量化实现，基于原生 C++、CUDA 和 PyTorch，包含浮点计算、PTQ、QAT、
 整数输入输出和 ONNX 导出。模型参数命名与单层 `torch.nn.GRU` 对齐。
 
 ## 支持范围
@@ -8,7 +8,7 @@ QuantGRU 提供 PyTorch GRU(门控循环单元) 的高性能量化实现，基�
 - 浮点和量化两种模式：可在训练和推理时自由切换
 - 模型使用 `num_layers=1`、`dropout=0`，支持单向和双向计算。
 - 输入为三维序列张量，`batch_first=True` 对应 `[B, T, I]`，默认布局为 `[T, B, I]`。
-- 常规前向和校准使用 CUDA float32 张量。输出为序列和最终隐藏状态。
+- CUDA 包使用 CUDA float32 张量，CPU 包支持 float32 前向和校准。输出为序列和最终隐藏状态。
 - 隐藏状态形状为 `[D, B, H]`，其中单向 `D=1`，双向 `D=2`。
 - 校准方法包括 MinMax、SQNR 和 Percentile，默认使用 MinMax。
 - 权重和偏置采用对称量化，支持 per-tensor、per-gate 和 per-channel 粒度。
@@ -19,31 +19,34 @@ QuantGRU 提供 PyTorch GRU(门控循环单元) 的高性能量化实现，基�
 
 ## 环境与安装
 
-rx-met 发布镜像包含 QuantGRU，环境说明见
-[Docker 构建配置](../../docker/README.md)。
+QuantGRU 可从独立仓库或 rx-met 的 `operators/quant-gru` 目录构建。以下命令均从
+包含本 README 的 QuantGRU 目录执行。独立仓库的镜像说明位于 `docker/README.md`，
+rx-met 的发布镜像说明位于其仓库根目录的 `docker/README.md`。
 
 源码构建需要 Linux、C++17 编译器、CMake 3.18 及以上版本、OpenMP、CUDA Toolkit
 和 CUDA 版 PyTorch。项目 wheel 构建流程使用 Python 3.10 至 3.12。编译工具链与
 PyTorch CUDA 版本保持兼容。
 
 CPU 发布包支持浮点推理、MinMax/SQNR/Percentile 校准、PTQ、整数输入输出和 ONNX
-适配，不支持浮点训练或 QAT。使用 CPU 版 PyTorch，在仓库根目录构建：
+适配，不支持浮点训练或 QAT。使用 CPU 版 PyTorch 构建：
 
 ```bash
-RX_MET_ENABLE_CUDA=0 bash scripts/internal/build_quant_gru_wheel.sh
+cmake -S . -B build_release -DCMAKE_BUILD_TYPE=Release -DRX_MET_ENABLE_CUDA=OFF
+cmake --build build_release --parallel 2
+RX_MET_ENABLE_CUDA=0 python3 -m pip install ./pytorch --no-deps --no-build-isolation
 ```
 
 CPU 构建不需要 CUDA Toolkit，生成的 wheel 包含 CPU 原生共享库。使用时将模块和输入
 放在 CPU，校准和推理均要求 `eval()` 且在 `torch.no_grad()` 或 `torch.inference_mode()`
-上下文中调用；量化参数导入导出接口与 CUDA 包相同。单独构建
-CPU 原生库可使用 `cmake -S operators/quant-gru -B build/gru-cpu -DRX_MET_ENABLE_CUDA=OFF`。
+上下文中调用；量化参数导入导出接口与 CUDA 包相同。自定义 CPU 构建目录时，安装前
+设置 `RX_MET_QUANT_GRU_BUILD_DIR` 为构建目录的绝对路径。
 ONNX Runtime 适配还需要构建时提供 C++ headers，可通过
 `QUANT_GRU_ONNXRUNTIME_INCLUDE` 指定其目录。
 
-先进入包含本 README 的 QuantGRU 目录，再执行：
+CUDA 构建使用：
 
 ```bash
-cmake -S operators/quant-gru -B build -DCMAKE_BUILD_TYPE=Release
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build --parallel 2
 python3 -m pip install ./pytorch --no-deps --no-build-isolation
 ```
@@ -170,16 +173,17 @@ gru.cuda()
 `pytorch/quant_gru_onnx.py` 提供标准 ONNX GRU 的输入适配，转换门顺序、方向、
 W/R/B 和输入输出布局，直接调用 QuantGRU 的校准、量化前向、Po2 与编码接口。
 `pytorch/lib/gru_onnx_runtime.cc` 只负责 ONNX Runtime 与 Python 接口之间的张量传递，
-不实现门计算。桥接经主机缓冲区调用原生 CUDA 算子，存在额外数据拷贝。
+不实现门计算。CUDA 包的桥接经主机缓冲区调用原生 CUDA 算子，存在额外数据拷贝；
+CPU 包直接使用 CPU 原生算子。
 
 RX-MET 的 `create_onnx_ptq_sim` 自动接入此能力，读取相同的 `GRU_config`。
 导出保存标准 GRU，双向参数编码按方向组合，内部编码沿用原生 schema。
-当前支持范围和验证见 [ONNX PTQ 文档](../../docs/ONNX_PTQ_COMPILER.md#gru-原生适配)
-及 [集成测试](../../tests/test_onnx_gru_native.py)。
+当前支持范围和验证见 rx-met 仓库中的 `docs/ONNX_PTQ_COMPILER.md` 和
+`tests/test_onnx_gru_native.py`。
 
-构建 wheel 时，仓库内的 ONNX Runtime 1.20.1 头文件用于构建
+在 rx-met 中构建 wheel 时，仓库内的 ONNX Runtime 1.20.1 头文件用于构建
 `quant_gru_onnx_runtime` 扩展，支持本项目使用的 ONNX Runtime 1.20.1 及以上版本。
-独立构建可用 `QUANT_GRU_ONNXRUNTIME_INCLUDE` 指定头文件目录；没有头文件时仍可
+独立构建需通过 `QUANT_GRU_ONNXRUNTIME_INCLUDE` 指定头文件目录；没有头文件时仍可
 构建仅用于 Torch 的 wheel，ONNX 输入校准会提示缺少运行时扩展。
 
 ## 接口与验证
@@ -204,7 +208,7 @@ python3 pytorch/example/example_usage.py -e basic
 python3 tests/test_quant_gru.py
 ```
 
-示例脚本会捕获并打印异常，结果检查同时读取日志中的完成信息和错误信息。
+示例脚本会捕获并打印异常，运行失败时返回非零退出码。
 测试数据规模、位宽和通过阈值以测试脚本为准。
 
 ## 文档与源码

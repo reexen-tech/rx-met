@@ -596,11 +596,11 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def main() -> None:
+def main() -> int:
     args = parse_args()
     if args.list:
         list_examples()
-        return
+        return 0
 
     print("=" * 60)
     print("  QuantGRU 量化库使用示例")
@@ -608,17 +608,19 @@ def main() -> None:
 
     if not torch.cuda.is_available():
         print("❌ 错误: 需要 CUDA 支持")
-        return
+        return 1
 
     try:
         run_examples(args.example, bitwidth=args.bitwidth)
         print("\n" + "=" * 60)
         print("  示例运行完成！")
         print("=" * 60)
+        return 0
     except Exception as exc:
         print(f"\n❌ 错误: {exc}")
         traceback.print_exc()
+        return 1
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

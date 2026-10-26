@@ -6,10 +6,14 @@
 ## [Unreleased]
 
 - LSTM 的 AIMET/RX 部署编码对齐 QuantGRU：补充 schema_version 3 和 bitwidth，
-  使用字符串 is_symmetric、I/O 列表、internal_ops.output 列表及扁平参数数组。
+  使用字符串 is_symmetric、I/O 端口字典、internal_ops.output 列表及扁平参数数组。
   双向 h/c 网格以各方向的 PER_TENSOR 标量编码保留，分别使用 output / cell_state
   量化点；权重和 bias 的部署编码展开为一维 per-channel 数组。公共编码可直接回读，
   原生参数检查点保留独立格式。
+- 公共编码增加与 scale 同形的 `n = round(-log2(scale))`；加载时校验已提供的 n，
+  并兼容旧版单元素 I/O 编码列表。
+- 显式 CPU Python 构建支持 eval/no-grad FP32 前向、MinMax/Percentile/SQNR 校准和
+  FP32 q-carrier PTQ；训练和 QAT 仍要求 CUDA，CUDA wheel 不提供隐式 CPU fallback。
 
 - 增加与 QuantGRU 对齐的循环算子集成接口，配置、校准生命周期、Po2 和 AIMET/ONNX
   编码处理均由本库负责，无 AIMET 依赖。
@@ -73,7 +77,8 @@
 
 ### Known limitations
 
-- Python runtime 只支持 CUDA FP32 tensor、单层 LSTM 和 `dropout=0`。
+- Python runtime 只支持 FP32 tensor、单层 LSTM 和 `dropout=0`；CPU 仅支持显式
+  CPU wheel 的 eval/no-grad 校准与 PTQ，浮点训练和 QAT 仍要求 CUDA。
 - Python package 尚未发布到 PyPI；wheel 需要在兼容的 Python、PyTorch 和 CUDA
   构建环境中生成。
 - CPU int32 reference 的 sigmoid/tanh 使用浮点函数；CUDA int32 backend 尚未实现。

@@ -21,6 +21,12 @@ BUILD_DIR="$PROJECT_DIR/build"
 # 保存原始配置内容（不创建备份文件）
 ORIGINAL_CONFIG=$(cat "$CONFIG_FILE")
 
+restore_config() {
+    printf '%s\n' "$ORIGINAL_CONFIG" > "$CONFIG_FILE"
+}
+
+trap restore_config EXIT
+
 # 结果文件
 RESULT_FILE="$PROJECT_DIR/test_weight_activation_results.txt"
 CSV_FILE="$PROJECT_DIR/test_weight_activation_results.csv"
@@ -269,7 +275,8 @@ run_test "W10A10_GEMM16" 10 10 "pass" 16
 run_test "W12A12_GEMM16" 12 12 "pass" 16
 
 # 恢复原始配置
-echo "$ORIGINAL_CONFIG" > "$CONFIG_FILE"
+restore_config
+trap - EXIT
 echo ""
 echo "原始配置已恢复"
 
