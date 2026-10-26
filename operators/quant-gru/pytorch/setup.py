@@ -205,7 +205,7 @@ cpu_extension = CppExtension(
 ) if not ENABLE_CUDA else None
 
 setup(
-    name='quant_gru',
+    name='quant-gru',
     version=read_version(),
     description='Quantized GRU implementation with C++ backend',
     py_modules=['quant_gru', 'quant_gru_onnx', '_version'],
