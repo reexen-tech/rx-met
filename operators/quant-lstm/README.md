@@ -196,7 +196,7 @@ CUDA 测试需要可用 GPU，真实网络测试还需要 Speech Commands v0.02 
 | [example/](example/README.md)                                                                | C++ 浮点与 int32 reference 示例     |
 | `include/`、`src/`                                                                            | C++/CUDA 计算、校准和量化实现            |
 | `pytorch/`                                                                                   | Python 模块、autograd 和扩展 binding |
-| [CHANGELOG.md](CHANGELOG.md)                                                                 | 功能变化与迁移记录                      |
+| [根目录 CHANGELOG.md](../../CHANGELOG.md)                                                    | 集成功能变化与迁移记录                  |
 
 
 完整入口见[文档导航](docs/README.md)。

@@ -43,7 +43,7 @@
   `fix(calibration): handle degenerate POT2 ranges`。
 - 功能实现和测试可以拆分提交，但每个提交都应保持可构建，并明确对应行为。
 - 用户可见行为、配置、依赖、命令、制品、量化公式或测试阈值变化时，同步更新
-  对应权威文档和 [CHANGELOG](../CHANGELOG.md)。根 README 只保留摘要和入口，
+  对应权威文档和[仓库根目录 CHANGELOG](../../../CHANGELOG.md)。根 README 只保留摘要和入口，
   完整内容写入专题文档。
 
 提交文档前运行 `git diff --check`，并检查 Markdown 相对链接、代码围栏、

@@ -9,7 +9,7 @@ variable "SOURCE_REVISION" {
 }
 
 variable "ENV_VERSION" {
-  default = "v1"
+  default = "202610"
 }
 
 variable "BUILD_ENV_REPOSITORY" {
@@ -33,9 +33,9 @@ target "variant-cpu" {
     BASE_IMAGE                = "public.ecr.aws/ubuntu/ubuntu:22.04"
     RX_MET_CUDA_ARCHITECTURES = ""
     TORCH_CUDA_ARCH_LIST      = ""
-    TORCH_VERSION             = "2.8.0"
-    TORCHVISION_VERSION       = "0.23.0"
-    TORCHAUDIO_VERSION        = "2.8.0"
+    TORCH_VERSION             = "2.9.1"
+    TORCHVISION_VERSION       = "0.24.1"
+    TORCHAUDIO_VERSION        = "2.9.1"
     ONNXRUNTIME_VERSION       = "1.23.2"
     ONNXRUNTIME_SOURCE_SHA256 = "vendored"
     PYTHON_VERSION            = "3.10"

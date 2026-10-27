@@ -108,7 +108,7 @@ def load_onnx_ptq_inputs(
     return original_model, input_shapes, feeds
 
 
-@logged_operation
+@logged_operation(capture_config=False)
 def create_onnx_ptq_sim(
     original_model: onnx.ModelProto,
     dummy_input: Dict[str, np.ndarray],
@@ -208,7 +208,7 @@ def export_onnx_json(
     }
 
 
-@logged_operation
+@logged_operation(capture_config=False)
 def verify_onnx_ptq_artifacts(
     artifacts: Dict[str, Any],
     feed: Dict[str, np.ndarray],
@@ -319,7 +319,7 @@ _force_model_io_quantizers = force_model_io_quantizers
 _compare_outputs = compare_outputs
 
 
-@logged_workflow('output_dir', task='onnx_ptq')
+@logged_workflow('output_dir', task='onnx_ptq', capture_config=False)
 def run_onnx_ptq(
     *,
     model_path: str | Path,

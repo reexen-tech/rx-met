@@ -188,7 +188,7 @@ flowchart LR
     Install --> Verify[纯 runtime + 外部只读目录 / GPU / 示例验收]
 ```
 
-环境镜像和应用包使用独立版本；公共环境为 rx-quant-env v1，由两仓库独立维护公共配方和环境版本标签约定：
+环境镜像和应用包使用独立版本；公共环境为 rx-quant-env `202610`，环境定义由本仓库维护，并通过环境版本标签复用兼容镜像：
 
 - 环境版本随 CUDA、Python、Torch、ONNX Runtime 或构建工具链变化。
 - 项目版本随 AIMET Python、原生实现、QuantGRU、示例或产品行为变化。

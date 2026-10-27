@@ -25,6 +25,14 @@ ENV_SPEC.loader.exec_module(runtime_cli)
 
 
 class EnvironmentArchiveTest(unittest.TestCase):
+    def test_archive_names_identify_docker_format_for_every_role_and_variant(self):
+        for role in ('runtime', 'build'):
+            for variant in archives.common.config()['variants']:
+                record = archives.requirement(role, variant)
+                self.assertEqual(record['filename'],
+                                 f'rx-quant-env-{role}-202610-{variant}-linux-amd64.docker.tar.gz')
+                self.assertEqual(record['environment_version'], '202610')
+
     def setUp(self):
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
@@ -188,13 +196,23 @@ class EnvironmentArchiveTest(unittest.TestCase):
 
     def test_export_saves_tag_and_records_actual_id_only_as_provenance(self):
         reference = self.existing_image()
+        self.images[reference].update(Created='2027-01-02T03:04:05Z', Config={'Labels': {
+            'org.opencontainers.image.revision': 'source-commit',
+            archives.common.LABEL + 'environment.config-sha256': 'source-digest'}})
         save = self.patch(archives, '_save_runtime', side_effect=lambda image, path: self.write_payload(path))
         archive, record = archives.image_archive('runtime', self.variant, self.directory, export=True)
         self.assertEqual(save.call_args.args[0], reference)
         self.assertEqual(record['image_id'], self.image_id)
         self.assertEqual(record['sha256'], archives.common.sha256(archive))
+        self.assertEqual(record['image_created_at'], '2027-01-02T03:04:05Z')
+        self.assertEqual(record['source_revision'], 'source-commit')
+        self.assertEqual(record['config_sha256'], 'source-digest')
+        self.assertEqual(record['environment_version'], '202610')
         self.assertTrue(archive.with_name(archive.name + '.sha256').is_file())
         self.assertNotIn('image_id', artifacts.runtime_requirement(record))
+        _, reused = archives.image_archive('runtime', self.variant, self.directory, export=True)
+        self.assertEqual(reused, record)
+        self.assertEqual(save.call_count, 1)
 
     def test_existing_archive_reuse_needs_no_write_or_matching_local_id(self):
         path, record = self.archive(sidecar=True)
@@ -240,6 +258,30 @@ class EnvironmentArchiveTest(unittest.TestCase):
                          archives.common.image_ref('runtime', self.variant))
         self.assertNotIn('config_sha256', document)
 
+    def test_standalone_export_preserves_both_roles_and_full_sidecar_names(self):
+        self.existing_image('build')
+        self.existing_image('runtime')
+        self.patch(archives, '_save_runtime', side_effect=lambda image, path: self.write_payload(path))
+        for role in ('build', 'runtime', 'build'):
+            runtime_cli.export_environment(self.variant, self.directory, role)
+        document = json.loads((self.directory / 'manifest.json').read_text())
+        self.assertEqual(set(document['variants'][self.variant]), {'build', 'runtime'})
+        for role, record in document['variants'][self.variant].items():
+            archive = self.directory / record['filename']
+            self.assertTrue(archive.with_name(archive.name + '.json').is_file())
+            self.assertTrue(archive.with_name(archive.name + '.sha256').is_file())
+            self.assertIn(archive.name, (self.directory / 'SHA256SUMS').read_text())
+
+    def test_standalone_cli_handles_both_roles_with_runtime_default(self):
+        for action, method in (('export', 'export_environment'), ('load', 'load_environment')):
+            for options, expected in (([], ['runtime']), (['--role', 'build'], ['build']),
+                                      (['--role', 'all'], ['build', 'runtime'])):
+                with patch.object(runtime_cli, method) as operation, \
+                        patch('sys.argv', ['runtime_archives.py', action, '--directory', str(self.directory),
+                                          '--output-dir', str(self.directory), 'cpu', *options]):
+                    runtime_cli.main()
+                self.assertEqual([call.args[2] for call in operation.call_args_list], expected)
+
     def test_standalone_load_uses_archive_without_repository_records(self):
         path, _ = self.archive()
         runtime_cli.load_runtime(self.variant, self.directory)
@@ -276,8 +318,8 @@ class RuntimeArchiveCliTest(unittest.TestCase):
         for action in ('export', 'load'):
             for selection, expected in selections:
                 with self.subTest(action=action, selection=selection), \
-                        patch.object(runtime_cli, 'export_runtime') as export, \
-                        patch.object(runtime_cli, 'load_runtime') as load, \
+                        patch.object(runtime_cli, 'export_environment') as export, \
+                        patch.object(runtime_cli, 'load_environment') as load, \
                         patch('sys.argv', ['runtime_archives.py', action, '--directory', '/tmp/runtime', *selection]):
                     runtime_cli.main()
                     operation = export if action == 'export' else load
@@ -287,7 +329,7 @@ class RuntimeArchiveCliTest(unittest.TestCase):
     def test_unknown_runtime_archive_variant_is_rejected(self):
         with patch('sys.argv', ['runtime_archives.py', 'export', 'unknown']), \
                 contextlib.redirect_stderr(io.StringIO()), \
-                patch.object(runtime_cli, 'export_runtime') as export:
+                patch.object(runtime_cli, 'export_environment') as export:
             with self.assertRaises(SystemExit) as error:
                 runtime_cli.main()
         self.assertEqual(error.exception.code, 2)

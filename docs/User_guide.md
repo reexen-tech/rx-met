@@ -54,7 +54,7 @@ CUDA 版 ONNX Runtime 安装在 runtime 中；QuantGRU 和 QuantLSTM 来自挂�
 
 ## 3. 加载并启动镜像
 
-当前安装入口是应用包内的 `install.sh`。离线首次交付时，将 `rx-quant-env-v1/`
+当前安装入口是应用包内的 `install.sh`。离线首次交付时，将 `rx-quant-env-202610/`
 公共运行环境目录与 `rx-met-v<版本>/` 产品目录平级放置。在产品目录内解压所选应用包，
 进入解压后的应用包目录安装；也可用 `--runtime-image FILE` 显式指定归档。从源码构建应用包见
 [`Release_packaging.md`](./Release_packaging.md)。

@@ -71,8 +71,10 @@ def load_matrix(path: Path = MATRIX_PATH) -> dict[str, Any]:
         raise DependencyError(f"cannot read dependency matrix {path}: {error}") from error
     if matrix.get("schema_version") != 1:
         raise DependencyError(f"{path}: unsupported schema_version")
-    if not str(matrix.get("environment_version", "")).strip():
-        raise DependencyError(f"{path}: missing environment_version")
+    if not isinstance(matrix.get("environment_version"), str) or not re.fullmatch(
+        r"[0-9]{4}(?:0[1-9]|1[0-2])", matrix["environment_version"]
+    ):
+        raise DependencyError(f"{path}: environment_version must be a fixed YYYYMM string")
 
     matrix["build_packages"] = _canonical_packages(
         matrix.get("build_packages", {}), "build_packages"

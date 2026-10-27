@@ -275,17 +275,72 @@ except RuntimeError:
             pass
 
     def test_timestamp_collision_preserves_previous_execution(self):
-        now = datetime.datetime(2026, 10, 21, 6, 30, 25, 123456, datetime.timezone.utc)
+        beijing = datetime.timezone(datetime.timedelta(hours=8))
+        now = datetime.datetime(2026, 10, 21, 14, 30, 25, 123456, beijing)
         with patch.object(runtime, '_now', return_value=now):
             with runtime.execution(self.root) as first:
                 (first.exports / 'model.onnx').write_bytes(b'first')
             with runtime.execution(self.root) as second:
                 (second.exports / 'model.onnx').write_bytes(b'second')
-        self.assertEqual(first.execution_id, '20261021T063025123456Z')
+        self.assertEqual(first.execution_id, '20261021_143025_123456')
         self.assertEqual(second.execution_id, first.execution_id + '-1')
         self.assertEqual((first.root / 'exports/model.onnx').read_bytes(), b'first')
         self.assertFalse((self.root / 'runs').exists())
         self.assertEqual(set(self.root.iterdir()), {first.root, second.root})
+
+    def test_beijing_timestamps_do_not_follow_host_timezone(self):
+        script = '''import sys, time
+from aimet_common.run_context import execution
+time.tzset()
+assert time.localtime(0).tm_hour == 0
+with execution(sys.argv[1]):
+    pass
+'''
+        before = datetime.datetime.now(datetime.timezone.utc)
+        result = subprocess.run([sys.executable, '-c', script, str(self.root)],
+                                env={**os.environ, 'TZ': 'UTC'},
+                                capture_output=True, text=True, timeout=20)
+        after = datetime.datetime.now(datetime.timezone.utc)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        records = list(self.root.glob('*/run.json'))
+        self.assertEqual(len(records), 1)
+        record = json.loads(records[0].read_text())
+        self.assertRegex(record['execution_id'], r'^\d{8}_\d{6}_\d{6}$')
+        started = datetime.datetime.fromisoformat(record['started_at'])
+        finished = datetime.datetime.fromisoformat(record['finished_at'])
+        for key, value in (('started_at', started), ('finished_at', finished)):
+            self.assertRegex(record[key], r'^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6}\+08:00$')
+            self.assertEqual(value.utcoffset(), datetime.timedelta(hours=8))
+        self.assertEqual(record['execution_id'], started.strftime('%Y%m%d_%H%M%S_%f'))
+        self.assertEqual(records[0].parent.name, record['execution_id'])
+        self.assertLessEqual(before, started)
+        self.assertLessEqual(started, finished)
+        self.assertLessEqual(finished, after)
+
+    def test_json_timestamps_keep_zero_microseconds(self):
+        beijing = datetime.timezone(datetime.timedelta(hours=8))
+        now = datetime.datetime(2026, 10, 27, 10, 53, 8, tzinfo=beijing)
+        with patch.object(runtime, '_now', return_value=now):
+            with runtime.execution(self.root) as run:
+                pass
+        record = self.read_record(run)
+        self.assertEqual(run.root.name, '20261027_105308_000000')
+        self.assertEqual(record['started_at'], '2026-10-27T10:53:08.000000+08:00')
+        self.assertEqual(record['finished_at'], record['started_at'])
+
+    def test_log_timestamps_convert_utc_epoch_to_beijing_time(self):
+        utc = datetime.datetime(2026, 10, 26, 18, 53, 8, 820401, datetime.timezone.utc)
+        message = logging.LogRecord('execution-time-test', logging.INFO, '', 0,
+                                    'known UTC instant', (), None)
+        message.created = utc.timestamp()
+        message.msecs = utc.microsecond / 1000
+        with runtime.execution(self.root) as run:
+            run.emit(message)
+        line = next(line for line in (run.root / 'run.log').read_text().splitlines()
+                    if 'known UTC instant' in line)
+        timestamp = datetime.datetime.fromisoformat(line.split()[0])
+        self.assertEqual(timestamp.utcoffset(), datetime.timedelta(hours=8))
+        self.assertEqual(timestamp.replace(microsecond=0).isoformat(), '2026-10-27T02:53:08+08:00')
 
     def test_source_version_does_not_use_unrelated_installed_bundle(self):
         checkout = self.root / 'checkout'
@@ -551,7 +606,7 @@ except RuntimeError:
         script = '''import contextlib, datetime, io, json, sys
 from unittest.mock import patch
 from aimet_common import run_context as runtime
-now = datetime.datetime(2026, 10, 21, tzinfo=datetime.timezone.utc)
+now = datetime.datetime(2026, 10, 21, tzinfo=datetime.timezone(datetime.timedelta(hours=8)))
 with contextlib.redirect_stdout(io.StringIO()), patch.object(runtime, '_now', return_value=now):
     run = runtime.Execution(sys.argv[1])
     run.finish()

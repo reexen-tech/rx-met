@@ -9,4 +9,4 @@
 - `schema/lstm_pytorch*_quant_params.schema.json` 校验公共参数交换文档。
 
 Schema 和默认文件发生变化时，需要同步更新
-[配置参考](../docs/configuration.md)、对应测试和 [CHANGELOG](../CHANGELOG.md)。
+[配置参考](../docs/configuration.md)、对应测试和[根目录 CHANGELOG](../../../CHANGELOG.md)。

@@ -294,7 +294,7 @@ class _QuantizationSimModelBase(_QuantizationSimModelInterface):
                              default_output_bw=16 or 32 and default_param_bw=16 or 32.
     """
 
-    @logged_operation
+    @logged_operation(capture_config=False)
     def __init__(
         self,
         model: torch.nn.Module,

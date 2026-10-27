@@ -1038,7 +1038,10 @@ def _run_kws_ptq(args, run):
                                 for name, array in stage_outputs.items()}
     (run.exports / "att_mh_rnn_kws_ptq.metadata.json").write_text(json.dumps(metadata, indent=2) + "\n")
     np.testing.assert_allclose(stage_outputs["restored"], stage_outputs["po2"], atol=1e-5, rtol=1e-4)
-    print(f"PTQ-only 完成: {onnx_path}; encodings: {enc_path}; 恢复误差: {restore_delta:.6g}")
+    print(f"PTQ-only 完成；恢复误差: {restore_delta:.6g}")
+    print("最终产物请配套使用 .onnx 模型和 .json 量化参数：")
+    print(f"ONNX 模型 (.onnx): {onnx_path}")
+    print(f"量化参数 (.json):  {enc_path}")
 
 
 # ============================================================================
@@ -1048,8 +1051,6 @@ def main(argv=None):
     args = parse_args(argv)
     with execution(args.output_dir / args.rnn_type, f'kws_{args.rnn_type}') as run:
         run.note_inputs(dataset=args.data_dir)
-        run.snapshot_config(args.quant_config, 'mixed_precision')
-        run.snapshot_config(CONFIG_FILE, 'quantsim')
         _run_kws(args, run)
 
 
@@ -1161,8 +1162,9 @@ def _run_kws(args, run):
         )
         sim.model.to(DEVICE)
         print(f"训练态权重: {qat_state_pth}")
-        print(f"ONNX:       {onnx_path}")
-        print(f"encodings:  {enc_path}")
+        print("最终产物请配套使用 .onnx 模型和 .json 量化参数：")
+        print(f"ONNX 模型 (.onnx): {onnx_path}")
+        print(f"量化参数 (.json):  {enc_path}")
 
     with stage("步骤 8: 重新加载并验证", timings):
         fresh_model = _new_model(args.rnn_type).eval()

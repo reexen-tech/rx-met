@@ -18,7 +18,7 @@ QuantGRU、QuantLSTM 和可复现的 CPU / 多 CUDA 运行环境。CPU 支持校
 
 | 镜像变体    | 系统 / Python         | CUDA | PyTorch | ONNX Runtime | 最低 NVIDIA Driver |
 | ------- | ------------------- | ---- | ------- | ---------------- | ---------------- |
-| `cpu` | Ubuntu 22.04 / 3.10 | 无 | 2.8.0 CPU | 1.23.2 CPU | 无 |
+| `cpu` | Ubuntu 22.04 / 3.10 | 无 | 2.9.1 CPU | 1.23.2 CPU | 无 |
 | `cu118` | Ubuntu 22.04 / 3.10 | 11.8 | 2.7.1   | 1.20.1           | 520.61.05        |
 | `cu126` | Ubuntu 22.04 / 3.10 | 12.6 | 2.8.0   | 1.23.2           | 560.35.05        |
 | `cu130` | Ubuntu 24.04 / 3.12 | 13.0 | 2.10.0  | 1.27.0           | 580.126.20       |
@@ -33,7 +33,7 @@ QuantGRU、QuantLSTM 和可复现的 CPU / 多 CUDA 运行环境。CPU 支持校
 后续产品更新只需下载应用包。解压后执行：
 
 ```bash
-./install.sh --offline
+./install.sh
 ```
 
 安装器校验并准备 runtime，在临时容器中离线安装三个 wheel，最后打印应用目录和 Docker 启动命令。

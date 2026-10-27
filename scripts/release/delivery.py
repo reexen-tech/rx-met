@@ -166,11 +166,11 @@ def publish_environment(archive, record, directory):
             document = existing
         verified = {}
         for entry in document['variants'].values():
-            previous_record = entry['runtime']
-            previous_archive = directory / previous_record['filename']
-            if not previous_archive.is_file() or common.sha256(previous_archive) != previous_record['sha256']:
-                raise RuntimeError(f'环境交付目录的归档冲突: {previous_archive}')
-            verified[previous_archive.name] = previous_record['sha256']
+            for previous_record in entry.values():
+                previous_archive = directory / previous_record['filename']
+                if not previous_archive.is_file() or common.sha256(previous_archive) != previous_record['sha256']:
+                    raise RuntimeError(f'环境交付目录的归档冲突: {previous_archive}')
+                verified[previous_archive.name] = previous_record['sha256']
         destination = directory / archive.name
         if destination.exists():
             if (verified.get(destination.name) or common.sha256(destination)) != record['sha256']:
@@ -184,12 +184,14 @@ def publish_environment(archive, record, directory):
         common.write_json(destination.with_name(destination.name + '.json'), record)
         destination.with_name(destination.name + '.sha256').write_text(
             f"{record['sha256']}  {destination.name}\n")
-        document['variants'][record['variant']] = {'runtime': record}
+        document['variants'].setdefault(record['variant'], {})[record['role']] = record
         common.write_json(manifest_path, document)
         (directory / 'README.md').write_text(
-            f"# {record['environment_name']} {record['environment_version']} 公共运行环境\n\n"
+            f"# {record['environment_name']} {record['environment_version']} 公共环境\n\n"
             '将本目录与产品交付目录平级放置，在产品目录内解压所选应用包并运行 install.sh。\n'
-            '这里只交付运行环境镜像；应用包按版本标签复用兼容环境，不包含构建环境镜像。\n')
+            '应用发布只附带 runtime 镜像；build 镜像可通过独立环境导出命令添加，供开发构建使用。\n'
+            '使用 docker load 加载 .docker.tar.gz 镜像归档。\n'
+            '应用包按版本标签复用兼容环境。\n')
         files = sorted(path for path in directory.iterdir()
                        if path.is_file() and not path.name.startswith('.') and path.name != 'SHA256SUMS')
         (directory / 'SHA256SUMS').write_text(''.join(

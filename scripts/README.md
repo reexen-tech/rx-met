@@ -4,7 +4,7 @@
 - environment/export_runtime.sh、export.sh：导出公共 runtime 归档，生成独立归档校验和追踪信息。
 - environment/load.sh：校验并导入公共 runtime。
 - verify_compiler_artifacts.py：只读验收保存的 ONNX/schema v4 编码、张量维度及图映射，默认要求 Po2 和完整计算输入覆盖。
-- environment/common.py：两仓库独立保存的公共环境定义；runtime_archives.py 处理独立归档的导出和加载。
+- environment/common.py：公共环境定义和兼容性检查；runtime_archives.py 处理独立归档的导出和加载。
 - release/build.sh：默认只构建应用包并执行离线安装自检，输出 .release/export/rx-met-v<VERSION>/；--with-env 将运行环境归档导出或复用到平级环境目录。
 - release/verify_bundle.sh：验证应用安装目录及 GPU 流程。
 - release/artifacts.py、verify_install.py、verify_runtime_archive.py：维护者实现，不独立交付给用户。

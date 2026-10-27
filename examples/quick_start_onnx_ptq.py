@@ -212,8 +212,6 @@ def parse_args(argv=None):
 def main(argv=None) -> None:
     args = parse_args(argv)
     with execution(args.output_dir, 'onnx_ptq') as run:
-        run.snapshot_config(args.config_file, 'quantsim')
-        run.snapshot_config(args.quant_config, 'mixed_precision')
         _run_onnx_ptq(run, args)
 
 
@@ -367,9 +365,10 @@ def _run_onnx_ptq(run, args=None) -> None:
         artifacts = export_onnx_json(
             sim, original_model, run.exports, filename_prefix
         )
-        print(f"ONNX:              {artifacts['onnx']}")
-        print(f"compiler encodings:{artifacts['encodings']}")
-        print(f"RX-MET encodings:   {artifacts['aimet_encodings']}")
+        print("最终产物请配套使用 .onnx 模型和 .json 量化参数：")
+        print(f"ONNX 模型 (.onnx): {artifacts['onnx']}")
+        print(f"量化参数 (.json):  {artifacts['encodings']}")
+        print(f"原始 AIMET 编码 (调试参考): {artifacts['aimet_encodings']}")
         print(
             "coverage: "
             f"{artifacts['coverage']['mapped_quantizers']}/"

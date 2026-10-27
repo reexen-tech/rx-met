@@ -220,7 +220,7 @@ python3 tests/test_quant_gru.py
 | [quant-gru-cpu-only/](quant-gru-cpu-only/README.md) | 独立的 C++ CPU 定点参考实现 |
 | `include/`、`src/` | 主 C++/CUDA 计算、校准和 LUT 实现 |
 | `pytorch/` | Python 模块、扩展 binding 与使用示例 |
-| [CHANGELOG.md](CHANGELOG.md) | 组件版本与迁移记录 |
+| [根目录 CHANGELOG.md](../../CHANGELOG.md) | 集成版本与迁移记录 |
 
 项目使用的 GRU 实现源自 [Haste](https://github.com/lmnt-com/haste)，并与
 [PyTorch GRU 接口](https://pytorch.org/docs/stable/generated/torch.nn.GRU.html) 集成。
