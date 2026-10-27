@@ -113,17 +113,16 @@ def _control_roles(model):
     return ports, control_only
 
 
-def _validate_native(node, entry, parameters, initializers):
-    name = node.name
-    kind = node.op_type
+def validate_native_recurrent_encoding_coverage(entry, kind, *, bidirectional, name):
+    """Validate native encoding coverage without requiring an exported ONNX graph."""
+    if kind not in ("GRU", "LSTM"):
+        raise ValueError(f"{name}: unsupported native encoding kind {kind!r}")
+    if not isinstance(entry, dict):
+        raise ValueError(f"{name}: expected native {kind} encodings")
     if (entry.get(f"is_{kind}") is not True or
             entry.get("is_LSTM" if kind == "GRU" else "is_GRU") is True):
         raise ValueError(f"{name}: native encoding kind does not match ONNX {kind}")
-    attrs = {item.name: onnx.helper.get_attribute_value(item) for item in node.attribute}
-    direction = attrs.get("direction", b"forward")
-    if direction not in (b"forward", b"bidirectional"):
-        raise ValueError(f"{name}: unsupported native direction {direction!r}")
-    directions = 2 if direction == b"bidirectional" else 1
+    directions = 2 if bidirectional else 1
     has_reverse = "internal_ops_reverse" in entry
     if has_reverse != (directions == 2):
         raise ValueError(f"{name}: native internal_ops_reverse does not match ONNX direction")
@@ -131,8 +130,9 @@ def _validate_native(node, entry, parameters, initializers):
     for field in ("internal_ops", "internal_ops_reverse")[:directions]:
         internal = entry.get(field)
         if not isinstance(internal, dict) or set(internal) != required:
-            missing = sorted(required - set(internal or {}))
-            extra = sorted(set(internal or {}) - required)
+            actual = set(internal) if isinstance(internal, dict) else set()
+            missing = sorted(required - actual)
+            extra = sorted(actual - required)
             raise ValueError(f"{name}.{field}: incomplete native internal coverage (missing={missing}, extra={extra})")
         for operation, value in internal.items():
             if (not isinstance(value, dict) or set(value) != {"output"}
@@ -142,6 +142,19 @@ def _validate_native(node, entry, parameters, initializers):
     for kind_io in ("input", "output"):
         if not isinstance(entry.get(kind_io), dict) or set(entry[kind_io]) != {"0"}:
             raise ValueError(f"{name}.{kind_io}: native compatibility summary requires only port 0")
+
+
+def _validate_native(node, entry, parameters, initializers):
+    name = node.name
+    kind = node.op_type
+    attrs = {item.name: onnx.helper.get_attribute_value(item) for item in node.attribute}
+    direction = attrs.get("direction", b"forward")
+    if direction not in (b"forward", b"bidirectional"):
+        raise ValueError(f"{name}: unsupported native direction {direction!r}")
+    directions = 2 if direction == b"bidirectional" else 1
+    validate_native_recurrent_encoding_coverage(
+        entry, kind, bidirectional=directions == 2, name=name,
+    )
     hidden_output = native_recurrent_output_grids(node, entry, 0)[0]
     if _grid(entry["output"]["0"]) != _grid(hidden_output):
         raise ValueError(f"{name}: output summary grid differs from forward internal output")

@@ -4,6 +4,7 @@ AIMET 量化工具函数库
 """
 from typing import Dict, Any, Iterable, Mapping, Set, Tuple
 import json
+import math
 from pathlib import Path
 from aimet_common.run_context import log_details, log_print as print, logged_operation
 
@@ -293,12 +294,10 @@ def apply_power_of_2_workflow(sim_model, method: str = "cover_range", tolerance:
     完整的 Power-of-2 量化工作流
     
     包括：
-    1. 打印校准后的量化器信息
-    2. 收集修改前的量化器信息
-    3. 应用 power-of-2 量化
-    4. 验证修改结果
-    5. 对比修改前后的差异
-    6. (可选) Bias Scale 对齐到 Sx * Sw
+    1. 分别检查普通量化器和原生算子的校准状态
+    2. 由原生算子设置并验证自己的有效 Po2 编码
+    3. 转换普通量化器并按需对齐 Conv/Linear bias
+    4. 验证最终参数，再生成比较报告
     
     Args:
         sim_model: Torch 侧传 ``QuantizationSimModel.model``；ONNX 侧传
@@ -318,7 +317,8 @@ def apply_power_of_2_workflow(sim_model, method: str = "cover_range", tolerance:
         bias_bitwidth: 对齐后的有符号 bias 位宽；PyTorch Conv/Linear 与 ONNX 均使用，默认 32。不可表示时拒绝对齐
     
     Returns:
-        结果字典，包含统计信息和对比结果
+        结果字典，保留既有统计字段；verification 分别说明普通量化器和原生算子的
+        验证范围。没有处理对象时状态为 not_applicable，不代表已验证某个模型。
     """
     if hasattr(sim_model, "qc_quantize_op_dict"):
         from aimet_onnx.rx_ptq.po2 import (
@@ -334,100 +334,75 @@ def apply_power_of_2_workflow(sim_model, method: str = "cover_range", tolerance:
             bias_bitwidth=bias_bitwidth,
         )
 
+    import torch
     from aimet_torch.power_of_2_quantization import (
         print_quantizer_info,
         apply_power_of_2_quantization,
-        verify_model_power_of_2
+        verify_model_power_of_2,
+        named_generic_quantizers,
     )
     from aimet_torch.compare_before_after_po2 import collect_quantizer_info, compare_quantizers
-    
-    results = {}
-    
-    # 1. 打印校准后的量化器信息
-    with log_details(verbose):
-        print("\n" + "="*80)
-        print("步骤 1: 校准后的量化器信息")
-        print("="*80)
-    
-    original_info = print_quantizer_info(sim_model, "校准后的原始量化参数", verbose=verbose)
-    results['original_info'] = original_info
-    
-    # 2. 收集修改前的量化器信息
-    with log_details(verbose):
-        print("\n收集修改前的量化器参数...")
-    before_po2_info = collect_quantizer_info(sim_model)
-    with log_details(verbose):
-        print(f"✅ 收集了 {len(before_po2_info)} 个量化器的信息")
-    results['before_count'] = len(before_po2_info)
-    results['before_info'] = before_po2_info
-    
-    # 3. 应用 Power-of-2 量化
-    with log_details(verbose):
-        print("\n" + "="*80)
-        print("步骤 2: 将 scale 修改为 2 的幂次方 (1/2^n)")
-        print("="*80)
-    
-    stats = apply_power_of_2_quantization(sim_model, method=method, tolerance=tolerance, verbose=verbose)
-    results['stats'] = stats
-    
-    # 4. 收集修改后的量化器信息
-    with log_details(verbose):
-        print("\n收集修改后的量化器参数...")
-    after_po2_info = collect_quantizer_info(sim_model)
-    with log_details(verbose):
-        print(f"✅ 收集了 {len(after_po2_info)} 个量化器的信息")
-    results['after_count'] = len(after_po2_info)
-    results['after_info'] = after_po2_info
-    
-    # 5. 验证修改结果
-    with log_details(verbose):
-        print("\n" + "="*80)
-        print("步骤 3: 验证修改后的量化参数")
-        print("="*80)
-    
-    modified_info = print_quantizer_info(sim_model, "修改后的量化参数", verbose=verbose)
-    results['modified_info'] = modified_info
-    
-    # 6. 验证所有 scale 是否都是 2 的幂次方
-    all_power_of_2 = verify_model_power_of_2(sim_model,verbose=verbose)
-    results['all_power_of_2'] = all_power_of_2
-    
-    with log_details(verbose):
-        if all_power_of_2:
-            print("\n✅ 所有量化器的 scale 已成功修改为 2 的幂次方!")
-        else:
-            print("\n⚠️ 警告: 部分量化器的 scale 未能修改为 2 的幂次方")
-    
-    # 7. 对比修改前后的参数
-    with log_details(verbose):
-        print("\n" + "="*80)
-        print("步骤 4: 对比修改前后的参数")
-        print("="*80)
-        detailed_issues = compare_quantizers(before_po2_info, after_po2_info)
-    issues = detailed_issues if verbose else []
-    results['issues'] = issues
-    
-    # 8. (可选) Bias Scale 对齐到 Sx * Sw
+    from aimet_torch.native_recurrent import (
+        validate_native_po2_targets, apply_native_po2, verify_native_po2,
+    )
+    from aimet_common.power_of_2 import validate_bias_bitwidth
+
+    if method not in ('round', 'cover_range'):
+        raise ValueError("method must be round or cover_range")
+    if not math.isfinite(tolerance) or tolerance < 0:
+        raise ValueError("tolerance must be finite and nonnegative")
     if align_bias_scale:
-        with log_details(verbose):
-            print("\n" + "="*80)
-            print("步骤 5: Bias Scale 对齐（Sb = Sx * Sw）")
-            print("="*80)
-            print("📝 将卷积/全连接层的 bias scale 对齐到输入和权重的 scale 乘积")
-            print("📝 目标：使得硬件可以直接计算 Sy*Qy = Sx*Sw*(Qx*Qw + Qb)\n")
-        
-        bias_alignment_stats = _align_conv_bias_scale(sim_model, verbose=verbose, bias_bitwidth=bias_bitwidth)
-        results['bias_alignment'] = bias_alignment_stats
+        validate_bias_bitwidth(bias_bitwidth)
+    generic_targets = list(named_generic_quantizers(sim_model))
+    for name, quantizer in generic_targets:
+        if not quantizer.is_initialized():
+            raise RuntimeError(f"Quantizer is not initialized; calibrate before Po2: {name}")
+        if not hasattr(quantizer, 'get_scale'):
+            raise ValueError(f"Po2 requires an integer-scale quantizer: {name}")
+        scale = torch.as_tensor(quantizer.get_scale()).detach()
+        if not scale.numel() or not torch.isfinite(scale).all() or not (scale > 0).all():
+            raise ValueError(f"Quantizer scale must be finite and positive: {name}")
+    native_targets = validate_native_po2_targets(sim_model)
+    before_po2_info = collect_quantizer_info(sim_model)
 
-    from aimet_torch.native_recurrent import named_native_recurrent
-    for name, module, op in named_native_recurrent(sim_model):
-        if module.use_quantization:
-            module.enable_pot2(method=method, tolerance=tolerance)
-            key = f"{op.package}_pot2_count"
+    with log_details(verbose):
+        original_info = print_quantizer_info(sim_model, "校准后的原始量化参数", verbose=verbose)
+        # Operators enforce their own locks before any ordinary quantizer changes.
+        apply_native_po2(native_targets, method, tolerance)
+        native_info = verify_native_po2(native_targets)
+        stats = apply_power_of_2_quantization(
+            sim_model, method=method, tolerance=tolerance, verbose=verbose,
+        )
+        results = {'original_info': original_info, 'before_count': len(before_po2_info),
+                   'before_info': before_po2_info, 'stats': stats}
+        if align_bias_scale:
+            results['bias_alignment'] = _align_conv_bias_scale(
+                sim_model, verbose=verbose, bias_bitwidth=bias_bitwidth,
+            )
+
+        after_po2_info = collect_quantizer_info(sim_model)
+        if not verify_model_power_of_2(sim_model, verbose=verbose):
+            raise RuntimeError("Ordinary AIMET quantizers failed Po2 verification")
+        results.update(after_count=len(after_po2_info), after_info=after_po2_info,
+                       modified_info=print_quantizer_info(sim_model, "最终普通量化参数", verbose=verbose),
+                       all_power_of_2=True)
+        for _, _, op in native_targets:
+            key = f'{op.package}_pot2_count'
             results[key] = results.get(key, 0) + 1
-            with log_details(verbose):
-                print(f"  [{op.module_type.__name__}] {name}: POT2 enabled")
-
+        results['verification'] = {
+            'status': 'verified' if generic_targets or native_targets else 'not_applicable',
+            'generic': {'status': 'verified' if generic_targets else 'not_applicable',
+                        'quantizer_count': len(after_po2_info)},
+            'native': {'status': 'verified' if native_targets else 'not_applicable',
+                       'module_count': len(native_targets), 'modules': native_info},
+        }
+        print(f"普通量化器: {len(after_po2_info)}；原生循环算子: {len(native_targets)}")
+        if native_targets:
+            print("原生 GRU/LSTM 的实际 Po2 编码已同步并通过验证")
+        if not generic_targets and not native_targets:
+            print("没有启用的量化目标，Po2 工作流不适用")
+        detailed_issues = compare_quantizers(before_po2_info, after_po2_info)
+    results['issues'] = detailed_issues if verbose else []
     return results
 
 

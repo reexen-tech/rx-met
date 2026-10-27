@@ -8,6 +8,7 @@ verify_power_of_2_scale）放在 aimet_common.power_of_2，此处再导出以保
 本文件只保留依赖 Torch v2 quantizer 的遍历与改写。
 """
 
+import inspect
 import torch
 from typing import Dict, List, Tuple
 from aimet_common.power_of_2 import (
@@ -18,6 +19,68 @@ from aimet_common.power_of_2 import (
 from aimet_torch.v2.nn import QuantizationMixin
 from aimet_torch.v2.nn.base import BaseQuantizationMixin
 from aimet_common.run_context import log_details, log_print as print, logged_operation
+
+
+def _non_tensor_input_slots(model):
+    """Exclude only FX inputs proven to never carry a floating-point tensor."""
+    constants, dynamic = set(), set()
+
+    def is_constant(value):
+        if isinstance(value, torch.fx.Node):
+            return False
+        if isinstance(value, torch.Tensor):
+            return not value.is_floating_point()
+        if isinstance(value, (tuple, list)):
+            return all(is_constant(item) for item in value)
+        if isinstance(value, dict):
+            return all(is_constant(item) for item in value.values())
+        return True
+
+    for prefix, graph_module in model.named_modules():
+        if not isinstance(graph_module, torch.fx.GraphModule):
+            continue
+        for node in graph_module.graph.nodes:
+            if node.op != 'call_module':
+                continue
+            module = graph_module.get_submodule(node.target)
+            if not isinstance(module, BaseQuantizationMixin):
+                continue
+            signature = inspect.signature(module.forward)
+            arguments = signature.bind(*node.args, **node.kwargs)
+            arguments.apply_defaults()
+            values = []
+            for key, value in arguments.arguments.items():
+                kind = signature.parameters[key].kind
+                if kind == inspect.Parameter.VAR_POSITIONAL:
+                    values.extend(value)
+                elif kind != inspect.Parameter.VAR_KEYWORD:
+                    values.append(value)
+            name = f'{prefix}.{node.target}' if prefix else node.target
+            for index, value in enumerate(values):
+                (constants if is_constant(value) else dynamic).add((name, index))
+    return constants - dynamic
+
+
+def named_generic_quantizers(model):
+    """Yield enabled AIMET quantizers; native operators own their internal grids."""
+    non_tensor_inputs = _non_tensor_input_slots(model)
+    for name, module in model.named_modules():
+        if getattr(module, 'owns_quantization', False):
+            continue
+        if isinstance(module, BaseQuantizationMixin):
+            for kind in ('input', 'output'):
+                quantizers = getattr(module, f'{kind}_quantizers', ())
+                items = quantizers.items() if hasattr(quantizers, 'items') else enumerate(quantizers)
+                for index, quantizer in items:
+                    if kind == 'input' and (name, index) in non_tensor_inputs:
+                        continue
+                    if quantizer is not None and getattr(quantizer, 'enabled', True):
+                        yield f'{name}.{kind}_quantizer[{index}]', quantizer
+        quantizers = getattr(module, 'param_quantizers', {})
+        if hasattr(quantizers, 'items'):
+            for parameter, quantizer in quantizers.items():
+                if quantizer is not None and getattr(quantizer, 'enabled', True):
+                    yield f'{name}.param_quantizer[{parameter}]', quantizer
 
 
 @logged_operation
@@ -32,33 +95,11 @@ def print_quantizer_info(model, title="量化器信息", verbose=True):
     """
     quantizer_info = []
     
-    for name, module in model.named_modules():
-        # 检查输入量化器（含 fake-quant，如 FakeQuantizedSum）
-        if isinstance(module, BaseQuantizationMixin) and hasattr(module, 'input_quantizers'):
-            for idx, quantizer in enumerate(module.input_quantizers):
-                if quantizer is not None and quantizer.is_initialized():
-                    info = get_single_quantizer_info(quantizer)
-                    info['module_name'] = name
-                    info['quantizer_type'] = f'input_quantizer[{idx}]'
-                    quantizer_info.append(info)
-        
-        # 检查输出量化器（含 fake-quant，如 FakeQuantizedSum）
-        if isinstance(module, BaseQuantizationMixin) and hasattr(module, 'output_quantizers'):
-            for idx, quantizer in enumerate(module.output_quantizers):
-                if quantizer is not None and quantizer.is_initialized():
-                    info = get_single_quantizer_info(quantizer)
-                    info['module_name'] = name
-                    info['quantizer_type'] = f'output_quantizer[{idx}]'
-                    quantizer_info.append(info)
-        
-        # 检查参数量化器（所有模块，包括非 QuantizationMixin）
-        if hasattr(module, 'param_quantizers'):
-            for param_name, quantizer in module.param_quantizers.items():
-                if quantizer is not None and quantizer.is_initialized():
-                    info = get_single_quantizer_info(quantizer)
-                    info['module_name'] = name
-                    info['quantizer_type'] = f'param_quantizer[{param_name}]'
-                    quantizer_info.append(info)
+    for name, quantizer in named_generic_quantizers(model):
+        if quantizer.is_initialized():
+            info = get_single_quantizer_info(quantizer)
+            info['module_name'], info['quantizer_type'] = name.rsplit('.', 1)
+            quantizer_info.append(info)
     
     with log_details(verbose):
         print("\n" + "="*80)
@@ -209,30 +250,11 @@ def apply_power_of_2_quantization(model, method: str = "round", tolerance: float
     total_quantizers = 0
     modified_quantizers = 0
     
-    for name, module in model.named_modules():
-        # 处理输入量化器（含 fake-quant，如 FakeQuantizedSum）
-        if isinstance(module, BaseQuantizationMixin) and hasattr(module, 'input_quantizers'):
-            for idx, quantizer in enumerate(module.input_quantizers):
-                if quantizer is not None and quantizer.is_initialized():
-                    total_quantizers += 1
-                    if modify_quantizer_to_power_of_2(quantizer, f"{name}.input_quantizer[{idx}]", method, tolerance, verbose):
-                        modified_quantizers += 1
-        
-        # 处理输出量化器（含 fake-quant，如 FakeQuantizedSum）
-        if isinstance(module, BaseQuantizationMixin) and hasattr(module, 'output_quantizers'):
-            for idx, quantizer in enumerate(module.output_quantizers):
-                if quantizer is not None and quantizer.is_initialized():
-                    total_quantizers += 1
-                    if modify_quantizer_to_power_of_2(quantizer, f"{name}.output_quantizer[{idx}]", method, tolerance, verbose):
-                        modified_quantizers += 1
-        
-        # 处理参数量化器（所有模块，包括非 QuantizationMixin）
-        if hasattr(module, 'param_quantizers'):
-            for param_name, quantizer in module.param_quantizers.items():
-                if quantizer is not None and quantizer.is_initialized():
-                    total_quantizers += 1
-                    if modify_quantizer_to_power_of_2(quantizer, f"{name}.param_quantizer[{param_name}]", method, tolerance, verbose):
-                        modified_quantizers += 1
+    for name, quantizer in named_generic_quantizers(model):
+        if quantizer.is_initialized():
+            total_quantizers += 1
+            if modify_quantizer_to_power_of_2(quantizer, name, method, tolerance, verbose):
+                modified_quantizers += 1
     
     print(f"\n总共处理 {total_quantizers} 个量化器")
     print(f"成功修改 {modified_quantizers} 个量化器为 Power-of-2 scale")
@@ -475,7 +497,7 @@ def modify_quantizer_to_power_of_2(quantizer, quantizer_name: str, method: str =
 @logged_operation
 def verify_model_power_of_2(model, verbose=True):
     """
-    验证模型中所有量化器的scale是否都是2的幂次方
+    验证普通 AIMET 量化器的 scale；原生算子的编码由工作流单独验证。
     
     Args:
         model: 量化模型
@@ -489,62 +511,24 @@ def verify_model_power_of_2(model, verbose=True):
     total_quantizers = 0
     power_of_2_quantizers = 0
     
-    for name, module in model.named_modules():
-        quantizers_to_check = []
-        
-        # 检查输入量化器（含 fake-quant，如 FakeQuantizedSum）
-        if isinstance(module, BaseQuantizationMixin) and hasattr(module, 'input_quantizers'):
-            for idx, q in enumerate(module.input_quantizers):
-                if q is not None and q.is_initialized():
-                    quantizers_to_check.append((q, f"{name}.input_quantizer[{idx}]"))
-        
-        # 检查输出量化器（含 fake-quant，如 FakeQuantizedSum）
-        if isinstance(module, BaseQuantizationMixin) and hasattr(module, 'output_quantizers'):
-            for idx, q in enumerate(module.output_quantizers):
-                if q is not None and q.is_initialized():
-                    quantizers_to_check.append((q, f"{name}.output_quantizer[{idx}]"))
-        
-        # 检查参数量化器（所有模块，包括非 QuantizationMixin）
-        if hasattr(module, 'param_quantizers'):
-            for param_name, q in module.param_quantizers.items():
-                if q is not None and q.is_initialized():
-                    quantizers_to_check.append((q, f"{name}.param_quantizer[{param_name}]"))
-        
-        # 处理收集到的量化器
-        if quantizers_to_check:
-            
-            for quantizer, qname in quantizers_to_check:
-                total_quantizers += 1
-                scale = quantizer.get_scale()
-                
-                if isinstance(scale, torch.Tensor):
-                    # 检查张量中的所有元素
-                    all_power_of_2 = True
-                    for s in scale.flatten():
-                        is_po2, n = verify_power_of_2_scale(s.item())
-                        if not is_po2:
-                            all_power_of_2 = False
-                            break
-                    
-                    if all_power_of_2:
-                        power_of_2_quantizers += 1
-                        with log_details(verbose):
-                            print(f"✓ {qname}: 所有scale都是2的幂次方")
-                    else:
-                        with log_details(verbose):
-                            print(f"✗ {qname}: 存在非2的幂次方scale")
-                else:
-                    is_po2, n = verify_power_of_2_scale(scale.item())
-                    if is_po2:
-                        power_of_2_quantizers += 1
-                        with log_details(verbose):
-                            print(f"✓ {qname}: scale = 1/2^{n}")
-                    else:
-                        with log_details(verbose):
-                            print(f"✗ {qname}: scale = {scale.item():.8f} (非2的幂次方)")
+    for name, quantizer in named_generic_quantizers(model):
+        total_quantizers += 1
+        valid = False
+        if quantizer.is_initialized():
+            scales = torch.as_tensor(quantizer.get_scale()).detach().reshape(-1)
+            valid = bool(scales.numel()) and bool(torch.isfinite(scales).all()) and all(
+                verify_power_of_2_scale(scale)[0] for scale in scales.tolist()
+            )
+        if valid:
+            power_of_2_quantizers += 1
+        with log_details(verbose):
+            print(f"{name}: {'Po2 verified' if valid else 'uninitialized or non-Po2 scale'}")
 
     with log_details(verbose):
-        print(f"\n验证结果: {power_of_2_quantizers}/{total_quantizers} 个量化器使用 Power-of-2 scale")
+        if total_quantizers:
+            print(f"\n验证结果: {power_of_2_quantizers}/{total_quantizers} 个普通量化器使用 Power-of-2 scale")
+        else:
+            print("无普通 AIMET 量化器，通用 Po2 验证不适用")
         print("="*80 + "\n")
     
     return power_of_2_quantizers == total_quantizers

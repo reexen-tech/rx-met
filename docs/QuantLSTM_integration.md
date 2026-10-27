@@ -89,7 +89,9 @@ python3 examples/quick_start_kws.py --rnn_type lstm \
 配置需在校准前应用；相同配置可重复应用，已校准后修改配置会报错，必须先显式
 `reset_calibration()`。量化参数按首次 PTQ 结果用于 QAT，不在训练循环中重新校准。
 
-`apply_power_of_2_workflow()` 对已启用量化的循环层调用算子的 `enable_pot2()`。
+`apply_power_of_2_workflow()` 检查已启用循环层的校准状态，调用算子的 `enable_pot2()`，
+再通过公共编码导出同步并验证实际 Po2 网格和内部编码覆盖。原生循环层独立于普通
+AIMET 量化器处理；普通量化器为空时仍执行原生转换，比较报告在执行与验证之后生成。
 LSTM 按新 scale 重算非对称 zero point，并更新 `real_min/real_max`，再通过原生
 加载器重新派生执行参数并做数值审计。校准后优先使用内存中保留的校准下界；
 从 encoding 文件加载后使用已有量化网格下界，文件中不增加校准诊断字段。

@@ -125,6 +125,15 @@ python3 -m unittest -v tests/test_dependencies.py
 
 ## 循环算子与客户示例
 
+`test_po2_workflow.py` 在匹配的 CPU/CUDA 算子环境中验证普通量化器、原生循环层及
+混合模型的完整 Po2 工作流，覆盖空目标、校准缺失、参数锁、非法 scale、内部编码缺失、
+双向和裸根算子，以及详细日志开关不改变结果。使用 `examples/config` 的基础配置和
+混合精度配置，执行真实校准、Po2、ONNX/JSON 导出及编码恢复，并检查恢复前后输出一致。
+
+```bash
+python3 -m unittest discover -s tests -p test_po2_workflow.py -v
+```
+
 `test_prepare_onnx_ptq_data.py` 使用真实的小型 ONNX/parquet 文件，在 CPU 上验证
 模型、图片和标签检查、模型与数据分离的默认输出布局、样本预处理、重复生成的旧
 样本清理以及原始文件保护。需要 runtime 中的 ONNX、PyArrow、Pillow 和 NumPy：
