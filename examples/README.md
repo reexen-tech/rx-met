@@ -144,6 +144,7 @@ python3 examples/quick_start_onnx_ptq.py
 日志报告 FP32、PTQ、Po2 和恢复后的验证集 Top-1 精度。
 日志输出“量化流程完成”表示运行成功。
 
-`execution-id` 自动使用 UTC 时间戳。每次任务的详细日志和运行记录位于同级的
+`execution-id` 自动使用北京时间，格式为 `YYYYMMDD_HHMMSS_ffffff`，例如
+`20261027_105308_820401`。每次任务的详细日志和运行记录位于同级的
 `run.log`、`run.json`，产物位置见终端输出。
 参见[运行目录与日志](../docs/Runtime_outputs.md)。

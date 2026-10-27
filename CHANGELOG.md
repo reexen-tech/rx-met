@@ -29,7 +29,7 @@
 - **量化配置**：Torch、ONNX 和原生 GRU/LSTM 默认使用对称量化，仍支持显式非对称配置。普通 Torch/ONNX 量化器的整数符号与对称性独立，默认使用 INT，可显式选择 UINT。
 - **编译器编码**：统一 Torch/ONNX 的编码转换、零点语义和循环层元数据，升级为 `schema_version=4`；兼容性要求见下方升级说明。
 - **编码文件名**：Torch 与 ONNX PTQ 的最终编译器编码统一为 `<prefix>.json`，导出接口的参数和返回类型保持不变；编码结构、数值及 AIMET 原始编码命名不变。
-- **输出目录**：RX 导出接口将指定目录作为输出根目录，默认创建 UTC 时间戳子目录；可用 `configure_output(timestamp_output=False)` 切换为固定目录并覆盖同名输出。最终产物放入 `exports/`，KWS 检查点放入 `checkpoints/`，默认根目录基于当前运行目录，原有输出目录覆盖参数继续有效。
+- **输出目录**：RX 导出接口将指定目录作为输出根目录，默认创建北京时间（UTC+8）的 `YYYYMMDD_HHMMSS_ffffff` 时间戳子目录；`run.json` 保留带 `+08:00` 和微秒的完整开始、结束时间，日志同步使用北京时间并标注时区。可用 `configure_output(timestamp_output=False)` 切换为固定目录并覆盖同名输出。最终产物放入 `exports/`，KWS 检查点放入 `checkpoints/`，默认根目录基于当前运行目录，原有输出目录覆盖参数继续有效。
 - **ONNX 示例**：入口统一命名为 `quick_start_onnx_ptq.py`。MobileNetV2 + ImageNette 准备脚本只需模型和 parquet 路径，生成可复用的模型、校准数据和带标签的验证数据；准备与量化分两步执行，默认路径相互对应，原始输入可只读挂载。
 - **公共环境**：按版本标签复用兼容镜像，源码摘要和镜像 ID 仅供追踪；移除仓库身份记录依赖。ORT 构建材料统一迁入 `docker/environment/third_party/`。
 - **离线交付**：产品包和公共运行环境分别交付、独立校验。应用包按环境版本标签复用兼容 runtime，同一镜像重新导出的归档可继续使用；安装器核对归档内容并准备可读的镜像标签，宿主机无需 Python。
@@ -79,6 +79,8 @@
 - LSTM 默认 E2E 增加独立量化前向和 QAT 梯度 oracle、非连续 tensor、CUDA stream 及状态生命周期验证；浮点比较器拒绝非有限值和长度不匹配，真实网络验证在无可用 CUDA 时失败退出。
 - KWS 使用可量化 BN 和无随机增强的校准样本；检查点记录网络类型，保存原始模型时移除辅助量化器，支持 `weights_only` 恢复，验证失败时退出。
 - `run.json` 按编码文档结构识别 `.json` 和 `.encodings` 中的格式版本，正确记录最终编译器编码的 schema 与 SHA-256，避免将普通 metadata 当作编码文件。
+- KWS 和 ONNX PTQ 示例不再主动保存配置快照；Torch/ONNX QuantSim 负责保存解析后的基础配置，创建、验证和整流程包装不再重复抓取配置，其他操作保留自动记录。
+- KWS 的 QAT/PTQ 和 ONNX PTQ 示例明确打印最终配套使用的 `.onnx` 模型与 `.json` 量化参数路径，原始 AIMET 编码标为调试参考。
 - KWS 验收定位本次运行的时间戳目录，从 `exports/` 读取最终 `.json` 并严格验收 schema v4，从 `checkpoints/` 检查 QAT 产物，修复旧目录和端口列表假设导致的验收失败。
 - 往返分析使用比较报告记录的模型、最终编码、原始 AIMET 编码和 metadata 路径，支持容器外迁移及历史 `.encodings` 产物，避免误读同目录的原始编码或其他运行的文件。
 

@@ -57,7 +57,7 @@ python3 -m unittest discover -s tests -p test_percentile_calibration.py -v
 
 ## 文件说明
 
-`test_run_context.py` 检查内置运行记录：UTC 微秒目录、多进程冲突、配置快照、日志迁移、
+`test_run_context.py` 检查内置运行记录：北京时间微秒目录、完整时区记录、多进程冲突、配置快照、日志迁移、
 终端和文件的独立详细程度、异常堆栈、成功清理和失败保留、历史运行保护、版本来源及模型/线程间的日志隔离。
 固定目录检查覆盖配置快照、重复运行、输入和用户文件保留、早期日志迁移、目录互斥及旧记录保护。
 `test_run_logging.py` 使用真实 Torch/ONNX 和循环算子核对详细日志、数值不变、两种目录策略的导出路径及版本记录。

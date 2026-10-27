@@ -64,7 +64,8 @@ python3 /examples/quick_start_onnx_ptq.py
 
 输入名从 ONNX 图自动读取。多输入模型可用同一 sample 前缀的 npy，或改用 npz。
 默认输出根目录为当前运行目录下的 `output/onnx_ptq_quick_start/`，可用
-`RX_MET_ONNX_PTQ_OUTPUT_DIR` 覆盖。每次量化在该根目录下创建 UTC 时间戳运行目录，
+`RX_MET_ONNX_PTQ_OUTPUT_DIR` 覆盖。每次量化在该根目录下创建北京时间运行目录，
+格式为 `YYYYMMDD_HHMMSS_ffffff`，例如 `20261027_105308_820401`。
 产物写入其中的 `exports/`，日志和运行信息写入 `run.log`、`run.json`。
 准备好的 `models/`、`datasets/` 继续在根目录复用。
 

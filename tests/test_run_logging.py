@@ -39,6 +39,18 @@ class RuntimeLoggingIntegrationTest(unittest.TestCase):
             sim.model(torch.tensor([[-2., 1., 3., -1.]]))
         return sim
 
+    def assert_config_snapshots(self, root, sources):
+        self.assertEqual({path.name for path in (root / 'config').glob('*.json')},
+                         {f'{name}.json' for name in sources})
+        record = json.loads((root / 'run.json').read_text())
+        self.assertEqual(set(record['config']), set(sources))
+        for name, source in sources.items():
+            snapshot = root / 'config' / f'{name}.json'
+            self.assertEqual(json.loads(snapshot.read_text()), json.loads(source.read_text()))
+            self.assertEqual(record['config'][name]['source'], str(source.resolve()))
+            self.assertEqual(record['config'][name]['path'], f'config/{name}.json')
+            self.assertEqual(record['config'][name]['sha256'], runtime._sha256(snapshot))
+
     def test_onnx_details_are_written_when_verbose_is_false(self):
         from aimet_onnx.rx_ptq.mixed_precision import apply_onnx_mixed_precision_bitwidth
         config = self.path / 'mixed.json'
@@ -53,20 +65,31 @@ class RuntimeLoggingIntegrationTest(unittest.TestCase):
         text = (run.root / 'run.log').read_text()
         self.assertIn('应用混合精度位宽配置', text)
         self.assertIn('[name] fc', text)
-        self.assertTrue(list((run.root / 'config').glob('*.json')))
+        self.assert_config_snapshots(run.root, {'quantsim': self.fixture.config,
+                                                'config_file': config})
 
-    def test_onnx_default_config_is_snapshotted_without_explicit_file(self):
+    def test_quantsim_snapshots_resolved_config_once(self):
         from aimet_common.quantsim_config.quantsim_config import _get_config_file
-        from aimet_onnx.quantsim import QuantizationSimModel
-        for config in (None, 'default'):
-            with self.subTest(config=config), runtime.execution(self.path / 'onnx-default') as run:
-                QuantizationSimModel(fixtures.make_graph(), dummy_input=self.fixture.feed,
-                                      config_file=config, quant_scheme='tf')
-            source = Path(_get_config_file(config))
-            self.assertEqual(json.loads((run.root / 'config/quantsim.json').read_text()),
-                             json.loads(source.read_text()))
-            record = json.loads((run.root / 'run.json').read_text())
-            self.assertEqual(record['config']['quantsim']['source'], str(source.resolve()))
+        from aimet_onnx.quantsim import QuantizationSimModel as OnnxQuantizationSimModel
+        for backend in ('torch', 'onnx'):
+            for label, config in (('explicit', str(self.fixture.config)),
+                                  ('implicit', None), ('alias', 'default')):
+                with self.subTest(backend=backend, config=config):
+                    source = Path(_get_config_file(config))
+                    resolver = contextlib.nullcontext()
+                    if backend == 'torch' and config in (None, 'default'):
+                        # Isolate alias snapshot coverage from default-config operator support.
+                        resolver = patch('aimet_torch._base.quantsim._get_config_file',
+                                         return_value=str(self.fixture.config))
+                        source = self.fixture.config
+                    with resolver, runtime.execution(self.path / f'{backend}-{label}') as run:
+                        if backend == 'torch':
+                            QuantizationSimModel(prepare_model(nn.Sequential(nn.Linear(4, 2)).eval()),
+                                                 torch.ones(1, 4), config_file=config, quant_scheme='tf')
+                        else:
+                            OnnxQuantizationSimModel(fixtures.make_graph(), dummy_input=self.fixture.feed,
+                                                     config_file=config, quant_scheme='tf')
+                    self.assert_config_snapshots(run.root, {'quantsim': source})
 
     def test_torch_details_do_not_change_return_values_or_quantizer_settings(self):
         config = self.path / 'torch-mixed.json'
@@ -81,6 +104,8 @@ class RuntimeLoggingIntegrationTest(unittest.TestCase):
             observed.append((report, layer.param_quantizers['weight'].bitwidth,
                              layer.output_quantizers[0].bitwidth))
             self.assertIn('应用混合精度位宽配置', (run.root / 'run.log').read_text())
+            self.assert_config_snapshots(run.root, {'quantsim': self.fixture.config,
+                                                    'config_file': config})
             if not verbose:
                 self.assertNotIn('应用混合精度位宽配置', console.getvalue())
         self.assertEqual(observed[0], observed[1])
@@ -113,6 +138,7 @@ class RuntimeLoggingIntegrationTest(unittest.TestCase):
             self.assertIn(expected, text)
             self.assertNotIn('configuration loaded', console.getvalue())
             self.assertNotIn('GRU 量化配置', console.getvalue())
+            self.assert_config_snapshots(run.root, {'config_file': config})
 
     def test_complete_onnx_workflow_returns_grouped_outputs_and_format_versions(self):
         from aimet_onnx.rx_ptq.pipeline import run_onnx_ptq
@@ -122,10 +148,13 @@ class RuntimeLoggingIntegrationTest(unittest.TestCase):
         calibration = self.path / 'calib'
         calibration.mkdir()
         np.save(calibration / 'sample.npy', self.fixture.feed['x'])
+        mixed_config = self.path / 'workflow-mixed.json'
+        mixed_config.write_text(json.dumps({'layer_name_config': {'fc': {'output_bitwidth': 16}}}))
         root = self.path / 'workflow'
         result = run_onnx_ptq(model_path=source, calibration_dir=calibration,
                               output_dir=root, filename_prefix='model',
-                              config_file=str(self.fixture.config), bitwidth_config_file='', quant_scheme='tf')
+                              config_file=str(self.fixture.config),
+                              bitwidth_config_file=str(mixed_config), quant_scheme='tf')
         directory = result['onnx'].parent.parent
         self.assertEqual(set(root.iterdir()), {directory})
         self.assertTrue(all(path.parent == directory / 'exports' for path in result.values()))
@@ -142,6 +171,8 @@ class RuntimeLoggingIntegrationTest(unittest.TestCase):
         self.assertEqual(record['inputs']['model_path']['sha256'], runtime._sha256(source))
         self.assertEqual(record['status'], 'success')
         self.assertFalse((directory / '_work').exists())
+        self.assert_config_snapshots(directory, {'quantsim': self.fixture.config,
+                                                 'config_file': mixed_config})
 
     def test_fixed_onnx_workflow_repeats_without_removing_prepared_inputs(self):
         from aimet_onnx.rx_ptq.pipeline import run_onnx_ptq, write_onnx_ptq_metadata

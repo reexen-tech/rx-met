@@ -373,7 +373,7 @@ class QuantizationSimModel:
     """
 
     @_allow_deprecated_args
-    @logged_operation
+    @logged_operation(capture_config=False)
     def __init__(
         self,
         model: ModelProto,

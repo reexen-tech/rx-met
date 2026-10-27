@@ -42,6 +42,7 @@ _capture_lock = threading.RLock()
 _capture_depth = 0
 _capture_state = None
 _timestamp_output = True
+_BEIJING_TIMEZONE = datetime.timezone(datetime.timedelta(hours=8))
 
 
 def configure_output(*, timestamp_output: bool = True) -> None:
@@ -95,12 +96,16 @@ def _prepare_fixed_directory(root):
 
 
 class _PlainFormatter(logging.Formatter):
+    def formatTime(self, record, datefmt=None):
+        timestamp = datetime.datetime.fromtimestamp(record.created, _BEIJING_TIMEZONE)
+        return timestamp.strftime(datefmt) if datefmt else timestamp.isoformat(timespec='seconds')
+
     def format(self, record):
         return _ansi.sub('', super().format(record))
 
 
 def _now():
-    return datetime.datetime.now(datetime.timezone.utc)
+    return datetime.datetime.now(_BEIJING_TIMEZONE)
 
 
 def _atomic_json(path, value):
@@ -193,7 +198,8 @@ class Execution:
         self._directory_lock = None
         self._baseline_outputs = {}
         self._work_dir = None
-        timestamp = _now().strftime('%Y%m%dT%H%M%S%fZ')
+        started_at = _now()
+        timestamp = started_at.strftime('%Y%m%d_%H%M%S_%f')
         try:
             try:
                 self._reserve(timestamp)
@@ -206,7 +212,7 @@ class Execution:
                 self._reserve(timestamp)
             self._handler = self._open_handler(fresh=not self.timestamp_output)
             self.record = {'schema_version': 1, 'execution_id': self.execution_id, 'task': task,
-                           'status': 'running', 'started_at': _now().isoformat(), 'pid': self.pid,
+                           'status': 'running', 'started_at': started_at.isoformat(timespec='microseconds'), 'pid': self.pid,
                            'output_config': {'timestamp_output': self.timestamp_output},
                            'tool': _tool_identity(), 'inputs': {}, 'config': {}, 'outputs': {}, 'operations': {}}
             self.save()
@@ -289,9 +295,7 @@ class Execution:
                 pass
         # Append handlers can reopen after an external logging.dictConfig closes them.
         handler = logging.FileHandler(self.root / 'run.log', mode='a', encoding='utf-8')
-        formatter = _PlainFormatter('%(asctime)sZ %(levelname)s %(name)s: %(message)s',
-                                      datefmt='%Y-%m-%dT%H:%M:%S')
-        formatter.converter = time.gmtime
+        formatter = _PlainFormatter('%(asctime)s %(levelname)s %(name)s: %(message)s')
         handler.setFormatter(formatter)
         return handler
 
@@ -453,7 +457,7 @@ class Execution:
                 if error is not None:
                     self.exception(error)
                 self.record['status'] = 'failed' if error is not None else 'success'
-                self.record['finished_at'] = _now().isoformat()
+                self.record['finished_at'] = _now().isoformat(timespec='microseconds')
                 self.record['elapsed_s'] = round(time.monotonic() - self._started, 6)
                 if not self.timestamp_output and self.provisional:
                     self.save()
@@ -761,7 +765,10 @@ def note_output(path):
             return
 
 
-def logged_operation(function):
+def logged_operation(function=None, *, capture_config=True):
+    """Record an operation; callers owning resolved snapshots can opt out of capture."""
+    if function is None:
+        return functools.partial(logged_operation, capture_config=capture_config)
     signature = inspect.signature(function)
 
     @functools.wraps(function)
@@ -773,9 +780,10 @@ def logged_operation(function):
         failure = None
         try:
             bound = signature.bind(*args, **kwargs)
-            for name in ('config_file', 'config_path', 'bitwidth_config_file'):
-                if name in bound.arguments:
-                    run.snapshot_config(bound.arguments[name], name)
+            if capture_config:
+                for name in ('config_file', 'config_path', 'bitwidth_config_file'):
+                    if name in bound.arguments:
+                        run.snapshot_config(bound.arguments[name], name)
             with _capture(run):
                 result = function(*args, **kwargs)
                 if function.__name__ == '__init__' and args:
@@ -801,7 +809,7 @@ def logged_operation(function):
     return wrapped
 
 
-def logged_workflow(output_argument, *, task):
+def logged_workflow(output_argument, *, task, capture_config=True):
     def decorate(function):
         signature = inspect.signature(function)
 
@@ -812,8 +820,9 @@ def logged_workflow(output_argument, *, task):
             with execution(bound.arguments[output_argument], task) as run:
                 run.note_inputs(**{name: bound.arguments[name] for name in
                                    ('model_path', 'calibration_dir', 'validation_dir') if name in bound.arguments})
-                for name in ('config_file', 'bitwidth_config_file'):
-                    run.snapshot_config(bound.arguments.get(name), name)
+                if capture_config:
+                    for name in ('config_file', 'bitwidth_config_file'):
+                        run.snapshot_config(bound.arguments.get(name), name)
                 bound.arguments[output_argument] = run.root
                 return function(*bound.args, **bound.kwargs)
         return wrapped
