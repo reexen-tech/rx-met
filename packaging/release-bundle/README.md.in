@@ -8,19 +8,17 @@
 
 ## 步骤 1：安装
 
-宿主机需要 Linux x86_64、Docker，以及 Bash、gzip、flock 等常用工具。
-GPU 变体还需要 NVIDIA Container Toolkit 和兼容的 NVIDIA 驱动；CPU 变体无需 GPU 或 NVIDIA 软件。
+宿主机需要 Linux x86_64、Docker、NVIDIA Container Toolkit 和兼容的 NVIDIA 驱动，
+以及 Bash、gzip、flock 等常用工具。
 无需在宿主机安装 Python 或 CUDA Toolkit。
 
 | 变体 | CUDA | Python | 最低驱动 |
 | --- | --- | --- | --- |
-| cpu | 无 | 3.10 | 无需 GPU 驱动 |
 | cu118 | 11.8 | 3.10 | 520.61.05 |
 | cu126 | 12.6 | 3.10 | 560.35.05 |
 | cu130 | 13.0 | 3.12 | 580.126.20 |
 
 GPU 变体支持 sm_80/86/89/90，cu130 另支持 sm_120。当前包为 `@VARIANT@`。
-CPU 变体支持校准和 PTQ 推理，不支持浮点训练和 QAT。
 首次离线使用，将公共运行环境目录 `@ENV_DIRECTORY@/` 与产品目录 `rx-met-v@VERSION@/` 平级放置。
 在产品目录内解压所选应用包，再进入解压后的应用包目录执行：
 
@@ -41,7 +39,7 @@ CPU 变体支持校准和 PTQ 推理，不支持浮点训练和 QAT。
 
 | 示例 | 模型目录内容 | 数据目录内容 |
 | --- | --- | --- |
-| KWS（GRU / LSTM） | CPU PTQ 需要对应的浮点检查点；GPU 训练流程无需准备 | 已解压的 `speech_commands_v0.02/`，包含 `yes/`、`no/`、`_background_noise_/` 等目录 |
+| KWS（GRU / LSTM） | 无需预先准备，示例会执行浮点训练 | 已解压的 `speech_commands_v0.02/`，包含 `yes/`、`no/`、`_background_noise_/` 等目录 |
 | ONNX PTQ | `mobilenetv2-12.onnx` | `imagenette2-320.parquet` |
 
 没有现成数据时，可按 [examples/README.md](examples/README.md) 准备公开示例输入。
@@ -58,20 +56,18 @@ cp -a examples "$HOME/rx-met-user/"
 
 ## 步骤 3：进入容器并运行
 
-在宿主机执行时，按实际情况调整宿主机路径；GPU 变体可调整 GPU 编号。
+在宿主机执行时，按实际情况调整宿主机路径和 GPU 编号。
 将 `/path/to/models`、`/path/to/datasets` 替换为实际宿主机目录的绝对路径，
 并提前在宿主机创建这些目录。
 
 ```bash
-GPU_ARGS=()
-if [[ "@VARIANT@" != cpu ]]; then GPU_ARGS=(--gpus device=0); fi
 docker run --rm -it --pull=never --shm-size=2g \
   --user "$(id -u):$(id -g)" \
   -e HOME=/tmp \
   -e USER="$(id -un)" -e LOGNAME="$(id -un)" \
   -w /workspace \
   -e PYTHONPATH=/opt/rx-met/python \
-  "${GPU_ARGS[@]}" \
+  --gpus device=0 \
   -v "$HOME/.local/share/rx-met/@BUNDLE_NAME@:/opt/rx-met:ro" \
   -v "/path/to/models:/models:ro" \
   -v "/path/to/datasets:/datasets:ro" \
@@ -84,20 +80,13 @@ docker run --rm -it --pull=never --shm-size=2g \
 
 ### KWS：GRU 或 LSTM
 
-GPU 变体默认执行浮点训练和 QAT，各运行 1 epoch：
+默认执行浮点训练和 QAT，各运行 1 epoch：
 
 ```bash
 python3 /workspace/examples/quick_start_kws.py --rnn_type gru
 ```
 
-CPU 变体加载已训练的浮点检查点，仅执行校准和 PTQ：
-
-```bash
-python3 /workspace/examples/quick_start_kws.py --rnn_type gru \
-  --device cpu --ptq-only --fp-checkpoint /models/model_fp_kws.pth
-```
-
-运行 LSTM 时将 `gru` 改为 `lstm`，并提供匹配的 LSTM 检查点。
+运行 LSTM 时将 `gru` 改为 `lstm`。
 
 ### ONNX PTQ
 
@@ -110,10 +99,10 @@ python3 /workspace/examples/prepare_onnx_ptq_data.py \
   --parquet /datasets/imagenette2-320.parquet
 
 # 量化
-python3 /workspace/examples/quick_start_onnx_ptq.py --device cpu
+python3 /workspace/examples/quick_start_onnx_ptq.py
 ```
 
-GPU 变体将 `--device cpu` 改为 `--device cuda`。后续输入不变时，可直接执行量化命令。
+后续输入不变时，可直接执行量化命令。
 
 ### 查看结果和再次运行
 
