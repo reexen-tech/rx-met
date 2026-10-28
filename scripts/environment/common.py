@@ -262,7 +262,7 @@ def main():
     matrix = config()
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('action', choices=['build', 'verify', 'export', 'load', 'digest', 'download'])
-    parser.add_argument('variants', nargs='*', choices=list(matrix['variants']),
+    parser.add_argument('variants', nargs='*',
                         help='Environment variants (default: CUDA variants; CPU requires cpu)')
     parser.add_argument('--output-dir', '--export-dir', dest='output_dir', type=Path)
     parser.add_argument('--directory', type=Path)
@@ -273,11 +273,16 @@ def main():
     parser.add_argument('--gpu', action='store_true')
     parser.add_argument('--no-export', action='store_true', help='Compatibility option; build never exports implicitly')
     args = parser.parse_intermixed_args()
+    # Python 3.10 rejects omitted nargs='*' positionals when choices is used.
+    targets = args.variants or default_variants(matrix)
+    unsupported = sorted(set(targets) - set(matrix['variants']))
+    if unsupported:
+        parser.error('Unsupported environment variants: ' + ', '.join(unsupported))
     if args.role != 'runtime' and args.action not in ('export', 'load'):
         parser.error('--role only applies to export/load')
     if args.action == 'digest': print(config_digest()); return
     directory = args.output_dir or ROOT / '.release/runtime-images' / matrix['environment_version']
-    for variant in args.variants or default_variants(matrix):
+    for variant in targets:
         if args.action == 'build':
             build(variant, args.wheelhouse_dir / variant if args.wheelhouse_dir else None, args.builder)
             verify(variant, args.gpu)

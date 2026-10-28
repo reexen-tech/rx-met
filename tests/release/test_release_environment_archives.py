@@ -327,13 +327,18 @@ class RuntimeArchiveCliTest(unittest.TestCase):
                     (load if action == 'export' else export).assert_not_called()
 
     def test_unknown_runtime_archive_variant_is_rejected(self):
-        with patch('sys.argv', ['runtime_archives.py', 'export', 'unknown']), \
-                contextlib.redirect_stderr(io.StringIO()), \
-                patch.object(runtime_cli, 'export_environment') as export:
-            with self.assertRaises(SystemExit) as error:
-                runtime_cli.main()
-        self.assertEqual(error.exception.code, 2)
-        export.assert_not_called()
+        for action in ('export', 'load'):
+            for selection in (['unknown'], ['cu126', '--role', 'all', 'unknown']):
+                with self.subTest(action=action, selection=selection), \
+                        patch('sys.argv', ['runtime_archives.py', action, '--directory', '/tmp/runtime', *selection]), \
+                        contextlib.redirect_stderr(io.StringIO()), \
+                        patch.object(runtime_cli, 'export_environment') as export, \
+                        patch.object(runtime_cli, 'load_environment') as load:
+                    with self.assertRaises(SystemExit) as error:
+                        runtime_cli.main()
+                    self.assertEqual(error.exception.code, 2)
+                    export.assert_not_called()
+                    load.assert_not_called()
 
 
 class OciArchiveIdentityTest(unittest.TestCase):

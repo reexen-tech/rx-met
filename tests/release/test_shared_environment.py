@@ -60,12 +60,31 @@ class SharedEnvironmentTest(unittest.TestCase):
                         self.assertEqual([call.args[0] for call in operations['verify'].call_args_list], expected)
 
     def test_cli_rejects_unknown_environment_variants(self):
-        with patch('sys.argv', ['common.py', 'build', 'unknown']), \
-                contextlib.redirect_stderr(io.StringIO()), patch.object(common, 'build') as build:
-            with self.assertRaises(SystemExit) as error:
-                common.main()
-        self.assertEqual(error.exception.code, 2)
-        build.assert_not_called()
+        for action in ('build', 'verify', 'export', 'load', 'download', 'digest'):
+            for selection in (['unknown'], ['cu126', '--gpu', 'unknown']):
+                with self.subTest(action=action, selection=selection), contextlib.ExitStack() as stack:
+                    operations = {name: Mock() for name in ('build', 'verify', 'export', 'load', 'download', 'config_digest')}
+                    for name in ('build', 'verify', 'export', 'download', 'config_digest'):
+                        stack.enter_context(patch.object(common, name, operations[name]))
+                    stack.enter_context(patch.dict('sys.modules', {
+                        'environment.runtime_archives': SimpleNamespace(load_environment=operations['load'])}))
+                    stack.enter_context(patch('sys.argv', ['common.py', action, '--directory', '/tmp/runtime',
+                                                          *selection]))
+                    stack.enter_context(contextlib.redirect_stderr(io.StringIO()))
+                    with self.assertRaises(SystemExit) as error:
+                        common.main()
+                    self.assertEqual(error.exception.code, 2)
+                    for operation in operations.values():
+                        operation.assert_not_called()
+
+    def test_cli_digest_accepts_omitted_variants(self):
+        output = io.StringIO()
+        with patch('sys.argv', ['common.py', 'digest']), \
+                patch.object(common, 'config_digest', return_value='environment-digest') as digest, \
+                contextlib.redirect_stdout(output):
+            common.main()
+        digest.assert_called_once_with()
+        self.assertEqual(output.getvalue(), 'environment-digest\n')
 
     def test_product_and_cpu_versions_do_not_change_public_gpu_identity(self):
         original = json.loads((ROOT / 'docker/variants.json').read_text())
