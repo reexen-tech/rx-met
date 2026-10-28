@@ -13,7 +13,7 @@ RX-MET 量化演示 — kws_streaming att_mh_rnn + QuantGRU / QuantLSTM
     * Speech Commands v2 的 12 类协议（10 个 wanted word + _silence_ + _unknown_）
     * 文件名 hash 划分 train/validation/testing（validation/testing 各 10%）
     * 增强：time shift、背景噪声、时间拉伸（resample）
-    * preprocess=raw：1 秒波形进网，SpeechFeatures（mfcc_tf）在图内
+    * 完整浮点 SpeechFeatures（mfcc_tf）外置，分类网络输入 [49, 20] MFCC
     * Conv2D 10,1  kernel (5,1)  same + ReLU + BN
     * 2 层 Bidirectional GRU 或 LSTM（rnn_units=128）+ 4-head 注意力 + Dense
     * 上游原生支持 rnn_type=gru/lstm，本示例使用对应的 rx-met 量化算子
@@ -77,6 +77,7 @@ from aimet_torch.utils_rx import (
     set_train_mode_freeze_bn,
 )
 from aimet_torch.v2 import quantsim
+from aimet_torch._base.nn.modules import custom
 from aimet_common.run_context import execution
 from quant_gru import QuantGRU
 from quant_lstm import QuantLSTM
@@ -112,6 +113,7 @@ MEL_FMIN = 20.0
 MEL_FMAX = 7000.0
 N_FRAMES = 1 + (TARGET_LEN - N_FFT) // HOP_LENGTH         # 49
 WAVEFORM_SHAPE = (TARGET_LEN,)                            # preprocess=raw: [T]
+FEATURE_SHAPE = (N_FRAMES, N_MFCC)
 
 # kws_streaming 数据协议
 KWS_RANDOM_SEED = 59185
@@ -207,7 +209,7 @@ class SpeechCommandsKWS(Dataset):
     """
     kws_streaming AudioProcessor 的 PyTorch 版。
 
-    返回 (wav[T], label)，对应 preprocess='raw'：特征在模型的 SpeechFeatures 里。
+    返回 (wav[T], label)；外置 SpeechFeatures 在进入分类网络前提取 MFCC。
     """
 
     def __init__(self, root: str, split: str = "train"):
@@ -604,16 +606,76 @@ class ConvActBN(nn.Module):
         # FX expands this BN into Sub/Div/Mul/Add so both operands of
         # each operation are calibrated, including the frozen statistics.
         self.bn = QuantizableBatchNorm2d(out_ch, momentum=0.01)
+        self.flatten_bn_spatial = out_ch == 1
 
     def forward(self, x):
-        return self.bn(self.act(self.conv(x)))
+        x = self.conv(x)
+        if self.flatten_bn_spatial:
+            # ReLU and BN preserve the single-channel spatial flattening.
+            shape = x.shape
+            x = self.bn(self.act(x.flatten(2).unsqueeze(2)))
+            return x.reshape(shape)
+        return self.bn(self.act(x))
+
+
+def make_speech_features(device="cpu") -> SpeechFeatures:
+    """Create the unchanged, external waveform-to-MFCC transform."""
+    return SpeechFeatures(
+        sample_rate=SAMPLE_RATE,
+        window_size_ms=WINDOW_SIZE_MS,
+        window_stride_ms=WINDOW_STRIDE_MS,
+        desired_samples=TARGET_LEN,
+        mel_num_bins=N_MELS,
+        mel_lower_edge_hertz=MEL_FMIN,
+        mel_upper_edge_hertz=MEL_FMAX,
+        dct_num_features=N_MFCC,
+    ).to(device).eval()
+
+
+class LinearAsConv2d(nn.Module):
+    """A Linear with unchanged [out, in] weight order and a 1x1 kernel."""
+
+    def __init__(self, in_features: int, out_features: int):
+        super().__init__()
+        self.conv = nn.Conv2d(in_features, out_features, 1, bias=True)
+
+    def forward(self, x):
+        return self.conv(x.unsqueeze(-1).unsqueeze(-1)).flatten(1)
+
+
+class AttentionHead(nn.Module):
+    """Stable attention pooling without dynamic MatMul or Softmax."""
+
+    def __init__(self, time_steps: int):
+        super().__init__()
+        self.time_steps = time_steps
+        self.score_product = custom.Multiply()
+        self.score_sum = custom.Sum()
+        self.score_max = custom.AMax()
+        self.center_scores = custom.Subtract()
+        self.exponential = custom.Exponential()
+        self.context_product = custom.Multiply()
+        self.numerator = custom.Sum()
+        self.denominator = custom.Sum()
+        self.denominator_clamp = custom.Clamp()
+        self.normalize = custom.Divide()
+
+    def forward(self, sequence, query):
+        scores = self.score_sum(self.score_product(sequence, query), dim=2, keepdim=True)
+        maximum = self.score_max(scores, dim=1, keepdim=True)
+        exponentials = self.exponential(self.center_scores(scores, maximum))
+        numerator = self.numerator(self.context_product(sequence, exponentials), dim=1, keepdim=True)
+        denominator = self.denominator(exponentials, dim=1, keepdim=True)
+        # Stable softmax has one exp(0)=1 and all other terms in [0,1].
+        denominator = self.denominator_clamp(denominator, min=1.0, max=float(self.time_steps))
+        return self.normalize(numerator, denominator)
 
 
 class AttMHRNN(nn.Module):
     """
-    kws_streaming.models.att_mh_rnn 默认拓扑（preprocess=raw）。
+    kws_streaming.models.att_mh_rnn 的等价拓扑。
 
-    输入 [B, 16000] 波形；SpeechFeatures 在 forward 里，再接 Conv / 双向 QuantGRU 或 QuantLSTM / 注意力。
+    输入外置 MFCC [B, 49, 20]，接 Conv / 双向 QuantGRU 或 QuantLSTM / 四头注意力。
     """
 
     def __init__(
@@ -634,16 +696,6 @@ class AttMHRNN(nn.Module):
         if rnn_type not in ("gru", "lstm"):
             raise ValueError("rnn_type 必须是 gru 或 lstm")
         self.rnn_type = rnn_type
-        self.speech_features = SpeechFeatures(
-            sample_rate=SAMPLE_RATE,
-            window_size_ms=WINDOW_SIZE_MS,
-            window_stride_ms=WINDOW_STRIDE_MS,
-            desired_samples=TARGET_LEN,
-            mel_num_bins=N_MELS,
-            mel_lower_edge_hertz=MEL_FMIN,
-            mel_upper_edge_hertz=MEL_FMAX,
-            dct_num_features=in_freq,
-        )
         convs: list[nn.Module] = []
         in_ch = 1
         for filters, kernel in zip(cnn_filters, cnn_kernels):
@@ -674,31 +726,26 @@ class AttMHRNN(nn.Module):
             self.lstms = nn.ModuleList(recurrent_layers)
 
         feature_dim = rnn_units * 2
-        self.mid_index = self.speech_features.n_frames // 2
-        if self.mid_index != in_time // 2:
-            raise ValueError(
-                f"SpeechFeatures n_frames={self.speech_features.n_frames} "
-                f"与期望 T={in_time} 不一致"
-            )
+        self.mid_index = in_time // 2
         self.query_projs = nn.ModuleList(
-            [nn.Linear(feature_dim, feature_dim) for _ in range(heads)]
+            [LinearAsConv2d(feature_dim, feature_dim) for _ in range(heads)]
         )
+        self.attention = nn.ModuleList([AttentionHead(in_time) for _ in range(heads)])
         self.dropout = nn.Dropout(p=dropout)
 
         mlp: list[nn.Module] = []
         prev = feature_dim * heads
         for i, units in enumerate(dense_units):
-            mlp.append(nn.Linear(prev, units))
+            mlp.append(LinearAsConv2d(prev, units))
             # act2: 'relu','linear'
             if i == 0:
                 mlp.append(nn.ReLU(inplace=False))
             prev = units
         self.mlp = nn.Sequential(*mlp)
-        self.fc = nn.Linear(prev, num_classes)
+        self.fc = LinearAsConv2d(prev, num_classes)
 
     def forward(self, x):
-        # x: [B, T] 原始波形 → [B, T_frames, F] → NCHW [B, 1, T_frames, F]
-        x = self.speech_features(x)
+        # MFCC is computed outside this quantized/exported model.
         x = x.unsqueeze(1)
         x = self.convs(x)
         x = x.permute(0, 2, 3, 1).contiguous()
@@ -710,16 +757,63 @@ class AttMHRNN(nn.Module):
 
         mid = x[:, self.mid_index, :].contiguous()
         heads = []
-        for proj in self.query_projs:
-            query = proj(mid)
-            logits = torch.matmul(x, query.unsqueeze(-1)).squeeze(-1)
-            weights = F.softmax(logits, dim=-1)
-            ctx = torch.matmul(weights.unsqueeze(1), x).squeeze(1)
+        for proj, attention in zip(self.query_projs, self.attention):
+            query = proj(mid).unsqueeze(1)
+            ctx = attention(x, query).squeeze(1)
             heads.append(ctx)
         x = torch.cat(heads, dim=-1)
         x = self.dropout(x)
         x = self.mlp(x)
         return self.fc(x)
+
+
+def prepare_model(model):
+    """Keep named attention arithmetic as explicit quantizable FX operations."""
+    return model_preparer.prepare_model(
+        model, module_classes_to_exclude=[custom.AMax, custom.Multiply, custom.Sum,
+                                         custom.Subtract, custom.Exponential,
+                                         custom.Clamp, custom.Divide])
+
+
+def configure_attention_quantizers(model) -> None:
+    """A ReduceMax selection must use the same encoding as its source scores."""
+    for name, module in model.named_modules():
+        if not name.endswith(".score_sum"):
+            continue
+        head_name = name.rsplit(".", 1)[0]
+        maximum = model.get_submodule(f"{head_name}.score_max")
+        centered = model.get_submodule(f"{head_name}.center_scores")
+        scores = module.output_quantizers[0]
+        maximum.input_quantizers[0] = scores
+        maximum.output_quantizers[0] = scores
+        centered.input_quantizers[0] = scores
+        centered.input_quantizers[1] = scores
+
+
+def extract_mfcc_feeds(feeds, speech_features, device="cpu"):
+    """Apply the identical frontend before calibration/validation/ONNX feeds."""
+    speech_features.to(device).eval()
+    with torch.no_grad():
+        return [{"input": speech_features(torch.from_numpy(feed["input"]).to(device))
+                 .detach().cpu().numpy()} for feed in feeds]
+
+
+class FeatureLoader:
+    """Adapt waveform batches while keeping the frontend outside the core."""
+
+    def __init__(self, loader, speech_features):
+        self.loader = loader
+        self.speech_features = speech_features
+
+    def __len__(self):
+        return len(self.loader)
+
+    def __iter__(self):
+        device = next(self.speech_features.buffers()).device
+        for waveform, labels in self.loader:
+            with torch.no_grad():
+                features = self.speech_features(waveform.to(device)).detach()
+            yield features, labels
 
 
 # ============================================================================
@@ -760,7 +854,8 @@ def stage(name: str, timings: dict | None = None):
 # ============================================================================
 def train_floating_point(model, train_loader, test_loader, device,
                          save_path, rnn_type: str,
-                         epochs: int = FP_EPOCHS, lr: float = FP_LR) -> float:
+                         epochs: int = FP_EPOCHS, lr: float = FP_LR,
+                         speech_features=None) -> float:
     save_path = Path(save_path)
     save_path.parent.mkdir(parents=True, exist_ok=True)
     loss_fn = nn.CrossEntropyLoss()
@@ -779,9 +874,9 @@ def train_floating_point(model, train_loader, test_loader, device,
             running_loss += loss.item()
             pbar.set_postfix(loss=f"{running_loss / batch_idx:.4f}")
         print(f"[FP] Epoch {epoch}/{epochs} - Loss: {running_loss / max(batch_idx, 1):.4f}")
-        save_checkpoint(model, save_path, rnn_type)
+        save_checkpoint(model, save_path, rnn_type, speech_features=speech_features)
 
-    load_checkpoint(model, save_path, rnn_type, device)
+    load_checkpoint(model, save_path, rnn_type, device, speech_features=speech_features)
     return evaluate(model, test_loader, device)
 
 
@@ -850,21 +945,66 @@ def print_stage_timings(timings: dict):
     print("=" * 70)
 
 
-def save_checkpoint(model, path: Path, rnn_type: str) -> None:
-    """模型类型随权重保存，避免 GRU / LSTM 检查点混用。"""
+def save_checkpoint(model, path: Path, rnn_type: str, speech_features=None) -> None:
+    """模型类型随权重保存，并单独保存外置 MFCC 的常量。"""
     if path.exists():
         previous = torch.load(path, map_location="cpu", weights_only=True)
         if previous.get("rnn_type") != rnn_type:
             raise ValueError(f"{path} 的模型类型不匹配或缺少类型信息，请选择新的输出路径")
     path.parent.mkdir(parents=True, exist_ok=True)
-    torch.save({"rnn_type": rnn_type, "model": model.state_dict()}, path)
+    if speech_features is None:
+        speech_features = getattr(model, "_external_frontend_state", None)
+    if speech_features is None:
+        speech_features = make_speech_features().state_dict()
+    elif isinstance(speech_features, nn.Module):
+        speech_features = speech_features.state_dict()
+    torch.save({"rnn_type": rnn_type, "model_variant": "ada200-equivalent-v1",
+                "model": model.state_dict(), "speech_features": speech_features}, path)
 
 
-def load_checkpoint(model, path: Path, rnn_type: str, device) -> None:
+def load_checkpoint(model, path: Path, rnn_type: str, device, speech_features=None) -> None:
+    """Strictly migrate legacy Linear weights or load equivalent core weights."""
     checkpoint = torch.load(path, map_location=device, weights_only=True)
     if checkpoint.get("rnn_type") != rnn_type:
         raise ValueError(f"检查点 {path} 的 rnn_type 与当前 {rnn_type} 不一致")
-    model.load_state_dict(checkpoint["model"], strict=True)
+    source = dict(checkpoint["model"])
+    if checkpoint.get("model_variant") == "ada200-equivalent-v1":
+        frontend_state = checkpoint["speech_features"]
+    elif checkpoint.get("model_variant") is None:
+        frontend_state = {name.removeprefix("speech_features."): value
+                          for name, value in source.items() if name.startswith("speech_features.")}
+        source = {name: value for name, value in source.items()
+                  if not name.startswith("speech_features.")}
+    else:
+        raise ValueError(f"Unsupported checkpoint model_variant: {checkpoint['model_variant']}")
+    if speech_features is None:
+        expected_frontend = make_speech_features()
+        expected_frontend.load_state_dict(frontend_state, strict=True)
+        default_state = make_speech_features().state_dict()
+        if any(not torch.equal(value.cpu(), default_state[name])
+               for name, value in frontend_state.items()):
+            raise ValueError("Non-default MFCC buffers require an explicit speech_features instance")
+    else:
+        speech_features.load_state_dict(frontend_state, strict=True)
+    target = model.state_dict()
+    migrated = {}
+    for name, value in source.items():
+        target_name = name
+        if name not in target and name.endswith((".weight", ".bias")):
+            prefix, parameter = name.rsplit(".", 1)
+            candidate = f"{prefix}.conv.{parameter}"
+            if candidate in target:
+                if parameter == "weight":
+                    if value.ndim != 2 or tuple(target[candidate].shape) != (*value.shape, 1, 1):
+                        raise ValueError(f"Invalid Linear-to-Conv weight shape for {name}: {tuple(value.shape)}")
+                    value = value.unsqueeze(-1).unsqueeze(-1)
+                target_name = candidate
+        if target_name in migrated:
+            raise ValueError(f"Duplicate migrated checkpoint parameter: {target_name}")
+        migrated[target_name] = value
+    model.load_state_dict(migrated, strict=True)
+    model._external_frontend_state = {name: value.detach().cpu().clone()
+                                      for name, value in frontend_state.items()}
 
 
 def _new_model(rnn_type: str = "gru") -> AttMHRNN:
@@ -971,14 +1111,17 @@ def _run_kws_ptq(args, run):
     else:
         calib_dir = args.calib_dir
         validation_dir = args.validation_dir or calib_dir.parent / "val"
-    feeds, _ = load_ptq_feeds(calib_dir, args.calib_limit)
-    validation, labels = load_ptq_feeds(validation_dir, args.validation_limit)
-    if not feeds or not validation:
+    waveform_feeds, _ = load_ptq_feeds(calib_dir, args.calib_limit)
+    waveform_validation, labels = load_ptq_feeds(validation_dir, args.validation_limit)
+    if not waveform_feeds or not waveform_validation:
         raise ValueError("校准和验证样本均不能为空")
     run.note_inputs(calibration=calib_dir, validation=validation_dir)
     set_seed(SEED)
     model = _new_model(args.rnn_type).eval()
-    load_checkpoint(model, args.fp_checkpoint, args.rnn_type, DEVICE)
+    frontend = make_speech_features(DEVICE)
+    load_checkpoint(model, args.fp_checkpoint, args.rnn_type, DEVICE, speech_features=frontend)
+    feeds = extract_mfcc_feeds(waveform_feeds, frontend, DEVICE)
+    validation = extract_mfcc_feeds(waveform_validation, frontend, DEVICE)
 
     def outputs(module):
         module.eval()
@@ -990,7 +1133,7 @@ def _run_kws_ptq(args, run):
         return np.concatenate(result)
 
     stage_outputs = {"fp32": outputs(model)}
-    prepared = model_preparer.prepare_model(model.cpu()).to(DEVICE).eval()
+    prepared = prepare_model(model.cpu()).to(DEVICE).eval()
     dummy = torch.from_numpy(feeds[0]["input"]).to(DEVICE)
     sim_options = dict(dummy_input=dummy, quant_scheme=QUANT_SCHEME,
                        config_file=str(CONFIG_FILE), default_output_bw=DEFAULT_BW,
@@ -998,6 +1141,7 @@ def _run_kws_ptq(args, run):
     sim = quantsim.QuantizationSimModel(prepared, **sim_options)
     sim.set_percentile_value(PERCENTILE_VALUE)
     apply_mixed_precision_bitwidth(sim.model, config_file=str(args.quant_config), verbose=True)
+    configure_attention_quantizers(sim.model)
     sim.model.eval()
     with torch.no_grad(), aimet.nn.compute_encodings(sim.model):
         for feed in tqdm(feeds, desc="PTQ calibration"):
@@ -1006,16 +1150,18 @@ def _run_kws_ptq(args, run):
     apply_power_of_2_workflow(sim.model, align_bias_scale=True, verbose=True)
     stage_outputs["po2"] = outputs(sim.model)
     checkpoint = run.checkpoints / "att_mh_rnn_kws_ptq.pth"
-    save_checkpoint(sim.get_original_model(sim.model, qdq_weights=False), checkpoint, args.rnn_type)
+    save_checkpoint(sim.get_original_model(sim.model, qdq_weights=False), checkpoint, args.rnn_type,
+                    speech_features=frontend)
     sim.model.cpu().eval()
     onnx_path, enc_path = export_onnx_json(
         sim, export_dir=str(run.exports), filename_prefix="att_mh_rnn_kws_ptq",
-        dummy_input_shape=(1, *WAVEFORM_SHAPE), opset=18)
-    fresh = model_preparer.prepare_model(_new_model(args.rnn_type).eval())
-    load_checkpoint(fresh, checkpoint, args.rnn_type, DEVICE)
+        dummy_input_shape=(1, *FEATURE_SHAPE), opset=18)
+    fresh = prepare_model(_new_model(args.rnn_type).eval())
+    load_checkpoint(fresh, checkpoint, args.rnn_type, DEVICE, speech_features=frontend)
     restored = quantsim.QuantizationSimModel(fresh, **sim_options)
     restored.set_percentile_value(PERCENTILE_VALUE)
     apply_mixed_precision_bitwidth(restored.model, config_file=str(args.quant_config), verbose=True)
+    configure_attention_quantizers(restored.model)
     load_quantizer_encodings(restored.model, load_path=str(enc_path), skip_if_not_found=False,
                              allow_overwrite=False, verbose=True)
     stage_outputs["restored"] = outputs(restored.model)
@@ -1028,8 +1174,8 @@ def _run_kws_ptq(args, run):
         "fp_checkpoint_sha256": hashlib.sha256(args.fp_checkpoint.read_bytes()).hexdigest(),
         "calibration_dir": str(calib_dir.resolve()), "calibration_count": len(feeds),
         "validation_dir": str(validation_dir.resolve()), "validation_count": len(validation),
-        "calibration_sha256": hashlib.sha256(b"".join(feed["input"].tobytes() for feed in feeds)).hexdigest(),
-        "validation_sha256": hashlib.sha256(b"".join(feed["input"].tobytes() for feed in validation)).hexdigest(),
+        "calibration_sha256": hashlib.sha256(b"".join(feed["input"].tobytes() for feed in waveform_feeds)).hexdigest(),
+        "validation_sha256": hashlib.sha256(b"".join(feed["input"].tobytes() for feed in waveform_validation)).hexdigest(),
         "restore_max_abs": restore_delta, "restore_atol": 1e-5, "restore_rtol": 1e-4,
         "onnx": str(onnx_path), "encodings": str(enc_path),
     }
@@ -1077,27 +1223,30 @@ def _run_kws(args, run):
     print(f"量化配置: {args.quant_config}（循环层查看 {args.rnn_type.upper()}_config）")
     print(f"输出目录: {output_dir}")
     print("默认浮点训练和 QAT 各 1 epoch，用于学习完整流程；精度需充分训练后评估。")
-    print(f"特征: preprocess=raw 波形 {WAVEFORM_SHAPE} → SpeechFeatures T={N_FRAMES}, F={N_MFCC}")
+    print(f"特征: 外置完整 MFCC，分类网络输入 {FEATURE_SHAPE}")
 
     with stage("步骤 1: 加载数据和模型", timings):
-        loaders = build_dataloaders(str(args.data_dir))
+        frontend = make_speech_features(DEVICE)
+        loaders = {name: FeatureLoader(loader, frontend)
+                   for name, loader in build_dataloaders(str(args.data_dir)).items()}
         model = _new_model(args.rnn_type)
         n_params = sum(p.numel() for p in model.parameters())
-        n_feat_buf = sum(b.numel() for b in model.speech_features.buffers())
+        n_feat_buf = sum(b.numel() for b in frontend.buffers())
         n_rnn = sum(1 for m in model.modules() if isinstance(m, (QuantGRU, QuantLSTM)))
         print(
             f"att_mh_rnn 参数量: {n_params / 1e3:.1f}K  {operator_name} 层: {n_rnn}（均为 bidirectional）"
         )
-        print(f"SpeechFeatures 常量 buffer: {n_feat_buf / 1e3:.1f}K（RDFT/Mel/DCT，对齐 kws 进图）")
+        print(f"外置 SpeechFeatures 常量 buffer: {n_feat_buf / 1e3:.1f}K（不进入量化或 ONNX）")
 
     with stage("步骤 2: 浮点训练 + 评估", timings):
         fp_accuracy = train_floating_point(
-            model, loaders["train"], loaders["test"], DEVICE, fp_model_path, args.rnn_type
+            model, loaders["train"], loaders["test"], DEVICE, fp_model_path, args.rnn_type,
+            speech_features=frontend,
         )
         print(f"浮点精度: {fp_accuracy * 100:.2f}%")
 
     with stage("步骤 3: prepare_model + 创建 sim", timings):
-        prepared_model = model_preparer.prepare_model(model)
+        prepared_model = prepare_model(model)
         sample_input, _ = next(iter(loaders["train"]))
         dummy_input = sample_input.to(DEVICE)
 
@@ -1113,6 +1262,7 @@ def _run_kws(args, run):
         apply_mixed_precision_bitwidth(
             sim.model, config_file=str(args.quant_config), verbose=True,
         )
+        configure_attention_quantizers(sim.model)
 
     with stage("步骤 4: 校准 (PTQ)", timings):
         sim.model.to(DEVICE).eval()
@@ -1145,7 +1295,7 @@ def _run_kws(args, run):
         qat_state_pth = run.checkpoints / "att_mh_rnn_kws_qat.pth"
         # 主权重与量化参数分开保存；避免检查点依赖 QuantSim 的内部 Python 状态。
         original_model = sim.get_original_model(sim.model, qdq_weights=False)
-        save_checkpoint(original_model, qat_state_pth, args.rnn_type)
+        save_checkpoint(original_model, qat_state_pth, args.rnn_type, speech_features=frontend)
         # 在导出前保留测试样本的输出，恢复后比较数值而不只比较准确率。
         reload_input = next(iter(loaders["test"]))[0].to(DEVICE)
         sim.model.eval()
@@ -1157,7 +1307,7 @@ def _run_kws(args, run):
             sim,
             export_dir=str(output_dir),
             filename_prefix="att_mh_rnn_kws",
-            dummy_input_shape=(1, *WAVEFORM_SHAPE),
+            dummy_input_shape=(1, *FEATURE_SHAPE),
             opset=18,
         )
         sim.model.to(DEVICE)
@@ -1168,8 +1318,8 @@ def _run_kws(args, run):
 
     with stage("步骤 8: 重新加载并验证", timings):
         fresh_model = _new_model(args.rnn_type).eval()
-        fresh_prepared = model_preparer.prepare_model(fresh_model)
-        load_checkpoint(fresh_prepared, qat_state_pth, args.rnn_type, DEVICE)
+        fresh_prepared = prepare_model(fresh_model)
+        load_checkpoint(fresh_prepared, qat_state_pth, args.rnn_type, DEVICE, speech_features=frontend)
         fresh_sim = quantsim.QuantizationSimModel(
             fresh_prepared,
             dummy_input=dummy_input,
@@ -1182,6 +1332,7 @@ def _run_kws(args, run):
         apply_mixed_precision_bitwidth(
             fresh_sim.model, config_file=str(args.quant_config), verbose=True,
         )
+        configure_attention_quantizers(fresh_sim.model)
 
         load_quantizer_encodings(
             fresh_sim.model,

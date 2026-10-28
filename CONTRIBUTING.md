@@ -31,7 +31,7 @@ Python 兼容范围和依赖声明位于 `pyproject.toml`，发布变体位于
 ```bash
 python3 scripts/dependencies.py lock
 python3 scripts/dependencies.py check
-python3 -m unittest -v tests/test_dependencies.py
+python3 -m tests release -k dependencies -v
 ```
 
 `scripts/dependencies.py lock` 是 `docker/docker-bake.hcl` 和
@@ -43,7 +43,7 @@ python3 -m unittest -v tests/test_dependencies.py
 
 ```bash
 git diff --check
-python3 -m unittest -v tests/test_dependencies.py
+python3 -m tests common release
 ```
 
 根据修改范围补充以下验证：
@@ -52,7 +52,7 @@ python3 -m unittest -v tests/test_dependencies.py
 | --- | --- |
 | AIMET 原生运行库 | `docs/AIMET_ONNX_NATIVE.md` 中的构建和冒烟测试 |
 | QuantGRU | `operators/quant-gru/README.md` 和 `operators/quant-gru/script/run_all_test.sh` |
-| QuantLSTM 集成 | `python3 -m unittest -v tests/test_quant_lstm_integration.py`（CUDA 环境） |
+| QuantLSTM 集成 | `python3 -m tests recurrent -v`（CUDA 环境） |
 | 依赖矩阵或锁文件 | `python3 scripts/dependencies.py check` |
 | Docker 构建或发布脚本 | `./scripts/release/build.sh <变体>` |
 | 应用包 GPU 行为 | `./scripts/release/verify_bundle.sh --gpu --gpu-device 0 <变体>` |

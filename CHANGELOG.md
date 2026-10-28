@@ -6,6 +6,11 @@
 
 ## [Unreleased]
 
+### Changed
+
+- 项目级回归按领域整理，沿用 unittest 提供统一分组入口；共享测试夹具独立复用，真实数据往返验证移至 scripts/validation，清理无实际调用的历史报告解析脚本及自测。
+- KWS 示例网络改为外置完整浮点 MFCC，通过广播乘法、归约、指数和除法表达四头 Attention，Linear 等价改为 1×1 Conv2d，保留原量化配置及训练流程；针对该网络的 ONNX/JSON 检查放入 tests。
+
 ### Fixed
 
 - PyTorch Po2 工作流分别处理普通 AIMET 量化器与原生 GRU/LSTM，修复只有原生算子时空列表统计除零、原生 Po2 未执行的问题；同步并验证原生有效编码及内部覆盖，普通转换与可选 bias 对齐完成后再生成比较报告，返回分支验证状态及数量。

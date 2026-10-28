@@ -78,12 +78,52 @@ def main(argv=None):
     # Both ONNX passes start from one identical clean ONNX, preventing graph
     # differences in the first pair from changing the second pair's inputs.
     shared_onnx = products["kws_cuda"]
+    # KWS accepts waveform feeds; its deployment ONNX accepts external MFCC.
+    feature_root = args.output_dir / "mfcc_feeds"
+    prepare_features = """
+import json
+from pathlib import Path
+import sys
+import numpy as np
+sys.path.insert(0, sys.argv[1])
+from examples import quick_start_kws as kws
+checkpoint, rnn_type, output, calib, validation = sys.argv[2:7]
+frontend = kws.make_speech_features().eval()
+kws.load_checkpoint(kws.AttMHRNN(rnn_type=rnn_type), Path(checkpoint),
+                    rnn_type, 'cpu', speech_features=frontend)
+root = Path(output)
+root.mkdir()
+manifest = {'labels': list(kws.LABELS), 'batch_size': 1, 'augmentation': False}
+for folder, source, raw_limit in (('calib', calib, sys.argv[7]),
+                                  ('val', validation, sys.argv[8])):
+    feeds, labels = kws.load_ptq_feeds(Path(source), int(raw_limit) if raw_limit else None)
+    features = kws.extract_mfcc_feeds(feeds, frontend)
+    directory = root / folder
+    directory.mkdir()
+    files = []
+    for index, feed in enumerate(features):
+        filename = f'{index:05d}.npz'
+        np.savez(directory / filename, **feed)
+        files.append(filename)
+    manifest[folder + '_files'] = files
+    if labels is not None:
+        manifest[folder + '_labels'] = labels
+(root / 'manifest.json').write_text(json.dumps(manifest, indent=2) + '\\n')
+"""
+    command = shlex.split(args.cpu_command) + ["-c", prepare_features, str(ROOT),
+        str(args.fp_checkpoint.resolve()), args.rnn_type, str(feature_root),
+        str(args.calib_dir.resolve()), str(args.validation_dir.resolve()),
+        str(args.calib_limit or ""), str(args.validation_limit or "")]
+    commands.append(command)
+    run(command, args.output_dir / "mfcc_feeds.log")
+    onnx_common = ["--calib-dir", feature_root / "calib",
+                   "--validation-dir", feature_root / "val"]
     for device in ("cpu", "cuda"):
         prefix = shlex.split(getattr(args, device + "_command"))
         command = prefix + [str(ROOT / "examples/quick_start_onnx_ptq.py"),
             "--model", str(shared_onnx), "--device", device,
             "--prefix", "att_mh_rnn_kws_ptq", "--output-dir",
-            str(args.output_dir / ("onnx_" + device)), *map(str, common)]
+            str(args.output_dir / ("onnx_" + device)), *map(str, onnx_common)]
         commands.append(command)
         run(command, args.output_dir / f"onnx_{device}.log")
         products["onnx_" + device] = exported(args.output_dir / ("onnx_" + device), "att_mh_rnn_kws_ptq.onnx")

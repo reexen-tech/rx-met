@@ -219,7 +219,7 @@ flowchart LR
 
 | 验证层级 | 入口 | 覆盖内容 |
 | --- | --- | --- |
-| 依赖配置 | `tests/test_dependencies.py` | 版本范围、变体矩阵、Bake 配置和 lock 一致性 |
+| 依赖配置 | `tests/release/test_dependencies.py` | 版本范围、变体矩阵、Bake 配置和 lock 一致性 |
 | AIMET 原生库 | `native/tests/smoke_onnx_runtime.py` | Python 扩展和 ONNX Runtime custom op |
 | QuantGRU | `operators/quant-gru/tests/` | 浮点、量化、校准、训练和导出行为 |
 | 发布镜像 | `scripts/release/verify_bundle.sh` | 包版本、GPU、AIMET 和 QuantGRU 冒烟流程 |

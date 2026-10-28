@@ -228,8 +228,8 @@ GRU/LSTM 关闭量化时，即使已完成校准，阶段文件与部署 encodin
 ## 验证
 
 ```bash
-python3 -m unittest -v tests.test_dependencies
-python3 -m unittest -v tests.test_quant_lstm_integration tests.test_native_recurrent_state tests.test_kws_example
+python3 -m tests release -k dependencies -v
+python3 -m tests recurrent examples -v
 bash operators/quant-lstm/tools/run_cpu_only_package_check.sh /tmp/quant-lstm-cpu
 ```
 
