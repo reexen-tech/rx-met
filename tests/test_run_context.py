@@ -1,19 +1,24 @@
 """Automatic execution layout and logging, without Torch or a native runtime."""
+import asyncio
 import contextlib
+import contextvars
 import datetime
 import errno
+import gc
 import io
 import json
 import logging
 import multiprocessing
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 import tempfile
 import threading
 import unittest
 import warnings
+import weakref
 from unittest.mock import patch
 
 from aimet_common import run_context as runtime
@@ -33,6 +38,575 @@ class ExecutionTest(unittest.TestCase):
 
     def read_record(self, run):
         return json.loads((run.root / 'run.json').read_text())
+
+    def test_completed_workflows_release_run_records_and_handlers(self):
+        references = []
+        handlers = []
+        for boundary in (runtime.execution, runtime.export_execution):
+            for index in range(4):
+                with boundary(self.root / boundary.__name__ / str(index)) as run:
+                    references.append(weakref.ref(run))
+                    handlers.append(weakref.ref(run._handler))
+                self.assertNotIn(run, runtime._implicit.values())
+                del run
+        gc.collect()
+        self.assertTrue(all(reference() is None for reference in references))
+        self.assertTrue(all(reference() is None for reference in handlers))
+
+    def test_model_association_owns_its_run_only_while_model_is_alive(self):
+        class Sim:
+            @runtime.logged_operation
+            def __init__(self):
+                runtime.log_print('model diagnostics')
+
+        sim = Sim()
+        run = runtime.get_run(sim)
+        reference = weakref.ref(run)
+        with runtime.export_execution(self.root / 'owned', source=sim):
+            pass
+        self.assertTrue(run.closed)
+        del run
+        gc.collect()
+        self.assertIsNotNone(reference())
+        del sim
+        gc.collect()
+        self.assertIsNone(reference())
+
+    def test_displaced_implicit_run_finishes_only_after_its_model_is_released(self):
+        class Sim:
+            @runtime.logged_operation
+            def __init__(self):
+                pass
+
+        first = Sim()
+        run = runtime.get_run(first)
+        reference, stream = weakref.ref(run), run._handler.stream
+        record = run.root / 'run.json'
+        del run
+        second = Sim()
+        self.assertIsNotNone(reference())
+        self.assertEqual(json.loads(record.read_text())['status'], 'running')
+        self.assertFalse(stream.closed)
+        with warnings.catch_warnings(record=True) as captured:
+            warnings.simplefilter('always', ResourceWarning)
+            del first
+            gc.collect()
+        self.assertIsNone(reference())
+        self.assertTrue(stream.closed)
+        self.assertEqual(json.loads(record.read_text())['status'], 'success')
+        self.assertFalse([item for item in captured if item.category is ResourceWarning])
+        del second
+
+    def test_implicit_replacement_finishes_a_run_with_no_remaining_model(self):
+        class Sim:
+            @runtime.logged_operation
+            def __init__(self):
+                pass
+
+        first, second = Sim(), Sim()
+        run = runtime.get_run(first)
+        reference = weakref.ref(run)
+        record = run.root / 'run.json'
+        del run, first
+        gc.collect()
+        self.assertIsNotNone(reference())
+        runtime.get_run(second)
+        self.assertIsNone(reference())
+        self.assertEqual(json.loads(record.read_text())['status'], 'success')
+
+    def test_multiple_unfinished_models_finalize_independently_on_other_thread(self):
+        class Sim:
+            @runtime.logged_operation
+            def __init__(self):
+                pass
+
+        models, records, references = [], [], []
+        for _ in range(4):
+            models.append(Sim())
+            run = runtime.get_run(models[-1])
+            records.append(run.root / 'run.json')
+            references.append(weakref.ref(run))
+            del run
+        latest = models.pop()
+
+        def discard():
+            models.clear()
+            gc.collect()
+
+        thread = threading.Thread(target=discard)
+        thread.start()
+        thread.join(10)
+        self.assertFalse(thread.is_alive())
+        self.assertTrue(all(reference() is None for reference in references[:-1]))
+        self.assertIsNotNone(references[-1]())
+        self.assertTrue(all(json.loads(path.read_text())['status'] == 'success' for path in records[:-1]))
+        runtime.get_run(latest).finish()
+
+    def test_finalization_does_not_repeat_explicit_success_or_failure(self):
+        for error in (None, ValueError('failed workflow')):
+            with self.subTest(error=error):
+                run = runtime.Execution(self.root / str(error is None))
+                record = run.root / 'run.json'
+                run.finish(error)
+                original = record.read_bytes()
+                reference = weakref.ref(run)
+                run.finish = lambda: self.fail('finished task was finalized twice')
+                del run
+                gc.collect()
+                self.assertIsNone(reference())
+                self.assertEqual(record.read_bytes(), original)
+
+    def test_constructor_failure_closes_partial_resources_without_finalizing_again(self):
+        original_handler = logging.FileHandler
+        streams = []
+
+        def handler(*args, **kwargs):
+            value = original_handler(*args, **kwargs)
+            streams.append(value.stream)
+            return value
+
+        with warnings.catch_warnings(record=True) as captured, \
+                patch.object(logging, 'FileHandler', side_effect=handler), \
+                patch.object(runtime.Execution, 'save', side_effect=OSError('cannot persist initial record')):
+            warnings.simplefilter('always', ResourceWarning)
+            with self.assertRaisesRegex(OSError, 'cannot persist initial record'):
+                runtime.Execution(self.root)
+            gc.collect()
+        self.assertTrue(streams and all(stream.closed for stream in streams))
+        self.assertFalse([item for item in captured if item.category is ResourceWarning])
+
+    def test_finalizer_reports_persistence_errors_and_still_closes_its_log(self):
+        run = runtime.Execution(self.root)
+        stream = run._handler.stream
+        errors = []
+
+        def unraisable(error):
+            errors.append((error.exc_type, str(error.exc_value)))
+
+        with patch.object(sys, 'unraisablehook', side_effect=unraisable), \
+                patch.object(runtime, '_atomic_json', side_effect=OSError('final record cannot be saved')):
+            del run
+            gc.collect()
+        self.assertEqual(errors, [(OSError, 'final record cannot be saved')])
+        self.assertTrue(stream.closed)
+
+    def test_finalizer_closes_a_deleted_run_without_recreating_its_directory(self):
+        for timestamp_output in (True, False):
+            with self.subTest(timestamp_output=timestamp_output):
+                runtime.configure_output(timestamp_output=timestamp_output)
+                run = runtime.Execution(self.root / str(timestamp_output))
+                root, stream, reference = run.root, run._handler.stream, weakref.ref(run)
+                shutil.rmtree(root)
+                errors = []
+                with warnings.catch_warnings(record=True) as captured, \
+                        patch.object(sys, 'unraisablehook', side_effect=lambda error: errors.append(error.exc_type)):
+                    warnings.simplefilter('always', ResourceWarning)
+                    del run
+                    gc.collect()
+                self.assertIsNone(reference())
+                self.assertTrue(stream.closed)
+                self.assertFalse(root.exists())
+                self.assertEqual(errors, [])
+                self.assertFalse([item for item in captured if item.category is ResourceWarning])
+
+    def test_inherited_run_finalizer_closes_only_child_resources(self):
+        script = '''import gc,json,os,sys
+from pathlib import Path
+from aimet_common import run_context as runtime
+run = runtime.Execution(sys.argv[1])
+record = run.root / 'run.json'
+stream = run._handler.stream
+pid = os.fork()
+if pid == 0:
+    del run
+    gc.collect()
+    assert stream.closed
+    assert json.loads(record.read_text())['status'] == 'running'
+    raise SystemExit(0)
+_, status = os.waitpid(pid, 0)
+assert os.waitstatus_to_exitcode(status) == 0
+assert not stream.closed
+assert json.loads(record.read_text())['status'] == 'running'
+run.finish()
+'''
+        result = subprocess.run([sys.executable, '-c', script, str(self.root)],
+                                capture_output=True, text=True, timeout=20)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_gc_finalizer_does_not_reverse_logging_fork_lock_order(self):
+        script = '''import gc,json,logging,os,signal,sys,threading
+gc.disable()
+signal.alarm(8)
+runtime_locked = threading.Event()
+def mark_runtime_locked():
+    runtime_locked.set()
+# Before callbacks run in reverse registration order: runtime, marker, logging.
+os.register_at_fork(before=mark_runtime_locked,
+                    after_in_child=lambda: signal.alarm(5))
+from aimet_common import run_context as runtime
+run = runtime.Execution(sys.argv[1])
+record = run.root / 'run.json'
+run.cycle = run
+holder = [run]
+del run
+held = threading.Event()
+def worker():
+    with logging._lock:
+        held.set()
+        assert runtime_locked.wait(3)
+        holder.clear()
+        gc.collect()
+thread = threading.Thread(target=worker)
+thread.start()
+assert held.wait(3)
+child = os.fork()
+if child == 0:
+    raise SystemExit(0)
+thread.join(3)
+assert not thread.is_alive()
+_, status = os.waitpid(child, 0)
+assert os.waitstatus_to_exitcode(status) == 0
+assert json.loads(record.read_text())['status'] == 'success'
+'''
+        result = subprocess.run([sys.executable, '-B', '-c', script, str(self.root)],
+                                capture_output=True, text=True, timeout=10)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertNotIn('Exception ignored', result.stderr)
+
+    def test_fork_serializes_metadata_descriptor_creation_and_registration(self):
+        script = '''import gc,os,signal,sys,threading
+from unittest.mock import patch
+signal.alarm(10)
+os.register_at_fork(after_in_child=lambda: signal.alarm(5))
+from aimet_common import run_context as runtime
+with runtime.execution(sys.argv[1]) as run:
+    exports = run.exports
+del run
+gc.collect()
+opened, return_descriptor, entered, leave = (threading.Event() for _ in range(4))
+original = runtime._lock_directory
+errors = []
+def delayed_lock(path):
+    descriptor = original(path)
+    opened.set()
+    assert return_descriptor.wait(4)
+    return descriptor
+def worker():
+    try:
+        with runtime.metadata_output(exports):
+            entered.set()
+            assert leave.wait(4)
+    except BaseException as error:
+        errors.append(error)
+# This marker runs before runtime's fork lock and allows the opening transaction
+# to finish. The actual fork must wait for its descriptor registration.
+os.register_at_fork(before=return_descriptor.set)
+thread = threading.Thread(target=worker)
+ready_read, ready_write = os.pipe()
+stop_read, stop_write = os.pipe()
+with patch.object(runtime, '_lock_directory', side_effect=delayed_lock):
+    thread.start()
+    assert opened.wait(3)
+    child = os.fork()
+if child == 0:
+    assert not runtime._metadata_descriptors
+    os.write(ready_write, b'1')
+    os.read(stop_read, 1)
+    raise SystemExit(0)
+try:
+    assert os.read(ready_read, 1) == b'1'
+    assert entered.wait(3)
+    leave.set()
+    thread.join(3)
+    assert not thread.is_alive() and not errors, errors
+    with runtime.metadata_output(exports):
+        pass
+finally:
+    leave.set()
+    os.write(stop_write, b'1')
+    _, status = os.waitpid(child, 0)
+    for descriptor in (ready_read, ready_write, stop_read, stop_write):
+        os.close(descriptor)
+assert os.waitstatus_to_exitcode(status) == 0
+'''
+        result = subprocess.run([sys.executable, '-B', '-c', script, str(self.root)],
+                                capture_output=True, text=True, timeout=12)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_metadata_recovers_durable_record_after_execution_is_collected(self):
+        for timestamp_output in (True, False):
+            runtime.configure_output(timestamp_output=timestamp_output)
+            output = self.root / str(timestamp_output)
+            with runtime.export_execution(output) as run:
+                (run.exports / 'model.onnx').write_bytes(b'model')
+            exports = run.exports
+            record_path = run.root / 'run.json'
+            reference = weakref.ref(run)
+            del run
+            gc.collect()
+            self.assertIsNone(reference())
+            with patch.object(logging, 'FileHandler', side_effect=AssertionError('reopened log')):
+                for directory in (output, exports.parent, exports):
+                    with self.subTest(timestamp_output=timestamp_output, directory=directory):
+                        self.assertEqual(runtime.metadata_directory(directory), exports)
+                        with runtime.metadata_output(directory) as recovered:
+                            metadata = recovered / 'model.meta.json'
+                            metadata.write_text('{}')
+                            runtime.note_output(metadata)
+            record = json.loads(record_path.read_text())
+            self.assertEqual(record['status'], 'success')
+            self.assertEqual(record['outputs']['exports/model.meta.json']['sha256'],
+                             runtime._sha256(metadata))
+
+    def test_latest_failed_record_is_recovered_with_numeric_timestamp_collisions(self):
+        now = datetime.datetime(2026, 10, 27, tzinfo=datetime.timezone.utc)
+        output = self.root / 'collisions'
+        with patch.object(runtime, '_now', return_value=now):
+            for _ in range(11):
+                with runtime.execution(output) as run:
+                    pass
+                del run
+            with self.assertRaisesRegex(ValueError, 'latest failure'):
+                with runtime.execution(output) as run:
+                    raise ValueError('latest failure')
+        exports = run.exports
+        record_path = run.root / 'run.json'
+        reference = weakref.ref(run)
+        del run
+        gc.collect()
+        self.assertIsNone(reference())
+        invalid = output / '20990101_000000_000000'
+        invalid.mkdir()
+        (invalid / 'run.json').write_text('{}')
+        with runtime.metadata_output(output) as directory:
+            self.assertEqual(directory, exports)
+            metadata = directory / 'failure.meta.json'
+            metadata.write_text('{}')
+            runtime.note_output(metadata)
+        record = json.loads(record_path.read_text())
+        self.assertEqual(record['status'], 'failed')
+        self.assertTrue(record['execution_id'].endswith('-11'))
+        self.assertIn('exports/failure.meta.json', record['outputs'])
+
+    def test_new_running_record_does_not_redirect_metadata_to_old_finished_run(self):
+        with runtime.execution(self.root) as old:
+            pass
+        record_path = old.root / 'run.json'
+        original = record_path.read_bytes()
+        del old
+        new = runtime.Execution(self.root)
+        try:
+            self.assertEqual(runtime.metadata_directory(self.root), self.root)
+            self.assertEqual(record_path.read_bytes(), original)
+        finally:
+            new.finish()
+
+    def test_collected_concurrent_runs_restore_metadata_for_their_own_thread(self):
+        first_done = threading.Event()
+        both_done = threading.Barrier(2)
+        records, errors = {}, []
+
+        def worker(name):
+            try:
+                if name == 'second' and not first_done.wait(10):
+                    raise TimeoutError('first workflow did not finish')
+                with runtime.execution(self.root) as run:
+                    exports = run.exports
+                    records[name] = run.root / 'run.json'
+                reference = weakref.ref(run)
+                del run
+                gc.collect()
+                self.assertIsNone(reference())
+                if name == 'first':
+                    first_done.set()
+                both_done.wait(10)
+                with runtime.metadata_output(self.root) as directory:
+                    self.assertEqual(directory, exports)
+                    metadata = directory / (name + '.meta.json')
+                    metadata.write_text('{}')
+                    runtime.note_output(metadata)
+            except BaseException as error:
+                errors.append(error)
+                both_done.abort()
+
+        threads = [threading.Thread(target=worker, args=(name,)) for name in ('first', 'second')]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(30)
+            self.assertFalse(thread.is_alive())
+        self.assertEqual(errors, [])
+        for name, path in records.items():
+            self.assertIn('exports/' + name + '.meta.json', json.loads(path.read_text())['outputs'])
+
+    def test_recovered_metadata_writers_lock_before_writing_and_merge_on_retry(self):
+        for timestamp_output in (True, False):
+            runtime.configure_output(timestamp_output=timestamp_output)
+            with runtime.execution(self.root / str(timestamp_output)) as run:
+                exports = run.exports
+                record_path = run.root / 'run.json'
+            del run
+            gc.collect()
+            entered, attempted, finished = threading.Event(), threading.Event(), threading.Event()
+            errors = []
+
+            def owner():
+                try:
+                    with runtime.metadata_output(exports) as directory:
+                        first = directory / 'first.meta.json'
+                        first.write_text('{}')
+                        entered.set()
+                        if not attempted.wait(10):
+                            raise TimeoutError('contending metadata writer did not attempt entry')
+                        with runtime.metadata_output(exports):
+                            runtime.note_output(first)
+                except BaseException as error:
+                    errors.append(error)
+                finally:
+                    finished.set()
+
+            def contender():
+                try:
+                    if not entered.wait(10):
+                        raise TimeoutError('metadata lock owner did not enter')
+                    with self.assertRaisesRegex(RuntimeError, '另一个任务使用'):
+                        with runtime.metadata_output(exports):
+                            self.fail('contender wrote while the metadata directory was locked')
+                    attempted.set()
+                    if not finished.wait(10):
+                        raise TimeoutError('metadata lock owner did not finish')
+                    with runtime.metadata_output(exports) as directory:
+                        second = directory / 'second.meta.json'
+                        second.write_text('{}')
+                        runtime.note_output(second)
+                except BaseException as error:
+                    errors.append(error)
+                    attempted.set()
+
+            threads = [threading.Thread(target=owner), threading.Thread(target=contender)]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join(30)
+                self.assertFalse(thread.is_alive())
+            self.assertEqual(errors, [])
+            self.assertEqual(set(json.loads(record_path.read_text())['outputs']),
+                             {'exports/first.meta.json', 'exports/second.meta.json'})
+
+    def test_recovered_metadata_lock_also_excludes_other_processes(self):
+        with runtime.execution(self.root) as run:
+            exports = run.exports
+        del run
+        script = '''import sys
+from aimet_common.run_context import metadata_output
+try:
+    with metadata_output(sys.argv[1]):
+        raise AssertionError('overlapping metadata writer entered output directory')
+except RuntimeError:
+    print('metadata-busy')
+'''
+        with runtime.metadata_output(exports):
+            result = subprocess.run([sys.executable, '-c', script, str(exports)],
+                                    capture_output=True, text=True, timeout=20)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('metadata-busy', result.stdout)
+
+    def test_forked_worker_does_not_retain_parent_metadata_directory_lock(self):
+        with runtime.execution(self.root) as run:
+            exports = run.exports
+        del run
+        context = multiprocessing.get_context('fork')
+        ready, stop = context.Event(), context.Event()
+
+        def worker():
+            ready.set()
+            stop.wait(10)
+
+        child = context.Process(target=worker)
+        try:
+            with runtime.metadata_output(exports):
+                child.start()
+                self.assertTrue(ready.wait(10))
+            self.assertTrue(child.is_alive())
+            with runtime.metadata_output(exports) as directory:
+                metadata = directory / 'after-fork.meta.json'
+                metadata.write_text('{}')
+                runtime.note_output(metadata)
+            self.assertTrue(child.is_alive())
+        finally:
+            stop.set()
+            if child.pid is not None:
+                child.join(5)
+                if child.is_alive():
+                    child.terminate()
+                    child.join(5)
+
+    def test_copied_metadata_context_cannot_reuse_an_expired_lock(self):
+        with runtime.execution(self.root) as run:
+            exports = run.exports
+        del run
+        with runtime.metadata_output(exports):
+            inherited = contextvars.copy_context()
+
+        def enter():
+            with runtime.metadata_output(exports):
+                self.fail('an expired lease bypassed metadata locking')
+
+        with runtime.metadata_output(exports):
+            with self.assertRaisesRegex(RuntimeError, '另一个任务使用'):
+                inherited.run(enter)
+
+    def test_async_tasks_cannot_inherit_metadata_lock_ownership_or_stale_records(self):
+        with runtime.execution(self.root) as run:
+            exports = run.exports
+            record_path = run.root / 'run.json'
+        del run
+
+        async def scenario():
+            start, retry = asyncio.Event(), asyncio.Event()
+
+            async def assert_locked():
+                with self.assertRaisesRegex(RuntimeError, '另一个任务使用'):
+                    with runtime.metadata_output(exports):
+                        self.fail('an inherited lease bypassed metadata locking')
+
+            async def delayed_writer():
+                await start.wait()
+                await assert_locked()
+                await retry.wait()
+                with runtime.metadata_output(exports) as directory:
+                    metadata = directory / 'child.meta.json'
+                    metadata.write_text('{}')
+                    runtime.note_output(metadata)
+
+            with runtime.metadata_output(exports):
+                await asyncio.create_task(assert_locked())
+                delayed = asyncio.create_task(delayed_writer())
+            with runtime.metadata_output(exports) as directory:
+                metadata = directory / 'owner.meta.json'
+                metadata.write_text('{}')
+                runtime.note_output(metadata)
+                start.set()
+                await asyncio.sleep(0)
+            retry.set()
+            await delayed
+
+        asyncio.run(scenario())
+        self.assertEqual(set(json.loads(record_path.read_text())['outputs']),
+                         {'exports/owner.meta.json', 'exports/child.meta.json'})
+
+    def test_pid_and_thread_reuse_does_not_select_a_previous_process_session(self):
+        records = []
+        for index in range(2):
+            with runtime.execution(self.root) as run:
+                records.append((run.root / 'run.json', run.exports))
+            del run
+        for index, (path, _) in enumerate(records):
+            record = json.loads(path.read_text())
+            record['session_token'] = 'previous-process-session'
+            record['thread_id'] = threading.get_ident() + index
+            path.write_text(json.dumps(record))
+        self.assertEqual(runtime.metadata_directory(self.root), records[-1][1])
 
     def test_encoding_versions_follow_document_structure_for_json_and_raw_outputs(self):
         compiler = {'version': '1.0.0', 'schema_version': 4,

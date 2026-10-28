@@ -67,6 +67,28 @@ python3 scripts/environment/common.py digest
 `--wheelhouse-dir DIR` 可以指定本地依赖缓存，按 cpu/cu118/cu126/cu130 分目录。
 缓存中的 wheel 必须与依赖定义匹配。build 不自动导出镜像。
 
+暂存依赖时，`onnxsim==0.7.0` 的已核对源码会应用退出引用修复：将
+`_model_executor` 的类型注解延迟为字符串，避免 `typing` 缓存间接保留原生 executor。
+该修复由 `scripts/environment/patch_onnxsim_wheel.py` 检查源文件 SHA-256 后执行，
+为 wheel 添加 `1rxmet` build tag，重写 `WHEEL` / `RECORD`，并更新依赖缓存校验清单；
+包版本和原生扩展保持不变。未知源码会报错，不能静默套用补丁。
+
+Torch `2.10.0` / `2.10.0+cu130`、`2.8.0` / `2.8.0+cu126` 的已核对源码还会应用
+FX 生成源码缓存的生命周期修复。自动生成的唯一文件名由编译代码对象持有，最后一个代码对象
+及其 traceback 释放后，才回收对应源码；仍存活的函数、生成器和 traceback 可以继续查阅源码。
+显式文件名和 profiler 内容哈希保留 Torch 原有缓存语义。fork 子进程保守保留继承的源码快照，
+子进程新编译的源码继续正常回收，避免在 fork 前引入跨组件锁顺序。
+`scripts/environment/patch_torch_wheel.py` 同样校验源文件和修复模块的 SHA-256，添加
+`1rxmet` build tag 并重写 wheel 元数据，不修改原生库。其他 Torch 版本明确报告未覆盖，
+不因此宣称已经解决这些版本的 FX 缓存增长。
+
+环境验收在独立进程中按 Torch、onnxsim 的顺序导入，执行三次真实常量折叠并检查
+ONNX 和 ORT 输出。等待解释器正常退出后，还会检查完整 stderr 中的 nanobind 泄漏告警；
+退出码为 0 不足以通过此项检查。
+受覆盖的 Torch 版本还检查 FX 缓存随重复追踪释放，以及存活代码和 traceback 的源码可用性。
+已有镜像的复用规则不变，源码修改不会修补现有镜像；受影响的旧镜像会在新增验收中报错。
+发布时须按环境版本规则构建并验收修复后的环境，不能用产品运行时修改依赖私有状态代替。
+
 ## 离线导出与加载
 
 ```bash

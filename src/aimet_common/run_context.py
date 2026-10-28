@@ -22,6 +22,7 @@ import sys
 import tempfile
 import threading
 import time
+import uuid
 import warnings
 import weakref
 from importlib import metadata
@@ -31,8 +32,11 @@ from ._version import __version__
 _current = contextvars.ContextVar('rx_met_execution', default=None)
 _details = contextvars.ContextVar('rx_met_log_details', default=None)
 _passthrough = contextvars.ContextVar('rx_met_console_passthrough', default=False)
+_metadata_current = contextvars.ContextVar('rx_met_metadata_execution', default=None)
+_metadata_descriptors = {}
+_session_token = uuid.uuid4().hex
 _implicit = {}
-_last_runs = {}
+_last_runs = weakref.WeakValueDictionary()
 _model_runs = weakref.WeakKeyDictionary()
 _runs = weakref.WeakSet()
 _lock = threading.RLock()
@@ -43,6 +47,7 @@ _capture_depth = 0
 _capture_state = None
 _timestamp_output = True
 _BEIJING_TIMEZONE = datetime.timezone(datetime.timedelta(hours=8))
+_execution_name = re.compile(r'^(\d{8}_\d{6}_\d{6})(?:-(\d+))?$')
 
 
 def configure_output(*, timestamp_output: bool = True) -> None:
@@ -213,10 +218,13 @@ class Execution:
             self._handler = self._open_handler(fresh=not self.timestamp_output)
             self.record = {'schema_version': 1, 'execution_id': self.execution_id, 'task': task,
                            'status': 'running', 'started_at': started_at.isoformat(timespec='microseconds'), 'pid': self.pid,
+                           'thread_id': threading.get_ident(),
+                           'session_token': _session_token,
                            'output_config': {'timestamp_output': self.timestamp_output},
                            'tool': _tool_identity(), 'inputs': {}, 'config': {}, 'outputs': {}, 'operations': {}}
             self.save()
         except BaseException:
+            self.closed = True
             if hasattr(self, '_handler'):
                 self._handler.close()
             self._release_directory()
@@ -227,6 +235,30 @@ class Execution:
         self.message(f'RX-MET execution {self.execution_id}: {task}', console=False)
         self.message('Tool identity: ' + json.dumps(self.record['tool'], ensure_ascii=False), console=False)
         builtins.print(f'[rx-met] 日志: {self.root / "run.log"}', flush=True)
+
+    def __del__(self, _getpid=os.getpid, _close=os.close):
+        if getattr(self, 'closed', True):
+            return
+        try:
+            # A discarded model may release a displaced implicit run's last owner.
+            if self.pid == _getpid() and hasattr(self, 'record'):
+                try:
+                    self.root.stat()
+                except FileNotFoundError:
+                    pass
+                else:
+                    self._finish(None, release_implicit=False)
+        finally:
+            self.closed = True
+            descriptor = getattr(self, '_directory_lock', None)
+            self._directory_lock = None
+            try:
+                handler = getattr(self, '_handler', None)
+                if handler is not None:
+                    handler.close()
+            finally:
+                if descriptor is not None:
+                    _close(descriptor)
 
     def _reserve(self, timestamp):
         self.execution_id = timestamp
@@ -450,6 +482,9 @@ class Execution:
         self.save()
 
     def finish(self, error=None):
+        self._finish(error, release_implicit=True)
+
+    def _finish(self, error, *, release_implicit):
         with self._lock:
             if self.closed:
                 return
@@ -497,6 +532,84 @@ class Execution:
                 self._handler.close()
                 self.closed = True
                 self._release_directory()
+                # Finalization proves _implicit holds no strong reference to
+                # this run. Avoid taking a global lock from arbitrary GC code.
+                if release_implicit:
+                    with _lock:
+                        for key, run in list(_implicit.items()):
+                            if run is self:
+                                del _implicit[key]
+
+
+class _CompletedExecution(Execution):
+    """Access durable metadata without recreating a task or a log handler."""
+
+    def __init__(self, root, record):
+        self._run_dir = root
+        self.record = record
+        self.execution_id = record['execution_id']
+        self.timestamp_output = record['output_config']['timestamp_output']
+        self.closed = True
+        self._lock = threading.RLock()
+
+
+def _stored_execution_record(root):
+    try:
+        record = json.loads((root / 'run.json').read_text(encoding='utf-8'))
+    except (OSError, ValueError):
+        return None
+    if (not isinstance(record, dict) or record.get('schema_version') != 1
+            or record.get('status') not in ('running', 'success', 'failed')
+            or not isinstance(record.get('execution_id'), str)
+            or not _execution_name.fullmatch(record['execution_id'])
+            or not isinstance(record.get('outputs'), dict)
+            or not isinstance(record.get('output_config'), dict)
+            or type(record['output_config'].get('timestamp_output')) is not bool
+            or not isinstance(record.get('tool'), dict)
+            or not isinstance(record['tool'].get('versions'), dict)
+            or 'rx-met' not in record['tool']['versions']):
+        return None
+    if record['output_config']['timestamp_output'] and root.name != record['execution_id']:
+        return None
+    return record
+
+
+def _completed_execution(root):
+    record = _stored_execution_record(root)
+    if record is not None and record['status'] != 'running':
+        return _CompletedExecution(root, record)
+    return None
+
+
+def _stored_metadata_run(requested):
+    roots = [requested]
+    if requested.name == 'exports':
+        roots.append(requested.parent)
+    for root in roots:
+        record = _stored_execution_record(root)
+        if record is not None:
+            return _CompletedExecution(root, record) if record['status'] != 'running' else None
+    try:
+        candidates = []
+        for root in requested.iterdir():
+            name = _execution_name.fullmatch(root.name)
+            if name is not None and root.is_dir():
+                candidates.append(((name[1], int(name[2] or 0)), root))
+    except OSError:
+        return None
+    latest = None
+    for _, root in sorted(candidates, reverse=True):
+        record = _stored_execution_record(root)
+        if record is not None:
+            if latest is None:
+                latest = root, record
+            if (record.get('session_token') == _session_token
+                    and (record.get('pid'), record.get('thread_id')) == _key()):
+                return _CompletedExecution(root, record) if record['status'] != 'running' else None
+    if latest is not None:
+        root, record = latest
+        return _CompletedExecution(root, record) if record['status'] != 'running' else None
+    return None
 
 
 def _key():
@@ -673,9 +786,11 @@ def _record_failure(run, error, *, finish=False):
 @contextlib.contextmanager
 def execution(output_root, task='quantization'):
     """Internal complete-workflow boundary; callers of public APIs need no setup."""
-    _last_runs.pop(_root_key(output_root), None)
+    with _lock:
+        _last_runs.pop(_root_key(output_root), None)
     run = Execution(output_root, task)
-    _last_runs[_root_key(run.output_root)] = run
+    with _lock:
+        _last_runs[_root_key(run.output_root)] = run
     token = _current.set(run)
     try:
         with _capture(run):
@@ -696,11 +811,13 @@ def export_execution(output_root, task='export', *, source=None):
     if owned:
         run = get_run(source)
         run.record['task'] = task
-        _last_runs[_root_key(output_root)] = run
+        with _lock:
+            _last_runs[_root_key(output_root)] = run
     token = _current.set(run)
     try:
         run.bind_root(output_root)
-        _last_runs[_root_key(run.output_root)] = run
+        with _lock:
+            _last_runs[_root_key(run.output_root)] = run
         with _capture(run):
             yield run
     except BaseException as error:
@@ -719,10 +836,13 @@ def _metadata_run(output_dir):
         run.bind_root(output_dir)
     else:
         requested = Path(output_dir).resolve()
-        run = _last_runs.get(_root_key(requested))
+        with _lock:
+            run = _last_runs.get(_root_key(requested))
+            if run is None:
+                run = next((candidate for candidate in _last_runs.values()
+                            if requested in (candidate.root, candidate.root / 'exports')), None)
         if run is None:
-            run = next((candidate for candidate in _last_runs.values()
-                        if requested in (candidate.root, candidate.root / 'exports')), None)
+            run = _stored_metadata_run(requested)
     return run
 
 
@@ -733,35 +853,93 @@ def metadata_directory(output_dir):
     return run.exports if run else Path(output_dir)
 
 
+def _metadata_owner():
+    current_task = getattr(sys.modules.get('asyncio'), 'current_task', None)
+    try:
+        task = current_task() if current_task is not None else None
+    except RuntimeError:
+        task = None
+    return (*_key(), id(task) if task is not None else None)
+
+
+class _MetadataLease:
+    def __init__(self, run):
+        self.run = run
+        self.owner = _metadata_owner()
+        self.active = True
+
+
+def _held_metadata_run():
+    lease = _metadata_current.get()
+    if lease is not None and lease.active and lease.owner == _metadata_owner():
+        return lease.run
+    return None
+
+
 @contextlib.contextmanager
-def metadata_output(output_dir):
-    """Keep post-export metadata writes within the fixed directory's ownership."""
-    run = _metadata_run(output_dir)
+def _metadata_access(run):
     descriptor = None
+    lease = None
+    token = None
     try:
         if run is not None:
-            if run.closed and not run.timestamp_output:
-                descriptor = _lock_directory(run.root)
+            held = _held_metadata_run()
+            if (held is not None and held.root == run.root
+                    and held.execution_id == run.execution_id):
+                yield held
+                return
+            lease = _MetadataLease(run)
+            if run.closed:
+                with _lock:
+                    descriptor = _lock_directory(run.root)
+                    _metadata_descriptors[descriptor] = lease
             run._assert_current()
-        yield run.exports if run else Path(output_dir)
+            if run.closed:
+                record = _stored_execution_record(run.root)
+                if record is None or record['status'] == 'running':
+                    raise RuntimeError(f'无法恢复已结束任务的运行记录: {run.root}')
+                if record['execution_id'] != run.execution_id:
+                    raise RuntimeError(f'输出目录已被后续任务覆盖，不能修改旧任务记录: {run.root}')
+                run.record = record
+        token = _metadata_current.set(lease)
+        yield run
     finally:
+        if lease is not None:
+            lease.active = False
+            lease.run = None
+        if token is not None:
+            _metadata_current.reset(token)
         if descriptor is not None:
-            os.close(descriptor)
+            with _lock:
+                if _metadata_descriptors.get(descriptor) is lease:
+                    del _metadata_descriptors[descriptor]
+                    os.close(descriptor)
+
+
+@contextlib.contextmanager
+def metadata_output(output_dir):
+    """Keep post-export metadata writes within the completed task's ownership."""
+    with _metadata_access(_metadata_run(output_dir)) as run:
+        yield run.exports if run else Path(output_dir)
 
 
 def note_output(path):
     path = Path(path).resolve()
-    candidates = [active_run(), *sorted(set(_last_runs.values()), key=lambda run: run._started, reverse=True)]
+    with _lock:
+        candidates = [_held_metadata_run(), active_run(),
+                      *sorted(set(_last_runs.values()), key=lambda run: run._started, reverse=True)]
+    candidates.extend(_completed_execution(root) for root in path.parents
+                      if path.relative_to(root).parts[0] in ('exports', 'checkpoints'))
     for run in candidates:
         if run is not None and path.is_relative_to(run.root):
             relative = path.relative_to(run.root)
             if not relative.parts or relative.parts[0] not in ('exports', 'checkpoints'):
                 continue
             if run.closed:
-                run._assert_current()
-                run.record['outputs'][relative.as_posix()] = {
-                    'size_bytes': path.stat().st_size, 'sha256': _sha256(path)}
-                run.save()
+                with _metadata_access(run) as writable:
+                    writable.record['outputs'][relative.as_posix()] = {
+                        'size_bytes': path.stat().st_size, 'sha256': _sha256(path)}
+                    writable.save()
             return
 
 
@@ -913,9 +1091,20 @@ def _finish_implicit():
 
 def _close_inherited_directory_locks():
     # DataLoader workers must not keep their parent's fixed output directory locked.
-    for run in list(_runs):
-        if run.pid != os.getpid():
-            run._release_directory()
+    global _session_token
+    try:
+        _session_token = uuid.uuid4().hex
+        for descriptor, lease in list(_metadata_descriptors.items()):
+            lease.active = False
+            lease.run = None
+            os.close(descriptor)
+        _metadata_descriptors.clear()
+        _metadata_current.set(None)
+        for run in list(_runs):
+            if run.pid != os.getpid():
+                run._release_directory()
+    finally:
+        _lock.release()
 
 
 def _install_exception_hook():
@@ -936,5 +1125,6 @@ def _install_exception_hook():
     _exception_hook_installed = True
 
 
-os.register_at_fork(after_in_child=_close_inherited_directory_locks)
+os.register_at_fork(before=_lock.acquire, after_in_parent=_lock.release,
+                    after_in_child=_close_inherited_directory_locks)
 atexit.register(_finish_implicit)

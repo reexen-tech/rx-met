@@ -17,6 +17,11 @@ NAME = 'rx-quant-env'
 LABEL = 'com.reexen.rx-quant.'
 THIRD_PARTY = 'docker/environment/third_party'
 BUILD_FILES = ('docker/Dockerfile.environment', 'scripts/environment/common.py',
+               'scripts/environment/patch_onnxsim_wheel.py',
+               'scripts/environment/verify_onnxsim_shutdown.py',
+               'scripts/environment/patch_torch_wheel.py',
+               'scripts/environment/patches/torch_fx_source_cache.py',
+               'scripts/environment/verify_fx_source_cache.py',
                'scripts/internal/prepare_onnxruntime_headers.sh', 'scripts/internal/verify_dependency_wheelhouse.py')
 
 
@@ -87,6 +92,47 @@ def inspect(reference, role, variant):
     return info
 
 
+def _verify_lifecycle(image, script, label, container_prefix):
+    name = f'rx-met-{container_prefix}-verify-{os.getpid()}-{os.urandom(6).hex()}'
+    command = ['docker', 'run', '--rm', '--name', name, '-i', '--network', 'none', '--read-only',
+               '--cpus', '1', '--memory', '2g', '--memory-swap', '2g', '--pids-limit', '192',
+               '--tmpfs', '/tmp:rw,exec,size=256m', '-e', 'HOME=/tmp',
+               '-e', 'PYTHONDONTWRITEBYTECODE=1', '-e', 'OMP_NUM_THREADS=1',
+               '-e', 'MKL_NUM_THREADS=1', '-e', 'OPENBLAS_NUM_THREADS=1',
+               '--entrypoint', 'python3', image, '-B', '-']
+    code = 'import signal\nsignal.alarm(60)\n' + (ROOT / script).read_text()
+    try:
+        result = subprocess.run(command, input=code, text=True, capture_output=True, timeout=90)
+    except subprocess.TimeoutExpired as error:
+        for stream, output in ((sys.stdout, error.stdout), (sys.stderr, error.stderr)):
+            if output:
+                stream.write(output.decode(errors='replace') if isinstance(output, bytes) else output)
+        try:
+            cleanup = subprocess.run(['docker', 'rm', '-f', name], text=True, capture_output=True, timeout=10)
+            sys.stdout.write(cleanup.stdout)
+            sys.stderr.write(cleanup.stderr)
+            removed = cleanup.returncode == 0 or 'No such container' in cleanup.stderr
+        except (OSError, subprocess.TimeoutExpired):
+            removed = False
+        cleanup_status = 'container removed' if removed else f'container cleanup not confirmed: {name}'
+        raise RuntimeError(f'{image}: {label} verification timed out; {cleanup_status}') from error
+    sys.stdout.write(result.stdout)
+    sys.stderr.write(result.stderr)
+    if result.returncode or 'nanobind: leaked' in result.stderr:
+        raise RuntimeError(f'{image}: {label} verification failed '
+                           f'(exit code {result.returncode}; inspect stderr above)')
+
+
+def verify_onnxsim_shutdown(image):
+    _verify_lifecycle(image, 'scripts/environment/verify_onnxsim_shutdown.py',
+                      'onnxsim shutdown', 'onnxsim')
+
+
+def verify_fx_source_cache(image):
+    _verify_lifecycle(image, 'scripts/environment/verify_fx_source_cache.py',
+                      'FX source-cache', 'fx-source-cache')
+
+
 def verify(variant, gpu=False):
     matrix = config()
     spec = matrix['variants'][variant]
@@ -118,6 +164,8 @@ if {bool(gpu and variant != 'cpu')!r}:
 print({variant!r},{role!r},"public environment verified")
 '''
         run(*command, input=code, text=True)
+        verify_onnxsim_shutdown(info['Id'])
+        verify_fx_source_cache(info['Id'])
 
 
 def download(variant, output):
@@ -147,6 +195,14 @@ def download(variant, output):
             if index: command += ['--index-url', index]
             for extra in extras: command += ['--extra-index-url', extra]
             run(*command)
+    patch_spec = importlib.util.spec_from_file_location('onnxsim_wheel_patch', ROOT / 'scripts/environment/patch_onnxsim_wheel.py')
+    patcher = importlib.util.module_from_spec(patch_spec); patch_spec.loader.exec_module(patcher)
+    for path in output.glob('onnxsim-*.whl'):
+        patcher.patch_wheel(path)
+    patch_spec = importlib.util.spec_from_file_location('torch_wheel_patch', ROOT / 'scripts/environment/patch_torch_wheel.py')
+    patcher = importlib.util.module_from_spec(patch_spec); patch_spec.loader.exec_module(patcher)
+    for path in output.glob('torch-*.whl'):
+        patcher.patch_wheel(path)
     verifier.verify(output, [ROOT / 'requirements/build.lock', ROOT / 'requirements/runtime.lock'])
     (output / 'SHA256SUMS').write_text(''.join(f'{sha256(p)}  {p.name}\n' for p in sorted(output.glob('*.whl'))))
 
