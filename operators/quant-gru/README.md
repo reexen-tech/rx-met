@@ -37,8 +37,9 @@ RX_MET_ENABLE_CUDA=0 python3 -m pip install ./pytorch --no-deps --no-build-isola
 ```
 
 CPU 构建不需要 CUDA Toolkit，生成的 wheel 包含 CPU 原生共享库。使用时将模块和输入
-放在 CPU，校准和推理均要求 `eval()` 且在 `torch.no_grad()` 或 `torch.inference_mode()`
-上下文中调用；量化参数导入导出接口与 CUDA 包相同。自定义 CPU 构建目录时，安装前
+放在 CPU，校准和推理均要求 `eval()`，普通前向无需额外关闭梯度。推荐使用
+`torch.no_grad()` 或 `torch.inference_mode()` 减少推理开销；实际跨 CPU 算子的反向传播
+会明确报错，CPU 不支持训练或 QAT。量化参数导入导出接口与 CUDA 包相同。自定义 CPU 构建目录时，安装前
 设置 `RX_MET_QUANT_GRU_BUILD_DIR` 为构建目录的绝对路径。
 ONNX Runtime 适配还需要构建时提供 C++ headers，可通过
 `QUANT_GRU_ONNXRUNTIME_INCLUDE` 指定其目录。

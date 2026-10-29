@@ -50,8 +50,9 @@ QuantLSTM 的 `load_quant_config()`、`percentile_value`、量化参数锁和安
 ## 使用与配置
 
 支持单层、`dropout=0`、无 projection、CPU/CUDA float32，单向/双向及有/无 bias。
-CPU 支持校准、PTQ、Po2、编码保存恢复及 ONNX 导出，要求 `eval()` 和
-`torch.no_grad()` 或 `torch.inference_mode()`；浮点训练与 QAT 继续使用 CUDA。
+CPU 支持校准、PTQ、Po2、编码保存恢复及 ONNX 导出，要求 `eval()`，普通前向无需
+额外关闭梯度；推荐使用 `torch.no_grad()` 或 `torch.inference_mode()` 减少推理开销。
+实际跨 CPU 算子的反向传播会明确报错，浮点训练与 QAT 继续使用 CUDA。
 CPU 算子 wheel 通过 `RX_MET_ENABLE_CUDA=0` 构建，不能用仅含 CUDA binding 的 wheel 代替。
 用户示例统一为 `examples/quick_start_kws.py`，使用真实 Speech Commands v0.02，
 通过 `--rnn_type gru|lstm` 选择循环层，完成浮点训练、PTQ、Po2、QAT、导出和恢复。
