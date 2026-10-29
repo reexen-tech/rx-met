@@ -44,6 +44,8 @@ Torch 版本更新时须重新编译这三个 wheel，不能沿用旧版本环�
 组装应用包，并在纯 runtime 中实际离线安装、自检。默认不生成公共环境交付目录，不执行 docker save。
 输出目录为 `.release/export/rx-met-v<VERSION>/`。每个应用包默认在独立临时目录
 完成安装验收，成功或失败后自动清理，不受已有安装目录影响。
+产品目录生成通用 `README.md`，说明文件用途、当前已有变体的选择条件，以及环境准备、解压和安装步骤。
+增量追加变体时会更新该说明，已有归档及其独立校验文件保留。
 
 产品交付目录可以存在，脚本只检查本次所选变体的目标应用归档是否已存在。
 未指定 `--replace` 且任一目标归档重名时，在调用 Docker、编译或导出前一次性报告所有冲突。
@@ -60,7 +62,7 @@ Torch 版本更新时须重新编译这三个 wheel，不能沿用旧版本环�
 使用 `--replace` 时，仅替换本次所选变体的目标归档及其 `.sha256`。
 本次全部目标先在暂存区完成构建和安装验收，再发布到产品目录；构建或发布失败时保留或恢复原有产物。
 未选择的归档、已解压的应用目录及目录内其他内容保留，已有安装目录和公共环境不受此参数影响。
-首次成功发布到旧版产品目录时，会清理原外层 `README.md`、`CHANGELOG.md`、`release.json`
+成功发布时会重新生成外层 `README.md`，并清理旧版外层 `CHANGELOG.md`、`release.json`
 和聚合 `SHA256SUMS`；应用包内及已解压应用目录中的同名文件保留。
 已有归档缺少独立 `.sha256` 时会补齐；旧聚合清单中有对应校验值的，先核对再迁移，
 校验不匹配则停止发布并保留原目录。
@@ -85,7 +87,7 @@ Torch 版本更新时须重新编译这三个 wheel，不能沿用旧版本环�
 | `quant-lstm` | `quant_lstm-` |
 
 wheel 格式将发行包名中的连字符转为下划线，各字段之间使用连字符，例如
-`quant_gru-1.1.0+cpu-cp310-cp310-linux_x86_64.whl`。Python 导入继续使用
+`quant_gru-1.1.1+cpu-cp310-cp310-linux_x86_64.whl`。Python 导入继续使用
 `quant_gru`、`quant_lstm` 等模块名。
 
 发布校验同时检查包内发行名和标准 wheel 文件名。修改命名声明后，通过正常构建重新
@@ -113,47 +115,51 @@ wheel 格式将发行包名中的连字符转为下划线，各字段之间使�
 ```text
 .release/export/
 ├── rx-met-v<VERSION>/
+│   ├── README.md
 │   ├── rx-met-v<VERSION>-cu126-linux-amd64.tar.gz
 │   └── rx-met-v<VERSION>-cu126-linux-amd64.tar.gz.sha256
 └── rx-quant-env-202610/              # 仅 --with-env 导出或复用
     ├── rx-quant-env-runtime-202610-cu126-linux-amd64.docker.tar.gz
     ├── rx-quant-env-runtime-202610-cu126-linux-amd64.docker.tar.gz.json
     ├── rx-quant-env-runtime-202610-cu126-linux-amd64.docker.tar.gz.sha256
-    ├── README.md
-    ├── manifest.json
-    └── SHA256SUMS
+    └── README.md
 ```
 
 `--with-env` 只附带所选变体的公共运行环境，不附带构建环境镜像。
 开发交付可另用 `./scripts/environment/export.sh --role build` 导出 build 镜像；
-`--role all` 同时导出两种角色，目录清单按角色合并。
+`--role all` 同时导出两种角色。
 归档通过硬链接或复制放入产品目录平级的 `<环境名>-<环境版本>/`；已有环境校验复用、
 按变体补齐，不覆盖其他变体或版本。不带此参数时已有环境目录保持原样。
 
 首次离线交付同时提供产品目录和对应环境目录；后续已安装相同环境的用户只需产品目录。
 在产品目录内解压所选应用包并运行包内 `install.sh`，安装器自动查找平级环境目录；
 也支持将解压后的应用目录与环境目录直接平级放置，或使用 `--runtime-image FILE` 显式指定归档。
-产品目录只生成应用归档及各自的 `.sha256`，不再生成外层 README、CHANGELOG、
+产品目录生成通用 README、应用归档及各自的 `.sha256`，不再生成外层 CHANGELOG、
 `release.json` 或聚合 `SHA256SUMS`。版本、变体和环境要求由每个应用包内的
 `manifest.json` 描述，使用说明和当前版本日志分别保存在包内 README、CHANGELOG 中，
 包内 `SHA256SUMS` 校验应用文件。所需公共环境的完整归档文件名也列在包内 README 中。
 
-分发或解压前，在应用归档所在目录检查对应的独立校验文件，例如 1.1.0 的 cu126 包：
+分发或解压前，在应用归档所在目录检查对应的独立校验文件，例如 1.1.1 的 cu126 包：
 
 ```bash
-sha256sum -c rx-met-v1.1.0-cu126-linux-amd64.tar.gz.sha256
+sha256sum -c rx-met-v1.1.1-cu126-linux-amd64.tar.gz.sha256
 ```
 
-公共环境目录继续维护 README、manifest、导出元数据和校验清单；应用归档校验不绑定环境归档文件的字节校验值。
+公共环境目录保留 README、每个镜像的环境说明 `.json` 及独立 `.sha256`，不生成外层
+`manifest.json` 和 `SHA256SUMS`。环境说明记录对应镜像的实际系统和主要组件版本，
+以及完整的 Python、系统依赖清单。镜像归档、`.sha256` 和 `.json` 的用途见目录内 README；应用包内的
+`SHA256SUMS` 保留，用于校验应用文件。
 
 ### 环境标签与文件校验
 
 应用包通过版本标签要求公共环境，不绑定本地镜像 ID、构建脚本摘要或归档文件的 SHA256。
 镜像 ID 自动记录在构建资料中，供问题排查和编译缓存判断使用。
 
-环境归档实际 SHA256 单独保存在同名 `.sha256`、导出元数据 `.json` 和环境交付 `SHA256SUMS` 中。
+环境归档实际 SHA256 保存在同名 `.sha256` 和导出元数据 `.json` 中。
+这两个文件均为可选辅助材料；安装器可只使用 Docker 镜像归档，
+不读取归档 `.json`，也不要求 `.sha256` 必须存在。应用包自身的 manifest 和包内校验清单仍需完整保留。
 安装器支持环境归档同名 `.sha256`（一行 SHA256 或标准 sha256sum 格式），以及归档同目录
-`SHA256SUMS` 中对应文件的记录。有校验记录时必须通过检查；没有记录时检查 gzip 完整性，
+旧版 `SHA256SUMS` 中对应文件的记录。有校验记录时必须通过检查；没有记录时检查 gzip 完整性，
 由 Docker 加载并验证镜像内容。应用文件和已安装内容继续独立校验。
 
 安装器验证本次实际导入镜像的环境名称、版本、runtime 角色、CUDA/CPU 变体和平台，

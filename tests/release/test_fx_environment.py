@@ -50,7 +50,8 @@ class FxEnvironmentTest(unittest.TestCase):
         self.assertEqual(run.call_args.kwargs['timeout'], 90)
         self.assertTrue(run.call_args.kwargs['capture_output'])
         self.assertIn('signal.alarm(60)', run.call_args.kwargs['input'])
-        self.assertIn('FX_SOURCE_CACHE_SKIP', run.call_args.kwargs['input'])
+        self.assertIn('FX_SOURCE_CACHE_OK', run.call_args.kwargs['input'])
+        self.assertNotIn('FX_SOURCE_CACHE_SKIP', run.call_args.kwargs['input'])
 
     def test_failure_with_zero_exit_and_nanobind_warning_is_not_accepted(self):
         result = SimpleNamespace(returncode=0, stdout='', stderr='nanobind: leaked 1 instances!\n')
@@ -88,17 +89,18 @@ class FxEnvironmentTest(unittest.TestCase):
         fx = ModuleType('torch.fx')
         fx.__path__ = []
         graph_module = ModuleType('torch.fx.graph_module')
-        graph_module._loader = helper.OwnedEvalCacheLoader()
+        loader = helper.OwnedEvalCacheLoader()
+        graph_module._loader = SimpleNamespace(eval_cache=loader.eval_cache)
         if leaking:
             def original_exec(source, namespace, co_fields=None):
-                key = graph_module._loader.cache(source, namespace, co_fields)
+                key = loader.cache(source, namespace, co_fields)
                 exec(compile(source, key, 'exec'), namespace)
             graph_module._exec_with_source = original_exec
         else:
-            graph_module._exec_with_source = graph_module._loader.exec_with_source
+            graph_module._exec_with_source = loader.exec_with_source
         torch.fx, fx.graph_module = fx, graph_module
         modules = {'torch': torch, 'torch.fx': fx, 'torch.fx.graph_module': graph_module,
-                   'torch.fx._rx_source_cache': helper}
+                   'torch.fx._rx_source_cache': None}
 
         def cleanup():
             for key in list(graph_module._loader.eval_cache):
@@ -108,9 +110,12 @@ class FxEnvironmentTest(unittest.TestCase):
         return modules
 
     def test_actual_probe_checks_live_function_traceback_and_reclamation(self):
-        with patch.dict(sys.modules, self.fake_runtime()), contextlib.redirect_stdout(io.StringIO()) as output:
-            runpy.run_path(str(PROBE), run_name='__main__')
-        self.assertIn('FX_SOURCE_CACHE_OK', output.getvalue())
+        for variant, spec in common.config()['variants'].items():
+            version = spec['torch']['packages']['torch']
+            with self.subTest(variant=variant), patch.dict(sys.modules, self.fake_runtime(version)), \
+                    contextlib.redirect_stdout(io.StringIO()) as output:
+                runpy.run_path(str(PROBE), run_name='__main__')
+                self.assertIn(f'FX_SOURCE_CACHE_OK torch={version}', output.getvalue())
 
     def test_actual_probe_rejects_the_original_unbounded_execution_path(self):
         with patch.dict(sys.modules, self.fake_runtime(leaking=True)), \
@@ -118,12 +123,17 @@ class FxEnvironmentTest(unittest.TestCase):
                 self.assertRaisesRegex(AssertionError, 'dead generated function retained its source'):
             runpy.run_path(str(PROBE), run_name='__main__')
 
-    def test_actual_probe_explicitly_skips_uncovered_versions(self):
-        with patch.dict(sys.modules, self.fake_runtime('2.9.1+cpu')), \
+    def test_actual_probe_accepts_unreviewed_version_without_private_helper(self):
+        with patch.dict(sys.modules, self.fake_runtime('2.11.0')), \
                 contextlib.redirect_stdout(io.StringIO()) as output:
             runpy.run_path(str(PROBE), run_name='__main__')
-        self.assertIn('FX_SOURCE_CACHE_SKIP torch=2.9.1+cpu', output.getvalue())
-        self.assertIn('not covered', output.getvalue())
+        self.assertIn('FX_SOURCE_CACHE_OK torch=2.11.0', output.getvalue())
+
+    def test_actual_probe_rejects_leaking_unreviewed_version(self):
+        with patch.dict(sys.modules, self.fake_runtime('2.11.0', leaking=True)), \
+                contextlib.redirect_stdout(io.StringIO()), \
+                self.assertRaisesRegex(AssertionError, 'dead generated function retained its source'):
+            runpy.run_path(str(PROBE), run_name='__main__')
 
 
 if __name__ == '__main__':

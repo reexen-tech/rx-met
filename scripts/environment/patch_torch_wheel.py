@@ -1,7 +1,7 @@
 """Patch reviewed staged Torch wheels to bound FX generated-source lifetime.
 
-Only reviewed source hashes are changed. Other Torch versions stay untouched
-and are reported as uncovered. Native members are copied in bounded chunks;
+Only reviewed source hashes are changed. Unreviewed Torch versions stay intact
+and require environment lifecycle verification. Native members are copied in bounded chunks;
 only graph_module.py, the new helper, WHEEL and RECORD change.
 """
 from __future__ import annotations
@@ -28,6 +28,10 @@ HELPER_PATH = Path(__file__).with_name('patches') / 'torch_fx_source_cache.py'
 HELPER_SHA256 = '9f2ee566fbdc4c94732a8794b7995b95b354a1ff0d8f5b62a0cc3d9f81b63257'
 # Each value is (upstream graph_module.py hash, patched graph_module.py hash).
 REVIEWED_SOURCES = {
+    '2.9.1+cpu': ('725579e7aca4d0c6be9bc1c8efc600c023b84d24997371a62cb92ccdc8f9ffb0',
+                   '4583002f1fe30c706777a2712dc2f2dee3069bb710468340ca96ca2633796660'),
+    '2.7.1+cu118': ('32a36eca5ee08efd3307ddbf5ce19005fb77789fc0fd8f9ea6e713dbf33727f1',
+                     '8f3c1207e39629d5ae86d36191de4bec30007caadf3b7b647d8e4495d016cafa'),
     '2.10.0': ('a681378dbc62b36ef7527c7f5254632a62ff536435b8b5b12130d464353410af',
                '170a42e0700d440b54993cd5f164751785081597fb0b42af27455772ad5fc01f'),
     '2.10.0+cu130': ('a681378dbc62b36ef7527c7f5254632a62ff536435b8b5b12130d464353410af',
@@ -97,7 +101,7 @@ def _record_rows(data: bytes, files: set[str], record_name: str) -> list[list[st
 
 
 def patch_wheel(path: Path, *, helper_path: Path | None = None) -> Path:
-    """Atomically replace a covered staged wheel; leave other versions intact."""
+    """Atomically replace a reviewed staged wheel; leave other versions intact."""
     path = Path(path)
     with zipfile.ZipFile(path) as archive:
         entries = archive.infolist()
@@ -114,8 +118,8 @@ def patch_wheel(path: Path, *, helper_path: Path | None = None) -> Path:
         version = metadata['Version']
         reviewed = REVIEWED_SOURCES.get(version)
         if reviewed is None:
-            print(f'[rx-met] FX source-cache fix is not applied to torch=={version}; '
-                  f'this version is not covered by reviewed sources', file=sys.stderr)
+            print(f'[rx-met] torch=={version} is not covered by reviewed sources; '
+                  'wheel left unchanged, environment lifecycle verification is required', file=sys.stderr)
             return path
         prefix = metadata_name.rsplit('/', 1)[0]
         record_name, wheel_name = prefix + '/RECORD', prefix + '/WHEEL'

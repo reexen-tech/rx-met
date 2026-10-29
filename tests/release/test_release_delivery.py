@@ -49,9 +49,16 @@ class ReleaseDeliveryTest(unittest.TestCase):
         return archive, record
 
     def assert_checksums(self, directory):
-        result = subprocess.run(['sha256sum', '--check', '--strict', 'SHA256SUMS'],
-                                cwd=directory, capture_output=True, text=True)
-        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertFalse((directory / 'SHA256SUMS').exists())
+        self.assertFalse((directory / 'manifest.json').exists())
+        for archive in directory.glob('*.docker.tar.gz'):
+            record = json.loads(archive.with_name(archive.name + '.json').read_text())
+            checksum = record['filename'] + '.sha256'
+            self.assertEqual((directory / checksum).read_text(),
+                             f"{record['sha256']}  {record['filename']}\n")
+            result = subprocess.run(['sha256sum', '--check', '--strict', checksum],
+                                    cwd=directory, capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
     def assert_product_checksums(self, directory, variants):
         for variant in variants:
@@ -62,7 +69,7 @@ class ReleaseDeliveryTest(unittest.TestCase):
             result = subprocess.run(['sha256sum', '--check', '--strict', checksum.name],
                                     cwd=directory, capture_output=True, text=True)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        for filename in ('README.md', 'CHANGELOG.md', 'release.json', 'SHA256SUMS'):
+        for filename in ('CHANGELOG.md', 'release.json', 'SHA256SUMS'):
             self.assertFalse((directory / filename).exists(), filename)
 
     def snapshot(self, directory):
@@ -109,7 +116,7 @@ class ReleaseDeliveryTest(unittest.TestCase):
         self.assertEqual(self.probe_lock(self.destination), 0)
         self.assertTrue(delivery.lock_path(self.destination).is_file())
 
-    def test_environment_lock_is_exclusive_during_manifest_writes(self):
+    def test_environment_lock_is_exclusive_during_metadata_writes(self):
         archive, record = self.archive()
         write_json = delivery.common.write_json
         def checked_write(path, document):
@@ -290,8 +297,8 @@ class ReleaseDeliveryTest(unittest.TestCase):
         self.assertEqual((self.environment / archive.name).stat().st_mtime_ns, previous.st_mtime_ns)
         other, other_record = self.archive('cu126')
         delivery.publish_environment(other, other_record, self.environment)
-        document = json.loads((self.environment / 'manifest.json').read_text())
-        self.assertEqual(set(document['variants']), {'cu118', 'cu126'})
+        self.assertEqual({path.name for path in self.environment.glob('*.docker.tar.gz')},
+                         {archive.name, other.name})
         self.assertEqual((self.environment / archive.name).read_bytes(), b'cu118')
         self.assert_checksums(self.environment)
 
@@ -302,19 +309,80 @@ class ReleaseDeliveryTest(unittest.TestCase):
         build_archive.write_bytes(archive.read_bytes())
         delivery.publish_environment(build_archive, build, self.environment)
         delivery.publish_environment(archive, record, self.environment)
-        manifest = json.loads((self.environment / 'manifest.json').read_text())
-        self.assertEqual(set(manifest['variants']['cu126']), {'build', 'runtime'})
+        self.assertEqual({json.loads(path.read_text())['role']
+                          for path in self.environment.glob('*.docker.tar.gz.json')}, {'build', 'runtime'})
         self.assertTrue((self.environment / build['filename']).is_file())
         self.assert_checksums(self.environment)
+
+    def test_environment_republication_removes_legacy_sums_and_explains_companion_files(self):
+        archive, record = self.archive()
+        delivery.publish_environment(archive, record, self.environment)
+        previous = self.snapshot(self.environment)
+        (self.environment / 'manifest.json').write_text('obsolete aggregate')
+        (self.environment / 'SHA256SUMS').write_text(f"{record['sha256']}  {archive.name}\n")
+        delivery.publish_environment(archive, record, self.environment)
+        self.assertEqual(self.snapshot(self.environment), previous)
+        self.assert_checksums(self.environment)
+        readme = (self.environment / 'README.md').read_text(encoding='utf-8')
+        for text in ('.docker.tar.gz', '.docker.tar.gz.sha256', '.docker.tar.gz.json',
+                     'SHA-256', '组件版本', 'runtime', 'build', '缺失不会阻止安装',
+                     f'sha256sum --check {archive.name}.sha256',
+                     f'docker load --input {archive.name}'):
+            self.assertIn(text, readme)
+        for placeholder in ('@ENV_NAME@', '@ENV_VERSION@', '@ARCHIVE_FILENAME@'):
+            self.assertNotIn(placeholder, readme)
+        self.assertNotIn('manifest.json', readme)
 
     def test_conflicting_environment_identity_is_rejected(self):
         archive, record = self.archive()
         delivery.publish_environment(archive, record, self.environment)
-        before = (self.environment / 'manifest.json').read_bytes()
+        before = self.snapshot(self.environment)
         for key in ('environment_name', 'environment_version'):
             with self.subTest(key=key), self.assertRaisesRegex(RuntimeError, '冲突|其他环境'):
                 delivery.publish_environment(archive, {**record, key: 'different'}, self.environment)
-        self.assertEqual((self.environment / 'manifest.json').read_bytes(), before)
+        self.assertEqual(self.snapshot(self.environment), before)
+
+    def test_environment_append_accepts_missing_optional_companion_files(self):
+        for missing in (('.json',), ('.sha256',), ('.json', '.sha256')):
+            with self.subTest(missing=missing):
+                directory = self.root / ('optional-' + '-'.join(missing))
+                archive, record = self.archive('cu118')
+                delivery.publish_environment(archive, record, directory)
+                for suffix in missing:
+                    (directory / (archive.name + suffix)).unlink()
+                before = (directory / archive.name).stat()
+                other, other_record = self.archive('cu126')
+                delivery.publish_environment(other, other_record, directory)
+                self.assertEqual((directory / archive.name).stat().st_mtime_ns, before.st_mtime_ns)
+                self.assertEqual((directory / archive.name).read_bytes(), b'cu118')
+                self.assertFalse((directory / 'manifest.json').exists())
+                for suffix in missing:
+                    self.assertFalse((directory / (archive.name + suffix)).exists())
+
+    def test_checksum_alone_rejects_corruption_when_appending_environment(self):
+        archive, record = self.archive('cu118')
+        delivery.publish_environment(archive, record, self.environment)
+        (self.environment / (archive.name + '.json')).unlink()
+        target = self.environment / archive.name
+        target.unlink()
+        target.write_bytes(b'corrupt old variant')
+        other, other_record = self.archive('cu126')
+        before = self.snapshot(self.environment)
+        with self.assertRaisesRegex(RuntimeError, '归档冲突'):
+            delivery.publish_environment(other, other_record, self.environment)
+        self.assertEqual(self.snapshot(self.environment), before)
+
+    def test_same_archive_conflict_is_rejected_without_companion_files(self):
+        archive, record = self.archive()
+        delivery.publish_environment(archive, record, self.environment)
+        for suffix in ('.json', '.sha256'):
+            (self.environment / (archive.name + suffix)).unlink()
+        target = self.environment / archive.name
+        target.unlink()
+        target.write_bytes(b'different archive')
+        with self.assertRaisesRegex(RuntimeError, '归档冲突'):
+            delivery.publish_environment(archive, record, self.environment)
+        self.assertEqual(target.read_bytes(), b'different archive')
 
     def test_corrupt_existing_archive_is_not_overwritten(self):
         archive, record = self.archive()
@@ -415,9 +483,27 @@ class ReleaseDeliveryTest(unittest.TestCase):
             before = self.snapshot(output)
             self.run_build_cli('cpu')
         self.assertTrue(all((output / name).read_bytes() == contents
-                            for name, contents in before.items()))
+                            for name, contents in before.items() if name != 'README.md'))
         self.assert_product_checksums(output, [*defaults, 'cpu'])
         self.assertFalse((output.parent / self.environment.name).exists())
+
+    def test_cli_readme_lists_all_available_variants_and_installation_steps(self):
+        output = self.root / '.release/export' / (self.product + '-v1.1.0')
+        with self.mocked_build():
+            self.run_build_cli('cpu')
+            before = (output / 'README.md').read_text(encoding='utf-8')
+            self.assertIn(self.bundle_filename('cpu'), before)
+            self.assertNotIn(self.bundle_filename('cu126'), before)
+            self.run_build_cli('cu126')
+        readme = (output / 'README.md').read_text(encoding='utf-8')
+        for text in (self.bundle_filename('cpu'), self.bundle_filename('cu126'),
+                     '3.10', '12.6', '560.35.05', 'sm_80', 'NVIDIA Container Toolkit',
+                     'tar -xzf', './install.sh', '--runtime-image', '--replace',
+                     'rx-quant-env-202610'):
+            self.assertIn(text, readme)
+        self.assertNotIn(self.bundle_filename('cu130'), readme)
+        self.assertNotIn('@', readme)
+        self.assertFalse((output / 'SHA256SUMS').exists())
 
     def test_cli_conflicting_later_target_is_rejected_before_docker(self):
         output = self.root / '.release/export' / (self.product + '-v1.1.0')

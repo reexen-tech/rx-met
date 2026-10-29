@@ -10,6 +10,7 @@ import subprocess
 import tempfile
 
 from environment import common
+from release.environment_inventory import collect_image_inventory
 from release.verify_runtime_archive import verify_runtime_payload
 
 
@@ -70,7 +71,7 @@ def verified_archive(role, variant, directory, *, contract=common):
     if expected is not None and actual != expected:
         raise RuntimeError(f'镜像归档 SHA-256 不匹配: {archive}')
     record.update(sha256=actual, size_bytes=archive.stat().st_size)
-    for key in ('image_id', 'image_created_at', 'source_revision', 'config_sha256'):
+    for key in ('image_id', 'image_created_at', 'source_revision', 'config_sha256', 'environment'):
         if metadata.get(key):
             record[key] = metadata[key]
     return archive, record
@@ -81,6 +82,32 @@ def write_checksum(archive, record):
     temporary = checksum.with_name(checksum.name + '.partial')
     temporary.write_text(f"{record['sha256']}  {archive.name}\n")
     temporary.replace(checksum)
+
+
+def describe_image(record, image):
+    labels = image.get('Config', {}).get('Labels') or {}
+    provenance = {'image_id': image['Id'], 'image_created_at': image.get('Created'),
+                  'source_revision': labels.get('org.opencontainers.image.revision'),
+                  'config_sha256': labels.get(common.LABEL + 'environment.config-sha256')}
+    record.update({key: value for key, value in provenance.items() if value})
+    record['environment'] = collect_image_inventory(image['Id'])
+    return record
+
+
+def describe_archive(archive, record):
+    """Enrich legacy metadata only from the exact archived image, never its current tag."""
+    if record.get('environment'):
+        return record
+    image_id = verify_runtime_payload(archive)
+    try:
+        image = _local_image(image_id)
+    except (RuntimeError, OSError) as error:
+        print(f'无法补充环境组件清单，保留已有归档说明: {error}', flush=True)
+        return record
+    if image is None:
+        print(f'本机没有归档对应镜像 {image_id}，保留已有归档说明', flush=True)
+        return record
+    return describe_image(record, image)
 
 
 def _save_runtime(reference, destination):
@@ -109,7 +136,8 @@ def image_archive(role, variant, directory, *, export=False, contract=common):
 
     def existing():
         if archive.exists():
-            return verified_archive(role, variant, directory, contract=contract)
+            path, previous = verified_archive(role, variant, directory, contract=contract)
+            return path, describe_archive(path, previous) if export else previous
         if archive.with_name(archive.name + '.json').exists() or archive.with_name(archive.name + '.sha256').exists():
             raise RuntimeError(f'缺少 {role} 镜像归档: {archive}')
         return None
@@ -130,11 +158,7 @@ def image_archive(role, variant, directory, *, export=False, contract=common):
             _save_runtime(record['image_tag'], staged)
             verify_runtime_payload(staged, image['Id'])
             record.update(image_id=image['Id'], sha256=common.sha256(staged), size_bytes=staged.stat().st_size)
-            labels = image.get('Config', {}).get('Labels') or {}
-            provenance = {'image_created_at': image.get('Created'),
-                          'source_revision': labels.get('org.opencontainers.image.revision'),
-                          'config_sha256': labels.get(common.LABEL + 'environment.config-sha256')}
-            record.update({key: value for key, value in provenance.items() if value})
+            describe_image(record, image)
             common.write_json(staged.with_name(staged.name + '.json'), record)
             staged.replace(archive)
             staged.with_name(staged.name + '.json').replace(archive.with_name(archive.name + '.json'))

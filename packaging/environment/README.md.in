@@ -1,0 +1,35 @@
+# @ENV_NAME@ @ENV_VERSION@ 环境包
+
+本目录提供 rx-met 和 rx-lm-quant 使用的 Docker 环境包。目录与产品交付目录平级放置，安装脚本自动查找并使用匹配的运行环境。
+
+## 文件说明
+
+| 文件 | 用途 |
+| --- | --- |
+| `.docker.tar.gz` | Docker 环境包，包含运行或构建所需的镜像。 |
+| 同名 `.docker.tar.gz.sha256` | 可选的 SHA-256 校验文件。 |
+| 同名 `.docker.tar.gz.json` | 可选的环境说明，记录实际系统和组件版本、完整依赖清单、镜像来源及归档校验值。 |
+
+安装只需要环境包，辅助文件缺失不会阻止安装。校验文件存在时，安装器会核对 SHA-256。
+
+环境说明中的版本与依赖从对应镜像采集，包括操作系统、架构、Python、CUDA、cuDNN、PyTorch、torchvision、torchaudio、ONNX、ONNX Runtime 和 NumPy，以及完整的 Python 和系统依赖清单。CPU 环境不包含 CUDA 和 cuDNN。
+
+## 环境包类型
+
+`runtime` 用于运行产品，`build` 用于源码编译。安装脚本自动匹配产品包所需的运行环境。
+
+`cpu` 不依赖 CUDA；`cu118`、`cu126`、`cu130` 分别对应 CUDA 11.8、12.6、13.0。CUDA 运行环境需要兼容的 NVIDIA GPU 和驱动。
+
+## 校验与加载
+
+可选的归档校验命令：
+
+```bash
+sha256sum --check @ARCHIVE_FILENAME@.sha256
+```
+
+镜像加载命令：
+
+```bash
+docker load --input @ARCHIVE_FILENAME@
+```

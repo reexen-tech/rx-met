@@ -2,7 +2,7 @@
 
 源码仓库：[reexen-tech/rx-met](https://github.com/reexen-tech/rx-met)
 
-本发布包提供 PyTorch / ONNX 小模型量化工具及 GRU、LSTM 示例，配套公共运行环境为
+本产品包提供 PyTorch / ONNX 小模型量化工具及 GRU、LSTM 示例，配套公共运行环境为
 `rx-quant-env` 的 `@ENV_VERSION@`。首次使用按以下三个步骤完成。
 版本变化、已知限制和升级说明见 [CHANGELOG.md](CHANGELOG.md)。
 
@@ -12,21 +12,21 @@
 以及 Bash、gzip、flock 等常用工具。
 无需在宿主机安装 Python 或 CUDA Toolkit。
 
-| 变体 | CUDA | Python | 最低驱动 |
+| 运行环境 | CUDA | Python | 最低驱动 |
 | --- | --- | --- | --- |
 | cu118 | 11.8 | 3.10 | 520.61.05 |
 | cu126 | 12.6 | 3.10 | 560.35.05 |
 | cu130 | 13.0 | 3.12 | 580.126.20 |
 
-GPU 变体支持 sm_80/86/89/90，cu130 另支持 sm_120。当前包为 `@VARIANT@`。
+GPU 运行环境支持 sm_80/86/89/90，cu130 另支持 sm_120。当前产品包使用 `@VARIANT@` 运行环境。
 首次离线使用，将公共运行环境目录 `@ENV_DIRECTORY@/` 与产品目录 `rx-met-v@VERSION@/` 平级放置。
-在产品目录内解压所选应用包，再进入解压后的应用包目录执行：
+在产品目录内解压所选产品包，再进入解压后的产品包目录执行：
 
 ```bash
 ./install.sh
 ```
 
-> 或指定镜像文件 `--runtime-image /path/to/@RUNTIME_ARCHIVE@`。
+> 环境包路径通过 `--runtime-image /path/to/@RUNTIME_ARCHIVE@` 指定。
 
 默认安装位置为 `$HOME/.local/share/rx-met/@BUNDLE_NAME@`。
 同版本重新安装或修复损坏的安装时，执行 `./install.sh --replace`：新安装自检通过后
@@ -44,7 +44,7 @@ GPU 变体支持 sm_80/86/89/90，cu130 另支持 sm_120。当前包为 `@VARIAN
 
 没有现成数据时，可按 [examples/README.md](examples/README.md) 准备公开示例输入。
 
-第一次使用时，在宿主机的应用包目录创建个人工作目录，并复制示例：
+第一次使用时，在宿主机的产品包目录创建个人工作目录，并复制示例：
 
 ```bash
 mkdir -p "$HOME/rx-met-user"

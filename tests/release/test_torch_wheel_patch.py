@@ -22,6 +22,7 @@ PATCHER_PATH = REPO_ROOT / 'scripts/environment/patch_torch_wheel.py'
 spec = importlib.util.spec_from_file_location('torch_wheel_patch', PATCHER_PATH)
 patcher = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(patcher)
+REVIEWED_VERSIONS = tuple(patcher.REVIEWED_SOURCES)
 
 
 class TorchWheelPatchTest(unittest.TestCase):
@@ -45,8 +46,7 @@ def untouched_function():
         self.helper_path.write_bytes(self.helper)
         reviewed = (hashlib.sha256(self.source).hexdigest(),
                     hashlib.sha256(patcher.patch_source(self.source)).hexdigest())
-        for name, value in [('REVIEWED_SOURCES', {version: reviewed for version in
-                             ('2.10.0', '2.10.0+cu130', '2.8.0', '2.8.0+cu126')}),
+        for name, value in [('REVIEWED_SOURCES', {version: reviewed for version in REVIEWED_VERSIONS}),
                             ('HELPER_PATH', self.helper_path),
                             ('HELPER_SHA256', hashlib.sha256(self.helper).hexdigest())]:
             replacement = patch.object(patcher, name, value)
@@ -119,23 +119,25 @@ def untouched_function():
         self.assertNotIn(b'key = _loader.cache', patched)
         compile(patched, 'graph_module.py', 'exec')
 
-    def test_all_four_reviewed_metadata_versions_are_supported(self):
+    def test_all_reviewed_metadata_versions_are_supported(self):
         for version in patcher.REVIEWED_SOURCES:
             with self.subTest(version=version):
                 result = patcher.patch_wheel(self.make_wheel(version))
                 self.assertIn(f'-{version}-1rxmet-', result.name)
 
-    def test_unsupported_torch_versions_remain_byte_identical_and_reported(self):
-        for version in ('2.9.1+cpu', '2.7.1+cu118', '2.10.0+cu128', '2.11.0'):
+    def test_unreviewed_torch_versions_warn_without_writes(self):
+        for version in ('2.10.0+cu128', '2.11.0'):
             with self.subTest(version=version):
                 original = self.make_wheel(version, source=b'unreviewed source')
                 before = original.read_bytes()
-                stderr = io.StringIO()
-                with contextlib.redirect_stderr(stderr):
+                with contextlib.redirect_stderr(io.StringIO()) as stderr:
                     self.assertEqual(patcher.patch_wheel(original, helper_path=self.directory / 'absent'), original)
-                self.assertIn('not covered by reviewed sources', stderr.getvalue())
                 self.assertIn(version, stderr.getvalue())
+                self.assertIn('wheel left unchanged', stderr.getvalue())
+                self.assertIn('environment lifecycle verification is required', stderr.getvalue())
                 self.assertEqual(original.read_bytes(), before)
+                self.assertEqual(list(self.directory.glob('*.whl')), [original])
+                original.unlink()
 
     def test_repeated_patch_is_byte_identical(self):
         fixed = patcher.patch_wheel(self.make_wheel())

@@ -16,6 +16,22 @@ spec.loader.exec_module(common)
 
 
 class SharedEnvironmentTest(unittest.TestCase):
+    def test_verification_limits_shared_server_resources(self):
+        with patch.object(common, 'inspect', return_value={'Id': 'verified-image'}), \
+                patch.object(common, 'run') as run, \
+                patch.object(common, 'verify_onnxsim_shutdown'), \
+                patch.object(common, 'verify_fx_source_cache'):
+            common.verify('cpu', gpu=True)
+        self.assertEqual(run.call_count, 2)
+        for call in run.call_args_list:
+            command = call.args
+            self.assertEqual(command[command.index('--cpus') + 1], '2')
+            self.assertEqual(command[command.index('--memory') + 1], '4g')
+            self.assertEqual(command[command.index('--pids-limit') + 1], '192')
+            self.assertIn('OMP_NUM_THREADS=1', command)
+            self.assertIn('OPENBLAS_NUM_THREADS=1', command)
+            self.assertNotIn('--gpus', command)
+
     def test_default_variants_exclude_cpu_and_preserve_matrix_order(self):
         matrix = {'variants': {'cu126': {}, 'cpu': {}, 'cu118': {}}}
         self.assertEqual(common.default_variants(matrix), ['cu126', 'cu118'])

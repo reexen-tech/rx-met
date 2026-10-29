@@ -141,14 +141,20 @@ def verify(variant, gpu=False):
         expected = packages(matrix, variant)
         if role == 'build':
             expected.update(matrix['build_packages'])
-        command = ['docker', 'run', '--rm', '-i', '--network', 'none', '--read-only', '--tmpfs', '/tmp:rw,exec,size=2g',
-                   '-e', 'HOME=/tmp', '-e', 'PYTHONDONTWRITEBYTECODE=1']
+        command = ['docker', 'run', '--rm', '-i', '--network', 'none', '--read-only',
+                   '--cap-drop', 'ALL', '--security-opt', 'no-new-privileges',
+                   '--cpus', '2', '--memory', '4g', '--memory-swap', '4g', '--pids-limit', '192',
+                   '--tmpfs', '/tmp:rw,exec,size=512m', '-e', 'HOME=/tmp',
+                   '-e', 'PYTHONDONTWRITEBYTECODE=1', '-e', 'OMP_NUM_THREADS=1',
+                   '-e', 'MKL_NUM_THREADS=1', '-e', 'OPENBLAS_NUM_THREADS=1']
         if gpu and variant != 'cpu':
             command += ['--gpus', 'device=' + os.environ.get('RX_QUANT_GPU_DEVICE', '0')]
         command += ['--entrypoint', 'python3', info['Id'], '-B', '-']
         code = f'''import importlib.metadata as m,sys,subprocess
 from pathlib import Path
 import torch,onnxruntime,transformers,datasets,gguf
+torch.set_num_threads(1)
+torch.set_num_interop_threads(1)
 metadata=dict(line.split('=',1) for line in Path('/opt/rx-quant-env/environment.env').read_text().splitlines())
 for key,value in {{'environment_name':{NAME!r},'environment_version':{matrix['environment_version']!r},'environment_role':{role!r},'cuda_variant':{variant!r}}}.items():
  assert metadata.get(key)==value,(key,metadata.get(key),value)
@@ -161,6 +167,24 @@ subprocess.run([sys.executable,'-m','pip','check'],check=True)
 if {bool(gpu and variant != 'cpu')!r}:
  assert torch.cuda.is_available()
  assert (torch.tensor([2.],device='cuda')*3).item()==6
+ import numpy as np
+ import onnx
+ from onnx import TensorProto, helper, numpy_helper
+ model=helper.make_model(helper.make_graph(
+  [helper.make_node('MatMul',['x','weight'],['y'])], 'environment-cuda-check',
+  [helper.make_tensor_value_info('x',TensorProto.FLOAT,[2,4])],
+  [helper.make_tensor_value_info('y',TensorProto.FLOAT,[2,4])],
+  [numpy_helper.from_array(np.eye(4,dtype=np.float32),'weight')]),
+  opset_imports=[helper.make_opsetid('',17)],ir_version=9)
+ options=onnxruntime.SessionOptions()
+ options.intra_op_num_threads=1
+ options.inter_op_num_threads=1
+ options.add_session_config_entry('session.disable_cpu_ep_fallback','1')
+ session=onnxruntime.InferenceSession(model.SerializeToString(),sess_options=options,
+  providers=[('CUDAExecutionProvider',{{'gpu_mem_limit':str(256*1024**2)}})])
+ assert session.get_providers()[0]=='CUDAExecutionProvider',session.get_providers()
+ value=np.arange(8,dtype=np.float32).reshape(2,4)
+ np.testing.assert_array_equal(session.run(None,{{'x':value}})[0],value)
 print({variant!r},{role!r},"public environment verified")
 '''
         run(*command, input=code, text=True)

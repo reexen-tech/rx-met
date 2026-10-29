@@ -195,7 +195,8 @@ flowchart LR
 - 项目构建复用匹配的 build-env 和 runtime-env。
 
 `scripts/release/build.sh` 是发布构建入口，`scripts/release/verify_bundle.sh` 是安装包验收
-入口。发布目录包含应用包、独立 runtime 归档、manifest、SHA256SUMS 和示例源码。
+入口。产品目录包含应用归档及各自的 `.sha256`；独立环境目录包含镜像归档、每镜像的
+`.sha256` / `.json` 和 README。示例源码及应用文件校验清单位于应用包内。
 完整操作说明见 [Docker 构建与发布](./Release_packaging.md)。
 
 ## 10. 制品关系
@@ -212,8 +213,8 @@ flowchart LR
 | Clean ONNX + compiler encodings | ONNX PTQ 流程 | 已有 ONNX 模型部署 |
 | metadata | ONNX PTQ 流程 | 输入、校准、Po2、覆盖率和数值对比记录 |
 
-模型文件和 encodings 按同一次导出结果配套使用。`manifest.json` 和
-`SHA256SUMS` 提供应用与环境制品的身份及完整性信息。
+模型文件和 encodings 按同一次导出结果配套使用。应用包内的 `manifest.json` 描述安装内容，
+归档同名 `.sha256` 校验分发文件；应用包内的 `SHA256SUMS` 校验应用文件。
 
 ## 11. 验证策略
 

@@ -1,0 +1,30 @@
+# @PRODUCT@ @VERSION@ 产品包
+
+## 文件说明
+
+| 文件 | 用途 |
+| --- | --- |
+| `@PRODUCT@-v@VERSION@-<运行环境>-linux-amd64.tar.gz` | 产品安装包，包含安装脚本、程序和示例。 |
+| 同名 `.tar.gz.sha256` | 产品归档的 SHA-256 校验文件。 |
+
+## 运行环境
+
+宿主机需要 Linux x86_64、Docker 和 Bash、gzip、flock、sha256sum 等常用工具。CPU 环境无需 NVIDIA GPU；CUDA 环境需要 NVIDIA Container Toolkit，并满足下表的 GPU 架构和驱动要求。Python 和 CUDA 由容器提供。
+
+| 运行环境 | Python | CUDA | 最低 NVIDIA 驱动 | GPU 架构 | 产品归档 |
+| --- | --- | --- | --- | --- | --- |
+@VARIANT_TABLE@
+
+## 安装
+
+配套 runtime 环境包位于产品目录平级的 `@ENV_DIRECTORY@/`，安装脚本自动匹配。已加载的兼容运行环境可直接复用。
+
+安装示例：
+
+```bash
+tar -xzf @EXAMPLE_BUNDLE@.tar.gz
+cd @EXAMPLE_BUNDLE@
+./install.sh
+```
+
+`--runtime-image FILE` 指定 runtime 环境包；`--replace` 替换同名安装。运行方法见产品包内 README。

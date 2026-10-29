@@ -46,6 +46,10 @@ class EnvironmentArchiveTest(unittest.TestCase):
         self.loaded_tag = None
         self.patch(archives.subprocess, 'run', side_effect=self.docker)
         self.patch(archives.common, 'inspect', side_effect=self.inspect)
+        self.inventory = {'source': 'image', 'python': {'version': '3.10.12'},
+                          'python_packages': {'torch': '2.8.0+cu126'},
+                          'system_packages': {'libc6:amd64': '2.35'}}
+        self.collect_inventory = self.patch(archives, 'collect_image_inventory', return_value=self.inventory)
 
     def patch(self, obj, name, **kwargs):
         patcher = patch.object(obj, name, **kwargs)
@@ -208,11 +212,51 @@ class EnvironmentArchiveTest(unittest.TestCase):
         self.assertEqual(record['source_revision'], 'source-commit')
         self.assertEqual(record['config_sha256'], 'source-digest')
         self.assertEqual(record['environment_version'], '202610')
+        self.assertEqual(record['environment'], self.inventory)
+        self.collect_inventory.assert_called_once_with(self.image_id)
         self.assertTrue(archive.with_name(archive.name + '.sha256').is_file())
         self.assertNotIn('image_id', artifacts.runtime_requirement(record))
         _, reused = archives.image_archive('runtime', self.variant, self.directory, export=True)
         self.assertEqual(reused, record)
         self.assertEqual(save.call_count, 1)
+        self.collect_inventory.assert_called_once_with(self.image_id)
+
+    def test_old_archive_inventory_uses_actual_archive_id_despite_rebuilt_tag_and_stale_sidecar(self):
+        path, record = self.archive(sidecar=True)
+        record['image_id'] = 'sha256:' + 'f' * 64
+        path.with_name(path.name + '.json').write_text(json.dumps(record))
+        self.existing_image(image_id='sha256:' + 'e' * 64)
+        self.images[self.image_id] = {'Id': self.image_id, 'role': 'runtime'}
+        save = self.patch(archives, '_save_runtime')
+        before = path.read_bytes()
+        _, enriched = archives.image_archive('runtime', self.variant, self.directory, export=True)
+        self.assertEqual(enriched['image_id'], self.image_id)
+        self.assertEqual(enriched['environment'], self.inventory)
+        self.collect_inventory.assert_called_once_with(self.image_id)
+        self.assertEqual(path.read_bytes(), before)
+        save.assert_not_called()
+        self.assertFalse(self.loads or self.tags)
+
+    def test_rebuilt_tag_cannot_supply_inventory_for_an_absent_old_image(self):
+        self.archive(sidecar=True)
+        self.existing_image(image_id='sha256:' + 'e' * 64)
+        _, record = archives.image_archive('runtime', self.variant, self.directory, export=True)
+        self.assertNotIn('environment', record)
+        self.collect_inventory.assert_not_called()
+        self.assertFalse(self.loads or self.tags)
+
+    def test_export_reuses_old_archive_without_requiring_a_docker_daemon(self):
+        self.archive()
+        self.patch(archives.subprocess, 'run', side_effect=None, return_value=subprocess.CompletedProcess(
+            [], 1, '', 'Cannot connect to the Docker daemon'))
+        _, record = archives.image_archive('runtime', self.variant, self.directory, export=True)
+        self.assertNotIn('environment', record)
+        self.collect_inventory.assert_not_called()
+
+    def test_import_does_not_collect_inventory_or_require_metadata(self):
+        self.archive(sidecar=True)
+        archives.ensure_image('runtime', self.variant, self.directory)
+        self.collect_inventory.assert_not_called()
 
     def test_existing_archive_reuse_needs_no_write_or_matching_local_id(self):
         path, record = self.archive(sidecar=True)
@@ -253,10 +297,13 @@ class EnvironmentArchiveTest(unittest.TestCase):
         self.patch(archives, '_save_runtime', side_effect=lambda image, path: self.write_payload(path))
         self.patch(archives.common, 'config_digest', side_effect=AssertionError('not a reuse requirement'))
         runtime_cli.export_runtime(self.variant, self.directory)
-        document = json.loads((self.directory / 'manifest.json').read_text())
-        self.assertEqual(document['variants'][self.variant]['runtime']['image_tag'],
+        filename = archives.requirement('runtime', self.variant)['filename']
+        document = json.loads((self.directory / (filename + '.json')).read_text())
+        self.assertEqual(document['image_tag'],
                          archives.common.image_ref('runtime', self.variant))
         self.assertNotIn('config_sha256', document)
+        self.assertEqual(document['environment'], self.inventory)
+        self.assertFalse((self.directory / 'manifest.json').exists())
 
     def test_standalone_export_preserves_both_roles_and_full_sidecar_names(self):
         self.existing_image('build')
@@ -264,13 +311,16 @@ class EnvironmentArchiveTest(unittest.TestCase):
         self.patch(archives, '_save_runtime', side_effect=lambda image, path: self.write_payload(path))
         for role in ('build', 'runtime', 'build'):
             runtime_cli.export_environment(self.variant, self.directory, role)
-        document = json.loads((self.directory / 'manifest.json').read_text())
-        self.assertEqual(set(document['variants'][self.variant]), {'build', 'runtime'})
-        for role, record in document['variants'][self.variant].items():
+        for role in ('build', 'runtime'):
+            filename = archives.requirement(role, self.variant)['filename']
+            record = json.loads((self.directory / (filename + '.json')).read_text())
             archive = self.directory / record['filename']
             self.assertTrue(archive.with_name(archive.name + '.json').is_file())
             self.assertTrue(archive.with_name(archive.name + '.sha256').is_file())
-            self.assertIn(archive.name, (self.directory / 'SHA256SUMS').read_text())
+            self.assertEqual(archive.with_name(archive.name + '.sha256').read_text(),
+                             f"{record['sha256']}  {archive.name}\n")
+        self.assertFalse((self.directory / 'SHA256SUMS').exists())
+        self.assertFalse((self.directory / 'manifest.json').exists())
 
     def test_standalone_cli_handles_both_roles_with_runtime_default(self):
         for action, method in (('export', 'export_environment'), ('load', 'load_environment')):
@@ -371,7 +421,8 @@ class OciArchiveIdentityTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             path = Path(temporary) / 'oci.tar.gz'
             image_id = self.fixture(path)
-            archives.verify_runtime_payload(path, image_id)
+            self.assertEqual(archives.verify_runtime_payload(path, image_id), image_id)
+            self.assertEqual(archives.verify_runtime_payload(path), image_id)
 
     def test_invalid_oci_content_is_rejected(self):
         with tempfile.TemporaryDirectory() as temporary:

@@ -269,6 +269,8 @@ def main():
             elif not build_record.is_file() or json.loads(build_record.read_text()) != fingerprint:
                 raise RuntimeError('--skip-build 的源码或环境身份与已有 wheels 不匹配')
             assemble(args, matrix, variant, runtime, build, record, archive, wheel_output / 'wheels', compatibility, version=version, changelog=changelog)
+        (args.output_dir / 'README.md').write_text(
+            delivery.product_readme('rx-met', version, matrix, args.output_dir), encoding='utf-8')
     print('Product delivery:', destination)
 
 

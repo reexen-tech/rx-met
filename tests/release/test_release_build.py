@@ -182,7 +182,7 @@ class ReleaseBuildPreflightTest(unittest.TestCase):
         self.root = Path(temporary.name)
         (self.root / 'VERSION').write_text('1.1.0\n')
         self.output = self.root / '.release/export/rx-met-v1.1.0'
-        matrix = {'environment_version': '202610', 'variants': {'cpu': {}, 'cu118': {}, 'cu126': {}, 'cu130': {}}}
+        matrix = artifacts.dependencies.load_matrix()
         for obj, target, options in (
             (artifacts, 'ROOT', {'new': self.root}),
             (artifacts.dependencies, 'load_matrix', {'return_value': matrix}),
@@ -345,7 +345,11 @@ class ReleaseBuildPreflightTest(unittest.TestCase):
                          len(expected) if '--with-env' in options else 0)
         names = [f'rx-met-v1.1.0-{variant}-linux-amd64.tar.gz' for variant in expected]
         self.assertEqual(sorted(path.name for path in self.output.iterdir()),
-                         sorted(name for archive in names for name in (archive, archive + '.sha256')))
+                         sorted(['README.md'] + [name for archive in names
+                                                  for name in (archive, archive + '.sha256')]))
+        readme = (self.output / 'README.md').read_text(encoding='utf-8')
+        for name in names:
+            self.assertIn(name, readme)
         for name in names:
             archive = self.output / name
             expected_checksum = hashlib.sha256(archive.read_bytes()).hexdigest()

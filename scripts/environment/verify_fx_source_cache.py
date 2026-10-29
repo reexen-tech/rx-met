@@ -9,14 +9,8 @@ def main():
 
     import torch
 
-    covered = {'2.10.0', '2.10.0+cu130', '2.8.0', '2.8.0+cu126'}
-    if torch.__version__ not in covered:
-        print(f'FX_SOURCE_CACHE_SKIP torch={torch.__version__}: version is not covered by reviewed sources')
-        return
     import torch.fx.graph_module as graph_module
-    from torch.fx._rx_source_cache import OwnedEvalCacheLoader
 
-    assert type(graph_module._loader) is OwnedEvalCacheLoader, 'reviewed FX source loader is not installed'
     torch.set_num_threads(1)
     torch.set_num_interop_threads(1)
     gc.collect()

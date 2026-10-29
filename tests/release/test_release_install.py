@@ -422,6 +422,28 @@ os.execv(os.environ['REAL_MV'], ['mv', *sys.argv[1:]])
         self.assert_failed_with('injected container failure', self.invoke())
         self.assertTrue((self.root / 'image-loaded').is_file())
 
+    def test_explicit_runtime_archive_installs_without_optional_files(self):
+        self.env['FAKE_INSTALL_SUCCESS'] = '1'
+        archive = self.local_archive()
+        for name in (archive.name + '.json', archive.name + '.sha256', 'manifest.json', 'SHA256SUMS'):
+            self.assertFalse((archive.parent / name).exists())
+        result = self.invoke('--offline', '--runtime-image', str(archive))
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertTrue((self.root / 'image-loaded').is_file())
+        self.assertEqual((self.prefix / 'rx-met-test/python/module.py').read_text(), 'original')
+
+    def test_discovered_runtime_archive_installs_without_optional_files(self):
+        self.env['FAKE_INSTALL_SUCCESS'] = '1'
+        images = self.bundle.parent / 'rx-quant-env-202610'
+        images.mkdir()
+        archive = images / 'runtime.tar.gz'
+        archive.write_bytes(base64.b64decode(self.env['FAKE_ARCHIVE']))
+        self.assertEqual(list(images.iterdir()), [archive])
+        result = self.invoke('--offline')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertTrue((self.root / 'image-loaded').is_file())
+        self.assertEqual((self.prefix / 'rx-met-test/python/module.py').read_text(), 'original')
+
     def test_configured_download_is_verified_cached_and_imported(self):
         self.write_bundle(url='https://example.invalid/runtime.tar.gz')
         self.fake_curl()

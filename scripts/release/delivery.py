@@ -14,6 +14,44 @@ from environment import common
 
 
 LEGACY_PRODUCT_FILES = {'README.md', 'CHANGELOG.md', 'release.json', 'SHA256SUMS'}
+ENVIRONMENT_README_TEMPLATE = Path(__file__).resolve().parents[2] / 'packaging/environment/README.md.in'
+PRODUCT_README_TEMPLATE = Path(__file__).resolve().parents[2] / 'packaging/product/README.md.in'
+
+
+def environment_readme(record):
+    text = ENVIRONMENT_README_TEMPLATE.read_text(encoding='utf-8')
+    for name, key in (('ENV_NAME', 'environment_name'), ('ENV_VERSION', 'environment_version'),
+                      ('ARCHIVE_FILENAME', 'filename')):
+        text = text.replace('@' + name + '@', record[key])
+    return text
+
+
+def product_readme(product, version, matrix, directory):
+    available = []
+    rows = []
+    for variant, spec in matrix['variants'].items():
+        bundle = f'{product}-v{version}-{variant}-linux-amd64'
+        if not (Path(directory) / (bundle + '.tar.gz')).is_file():
+            continue
+        available.append((variant, bundle))
+        architectures = ', '.join(f'sm_{value}' for value in spec.get('cuda_architectures', [])) or '-'
+        rows.append('| ' + ' | '.join((variant, spec.get('python_version', '-'),
+                    spec.get('cuda_version') or '-', spec.get('minimum_driver_version') or '-',
+                    architectures, f'`{bundle}.tar.gz`')) + ' |')
+    if not available:
+        raise RuntimeError(f'缺少 {product} {version} 的应用归档，无法生成产品目录说明')
+    variant, bundle = available[0]
+    env_version = matrix['environment_version']
+    values = {
+        'PRODUCT': product, 'VERSION': version, 'DIRECTORY': Path(directory).name,
+        'VARIANT_TABLE': '\n'.join(rows), 'EXAMPLE_BUNDLE': bundle,
+        'ENV_DIRECTORY': f'{common.NAME}-{env_version}',
+        'RUNTIME_ARCHIVE': f'{common.NAME}-runtime-{env_version}-{variant}-linux-amd64.docker.tar.gz',
+    }
+    text = PRODUCT_README_TEMPLATE.read_text(encoding='utf-8')
+    for name, value in values.items():
+        text = text.replace('@' + name + '@', value)
+    return text
 
 
 def lock_path(directory):
@@ -150,27 +188,40 @@ def stage_release(destination, archives, *, replace):
                 shutil.rmtree(temporary)
 
 
+def _environment_archive_checksums(directory, record):
+    verified = {}
+    for archive in directory.glob('*.docker.tar.gz'):
+        if archive.is_symlink() or not archive.is_file():
+            raise RuntimeError(f'环境产物路径不是普通文件: {archive}')
+        actual = common.sha256(archive)
+        metadata = archive.with_name(archive.name + '.json')
+        checksum = archive.with_name(archive.name + '.sha256')
+        for path in (metadata, checksum):
+            if path.is_symlink() or (path.exists() and not path.is_file()):
+                raise RuntimeError(f'环境产物路径不是普通文件: {path}')
+        if metadata.exists():
+            previous = json.loads(metadata.read_text())
+            if not isinstance(previous, dict):
+                raise RuntimeError(f'无效的环境归档说明: {metadata}')
+            if any(key in previous and previous[key] != record[key]
+                   for key in ('environment_name', 'environment_version')):
+                raise RuntimeError(f'环境交付目录包含其他环境的归档: {archive}')
+            if previous.get('filename', archive.name) != archive.name or previous.get('sha256', actual) != actual:
+                raise RuntimeError(f'环境交付目录的归档冲突: {archive}')
+        if checksum.exists():
+            parts = checksum.read_text().strip().split(maxsplit=1)
+            if (len(parts) != 2 or parts[0].lower() != actual
+                    or parts[1].removeprefix('*') != archive.name):
+                raise RuntimeError(f'环境交付目录的归档冲突: {archive}')
+        verified[archive.name] = actual
+    return verified
+
+
 def publish_environment(archive, record, directory):
     """Attach a verified archive without replacing a published environment."""
     directory.mkdir(parents=True, exist_ok=True)
     with _publication_lock(directory):
-        manifest_path = directory / 'manifest.json'
-        document = {key: record[key] for key in
-                    ('schema_version', 'environment_name', 'environment_version')}
-        document['variants'] = {}
-        if manifest_path.exists():
-            existing = json.loads(manifest_path.read_text())
-            if any(existing.get(key) != document[key] for key in
-                   ('schema_version', 'environment_name', 'environment_version')):
-                raise RuntimeError(f'环境交付目录包含其他环境的发布清单: {directory}')
-            document = existing
-        verified = {}
-        for entry in document['variants'].values():
-            for previous_record in entry.values():
-                previous_archive = directory / previous_record['filename']
-                if not previous_archive.is_file() or common.sha256(previous_archive) != previous_record['sha256']:
-                    raise RuntimeError(f'环境交付目录的归档冲突: {previous_archive}')
-                verified[previous_archive.name] = previous_record['sha256']
+        verified = _environment_archive_checksums(directory, record)
         destination = directory / archive.name
         if destination.exists():
             if (verified.get(destination.name) or common.sha256(destination)) != record['sha256']:
@@ -180,19 +231,9 @@ def publish_environment(archive, record, directory):
                 os.link(archive, destination)
             except OSError:
                 shutil.copy2(archive, destination)
-        verified[destination.name] = record['sha256']
         common.write_json(destination.with_name(destination.name + '.json'), record)
         destination.with_name(destination.name + '.sha256').write_text(
             f"{record['sha256']}  {destination.name}\n")
-        document['variants'].setdefault(record['variant'], {})[record['role']] = record
-        common.write_json(manifest_path, document)
-        (directory / 'README.md').write_text(
-            f"# {record['environment_name']} {record['environment_version']} 公共环境\n\n"
-            '将本目录与产品交付目录平级放置，在产品目录内解压所选应用包并运行 install.sh。\n'
-            '应用发布只附带 runtime 镜像；build 镜像可通过独立环境导出命令添加，供开发构建使用。\n'
-            '使用 docker load 加载 .docker.tar.gz 镜像归档。\n'
-            '应用包按版本标签复用兼容环境。\n')
-        files = sorted(path for path in directory.iterdir()
-                       if path.is_file() and not path.name.startswith('.') and path.name != 'SHA256SUMS')
-        (directory / 'SHA256SUMS').write_text(''.join(
-            f'{verified.get(path.name) or common.sha256(path)}  {path.name}\n' for path in files))
+        (directory / 'README.md').write_text(environment_readme(record), encoding='utf-8')
+        (directory / 'manifest.json').unlink(missing_ok=True)
+        (directory / 'SHA256SUMS').unlink(missing_ok=True)

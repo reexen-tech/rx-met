@@ -12,8 +12,8 @@ import sys
 import tarfile
 
 
-def verify_runtime_payload(archive, image_id):
-    """Verify classic config IDs and Docker 29 OCI manifest/index IDs without loading."""
+def verify_runtime_payload(archive, image_id=None):
+    """Verify archive contents and return their image ID without loading the image."""
     files, documents = {}, {}
     try:
         with tarfile.open(archive, 'r|gz') as saved:
@@ -40,7 +40,8 @@ def verify_runtime_payload(archive, image_id):
             index = documents.get('index.json', {})
             roots = index.get('manifests', []) if isinstance(index, dict) else []
             if (not isinstance(roots, list) or len(roots) != 1 or not isinstance(roots[0], dict)
-                    or roots[0].get('digest') != image_id):
+                    or not re.fullmatch(r'sha256:[0-9a-f]{64}', str(roots[0].get('digest', '')))
+                    or (image_id is not None and roots[0]['digest'] != image_id)):
                 raise RuntimeError(f'归档必须且仅能包含指定的 runtime 镜像: {archive}')
 
             def verify_descriptor(descriptor):
@@ -65,13 +66,15 @@ def verify_runtime_payload(archive, image_id):
                         verify_descriptor(layer)
 
             verify_image(roots[0])
+            return roots[0]['digest']
         else:
             # Classic docker-save archives identify an image by its config digest.
             manifest = documents.get('manifest.json')
             if not isinstance(manifest, list) or len(manifest) != 1 or not isinstance(manifest[0], dict):
                 raise RuntimeError(f'归档必须且仅能包含指定的 runtime 镜像: {archive}')
             name = manifest[0].get('Config')
-            if not isinstance(name, str) or files.get(name, (None,))[0] != image_id.removeprefix('sha256:'):
+            actual_id = 'sha256:' + files.get(name, ('missing',))[0] if isinstance(name, str) else None
+            if actual_id is None or actual_id == 'sha256:missing' or (image_id is not None and actual_id != image_id):
                 raise RuntimeError(f'归档内的 runtime 镜像身份不匹配: {archive}')
             config = documents.get(name, {})
             expected_layers = config.get('rootfs', {}).get('diff_ids', [])
@@ -80,6 +83,7 @@ def verify_runtime_payload(archive, image_id):
                     or any('sha256:' + files.get(layer, ('missing',))[0] != expected
                            for layer, expected in zip(layers, expected_layers))):
                 raise RuntimeError(f'归档内的 runtime 镜像层不匹配: {archive}')
+            return actual_id
     except (tarfile.TarError, EOFError, ValueError, TypeError) as error:
         raise RuntimeError(f'无效的 runtime 镜像归档: {archive}: {error}') from error
 
