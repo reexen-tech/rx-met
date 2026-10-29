@@ -17,6 +17,11 @@ NAME = 'rx-quant-env'
 LABEL = 'com.reexen.rx-quant.'
 THIRD_PARTY = 'docker/environment/third_party'
 BUILD_FILES = ('docker/Dockerfile.environment', 'scripts/environment/common.py',
+               'scripts/environment/patch_onnxsim_wheel.py',
+               'scripts/environment/verify_onnxsim_shutdown.py',
+               'scripts/environment/patch_torch_wheel.py',
+               'scripts/environment/patches/torch_fx_source_cache.py',
+               'scripts/environment/verify_fx_source_cache.py',
                'scripts/internal/prepare_onnxruntime_headers.sh', 'scripts/internal/verify_dependency_wheelhouse.py')
 
 
@@ -87,6 +92,47 @@ def inspect(reference, role, variant):
     return info
 
 
+def _verify_lifecycle(image, script, label, container_prefix):
+    name = f'rx-met-{container_prefix}-verify-{os.getpid()}-{os.urandom(6).hex()}'
+    command = ['docker', 'run', '--rm', '--name', name, '-i', '--network', 'none', '--read-only',
+               '--cpus', '1', '--memory', '2g', '--memory-swap', '2g', '--pids-limit', '192',
+               '--tmpfs', '/tmp:rw,exec,size=256m', '-e', 'HOME=/tmp',
+               '-e', 'PYTHONDONTWRITEBYTECODE=1', '-e', 'OMP_NUM_THREADS=1',
+               '-e', 'MKL_NUM_THREADS=1', '-e', 'OPENBLAS_NUM_THREADS=1',
+               '--entrypoint', 'python3', image, '-B', '-']
+    code = 'import signal\nsignal.alarm(60)\n' + (ROOT / script).read_text()
+    try:
+        result = subprocess.run(command, input=code, text=True, capture_output=True, timeout=90)
+    except subprocess.TimeoutExpired as error:
+        for stream, output in ((sys.stdout, error.stdout), (sys.stderr, error.stderr)):
+            if output:
+                stream.write(output.decode(errors='replace') if isinstance(output, bytes) else output)
+        try:
+            cleanup = subprocess.run(['docker', 'rm', '-f', name], text=True, capture_output=True, timeout=10)
+            sys.stdout.write(cleanup.stdout)
+            sys.stderr.write(cleanup.stderr)
+            removed = cleanup.returncode == 0 or 'No such container' in cleanup.stderr
+        except (OSError, subprocess.TimeoutExpired):
+            removed = False
+        cleanup_status = 'container removed' if removed else f'container cleanup not confirmed: {name}'
+        raise RuntimeError(f'{image}: {label} verification timed out; {cleanup_status}') from error
+    sys.stdout.write(result.stdout)
+    sys.stderr.write(result.stderr)
+    if result.returncode or 'nanobind: leaked' in result.stderr:
+        raise RuntimeError(f'{image}: {label} verification failed '
+                           f'(exit code {result.returncode}; inspect stderr above)')
+
+
+def verify_onnxsim_shutdown(image):
+    _verify_lifecycle(image, 'scripts/environment/verify_onnxsim_shutdown.py',
+                      'onnxsim shutdown', 'onnxsim')
+
+
+def verify_fx_source_cache(image):
+    _verify_lifecycle(image, 'scripts/environment/verify_fx_source_cache.py',
+                      'FX source-cache', 'fx-source-cache')
+
+
 def verify(variant, gpu=False):
     matrix = config()
     spec = matrix['variants'][variant]
@@ -95,14 +141,20 @@ def verify(variant, gpu=False):
         expected = packages(matrix, variant)
         if role == 'build':
             expected.update(matrix['build_packages'])
-        command = ['docker', 'run', '--rm', '-i', '--network', 'none', '--read-only', '--tmpfs', '/tmp:rw,exec,size=2g',
-                   '-e', 'HOME=/tmp', '-e', 'PYTHONDONTWRITEBYTECODE=1']
+        command = ['docker', 'run', '--rm', '-i', '--network', 'none', '--read-only',
+                   '--cap-drop', 'ALL', '--security-opt', 'no-new-privileges',
+                   '--cpus', '2', '--memory', '4g', '--memory-swap', '4g', '--pids-limit', '192',
+                   '--tmpfs', '/tmp:rw,exec,size=512m', '-e', 'HOME=/tmp',
+                   '-e', 'PYTHONDONTWRITEBYTECODE=1', '-e', 'OMP_NUM_THREADS=1',
+                   '-e', 'MKL_NUM_THREADS=1', '-e', 'OPENBLAS_NUM_THREADS=1']
         if gpu and variant != 'cpu':
             command += ['--gpus', 'device=' + os.environ.get('RX_QUANT_GPU_DEVICE', '0')]
         command += ['--entrypoint', 'python3', info['Id'], '-B', '-']
         code = f'''import importlib.metadata as m,sys,subprocess
 from pathlib import Path
 import torch,onnxruntime,transformers,datasets,gguf
+torch.set_num_threads(1)
+torch.set_num_interop_threads(1)
 metadata=dict(line.split('=',1) for line in Path('/opt/rx-quant-env/environment.env').read_text().splitlines())
 for key,value in {{'environment_name':{NAME!r},'environment_version':{matrix['environment_version']!r},'environment_role':{role!r},'cuda_variant':{variant!r}}}.items():
  assert metadata.get(key)==value,(key,metadata.get(key),value)
@@ -115,9 +167,29 @@ subprocess.run([sys.executable,'-m','pip','check'],check=True)
 if {bool(gpu and variant != 'cpu')!r}:
  assert torch.cuda.is_available()
  assert (torch.tensor([2.],device='cuda')*3).item()==6
+ import numpy as np
+ import onnx
+ from onnx import TensorProto, helper, numpy_helper
+ model=helper.make_model(helper.make_graph(
+  [helper.make_node('MatMul',['x','weight'],['y'])], 'environment-cuda-check',
+  [helper.make_tensor_value_info('x',TensorProto.FLOAT,[2,4])],
+  [helper.make_tensor_value_info('y',TensorProto.FLOAT,[2,4])],
+  [numpy_helper.from_array(np.eye(4,dtype=np.float32),'weight')]),
+  opset_imports=[helper.make_opsetid('',17)],ir_version=9)
+ options=onnxruntime.SessionOptions()
+ options.intra_op_num_threads=1
+ options.inter_op_num_threads=1
+ options.add_session_config_entry('session.disable_cpu_ep_fallback','1')
+ session=onnxruntime.InferenceSession(model.SerializeToString(),sess_options=options,
+  providers=[('CUDAExecutionProvider',{{'gpu_mem_limit':str(256*1024**2)}})])
+ assert session.get_providers()[0]=='CUDAExecutionProvider',session.get_providers()
+ value=np.arange(8,dtype=np.float32).reshape(2,4)
+ np.testing.assert_array_equal(session.run(None,{{'x':value}})[0],value)
 print({variant!r},{role!r},"public environment verified")
 '''
         run(*command, input=code, text=True)
+        verify_onnxsim_shutdown(info['Id'])
+        verify_fx_source_cache(info['Id'])
 
 
 def download(variant, output):
@@ -147,6 +219,14 @@ def download(variant, output):
             if index: command += ['--index-url', index]
             for extra in extras: command += ['--extra-index-url', extra]
             run(*command)
+    patch_spec = importlib.util.spec_from_file_location('onnxsim_wheel_patch', ROOT / 'scripts/environment/patch_onnxsim_wheel.py')
+    patcher = importlib.util.module_from_spec(patch_spec); patch_spec.loader.exec_module(patcher)
+    for path in output.glob('onnxsim-*.whl'):
+        patcher.patch_wheel(path)
+    patch_spec = importlib.util.spec_from_file_location('torch_wheel_patch', ROOT / 'scripts/environment/patch_torch_wheel.py')
+    patcher = importlib.util.module_from_spec(patch_spec); patch_spec.loader.exec_module(patcher)
+    for path in output.glob('torch-*.whl'):
+        patcher.patch_wheel(path)
     verifier.verify(output, [ROOT / 'requirements/build.lock', ROOT / 'requirements/runtime.lock'])
     (output / 'SHA256SUMS').write_text(''.join(f'{sha256(p)}  {p.name}\n' for p in sorted(output.glob('*.whl'))))
 
@@ -206,7 +286,7 @@ def main():
     matrix = config()
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('action', choices=['build', 'verify', 'export', 'load', 'digest', 'download'])
-    parser.add_argument('variants', nargs='*', choices=list(matrix['variants']),
+    parser.add_argument('variants', nargs='*',
                         help='Environment variants (default: CUDA variants; CPU requires cpu)')
     parser.add_argument('--output-dir', '--export-dir', dest='output_dir', type=Path)
     parser.add_argument('--directory', type=Path)
@@ -217,11 +297,16 @@ def main():
     parser.add_argument('--gpu', action='store_true')
     parser.add_argument('--no-export', action='store_true', help='Compatibility option; build never exports implicitly')
     args = parser.parse_intermixed_args()
+    # Python 3.10 rejects omitted nargs='*' positionals when choices is used.
+    targets = args.variants or default_variants(matrix)
+    unsupported = sorted(set(targets) - set(matrix['variants']))
+    if unsupported:
+        parser.error('Unsupported environment variants: ' + ', '.join(unsupported))
     if args.role != 'runtime' and args.action not in ('export', 'load'):
         parser.error('--role only applies to export/load')
     if args.action == 'digest': print(config_digest()); return
     directory = args.output_dir or ROOT / '.release/runtime-images' / matrix['environment_version']
-    for variant in args.variants or default_variants(matrix):
+    for variant in targets:
         if args.action == 'build':
             build(variant, args.wheelhouse_dir / variant if args.wheelhouse_dir else None, args.builder)
             verify(variant, args.gpu)

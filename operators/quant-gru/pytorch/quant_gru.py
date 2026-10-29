@@ -81,7 +81,7 @@ ONNX 导出:
 import json
 import math
 import re
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 
 import torch
 import torch.nn as nn
@@ -122,6 +122,18 @@ except ImportError:
     )
 
 _CPU_ONLY = bool(getattr(gru_ops, "cpu_only", False))
+
+
+class _CPUInferenceBackwardGuard(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, outputs, *dependencies):
+        # Clear native view metadata for downstream in-place operations; the
+        # explicit dependencies retain autograd edges without inference caches.
+        return tuple(output.detach() for output in outputs)
+
+    @staticmethod
+    def backward(ctx, *grad_outputs):
+        raise RuntimeError("CPU QuantGRU does not support backward; detach its outputs or use torch.no_grad() for inference")
 
 
 def _execution_device(tensor):
@@ -2136,32 +2148,39 @@ class QuantGRU(nn.Module):
             - export_mode=False (默认): 使用 CUDA C++ 实现(高性能)
             - export_mode=True: 使用 ONNX 单节点 GRU 导出路径
         """
-        if _CPU_ONLY and not self.export_mode:
-            if self.training:
-                raise RuntimeError("CPU QuantGRU supports calibration and PTQ inference; call eval() before inference")
-            if torch.is_grad_enabled():
-                raise RuntimeError("CPU QuantGRU does not support backward; use torch.no_grad() for inference and calibration")
+        cpu_inference = _CPU_ONLY and not self.export_mode
+        if cpu_inference and self.training:
+            raise RuntimeError("CPU QuantGRU supports calibration and PTQ inference; call eval() before inference")
+        dependencies = ()
+        if cpu_inference and torch.is_grad_enabled():
+            dependencies = (input, hx, *self.parameters())
+            if not any(tensor is not None and tensor.requires_grad for tensor in dependencies):
+                dependencies = ()
 
-        # ===== 统一处理 batch_first 输入转换(唯一入口)=====
-        if self.batch_first:
-            input = input.transpose(0, 1).contiguous()
+        with torch.no_grad() if cpu_inference else nullcontext():
+            # ===== 统一处理 batch_first 输入转换(唯一入口)=====
+            if self.batch_first:
+                input = input.transpose(0, 1).contiguous()
 
-        # ===== 根据模式选择执行路径 =====
-        if self.export_mode:
-            # ONNX 导出模式：使用标准 ONNX GRU 节点路径
-            output, h_n = self._forward_onnx_gru(input, hx)
-        elif self.calibrating:
-            # 校准模式：在 forward 过程中收集校准数据
-            self._ensure_cublas_initialized()
-            output, h_n = self._forward_with_calibration(input, hx)
-        else:
-            # 正常/量化推理模式：使用 CUDA C++ 实现
-            self._ensure_cublas_initialized()
-            output, h_n = self._forward_cuda(input, hx)
+            # ===== 根据模式选择执行路径 =====
+            if self.export_mode:
+                # ONNX 导出模式：使用标准 ONNX GRU 节点路径
+                output, h_n = self._forward_onnx_gru(input, hx)
+            elif self.calibrating:
+                # 校准模式：在 forward 过程中收集校准数据
+                self._ensure_cublas_initialized()
+                output, h_n = self._forward_with_calibration(input, hx)
+            else:
+                # 正常/量化推理模式：使用 CUDA C++ 实现
+                self._ensure_cublas_initialized()
+                output, h_n = self._forward_cuda(input, hx)
 
-        # ===== 统一处理 batch_first 输出转换(唯一出口)=====
-        if self.batch_first:
-            output = output.transpose(0, 1).contiguous()
+            # ===== 统一处理 batch_first 输出转换(唯一出口)=====
+            if self.batch_first:
+                output = output.transpose(0, 1).contiguous()
+
+        if dependencies:
+            return _CPUInferenceBackwardGuard.apply((output, h_n), *dependencies)
 
         return output, h_n
 

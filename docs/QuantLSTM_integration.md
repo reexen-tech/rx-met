@@ -50,8 +50,9 @@ QuantLSTM 的 `load_quant_config()`、`percentile_value`、量化参数锁和安
 ## 使用与配置
 
 支持单层、`dropout=0`、无 projection、CPU/CUDA float32，单向/双向及有/无 bias。
-CPU 支持校准、PTQ、Po2、编码保存恢复及 ONNX 导出，要求 `eval()` 和
-`torch.no_grad()` 或 `torch.inference_mode()`；浮点训练与 QAT 继续使用 CUDA。
+CPU 支持校准、PTQ、Po2、编码保存恢复及 ONNX 导出，要求 `eval()`，普通前向无需
+额外关闭梯度；推荐使用 `torch.no_grad()` 或 `torch.inference_mode()` 减少推理开销。
+实际跨 CPU 算子的反向传播会明确报错，浮点训练与 QAT 继续使用 CUDA。
 CPU 算子 wheel 通过 `RX_MET_ENABLE_CUDA=0` 构建，不能用仅含 CUDA binding 的 wheel 代替。
 用户示例统一为 `examples/quick_start_kws.py`，使用真实 Speech Commands v0.02，
 通过 `--rnn_type gru|lstm` 选择循环层，完成浮点训练、PTQ、Po2、QAT、导出和恢复。
@@ -89,7 +90,9 @@ python3 examples/quick_start_kws.py --rnn_type lstm \
 配置需在校准前应用；相同配置可重复应用，已校准后修改配置会报错，必须先显式
 `reset_calibration()`。量化参数按首次 PTQ 结果用于 QAT，不在训练循环中重新校准。
 
-`apply_power_of_2_workflow()` 对已启用量化的循环层调用算子的 `enable_pot2()`。
+`apply_power_of_2_workflow()` 检查已启用循环层的校准状态，调用算子的 `enable_pot2()`，
+再通过公共编码导出同步并验证实际 Po2 网格和内部编码覆盖。原生循环层独立于普通
+AIMET 量化器处理；普通量化器为空时仍执行原生转换，比较报告在执行与验证之后生成。
 LSTM 按新 scale 重算非对称 zero point，并更新 `real_min/real_max`，再通过原生
 加载器重新派生执行参数并做数值审计。校准后优先使用内存中保留的校准下界；
 从 encoding 文件加载后使用已有量化网格下界，文件中不增加校准诊断字段。
@@ -226,8 +229,8 @@ GRU/LSTM 关闭量化时，即使已完成校准，阶段文件与部署 encodin
 ## 验证
 
 ```bash
-python3 -m unittest -v tests.test_dependencies
-python3 -m unittest -v tests.test_quant_lstm_integration tests.test_native_recurrent_state tests.test_kws_example
+python3 -m tests release -k dependencies -v
+python3 -m tests recurrent examples -v
 bash operators/quant-lstm/tools/run_cpu_only_package_check.sh /tmp/quant-lstm-cpu
 ```
 

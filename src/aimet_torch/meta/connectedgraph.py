@@ -62,6 +62,7 @@ from aimet_common.utils import AimetLogger
 import aimet_torch._base.nn.modules.custom as aimet_modules
 from .operation import Op
 from .product import Product
+from ._trace import trace_for_connected_graph
 from aimet_torch.utils import (
     is_leaf_module,
     run_hook_for_layers_with_given_input,
@@ -349,7 +350,7 @@ class ConnectedGraph(AimetCommonConnectedGraph):
                 model, model_input
             )
         )
-        trace = torch.jit.trace(model, model_input, **jit_trace_args)
+        trace = trace_for_connected_graph(model, model_input, **jit_trace_args)
         self._parse_top_level_trace(trace, model)
         self._recover_input_output_structure()
         self._optimize_connected_graph()

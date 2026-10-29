@@ -200,6 +200,16 @@ apply_power_of_2_workflow(
 `apply_power_of_2_workflow()` 默认使用 `cover_range`。该策略在原范围与最近的
 Power-of-2 差异超过默认 2% 容差时扩大 scale，以覆盖校准范围。
 
+PyTorch 工作流分别处理普通 AIMET 量化器与原生 QuantGRU/QuantLSTM。模型只有原生
+循环层时，普通量化器列表可以为空，仍会执行原生 Po2，并同步、验证实际生效的编码。
+校准缺失、非法 scale 或算子参数锁阻止转换时会抛出异常；FX 图中明确为非 Tensor
+常量的输入槽不要求校准。可选 bias 对齐完成后再验证普通量化器，最后生成比较报告。
+
+返回值保留原有统计字段，并增加 `verification`：`generic` 记录普通量化器数量，
+`native` 记录原生模块数量和编码验证结果。各分支的 `status` 为 `verified` 或
+`not_applicable`；没有启用的量化目标时，总状态为 `not_applicable`。
+`all_power_of_2` 保留原有布尔兼容行为，无目标时仍为 `True`，不表示实际验证过模型。
+
 ## QAT 和重新加载
 
 进入 QAT 前应冻结量化参数，并在训练模式下保持 BatchNorm 统计量冻结：

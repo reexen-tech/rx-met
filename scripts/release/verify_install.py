@@ -22,7 +22,7 @@ environment = dict(line.split('=', 1) for line in Path('/opt/rx-quant-env/enviro
 assert environment['environment_name'] == manifest['environment_name'] == 'rx-quant-env'
 assert environment['environment_role'] == 'runtime'
 assert environment['environment_version'] == manifest['environment_version']
-assert environment['cuda_variant'] == manifest['variant']
+assert environment.get('platform_variant', environment.get('cuda_variant')) == manifest['variant']
 for name, version in expected['packages'].items():
     assert metadata.version(name) == version, (name, metadata.version(name), version)
 for name in ('rx-met', 'quant-gru', 'quant-lstm'):

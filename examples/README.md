@@ -36,6 +36,10 @@ python3 examples/quick_start_kws.py --rnn_type lstm
 默认浮点训练和 QAT 各 1 epoch。每次任务保存在
 `./output/quick_start_kws/<gru|lstm>/<execution-id>/`，最终模型位于 `exports/`，检查点位于 `checkpoints/`。
 
+完整浮点 MFCC 在分类网络外执行，导出 ONNX 输入为 `[1,49,20]` 特征，输出为 `[1,12]` logits。
+Attention 使用广播乘法、归约、指数和除法，Linear 使用等价的 1×1 Conv2d；
+仍使用 `config/quick_start_full_quant.json`，修改配置后需要重新校准。
+
 ### 只校准和 PTQ（CPU / GPU）
 
 使用同一个浮点检查点和固定的校准、验证样本。CPU 仅支持此模式，默认完整训练流程仍使用 CUDA。
@@ -65,10 +69,14 @@ metadata 记录检查点和实际输入数组的 SHA256、设备、精度及恢�
 
 将输出的 clean ONNX 传给第二个示例，在 CPU/GPU 上复用同一份图和样本：
 
+这里的校准、验证文件应为 MFCC 特征，不能直接使用前面保存的 `[1,16000]` 波形。
+前处理使用 `quick_start_kws.make_speech_features()` 和浮点检查点中的 MFCC 参数，
+保持窗口、Mel、Log、DCT 和归一化一致。
+
 ```bash
 python3 examples/quick_start_onnx_ptq.py --device cpu \
   --model /path/to/exports/att_mh_rnn_kws_ptq.onnx \
-  --calib-dir /workspace/shared_kws/calib --validation-dir /workspace/shared_kws/val \
+  --calib-dir /workspace/mfcc_kws/calib --validation-dir /workspace/mfcc_kws/val \
   --prefix att_mh_rnn_kws_ptq --output-dir output/onnx_cpu
 ```
 

@@ -4,6 +4,7 @@
 import torch
 
 from aimet_common.run_context import log_print as print
+from aimet_torch.power_of_2_quantization import named_generic_quantizers
 
 def collect_quantizer_info(model):
     """
@@ -14,53 +15,11 @@ def collect_quantizer_info(model):
     """
     info_list = []
     
-    for name, module in model.named_modules():
-        # Output quantizers（只在 QuantizationMixin 模块中）
-        if hasattr(module, 'output_quantizers'):
-            output_quantizers = module.output_quantizers
-            
-            if isinstance(output_quantizers, dict):
-                items = output_quantizers.items()
-            elif hasattr(output_quantizers, '__iter__'):
-                items = enumerate(output_quantizers)
-            else:
-                continue
-            
-            for qname, quantizer in items:
-                if quantizer is not None and hasattr(quantizer, 'is_initialized') and quantizer.is_initialized():
-                    info = extract_quantizer_params(quantizer)
-                    info['name'] = f"{name}.output_quantizer[{qname}]"
-                    info_list.append(info)
-        
-        # Input quantizers（只在 QuantizationMixin 模块中）
-        if hasattr(module, 'input_quantizers'):
-            input_quantizers = module.input_quantizers
-            
-            if isinstance(input_quantizers, dict):
-                items = input_quantizers.items()
-            elif hasattr(input_quantizers, '__iter__'):
-                items = enumerate(input_quantizers)
-            else:
-                continue
-            
-            for qname, quantizer in items:
-                if quantizer is not None and hasattr(quantizer, 'is_initialized') and quantizer.is_initialized():
-                    info = extract_quantizer_params(quantizer)
-                    info['name'] = f"{name}.input_quantizer[{qname}]"
-                    info_list.append(info)
-        
-        # Param quantizers（所有模块，包括非 QuantizationMixin）
-        # 这样可以收集通过补丁自动创建的参数量化器
-        if hasattr(module, 'param_quantizers'):
-            param_quantizers = module.param_quantizers
-            
-            # 处理 dict 或 ModuleDict
-            if hasattr(param_quantizers, 'items'):
-                for param_name, quantizer in param_quantizers.items():
-                    if quantizer is not None and hasattr(quantizer, 'is_initialized') and quantizer.is_initialized():
-                        info = extract_quantizer_params(quantizer)
-                        info['name'] = f"{name}.param_quantizer[{param_name}]"
-                        info_list.append(info)
+    for name, quantizer in named_generic_quantizers(model):
+        if quantizer.is_initialized():
+            info = extract_quantizer_params(quantizer)
+            info['name'] = name
+            info_list.append(info)
     
     return info_list
 
@@ -151,22 +110,28 @@ def safe_reciprocal(value):
 
 
 def compare_quantizers(before_list, after_list):
-    """对比两个量化器信息列表"""
+    """Compare matching snapshots; an absent generic branch has no differences."""
+    before_names = [item['name'] for item in before_list]
+    after_names = [item['name'] for item in after_list]
+    if len(set(before_names)) != len(before_names) or len(set(after_names)) != len(after_names):
+        raise ValueError("Quantizer snapshots contain duplicate names")
+    if set(before_names) != set(after_names):
+        missing = sorted(set(before_names) - set(after_names))
+        added = sorted(set(after_names) - set(before_names))
+        raise ValueError(f"Quantizer snapshots differ: missing={missing}, added={added}")
+    if not before_list:
+        print("未收集到通用 AIMET 量化器，跳过通用量化器参数比较")
+        return []
+    after_by_name = {item['name']: item for item in after_list}
+    after_list = [after_by_name[name] for name in before_names]
+
     print("\n" + "="*100)
     print("Power-of-2 转换前后对比")
     print("="*100)
     
-    if len(before_list) != len(after_list):
-        print(f"警告: 前后量化器数量不一致！before: {len(before_list)}, after: {len(after_list)}")
-        return
-    
     issues = []
     
     for i, (before, after) in enumerate(zip(before_list, after_list)):
-        if before['name'] != after['name']:
-            print(f"警告: 量化器顺序不一致！{before['name']} vs {after['name']}")
-            continue
-        
         name = before['name']
         
         # 检查对称性
@@ -179,14 +144,6 @@ def compare_quantizers(before_list, after_list):
                 issues.append(f"{name}: min向上移动了！{before['min']:.6f} -> {after['min']:.6f}")
             if after['max'] < before['max'] - 0.01:  # max应该向上扩展或保持
                 issues.append(f"{name}: max向下移动了！{before['max']:.6f} -> {after['max']:.6f}")
-        
-        # 检查对称量化的qmin=-qmax约束
-        if after['symmetric'] and after['qmin'] != -after['qmax']:
-            issues.append(f"{name}: 对称量化不满足qmin=-qmax！qmin={after['qmin']}, qmax={after['qmax']}")
-        
-        # 检查非对称量化的qmin是否保持为0
-        if not after['symmetric'] and after['qmin'] != 0:
-            issues.append(f"{name}: 非对称量化qmin不为0！qmin={after['qmin']}")
         
         # 打印前几个详细对比（示例）
         if i < 5:

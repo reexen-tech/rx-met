@@ -59,6 +59,75 @@ def named_native_recurrent(model):
                 break
 
 
+def validate_native_po2_targets(model):
+    """Find enabled native operators and reject missing calibration before Po2."""
+    targets = []
+    for name, module, op in named_native_recurrent(model):
+        if not module.use_quantization:
+            continue
+        if not module.is_calibrated():
+            raise RuntimeError(f"{op.module_type.__name__} is not calibrated: {name!r}")
+        targets.append((name, module, op))
+    return targets
+
+
+def apply_native_po2(targets, method, tolerance):
+    """Let each operator enforce its locking rules and derive its own Po2 grids."""
+    for _, module, _ in targets:
+        module.enable_pot2(method=method, tolerance=tolerance)
+
+
+def verify_native_po2(targets):
+    """Synchronize public encodings and validate effective grids in every direction."""
+    from aimet_common.compiler_encodings import finalize_compiler_encodings
+    from aimet_common.compiler_graph_validation import validate_native_recurrent_encoding_coverage
+
+    results = []
+    for name, module, op in targets:
+        # GRU resolves pending mode changes when exporting its public encodings.
+        document = module.export_quant_params_to_aimet_format(
+            {}, module_name=name, for_onnx=False,
+        )
+        activations = document.get("activation_encodings", {})
+        entry = activations.get(name)
+        validate_native_recurrent_encoding_coverage(
+            entry, op.onnx_type, bidirectional=module.bidirectional, name=name,
+        )
+        directions = ("internal_ops", "internal_ops_reverse")[:2 if module.bidirectional else 1]
+        parameters = document.get("param_encodings", {})
+        suffixes = ["weight_ih.weight", "weight_hh.weight"]
+        if module.bias:
+            suffixes.append("bias")
+        for suffix in suffixes:
+            if f"{name}.{suffix}" not in parameters:
+                raise ValueError(f"Missing native parameter encoding: {name}.{suffix}")
+
+        # Reuse the compiler's integer-grid contract, including exact Po2 scales,
+        # zero points and per-channel ranges; floating-point records are exempt.
+        normalized = finalize_compiler_encodings(document, require_po2=True)
+        entry = normalized["activation_encodings"][name]
+        records = [record for field in ("input", "output")
+                   for record in entry[field].values()]
+        records.extend(operation["output"][0] for field in directions
+                       for operation in entry[field].values())
+        records.extend(normalized["param_encodings"].values())
+        integer_records = [record for record in records
+                           if not record["dtype"].startswith("FLOAT")]
+
+        def scale_count(value):
+            return sum(map(scale_count, value)) if isinstance(value, list) else 1
+
+        if not integer_records:
+            raise ValueError(f"No native integer encodings were exported: {name!r}")
+        results.append({
+            "name": name,
+            "operator": op.onnx_type,
+            "encoding_count": len(integer_records),
+            "scale_count": sum(scale_count(record["scale"]) for record in integer_records),
+        })
+    return results
+
+
 @contextmanager
 def calibrate_native_recurrent(model):
     """Let each operator own its calibration lifecycle and failure cleanup."""

@@ -37,18 +37,23 @@ def main():
     matrix = common.config()
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('action', choices=['export', 'load'])
-    parser.add_argument('variants', nargs='*', choices=list(matrix['variants']),
+    parser.add_argument('variants', nargs='*',
                         help='Environment variants (default: CUDA variants; CPU requires cpu)')
     parser.add_argument('--output-dir', '--export-dir', dest='output_dir', type=Path)
     parser.add_argument('--directory', type=Path)
     parser.add_argument('--role', choices=['runtime', 'build', 'all'], default='runtime',
                         help='Environment image role (default: runtime)')
     args = parser.parse_intermixed_args()
+    # Python 3.10 rejects omitted nargs='*' positionals when choices is used.
+    targets = args.variants or common.default_variants(matrix)
+    unsupported = sorted(set(targets) - set(matrix['variants']))
+    if unsupported:
+        parser.error('Unsupported environment variants: ' + ', '.join(unsupported))
     if args.action == 'load' and args.directory is None:
         parser.error('load requires --directory')
     directory = (args.directory if args.action == 'load' else
                  args.output_dir or ROOT / '.release/runtime-images' / matrix['environment_version']).resolve()
-    for variant in args.variants or common.default_variants(matrix):
+    for variant in targets:
         for role in ('build', 'runtime') if args.role == 'all' else (args.role,):
             if args.action == 'export':
                 export_environment(variant, directory, role)
