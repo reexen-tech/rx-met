@@ -85,7 +85,9 @@ python3 examples/quick_start_kws.py --rnn_type lstm \
 ```
 
 `quant_config` 使用 QuantLSTM 自身的 override 格式，未列出的字段使用算子默认值。
-参数粒度是 `per_tensor`、`per_gate`、`per_channel`；量化点支持 8/16 位。
+参数粒度是 `per_tensor`、`per_gate`、`per_channel`；有符号量化点支持 1–32 位，
+无符号支持 1–31 位，有符号对称量化及权重、偏置从 2 位起。位宽不改变 FP32 载体
+和 JSON 格式；高位宽仍遵循既有浮点精度报告与 exact 模式约束。
 `LSTM_config` 缺省时保留模块设置，`use_quantization: false` 使用浮点路径。
 配置需在校准前应用；相同配置可重复应用，已校准后修改配置会报错，必须先显式
 `reset_calibration()`。量化参数按首次 PTQ 结果用于 QAT，不在训练循环中重新校准。
@@ -125,7 +127,7 @@ INT16 `[-32768,32767]`；CPU/CUDA、QAT 饱和掩码和导出范围均遵循此�
 | 项目 | 普通 Conv/Linear 等的 bias 对齐路径 | 原生 QuantGRU/QuantLSTM |
 | --- | --- | --- |
 | bias 编码 scale | 对齐后为 `Sx * Sw` | 根据 bias 自身范围独立计算 `Sb` |
-| bias 量化位宽 | 对齐后默认有符号 32 位，可显式指定并检查范围 | 由算子配置控制的 8/16 位；当前 KWS 示例两种 RNN 均配置为 8 位 |
+| bias 量化位宽 | 对齐后默认有符号 32 位，可显式指定并检查范围 | 由算子配置控制的有符号 2–32 位；当前 KWS 示例两种 RNN 均配置为 8 位 |
 | 加入累加器前 | 同一 scale，可直接相加 | 先将 bias 从 `Sb` 重缩放到 `Sacc` |
 | Po2 工作流 | 启用 bias 对齐时执行乘积 scale 和 bias 位宽对齐 | 调用算子自身的 `enable_pot2()`，不自动改为 INT32 或乘积 bias scale |
 

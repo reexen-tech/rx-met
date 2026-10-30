@@ -2,6 +2,7 @@
 
 import copy
 import importlib.util
+import json
 from pathlib import Path
 import tempfile
 import unittest
@@ -10,6 +11,107 @@ from onnx import helper, numpy_helper
 from aimet_common.compiler_graph_validation import validate_compiler_encoding_graph
 
 from tests.support.paths import REPO_ROOT
+
+
+class GruBitwidthExportTest(unittest.TestCase):
+    def setUp(self):
+        import torch
+        import gru_interface_binding as native
+        from quant_gru import QuantGRU
+
+        if not getattr(native, "cpu_only", False) and not torch.cuda.is_available():
+            self.skipTest("GRU export requires a CPU wheel or CUDA")
+        self.torch = torch
+        self.gru_type = QuantGRU
+        self.device = "cpu" if getattr(native, "cpu_only", False) else "cuda"
+        self.temporary = tempfile.TemporaryDirectory(prefix="gru-bitwidth-export-")
+        self.addCleanup(self.temporary.cleanup)
+        self.path = Path(self.temporary.name)
+
+    def calibrated(self, bits, *, bidirectional=False, unsigned_gate=False):
+        self.torch.manual_seed(39)
+        model = self.gru_type(3, 4, bidirectional=bidirectional).to(self.device).eval()
+        config = {"GRU_config": {"operator_config": {
+            name: {"bitwidth": bits} for name in ("weight_ih", "weight_hh")
+        }}}
+        if unsigned_gate:
+            config["GRU_config"]["operator_config"]["update_gate_output"] = {
+                "bitwidth": 4, "is_unsigned": True,
+            }
+        config_path = self.path / "config.json"
+        config_path.write_text(json.dumps(config))
+        model.load_bitwidth_config(str(config_path))
+        x = self.torch.randn(9, 2, 3, device=self.device) * .3 + .15
+        with model.calibration_context(), self.torch.no_grad():
+            model(x)
+            model(x * 1.1)
+        model.enable_pot2()
+        return model, x
+
+    def test_all_weight_bitwidths_export_valid_compiler_grids(self):
+        from aimet_common.compiler_encodings import finalize_compiler_encodings
+
+        for bits in range(1, 33):
+            with self.subTest(bits=bits):
+                model, _ = self.calibrated(bits)
+                document = model.export_quant_params_to_aimet_format({}, module_name="gru")
+                normalized = finalize_compiler_encodings(document, require_po2=True)
+                for name in ("weight_ih", "weight_hh"):
+                    record = normalized["param_encodings"][f"gru.{name}.weight"]
+                    self.assertEqual(record["bitwidth"], bits)
+                    self.assertEqual(record["dtype"], f"INT{bits}")
+
+    def test_i8w4_native_po2_verification_and_encoding_roundtrip(self):
+        from aimet_torch.native_recurrent import named_native_recurrent, verify_native_po2
+
+        for bidirectional, unsigned_gate in ((False, False), (True, False), (False, True), (True, True)):
+            with self.subTest(bidirectional=bidirectional, unsigned_gate=unsigned_gate):
+                model, x = self.calibrated(4, bidirectional=bidirectional, unsigned_gate=unsigned_gate)
+                wrapper = self.torch.nn.Module()
+                wrapper.add_module("gru", model)
+                targets = list(named_native_recurrent(wrapper))
+                self.assertEqual(len(targets), 1)
+                verify_native_po2(targets)
+                document = model.export_quant_params_to_aimet_format({}, module_name="gru")
+                layer = document["activation_encodings"]["gru"]
+                for direction in ("internal_ops", "internal_ops_reverse")[:2 if bidirectional else 1]:
+                    gate = layer[direction]["update_gate_output"]["output"][0]
+                    bits = 4 if unsigned_gate else 8
+                    self.assertEqual((gate["dtype"], gate["bitwidth"]), (f"UINT{bits}", bits))
+                target = self.gru_type(3, 4, bidirectional=bidirectional).to(self.device).eval()
+                target.load_state_dict(model.state_dict())
+                self.assertTrue(target.load_quant_params_from_aimet_format(document, module_name="gru"))
+                model.use_quantization = target.use_quantization = True
+                with self.torch.no_grad():
+                    for actual, expected in zip(target(x), model(x)):
+                        self.torch.testing.assert_close(actual, expected, atol=0, rtol=0)
+
+    def test_native_json_format_and_encoding_roundtrip(self):
+        from aimet_common.compiler_encodings import finalize_compiler_encodings
+
+        for bits in (4, 8, 16):
+            with self.subTest(bits=bits):
+                model, x = self.calibrated(bits, bidirectional=True)
+                path = self.path / "native.json"
+                model.export_quant_params(str(path))
+                native = json.loads(path.read_text())
+                for direction in ("operators", "operators_reverse"):
+                    for record in native[direction].values():
+                        self.assertEqual(set(record), {
+                            "dtype", "symmetric", "scale", "zero_point", "enc_type",
+                            "real_min", "real_max",
+                        })
+                target = self.gru_type(3, 4, bidirectional=True).to(self.device).eval()
+                target.load_state_dict(model.state_dict())
+                target.load_quant_params(str(path))
+                document = target.export_quant_params_to_aimet_format({}, module_name="gru")
+                finalize_compiler_encodings(document, require_po2=True)
+                for name in ("weight_ih", "weight_hh"):
+                    self.assertEqual(document["param_encodings"][f"gru.{name}.weight"]["bitwidth"], bits)
+                model.use_quantization = target.use_quantization = True
+                with self.torch.no_grad():
+                    for actual, expected in zip(target(x), model(x)):
+                        self.torch.testing.assert_close(actual, expected, atol=0, rtol=0)
 
 
 class NativeRecurrentGridExportTest(unittest.TestCase):
