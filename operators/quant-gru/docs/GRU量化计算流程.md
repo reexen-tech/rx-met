@@ -12,16 +12,16 @@ flowchart LR
     Input["模型权重与输入"] --> Python["QuantGRU"]
     Config["GRU_config"] --> Python
     Python --> Binding["gru_interface_binding"]
-    Binding --> Collect["CUDA 校准与统计"]
+    Binding --> Collect["CPU/CUDA 校准与统计"]
     Collect --> Params["scale / zero_point"]
-    Params --> Float["float32 存储执行"]
-    Params --> Integer["int32 存储执行"]
+    Params --> Integer["INT32 量化计算核心"]
     Params --> Export["量化参数导出"]
-    Float --> Output["序列与隐藏状态"]
-    Integer --> Output
+    Integer --> FloatCache["float32 量化码缓存"]
+    Integer --> IntCache["int32 量化码缓存"]
+    Integer --> Output["序列与隐藏状态"]
 ```
 
-Python 层管理配置、校准状态、双向执行和导出，binding 负责数据转换，C++/CUDA 层
+Python 层管理配置、校准状态、双向执行和导出，binding 负责数据转换，C++ CPU/CUDA 层
 负责量化、矩阵乘、门计算和梯度计算。
 
 ## GRU 递推与张量布局
@@ -109,8 +109,8 @@ $$
 q_y = \operatorname{round}\left(\frac{S_x}{S_y}(q_x-Z_x)\right)+Z_y
 $$
 
-实现将比值 `S_x / S_y` 编码为 `Pot2Rescale`、`FixedPointScale` 或 `FloatRescale`，
-并通过 `applyRescale()` 执行对应缩放。
+公共量化路径将比值 `S_x / S_y` 编码为 `Pot2Rescale` 或 `FixedPointScale`，
+并通过 `applyRescale()` 执行整数缩放。`FloatRescale` 保留浮点缩放表示，公共量化路径不使用。
 
 ### 不同网格的加法
 
@@ -177,9 +177,9 @@ x_hat = s * (q - zp)
 | `GRUQuantParams` | 聚合配置、各量化点参数以及三份门激活 LUT |
 | `Pot2Rescale` | Po2 重缩放的移位量 |
 | `FixedPointScale` | affine 重缩放的 16 位乘子和移位量 |
-| `FloatRescale` | 浮点执行用的缩放比 |
+| `FloatRescale` | 保留的浮点缩放比表示，公共量化路径不使用 |
 | `GateQuantParamsT<R>`、`LinearQuantParamsGPUT<R>` | 整数门计算和线性计算的设备参数 |
-| `GateQuantParamsFP`、`LinearRescaleParamsFP` | float32 存储路径的设备参数 |
+| `GateQuantParamsFP`、`LinearRescaleParamsFP` | 浮点参考实现的设备参数，公共量化路径不使用 |
 
 权重、偏置统一保存 `3H` 个通道参数。per-tensor 和 per-gate 模式把对应 scale
 广播到逐通道数组，执行阶段按通道读取。
@@ -203,24 +203,36 @@ Python binding 对外提供 `scale_x_`、`zp_x_` 和 `scale_W_` 等字段，
 q_dst = clamp(rescale(q_src - zp_src, s_src / s_dst) + zp_dst)
 ```
 
-`setRescaleParam()` 从基础参数派生设备执行表示，`applyRescale()` 按类型执行乘移、
-移位或浮点缩放。有限位宽下的舍入和截断需要通过输出误差验证。
+`setRescaleParam()` 从基础参数派生设备执行表示，公共量化路径的 `applyRescale()`
+按类型执行乘移或移位。有限位宽下的舍入和截断需要通过输出误差验证。
 
 ## 执行后端
 
 | 入口或配置 | 存储与执行 | 激活函数 |
 | --- | --- | --- |
-| `use_quantization=False` | CUDA 浮点 GRU | 浮点 sigmoid/tanh |
-| `quant_storage_dtype="float32"`（量化默认） | 量化值以 float32 存储，cuBLAS GEMM 加重缩放 | 反量化、浮点 sigmoid/tanh、再量化 |
-| `quant_storage_dtype="int32"` | 量化值以 int32 存储，整数内核执行 | 默认 16 段 PWL |
-| `forward_quantized()` | CUDA 整数张量输入输出，使用整数执行路径 | 默认 16 段 PWL |
+| `use_quantization=False` 或 `calibrating=True` | CPU/CUDA 浮点 GRU；校准时同时收集统计 | 浮点 sigmoid/tanh |
+| `quant_storage_dtype="float32"`（量化默认） | INT32 整数内核执行，量化码缓存转换为 float32 | 默认 16 段 PWL |
+| `quant_storage_dtype="int32"` | 同一 INT32 整数内核执行，量化码缓存保留 int32 | 默认 16 段 PWL |
+| `forward_quantized()` | CPU/CUDA INT32 张量输入输出，使用同一整数核心 | 默认 16 段 PWL |
+
+两种 `quant_storage_dtype` 在 CPU/CUDA 上都使用 INT32 承载权重、激活、门和隐藏状态
+的量化码，矩阵乘用 INT64 累加，实际整数范围由量化位宽控制。它们的区别是返回给
+binding/Python 的权重、偏置和输入量化码缓存类型；float32 缓存保存整数码的浮点表示
+（例如 `3 -> 3.0`），不按量化 scale 反量化，也不参与选择计算核心。
+
+CUDA 的 `quantGRUForwardFP()` 直接复用 `quantGRUForwardInt()` 和
+`quantGRUForwardInt32()`。旧 `ForwardPassQuantFP` 仍保留 cuBLAS GEMM、浮点载体和
+真实激活函数实现，供底层算法参考，公共量化前向不调用它。
 
 整数路径的 `USE_REAL_ACTIVATION` 编译宏可启用浮点激活计算分支，当前默认构建使用
 PWL。存储模式、量化位宽与 scale 模式分别控制不同的行为。
 
-常规 `forward()` 返回浮点张量；`forward_quantized()` 的调用方按
+常规量化 `forward()` 接收浮点输入和初始状态，在入口量化，并在出口反量化，返回
+FP32 张量。master 权重和偏置也保存为 FP32，在入口量化为 INT32。
+`forward_quantized()` 的调用方按
 `get_io_quant_meta()` 给出的输入和隐藏状态网格准备 INT32 张量，并按输出网格解释
-返回值。切换后端时需要分别验证输出和梯度。
+返回值；该入口跳过输入量化和输出反量化，权重仍在入口量化。CPU 包支持校准和 PTQ
+推理；CUDA 包还支持 QAT。切换缓存类型或执行设备时需要分别验证输出及适用的梯度。
 
 ## 线性层与门计算
 
@@ -284,8 +296,9 @@ q_g=\operatorname{round}\left(\frac{S_a}{S_g}(q_a-Z_a)\right)+
 \operatorname{round}\left(\frac{S_b}{S_g}(q_b-Z_b)\right)+Z_g
 $$
 
-激活模块从 `q_g` 得到 sigmoid 输出。float32 存储路径执行反量化、浮点 sigmoid 和
-再量化；整数路径使用 16 段 PWL。
+激活模块从 `q_g` 得到 sigmoid 输出。公共量化路径的两种缓存类型都默认使用
+16 段整数 PWL；浮点参考实现或启用 `USE_REAL_ACTIVATION` 的构建执行反量化、
+浮点 sigmoid 和再量化。
 
 ### 候选门
 
@@ -459,13 +472,13 @@ encodings 组装。
 | [src/gru_interface.cc](../src/gru_interface.cc) | 校准参数计算与执行接口 |
 | [src/calibration_gpu.cu](../src/calibration_gpu.cu) | GPU 范围与直方图统计 |
 | [include/scale_encoding.h](../include/scale_encoding.h) | scale 编码与重缩放参数派生 |
-| [src/gru_forward_gpu_quant.cu](../src/gru_forward_gpu_quant.cu) | 整数存储前向 |
-| [src/gru_forward_gpu_quant_fp.cu](../src/gru_forward_gpu_quant_fp.cu) | float32 存储量化前向 |
+| [src/gru_forward_gpu_quant.cu](../src/gru_forward_gpu_quant.cu) | CUDA 公共量化前向的整数核心 |
+| [src/gru_forward_gpu_quant_fp.cu](../src/gru_forward_gpu_quant_fp.cu) | 保留的浮点载体参考实现，公共量化前向不调用 |
 | [src/gru_backward_gpu_quant.cu](../src/gru_backward_gpu_quant.cu) | 量化训练反向 |
 | [tests/test_quant_gru.py](../tests/test_quant_gru.py) | 输出、梯度和误差检查 |
 
 [独立 CPU 参考实现](../quant-gru-cpu-only/README.md) 使用自身的 `shift_*` 参数结构。
 主实现与该参考实现的数值一致性需要在统一输入、权重和量化参数后单独验证。
 
-变更验证覆盖校准前后输出、两个执行后端、双向参数、QAT 梯度以及保存重载。
+变更验证覆盖校准前后输出、两种缓存类型、双向参数、QAT 梯度以及保存重载。
 结果同时记录 scale 模式、位宽、GPU 与依赖版本。

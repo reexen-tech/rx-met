@@ -2628,14 +2628,10 @@ class QuantGRU(nn.Module):
         
         # 添加 bitwidth（根据 dtype 判断）
         if "dtype" in encoding:
-            dtype = encoding["dtype"]
-            if "INT8" in dtype or "UINT8" in dtype:
-                encoding["bitwidth"] = 8
-            elif "INT16" in dtype or "UINT16" in dtype:
-                encoding["bitwidth"] = 16
-            elif "INT32" in dtype or "UINT32" in dtype:
-                encoding["bitwidth"] = 32
-        
+            match = re.fullmatch(r"U?INT([1-9][0-9]*)", encoding["dtype"])
+            if match:
+                encoding["bitwidth"] = int(match.group(1))
+
         # 转换 symmetric 为 is_symmetric（字符串格式），并删除原 symmetric 字段
         if "symmetric" in encoding:
             encoding["is_symmetric"] = "True" if encoding["symmetric"] else "False"
