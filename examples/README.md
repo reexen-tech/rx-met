@@ -4,9 +4,12 @@
 
 | 要运行的流程 | 设备 | 必需输入 |
 | --- | --- | --- |
-| KWS 浮点训练、PTQ、Po2、QAT、恢复 | CUDA | Speech Commands v0.02 |
+| KWS 浮点训练、PTQ、可选 Po2 演示、QAT、恢复 | CUDA | Speech Commands v0.02 |
 | KWS 只校准与 PTQ | CPU / CUDA | 同类型浮点检查点，以及 Speech Commands 或已保存的校准和验证波形 |
 | 已有 ONNX 的 PTQ | CPU / CUDA | 静态 ONNX 和预处理后的校准 NPY/NPZ；下面以 MobileNetV2 演示 |
+
+Power-of-2（Po2）是按目标后端要求选择的可选转换。KWS 和 ONNX PTQ 示例均执行该步骤，
+以演示转换前后的精度比较；日志将其标为“可选”阶段，以下示例命令均会执行该演示。
 
 在宿主机的应用包目录执行：
 
@@ -85,7 +88,7 @@ python3 examples/quick_start_kws.py --rnn-type gru --device cpu --ptq-only \
 
 LSTM 将 `--rnn-type gru` 改为 `--rnn-type lstm`，并使用对应的浮点检查点。
 
-此模式执行 FP 评估、校准、Po2、导出和恢复，不执行浮点训练或 QAT。产物为
+此模式执行 FP 评估、校准、可选步骤 Po2 的演示、导出和恢复，不执行浮点训练或 QAT。产物为
 `att_mh_rnn_kws_ptq.onnx`（不含 Q/DQ）、`att_mh_rnn_kws_ptq.json`、
 `outputs.npz` 和 metadata，PTQ 权重保存在 `checkpoints/att_mh_rnn_kws_ptq.pth`。
 metadata 记录检查点和实际波形数组的 SHA-256、设备和恢复误差。验证样本带标签时也记录 Top-1。

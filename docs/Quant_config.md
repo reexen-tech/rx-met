@@ -245,7 +245,7 @@ assert sqrt.input_quantizers[0].bitwidth == 32
 请在 `compute_encodings` 前执行；使用已有校准结果的模型修改位宽后，应重新校准。
 创建和恢复模型时使用相同的图准备步骤与配置。
 
-**4. 校准及 Po2 转换后检查最终网格和实际数值。**
+**4. 校准及可选的 Po2 转换后检查最终网格和实际数值。**
 
 按[PyTorch 接入流程](PyTorch_quantization.md#3-校准并评估-ptq)重新校准；目标需要
 Po2 时，再完成转换。此时量化器已初始化，可以查看实际 scale：
@@ -262,7 +262,7 @@ for name, side in (
 
 针对零分母，使用同批输入检查本应为正的值是否在量化前后变成 0，并继续检查
 后继 Sqrt 输出和 Divide 分母输入。方差或分子本身为 0 可能正常；提高上游位宽后，
-下游较粗的输入网格也可能再次将正数舍入为 0。最终位宽、Po2 scale、分母非零
+下游较粗的输入网格也可能再次将正数舍入为 0。最终位宽、scale（若启用 Po2 则检查其幂次约束）、分母非零
 和任务精度都需验证，不能仅凭最终输出有限判断问题已解决。
 
 若本次另有保存 `*_torch.encodings`，还可用其 `activation_encodings` 下的模块名
@@ -359,7 +359,9 @@ with torch.no_grad(), aimet.nn.compute_encodings(sim.model):
         sim.model(inputs.to(device))
 ```
 
-校准后可以把 scale 调整为 2 的幂，并按部署要求对齐 bias scale：
+Power-of-2 是按目标后端要求选用的阶段。需要 Po2 时，在校准后把 scale 调整为
+2 的幂，并按部署要求对齐 bias scale；PTQ 和 QAT 本身不要求执行此转换。当前示例
+演示执行 Po2，以下为该阶段的调用片段：
 
 ```python
 from aimet_torch.utils_rx import apply_power_of_2_workflow
@@ -413,7 +415,7 @@ freeze_quantizer_parameters(sim.model, freeze_bn_affine=True)
 set_train_mode_freeze_bn(sim.model)
 ```
 
-冻结和创建训练 optimizer 应在校准、Po2 或编码恢复完成后执行。CPU 只支持校准
+冻结和创建训练 optimizer 应在校准、所选的 Po2 转换或编码恢复完成后执行。CPU 只支持校准
 和 PTQ；浮点训练与 QAT 使用 CUDA。
 
 恢复顺序取决于权重的保存形式。KWS 保存的是主权重，先严格加载到对应模型，再创建

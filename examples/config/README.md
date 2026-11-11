@@ -11,7 +11,8 @@ KWS 和 ONNX PTQ 示例默认使用本目录的两份 JSON。示例先按基础�
 
 KWS 的 `--rnn-type` 决定模型使用的循环算子。两个配置节可以同时放在完整 JSON 中，
 模型中的循环算子只读取各自的配置。可用 `--quant-config` 指定另一份位宽配置；改动量化参数后
-重新校准，KWS 的 QAT 循环沿用 PTQ 和 Po2 阶段得到的参数。
+重新校准。Po2 是按目标后端要求选择的可选转换；当前示例执行 Po2 演示，KWS 的 QAT
+循环沿用转换后的固定参数。
 
 ## 普通层
 
@@ -70,7 +71,7 @@ sigmoid 门输出的默认无符号设置与对称性独立。
 - `weight_ih` / `weight_hh` 分别为输入权重、循环权重；`bias_ih` / `bias_hh` 为对应偏置。
 - 权重和偏置使用有符号对称量化，支持 2 到 32 位及三种参数粒度。激活和状态使用 per-tensor，可设置 `is_symmetric`、`is_unsigned`；有符号对称模式支持 2 到 32 位，有符号非对称模式支持 1 到 32 位，无符号模式支持 1 到 31 位。`UINT32` 和有符号对称 `INT1` 会报错。
 - 未列出的量化点沿用算子默认配置，默认位宽为 8。门计算可以通过 `input_gate_input`、`forget_gate_input`、`cell_gate_input`、`output_gate_input` 及其 `_output` 配置；`cell_tanh_output` 控制细胞状态经过 tanh 后的量化点。
-- `scale_mode` 控制首次 PTQ 的 scale。KWS 示例在校准后还会调用公共 Po2 转换接口，QAT 沿用转换后的固定参数。
+- `scale_mode` 控制首次 PTQ 的 scale。KWS 示例在校准后演示可选的公共 Po2 转换，QAT 沿用转换后的固定参数。
 - rx-met 的阶段保存和 ONNX 导出均将两组 bias 合并，因此 `bias_ih` / `bias_hh` 位宽应一致。
 
 `comment` 字段用于配置说明。配置在校准前生效；已有量化参数时改变配置需先清除旧校准结果。

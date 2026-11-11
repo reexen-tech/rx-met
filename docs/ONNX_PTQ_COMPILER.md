@@ -4,6 +4,10 @@
 并导出供目标编译器配套使用的 clean ONNX 和 `<prefix>.json`。已有模型和预处理数据
 可直接按下文量化；初次体验可从 [MobileNetV2 示例](#mobilenetv2) 开始。
 
+Po2 是按目标后端要求选用的转换，PTQ 本身不要求 scale 必须为 2 的幂。当前示例和
+`run_onnx_ptq()` 端到端接口均执行 Po2，恢复验证也要求 Po2 制品。示例日志将该转换
+标为“可选”阶段，用于说明实际项目应按部署要求选用。
+
 ## 术语
 
 - **Clean ONNX**：移除 AIMET 仿真量化节点后的部署模型。模型保留原始输入输出
@@ -188,7 +192,7 @@ ONNX 示例与 `run_onnx_ptq()` 默认使用以下两份配置，与 KWS 示例�
 - [混合精度配置](../examples/config/quick_start_full_quant.json)。模型含标准 GRU/LSTM 时，`GRU_config` / `LSTM_config` 由对应原生算子处理；已知但图中不存在的类型配置会忽略。
 
 调用 `create_onnx_ptq_sim()` 时由调用方传入 `config_file`。该接口创建仿真模型，
-应用混合精度、校准和 Po2 转换是后续步骤。基础配置也可选用
+应用混合精度、校准以及按需进行的 Po2 转换是后续步骤。基础配置也可选用
 [`onnx_ptq_compiler_w8a8.json`](../src/aimet_common/quantsim_config/onnx_ptq_compiler_w8a8.json)。
 
 示例的默认规则：

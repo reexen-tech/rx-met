@@ -129,7 +129,7 @@ CPU runtime 的 CUDA 版本打印为 `None`。runtime 提供第三方依赖，�
 ```
 已有浮点模型与权重 → prepare_model → QuantizationSimModel + 混合精度位宽
   → compute_encodings 校准 (PTQ)
-  → apply_power_of_2_workflow (NPU 友好的 Po2 量化)
+  → 可选：apply_power_of_2_workflow (按目标后端要求转换为 Po2)
   → 可选：freeze_quantizer_parameters + CUDA QAT 微调
   → 分别保存主权重检查点、ONNX 和 .json 编码文件
   → 重建并加载主权重 → 创建 sim → load_quantizer_encodings → 精度对比
@@ -137,6 +137,8 @@ CPU runtime 的 CUDA 版本打印为 `None`。runtime 提供第三方依赖，�
 
 已有权重可直接进行 PTQ；浮点训练不是量化前必须重复执行的步骤。KWS 完整示例同时演示
 浮点训练与 QAT，CPU 模式使用已有检查点，只执行校准、PTQ、Po2、导出与恢复。
+Po2 是按目标后端要求选用的阶段，PTQ 或 QAT 本身不要求 scale 必须为 2 的幂。
+当前 KWS 和 ONNX 示例执行 Po2，以演示该能力及转换前后的精度比较，日志将其标为“可选”阶段。
 按[自有模型接入教程](PyTorch_quantization.md)准备模型、数据和评估函数，
 再根据[配置参考](Quant_config.md)调整量化设置。
 
@@ -190,12 +192,14 @@ PyTorch 和 ONNX 采用两层配置。下表以 PyTorch 调用为例；完整字
   → QuantizationSimModel
   → set_percentile_value(99.99)
   → compute_encodings
-  → cover_range Po2 + Sb = Sx * Sw
+  → 示例演示：cover_range Po2 + Sb = Sx * Sw（按部署要求选用）
   → clean ONNX + compiler encodings
 ```
 
 CPU runtime 显式传入 `--device cpu`。公开 MobileNetV2 演示的下载、预处理和量化命令见
 [示例说明](../examples/README.md#onnx-ptqmobilenetv2)；通用入口不负责用户模型的预处理。
+当前 ONNX 示例和 `run_onnx_ptq()` 端到端接口均执行 Po2，并按 Po2 制品验证恢复结果；
+这条演示路径不表示所有 ONNX PTQ 任务都要求 Po2。
 
 当前 ONNX 流程适用于 PTQ；QAT 使用 PyTorch 流程。编译器 encodings 是 rx-met 的
 部署格式，必须与同次导出的 Clean ONNX 配套使用。

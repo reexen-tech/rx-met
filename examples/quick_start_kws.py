@@ -4,7 +4,7 @@ RX-MET 量化演示 — kws_streaming att_mh_rnn + QuantGRU / QuantLSTM
 流程用法：
     FP 训练 → prepare_model → QuantizationSimModel + 混合精度位宽
         → compute_encodings 校准 (PTQ)
-        → apply_power_of_2_workflow (NPU 友好的 Po2 量化)
+        → 可选：apply_power_of_2_workflow (按目标后端要求选择 Po2 量化)
         → freeze_quantizer_parameters + QAT 微调
         → state_dict + ONNX + .json 编码文件三件套保存
         → 重建 sim → load_state_dict → load_quantizer_encodings → 精度对比
@@ -34,6 +34,7 @@ RX-MET 量化演示 — kws_streaming att_mh_rnn + QuantGRU / QuantLSTM
 默认输出到运行目录的 output/quick_start_kws/，再分到 gru/ 或 lstm/ 下。
 默认各训练 1 epoch，用于学习流程；
 精度取决于训练轮数和配置，不代表上游论文成绩。完整说明见同目录 README.md。
+Power-of-2 是按目标后端要求选择的可选步骤，本示例执行该步骤以演示转换和精度比较。
 """
 
 from __future__ import annotations
@@ -1147,6 +1148,7 @@ def _run_kws_ptq(args, run):
         for feed in tqdm(feeds, desc="PTQ calibration"):
             sim.model(torch.from_numpy(feed["input"]).to(DEVICE))
     stage_outputs["ptq"] = outputs(sim.model)
+    print("Power-of-2 量化（可选）：按目标后端要求选用；本示例执行转换演示。")
     apply_power_of_2_workflow(sim.model, align_bias_scale=True, verbose=True)
     stage_outputs["po2"] = outputs(sim.model)
     checkpoint = run.checkpoints / "att_mh_rnn_kws_ptq.pth"
@@ -1275,7 +1277,8 @@ def _run_kws(args, run):
         ptq_accuracy = evaluate(sim.model, loaders["test"], DEVICE)
         print(f"PTQ 量化精度: {ptq_accuracy * 100:.2f}%")
 
-    with stage("步骤 5: Power-of-2 量化", timings):
+    with stage("步骤 5: Power-of-2 量化（可选）", timings):
+        print("按目标后端要求选用 Power-of-2；本示例执行转换演示。")
         apply_power_of_2_workflow(
             sim.model,
             align_bias_scale=True,

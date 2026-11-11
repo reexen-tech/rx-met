@@ -145,7 +145,7 @@ print("PTQ:", evaluate(sim.model))
 
 ## 4. 按部署要求执行 Power-of-2
 
-目标要求 Po2 scale 时，在校准后、参数冻结前转换，并重新评估。
+Po2 是可选阶段；目标要求 Po2 scale 时，在校准后、参数冻结前转换，并重新评估。
 以下用 `do_po2` 控制校准后的整模型转换；不要求这一步时设为 `False`。如果还希望
 原生循环层从 affine 网格开始校准，请在加载配置前确认 `GRU_config.default_config.use_pot2_scale`
 为 `false`，`LSTM_config.quant_config.scale_mode` 为 `"affine"`。本模板借用的 KWS
@@ -259,7 +259,7 @@ print("Restored:", evaluate(restored_sim.model))
 ```
 
 上面的输出容差与项目 KWS 示例一致，其他模型需要制定适合其数值尺度的验收标准。
-同时比较固定样本输出和独立验证集指标，记录 FP32、PTQ、Po2、可选 QAT、恢复后的结果。
+同时比较固定样本输出和独立验证集指标，记录 FP32、PTQ、已选用的 Po2/QAT 阶段及恢复后的结果。
 本模板直接组合库 API；导出运行记录的 `success` 只表示该次导出结束，不包含后续的
 主权重保存和恢复断言。完整接入应以脚本正常退出、恢复断言和任务指标共同判断。
 若恢复失败，先核对模型结构、准备方式、两份配置、默认位宽和量化方案，再检查编码覆盖。

@@ -61,6 +61,7 @@ C++/CUDA 实现，QuantGRU / QuantLSTM 在 PyTorch 中替换原始循环层；ON
 ## 4. PyTorch 量化流程
 
 标准入口位于 [`examples/quick_start_kws.py`](../examples/quick_start_kws.py)。
+下图表示模型接入时的阶段选择；当前 KWS 示例演示执行 Po2，实际项目按目标后端要求选用。
 
 ```mermaid
 flowchart LR
@@ -69,9 +70,11 @@ flowchart LR
     Base[QuantSim 基础配置] --> Sim
     Sim --> Mixed[应用混合精度配置]
     Mixed --> Calibrate[compute_encodings 校准]
-    Calibrate --> Po2[Power-of-2 与 bias 对齐]
-    Po2 -->|仅 PTQ| Quantized[量化模型]
-    Po2 -->|CUDA QAT| QAT[冻结量化参数并微调]
+    Calibrate -->|可选| Po2[Power-of-2 与 bias 对齐]
+    Calibrate -->|保留校准网格| Ready[选定量化网格]
+    Po2 --> Ready
+    Ready -->|仅 PTQ| Quantized[量化模型]
+    Ready -->|CUDA QAT| QAT[冻结量化参数并微调]
     QAT --> Quantized
     Quantized --> Export[export_onnx_json]
     Quantized --> State[KWS 显式保存主权重检查点]
@@ -84,7 +87,7 @@ flowchart LR
 1. `prepare_model` 在 QuantSim 创建前完成模型图规范化。
 2. 基础配置在创建 QuantSim 时加载，混合精度配置在校准前应用。
 3. `compute_encodings` 使用代表性数据收集激活范围，参数编码从模型权重和偏置计算。
-4. Power-of-2 对齐修改实际量化器 scale；普通层的 bias 可对齐到 `Sb = Sx * Sw`。
+4. Power-of-2 是按目标后端要求选用的转换，会修改实际量化器 scale；普通层的 bias 可对齐到 `Sb = Sx * Sw`。
 5. KWS 的 QAT 阶段冻结量化参数和 BatchNorm 状态；只做 PTQ 时直接导出。
 6. KWS 在导出前将 QuantSim 模型切换到 CPU 和 eval 模式，导出器以 CPU 上的浮点模型生成 ONNX 图。
 7. 重载流程使用相同的模型准备参数、配置文件、默认位宽和量化方案。
@@ -101,6 +104,7 @@ QuantGRU / QuantLSTM 与其他模块共享同一次 `compute_encodings` 前向�
 
 标准入口位于 [`examples/quick_start_onnx_ptq.py`](../examples/quick_start_onnx_ptq.py)，
 主要实现位于 [`src/aimet_onnx/rx_ptq`](../src/aimet_onnx/rx_ptq/)。
+下图描述当前示例及 `run_onnx_ptq()` 的执行路径，二者均演示 Po2；Po2 是否适用于实际部署由目标后端决定。
 
 ```mermaid
 flowchart LR
@@ -110,7 +114,7 @@ flowchart LR
     BaseConfig[QuantSim 基础配置] --> Sim
     Sim --> MixedConfig[应用混合精度配置]
     MixedConfig --> Calibration[校准]
-    Calibration --> Alignment[Power-of-2 与 bias 对齐]
+    Calibration --> Alignment[演示可选的 Power-of-2 与 bias 对齐]
     Alignment --> Clean[Clean ONNX]
     Alignment --> Raw[AIMET 原始 encodings]
     Alignment --> Compiler[编译器 encodings]

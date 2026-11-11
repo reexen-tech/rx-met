@@ -5,7 +5,7 @@ QuantGRU、QuantLSTM 和可复现的 CPU / 多 CUDA 运行环境。CPU 支持校
 
 ## 核心能力
 
-- **PyTorch 量化**：支持 PTQ、QAT、混合精度、Power-of-2 scale 和 ONNX 导出。
+- **PyTorch 量化**：支持 PTQ、QAT、混合精度、可选的 Power-of-2 scale 转换和 ONNX 导出。
 - **ONNX 量化**：直接读取已有 ONNX，输出 Clean ONNX、AIMET 原始 encodings、
   编译器 encodings 和运行元数据。
 - **量化循环算子**：QuantGRU / QuantLSTM 可替换 `num_layers=1`、`dropout=0` 的 PyTorch GRU / LSTM，

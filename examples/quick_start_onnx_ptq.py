@@ -7,12 +7,13 @@ RX-MET ONNX PTQ 演示 — 标准用法
         → create_onnx_ptq_sim（JSON 1 + IO quantizer + percentile）
         → apply_mixed_precision_bitwidth（JSON 2，与 quick_start_kws.py 同一份）
         → sim.compute_encodings 校准 (PTQ)
-        → apply_power_of_2_workflow（RX cover_range + Sb=Sx*Sw，算法在 aimet_common）
+        → 可选：apply_power_of_2_workflow（RX cover_range + Sb=Sx*Sw，算法在 aimet_common）
         → export_onnx_json（clean ONNX + compiler encodings）
         → 重建 QuantSim，恢复 encodings，对比保存前的量化输出
 
 ONNX 没有 PyTorch 权重可训，因此没有 QAT 微调；其余步骤与 quick_start_kws.py 对应。
 main() 只编排已有模块，不复制量化规则。
+Power-of-2 按目标后端要求选用，本示例执行该步骤并验证转换后的制品与恢复结果。
 
 运行（先进入 examples/）：
 
@@ -329,11 +330,12 @@ def _run_onnx_ptq(run, args=None) -> None:
         print_accuracy_report("PTQ 验证", ptq_evaluation)
 
     # ------------------------------------------------------------------
-    # 步骤 5: Power-of-2 量化
+    # 步骤 5: Power-of-2 量化（可选）
     #   算法是 aimet_common.power_of_2 里的 RX 原文；这里走 ONNX 入口，
     #   不经过 aimet_torch。
     # ------------------------------------------------------------------
-    with stage("步骤 5: Power-of-2 量化", timings):
+    with stage("步骤 5: Power-of-2 量化（可选）", timings):
+        print("按目标后端要求选用 Power-of-2；本示例执行转换演示。")
         po2_report = apply_power_of_2_workflow(
             sim,
             method=PO2_METHOD,

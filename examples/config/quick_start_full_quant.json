@@ -407,7 +407,7 @@
         }
       }
     },
-    "comment": "LSTM 专用配置。首次 PTQ 使用 affine scale，第 5 步统一转换为 Po2；QAT 固定量化参数。"
+    "comment": "LSTM 专用配置。首次 PTQ 使用 affine scale，示例第 5 步演示可选的 Po2 转换；QAT 固定量化参数。"
   },
 
   "default_config": {
