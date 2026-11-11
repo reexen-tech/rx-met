@@ -110,9 +110,15 @@ workspace 和生命周期证据后才能重新评估，不能为了降低延迟�
 
 `tests/benchmarks/schema/cuda_performance_thresholds.schema.json`
 
-可复现命令：
+以下命令从算子根目录执行，需要 CUDA 构建环境和可用 GPU；profiler 验证另需
+`compute-sanitizer`、Nsight Systems 的 `nsys` 和 `nvidia-smi`。性能目标随测试开关
+启用，默认安装构建不生成该目标：
 
 ```bash
+cmake -S . -B build \
+  -DQUANT_LSTM_ENABLE_CUDA=ON \
+  -DQUANT_LSTM_BUILD_TESTS=ON \
+  -DCMAKE_BUILD_TYPE=Release
 cmake --build build --target quant_lstm_cuda_benchmark -j
 
 build/tests/benchmarks/quant_lstm_cuda_benchmark \

@@ -16,8 +16,9 @@
 | `release/` | 依赖、环境、wheel 修复、离线构建、安装与交付 |
 | `support/` | 公共模型、输入夹具、编码断言与路径，不收集测试 |
 
-顶层只保留包入口和本说明。测试用例不再从另一个测试模块导入测试类充当夹具。
-公共路径从 `tests.support.paths` 读取；入口同时为子进程配置相同的源码路径。
+公共模型、输入夹具和断言放在 `support/`，不从其他测试模块导入测试类充当夹具。
+测试代码从 `tests.support.paths` 读取仓库路径；导入 `tests` 时将当前检出的 `src/` 加入
+模块搜索路径，并为子进程设置相同的 `PYTHONPATH`。
 
 ## 运行
 
@@ -60,7 +61,9 @@ python3 -m unittest discover -s tests -t . -v
 ## 环境
 
 `common` 和 `release` 不需要 GPU，也不运行真实训练、下载或 Docker 构建。
-其余组应在已安装 RX-MET、QuantGRU、QuantLSTM 及匹配依赖的 runtime 中执行。
+其余组应在具备匹配依赖及 QuantGRU、QuantLSTM 扩展的环境中执行。项目测试优先导入当前
+检出的 `src/`；依赖 AIMET 原生库的测试需要为当前 Python ABI 和目标设备构建原生库，
+见 [AIMET 原生构建与验收](../docs/AIMET_ONNX_NATIVE.md)。
 CPU/GPU 使用同一入口，GPU 全量回归需要匹配的 CUDA wheel 和可用设备。
 
 测试源码应与所加载的原生扩展版本匹配。普通 Python 检查通过不代表原生运行库、
@@ -82,6 +85,7 @@ python3 scripts/validation/verify_kws_ptq_roundtrip.py \
 两次均不执行 QAT，检查量化前后浮点权重不变。需要原生算子的 ORT 桥接扩展。
 
 输出包含 ONNX、JSON、逐样本 logits、`comparison.json` 和摘要。
+默认输出目录为 `output/kws_ptq_roundtrip/<时间戳>/`，可用 `--output-dir` 指定新目录。
 差异会如实记录并返回 1；`--report-only` 只改变退出策略，不把差异标为通过。
 已有输出目录拒绝覆盖。两轮产物、校准网格或浮点累加不同，不应仅凭最终精度相近认定逐值一致。
 
@@ -98,12 +102,11 @@ python3 -m tests.support.kws_artifacts \
 ## 整理与维护
 
 - 保留修复之后仍有回归价值的测试，不按提交时间或文件年龄删除。
-- 数值非有限值、Log 零码和奇异梯度合入 `torch/test_numerical_stability.py`。
-- GRU 截断链式法则、eval backward 和零点梯度合入 `recurrent/test_gru_autograd.py`。
-- ONNX 输入精度、控制端口及 bias 分别按行为合并；原 `alignment/remaining` 杂项按配置、
-  bias、Po2、校准输入和恢复拆分。
-- KWS 卷积和 MFCC 精度回归合入示例测试；编译器数学等价与导出测试独立保留。
-- 已删除只有自测调用的历史报告路径解析工具及其 6 个自测，保留真实往返报告的编码比较测试。
+- 数值非有限值、Log 零码和奇异梯度由 `torch/test_numerical_stability.py` 覆盖。
+- GRU 截断链式法则、eval backward 和零点梯度由 `recurrent/test_gru_autograd.py` 覆盖。
+- ONNX 回归按配置、输入精度、控制端口、bias、Po2、校准输入和恢复行为组织。
+- KWS 卷积和 MFCC 精度回归位于示例测试；编译器数学等价与导出测试独立维护。
+- 真实往返报告保留编码比较测试，逐项报告两轮输出和校准网格差异。
 
 新增长期用例放入对应测试组，复用 `support` 中的普通辅助对象并用 `addCleanup`
 管理临时资源。一次性排查脚本、模型、真实数据及运行产物不提交到本目录；

@@ -20,10 +20,10 @@ BSD-3-Clause 许可证保存在 `native/LICENSE`。
 该映射记录初始源码来源。后续实现按 rx-met 的运行职责组织，所有变更由 Git 记录。
 
 `docker/environment/third_party/onnxruntime` 保存 ONNX Runtime 1.23.2 头文件，供本地独立
-构建使用，并保留许可证、第三方声明、版本和 `SHA256SUMS`。Docker 多 CUDA 构建会
-按变体准备与运行时一致的头文件：`cu118=1.20.1`、`cu126=1.23.2`、
-`cu130=1.27.0`。下载的官方源码归档通过固定 SHA-256 校验后进入编译，确保 custom-op
-使用与实际运行库匹配的 ORT C API。
+构建使用，并保留许可证、第三方声明、版本和 `SHA256SUMS`。Docker 构建会
+按变体准备与运行时一致的头文件：`cpu=1.23.2`、`cu118=1.20.1`、
+`cu126=1.23.2`、`cu130=1.27.0`。当前变体优先使用仓库中已校验的离线头文件；
+准备其他版本时，官方源码归档须通过指定的 SHA-256 校验后才能进入编译。
 
 ## 构建产物
 
@@ -33,11 +33,22 @@ BSD-3-Clause 许可证保存在 `native/LICENSE`。
 - `libquant_info<EXT_SUFFIX>`；
 - `libaimet_onnxrt_ops.so`。
 
-支持的 ABI 是 Linux x86_64 上的 CPython 3.10-3.12。构建依赖包括 C++17
-编译器、CMake、Ninja、Eigen3、pybind11 和匹配版本的 ONNX Runtime 头文件；
-CUDA 构建还需要 CUDA Toolkit。
+源码构建支持 Linux x86_64 上的 CPython 3.10、3.11 和 3.12。构建依赖包括 C++17
+编译器、CMake 3.19 或更新版本、Ninja、Eigen3、pybind11、所用 Python 的开发头文件，
+以及匹配版本的 ONNX Runtime 头文件；
+CUDA 构建还需要 CUDA Toolkit。发行 wheel 使用的 Python 版本由
+[`docker/variants.json`](../docker/variants.json) 定义。
 
 ## 构建与冒烟测试
+
+以下命令在源码仓库根目录执行，使用同一 Python 解释器构建和测试。冒烟测试会导入
+`aimet_onnx` 并运行 QuantSim，因此除构建工具外还需要匹配的 Python 运行依赖，包括
+PyTorch、NumPy、ONNX 和 ONNX Runtime。对应变体的完整依赖见
+[`docker/requirements/`](../docker/requirements/)；CPU 使用 `onnxruntime`，CUDA 使用
+兼容目标 CUDA/cuDNN 的 `onnxruntime-gpu`，测试时还需有可用 GPU。
+
+命令使用默认安装目录 `src/aimet_common`，供冒烟测试从源码树加载新库。如果通过
+`RX_MET_PYTHON` 选择了其他解释器，用同一解释器运行 `smoke_onnx_runtime.py`。
 
 CPU：
 
@@ -57,16 +68,27 @@ python3 native/tests/smoke_onnx_runtime.py \
   --provider CUDAExecutionProvider
 ```
 
-构建命令和冒烟测试均以退出码 0 结束，并成功创建对应 Execution Provider 的 ONNX
-Runtime session，即表示原生运行库通过基础验证。
+测试成功时输出 `AIMET ONNX native smoke passed`，并列出 provider、自定义算子域和加载的库。
+该测试使用一个小型 MatMul + Relu 模型，检查原生库导入、校准及有限的推理输出。
 
-直接运行 `build_aimet_native.sh` 默认使用仓库内已归档的 1.23.2 头文件，可以离线
-完成构建。环境镜像构建由 `prepare_onnxruntime_headers.sh` 负责准备其他版本头文件。
+直接运行 `build_aimet_native.sh` 默认使用仓库内已归档的 1.23.2 头文件；上述构建依赖已
+安装时，无需下载 ORT 源码即可离线构建。这要求当前运行环境使用匹配版本的 ONNX Runtime。其他版本通过
+`RX_MET_ONNXRUNTIME_ROOT` 指定头文件目录，并用 `RX_MET_ONNXRUNTIME_VERSION`
+要求该目录的版本。例如，已有 cu118 依赖的环境可使用：
+
+```bash
+RX_MET_ENABLE_CUDA=1 \
+RX_MET_ONNXRUNTIME_ROOT="$PWD/docker/environment/third_party/onnxruntime-prepared/1.20.1" \
+RX_MET_ONNXRUNTIME_VERSION=1.20.1 \
+./scripts/build_aimet_native.sh
+```
+
+环境镜像构建由 `scripts/internal/prepare_onnxruntime_headers.sh` 负责准备所选版本头文件。
 
 支持的环境变量：
 
-- `RX_MET_ENABLE_CUDA`：`0` 表示 CPU，`1` 表示 CUDA；
-- `RX_MET_AIMET_BUILD_DIR`：CMake 构建目录；
+- `RX_MET_ENABLE_CUDA`：`0` 表示 CPU（默认），`1` 表示 CUDA；
+- `RX_MET_AIMET_BUILD_DIR`：CMake 构建目录，默认 `.release/build/aimet-cpu` 或 `.release/build/aimet-cuda`；
 - `RX_MET_AIMET_INSTALL_DIR`：安装目录，默认是仓库中的 `src/aimet_common`；
 - `RX_MET_PYTHON`：Python 解释器，默认 `python3`；
 - `RX_MET_CUDA_ARCHITECTURES`：CMake CUDA 架构列表；

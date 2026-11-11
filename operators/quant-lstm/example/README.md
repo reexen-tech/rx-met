@@ -5,7 +5,7 @@
 - `lstm_float_example.cc` 调用 CPU 浮点 reference forward。
 - `lstm_int32_example.cc` 演示校准、参数量化、CPU int32 carrier forward 和输出反量化。
 
-构建并运行：
+从算子根目录（rx-met 中为 `operators/quant-lstm/`）构建并运行：
 
 ```bash
 cmake -S . -B build-example \

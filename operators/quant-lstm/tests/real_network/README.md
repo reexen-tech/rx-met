@@ -48,7 +48,7 @@ MFCC 仅以训练集均值和标准差归一化。全量验收默认重新提取
 ## 3. 运行
 
 先构建 CUDA 扩展，确保 Python 可导入 torch、torchaudio 和 `_quant_lstm`，并准备官方数据集。
-从仓库根目录运行：
+从算子根目录（rx-met 中为 `operators/quant-lstm/`）运行：
 
 ```bash
 # 快速 profile（四种子，预训练 50 轮 + 微调 20 轮）
@@ -60,8 +60,8 @@ tests/real_network/run_speech_commands_lstm_test.sh --dataset-root /datasets/spe
 # 无需音频数据的编排、固定参数和选模回归
 PYTHONPATH=pytorch:tests/real_network python -m unittest test_pretrained_qat_protocol test_qat_fixed_quant_params
 
-# 独立前向、掩码和梯度 oracle
-PYTHONPATH=pytorch python -m unittest tests.test_qat_independent
+# 独立前向、掩码和梯度 oracle（需要 jsonschema）
+(cd pytorch && python -m unittest -v tests.test_qat_independent)
 ```
 
 使用 `PYTHON=/path/to/python` 选择解释器；仅显式 `--download` 才下载官方 2.3 GiB 数据。
@@ -78,8 +78,8 @@ CUDA 不可用时，正式 runner 以非零状态退出；不能将 unittest 的
 数值正确性继续由独立前向/掩码/反向 oracle、真实 batch 梯度、固定参数、
 权重更新和保存/重新加载回归严格验收。随机小模型只用于这些性质检查，不要求分类收敛。
 
-质量策略固定在 `pretrained_quality_assertions.py`，实跑前确定；本次增加种子
-20261008 验证，不能根据测试结果事后移动阈值：
+质量策略固定在 `pretrained_quality_assertions.py`，实跑前确定，对第 2 节列出的
+每个种子分别验收，不能根据测试结果事后移动阈值：
 
 | 要求 | 快速 profile | 全量 profile |
 |---|---:|---:|

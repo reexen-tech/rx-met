@@ -4,6 +4,11 @@ QuantLSTM 提供 PyTorch LSTM（长短期记忆网络）的量化实现，支持
 训练后量化（PTQ）、CUDA 浮点训练与量化感知训练（QAT），以及 ONNX 导出。
 模型参数命名与支持范围内的单层 `torch.nn.LSTM` 对齐。
 
+通过 rx-met 应用包安装的用户已经具备对应 wheel。整模型量化从
+[PyTorch 模型量化](../../docs/PyTorch_quantization.md)开始，循环层替换与统一校准见
+[循环算子接入](../../docs/QuantLSTM_integration.md)。本文的安装、配置和独立校准流程
+面向单独使用 QuantLSTM 或维护算子源码的读者。
+
 ## 支持范围
 
 - 浮点和量化两种模式，通过 `use_quantization` 切换；量化模式需要先校准或加载量化参数。
@@ -23,8 +28,8 @@ reference，CUDA int32 后端尚未实现。CPU 与 CUDA 使用各自构建的 w
 
 位宽控制量化网格，不改变 FP32 载体或执行后端，也不进行低位打包。FP32 无法精确
 表示所有高位宽量化码或大归约结果，相关配置会记录 `precision_risk`；
-`require_exact_accumulation=True` 拒绝该风险。INT1 对称量化与 UINT32 会明确拒绝。
-JSON 字段、层次和 schema 版本保持不变，仅扩展合法位宽与 dtype 取值。
+`require_exact_accumulation=True` 会拒绝存在此风险的配置。INT1 对称量化与
+UINT32 会在配置阶段被拒绝。
 
 ## 环境与安装
 
@@ -35,7 +40,8 @@ JSON 字段、层次和 schema 版本保持不变，仅扩展合法位宽与 dty
 版本及目标设备对应的 PyTorch。CUDA 构建另需 CUDA Toolkit。Python 需要开发头文件、
 `pip`、`setuptools` 和 `wheel`，编译工具链与 PyTorch 保持兼容。
 
-默认构建 Release CUDA 库，测试和示例默认关闭。以下命令从本仓库根目录执行：
+默认构建 Release CUDA 库，测试和示例默认关闭。本文命令从本 README 所在的算子
+根目录执行，在 rx-met 中为 `operators/quant-lstm/`：
 
 ```bash
 cmake -S . -B build
@@ -59,14 +65,16 @@ RX_MET_ENABLE_CUDA=0 RX_MET_QUANT_LSTM_BUILD_DIR="$PWD/build_cpu" \
 
 ## 最小示例
 
-以下示例检查 CUDA 模块加载、浮点前向接口和输出形状：
+以下示例检查 CUDA 模块加载、浮点前向接口和输出形状。使用 CPU wheel 时将
+`device` 改为 `"cpu"`，下方校准和重载示例沿用同一设备。
 
 ```python
 import torch
 from quant_lstm import QuantLSTM
 
-lstm = QuantLSTM(input_size=64, hidden_size=128, batch_first=True).cuda().eval()
-inputs = torch.randn(2, 10, 64, device="cuda")
+device = "cuda"
+lstm = QuantLSTM(input_size=64, hidden_size=128, batch_first=True).to(device).eval()
+inputs = torch.randn(2, 10, 64, device=device)
 with torch.no_grad():
     output, (hidden, cell) = lstm(inputs)
 
@@ -81,7 +89,8 @@ print("QuantLSTM forward OK")
 
 ## 量化流程
 
-推荐流程为 **浮点预训练 → PTQ 校准与评估 → 固定量化参数的 QAT 微调 → 推理**。
+推荐流程为 **加载预训练浮点权重 → PTQ 校准与评估 → 推理**。需要微调时，可在
+CUDA 上先进行固定量化参数的 QAT，再部署推理。
 已有单层、无投影、`dropout=0` 的 `torch.nn.LSTM` 可通过
 `lstm.load_state_dict(pretrained_lstm.state_dict())` 加载权重，模型形状、方向和 bias
 配置应保持一致。
@@ -93,7 +102,7 @@ print("QuantLSTM forward OK")
 lstm.set_all_bitwidth(8)
 with torch.no_grad(), lstm.calibration_context():
     for inputs in calibration_loader:
-        lstm(inputs.to(device="cuda", dtype=torch.float32))
+        lstm(inputs.to(device=device, dtype=torch.float32))
 lstm.use_quantization = True
 ```
 
@@ -110,6 +119,10 @@ QAT 在 PTQ 评估后使用 `lstm.train()` 和常规 PyTorch 训练循环。
 微调期间保持 `calibrating=False`、`use_quantization=True`，不要重置校准或修改配置。
 完整评估流程见[Speech Commands 真实网络测试](tests/real_network/README.md)。
 
+输入和循环 bias 采用带训练余量的独立网格，普通层的 INT32 乘积 scale 对齐不会
+覆盖这些网格。校准规则、数值例子和部署约束见
+[Bias 编码差异](../../docs/QuantLSTM_integration.md#bias-编码差异)。
+
 ## 保存与重载
 
 模型权重与量化参数共同确定推理结果。以下代码保存算子自身的原生检查点，接续
@@ -119,9 +132,9 @@ QAT 在 PTQ 评估后使用 `lstm.train()` 和常规 PyTorch 训练循环。
 torch.save(lstm.state_dict(), "lstm_weights.pth")
 lstm.export_quant_params("lstm_encodings.json")
 
-restored = QuantLSTM(64, 128, batch_first=True).cuda().eval()
+restored = QuantLSTM(64, 128, batch_first=True).to(device).eval()
 restored.load_state_dict(
-    torch.load("lstm_weights.pth", map_location="cuda", weights_only=True)
+    torch.load("lstm_weights.pth", map_location=device, weights_only=True)
 )
 restored.load_quant_params("lstm_encodings.json")
 restored.use_quantization = True
@@ -155,7 +168,7 @@ try:
     )
 finally:
     lstm.export_mode = False
-    lstm.cuda()
+    lstm.to(device)
 ```
 
 产物使用标准 ONNX `LSTM` 节点，表达浮点 LSTM 语义，量化参数单独导出。
@@ -166,7 +179,7 @@ finally:
 | 接口 | 用途 |
 | --- | --- |
 | `forward(input, hx=None)` | 按量化开关执行浮点或量化计算，`hx` 为 `(h_0, c_0)` |
-| `set_all_bitwidth()` | 将所有量化点设为 8-bit 或 16-bit |
+| `set_all_bitwidth()` | 统一设置所有量化点位宽，受各点 signed/unsigned 约束 |
 | `get_quant_config()`、`adjust_quant_config()` | 查询或调整量化点的配置 |
 | `calibration_context()` | 管理一轮校准，成功退出时完成参数计算，异常时恢复模式 |
 | `finalize_calibration()`、`reset_calibration()` | 完成当前校准会话，或清除校准状态及参数锁 |
@@ -178,14 +191,15 @@ finally:
 [端到端测试](tools/run_end_to_end_test.sh) 覆盖 CUDA、PyTorch、QAT 和 ONNX；
 [CPU package 测试](tools/run_cpu_only_package_check.sh) 检查 reference、配置、安装和
 外部 CMake 项目集成；[真实网络测试](tests/real_network/README.md) 比较浮点、PTQ
-及固定参数 QAT。命令从仓库根目录执行：
+及固定参数 QAT。命令从本 README 所在的算子根目录执行：
 
 ```bash
 tools/run_cpu_only_package_check.sh
 tools/run_end_to_end_test.sh
 ```
 
-CUDA 测试需要可用 GPU，真实网络测试还需要 Speech Commands v0.02 数据集。测试依赖、 数据规模与通过阈值见[测试说明](tests/README.md)及相应测试脚本。
+CUDA 测试需要可用 GPU，真实网络测试还需要 Speech Commands v0.02 数据集。测试依赖、
+数据规模与通过阈值见[测试说明](tests/README.md)及相应测试脚本。
 
 ## 文档与源码
 
@@ -206,20 +220,7 @@ CUDA 测试需要可用 GPU，真实网络测试还需要 Speech Commands v0.02 
 
 完整入口见[文档导航](docs/README.md)。
 
-rx-met 的 QuantSim、配置、校准和整模型导出流程见 rx-met 仓库中的
-`docs/QuantLSTM_integration.md`。
+rx-met 的 QuantSim、配置、校准和整模型导出流程见
+[循环算子接入](../../docs/QuantLSTM_integration.md)。
 
-算子自身提供的通用接口见 [循环算子集成接口](docs/aimet_integration.md)。
-
-### 固定 bias 网格的训练余量
-
-新校准的输入/循环 bias 在各自粒度下，由观测到的最大绝对值建立 scale
-`max(2 * max_abs_bias, 0.01) / qmax`；Po2 模式再严格向上取整为 2 的幂。
-此策略将观测范围至少扩大一倍，并为零 bias 提供至少 ±0.01 的可训练区间。
-8 位下最小 affine 步长约 7.87e-5、Po2 步长约 1.22e-4，可表示 1e-4 量级的更新。
-位宽、对称零点和部署算术保持原有约定。MinMax、Percentile、SQNR 均对 bias 使用此规则；bias 不使用直方图裁剪或常数 bin 扩展范围。
-
-已加载的编码与 QAT 期间的固定编码不会被扩张。
-
-余量以较粗的 bias 分辨率为代价，不能保证任意学习率/训练时长都不饱和；应同时检查
-偏置饱和、梯度与任务指标。可加载经过独立验证的显式编码以采用其他范围策略。
+算子自身提供的通用接口见 [LSTM 集成接口与编码参考](docs/aimet_integration.md)。

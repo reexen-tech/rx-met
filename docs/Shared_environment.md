@@ -1,7 +1,9 @@
 # 公共 CPU/GPU 环境
 
-rx-met 的 CPU/GPU 环境定义和构建脚本由本仓库维护，通过版本标签复用兼容镜像。
-环境版本独立于产品 VERSION。
+本文面向公共 build/runtime 环境的维护者，命令均在仓库根目录执行。
+操作顺序为：确认版本和变体 → 构建或复用环境 → 验收 → 按需导出归档 → 产品验收。
+rx-met 的环境定义和构建脚本由本仓库维护，环境版本独立于产品 VERSION。
+应用包组装见[应用包发布](Release_packaging.md)，安装现成应用见[用户使用指南](User_guide.md)。
 
 ## 版本与复用
 
@@ -11,8 +13,8 @@ rx-met 的 CPU/GPU 环境定义和构建脚本由本仓库维护，通过版本�
 调整基础镜像、Python、CUDA、PyTorch、ORT 等环境定义后，再改为调整当月的版本。
 
 公共 CPU 环境统一使用 PyTorch `2.9.1+cpu`、torchvision `0.24.1+cpu` 和
-torchaudio `2.9.1+cpu`，ONNX Runtime 保持 `1.23.2`。该组合已完成 rx-met
-三个 wheel 的源码构建和安装，并通过 42 项 CPU PTQ/ONNX 测试。
+torchaudio `2.9.1+cpu`，ONNX Runtime 保持 `1.23.2`。rx-met 的三个项目 wheel
+需在匹配的环境中从源码构建，并完成安装与 CPU PTQ/ONNX 验证。
 切换 Torch 版本后必须从源码重新编译原生扩展，不能复用旧 Torch 构建的 wheel。
 镜像提供可覆盖的 `HOME=/tmp`、`USER=rx-quant` 和 `LOGNAME=rx-quant` 默认值，
 支持使用宿主机数值 UID/GID 运行，无需为每个用户写入镜像内的 passwd。
@@ -34,8 +36,8 @@ torchaudio `2.9.1+cpu`，ONNX Runtime 保持 `1.23.2`。该组合已完成 rx-me
 一个月份版本对应一套固定的环境定义。依赖、ABI 或工具链变化时使用新的环境版本，
 并重新完成环境与应用包验收。真实构建时间、来源提交和镜像 ID/摘要独立记录，环境版本不从当前时间生成。
 
-当前 `202610` 尚未正式交付，允许本次内部更新在该版本下重建全部变体。
-完成最终镜像、产品流程和离线归档验收后再冻结为交付基线；正式交付后不再原地替换该基线。
+环境版本冻结为交付基线前，须完成最终镜像、产品流程和离线归档验收；
+正式交付后不再原地替换该基线，旧的 `v1` 等环境产物保留用于回退。
 
 ## 构建材料
 
@@ -59,8 +61,19 @@ python3 scripts/environment/common.py digest
 
 ## 构建与验收
 
+构建宿主机需有 Python 3.10 或更新版本、Docker Buildx，并能运行 Linux amd64 容器。首次构建还需
+获取基础镜像、系统包及缺少的 Python wheel；已有兼容镜像时可直接复用或复验。
+使用 `--gpu` 验收的宿主机还需可用的 NVIDIA GPU、驱动和 Container Toolkit。
+
 ```bash
 ./scripts/environment/build.sh --gpu cu126
+```
+
+`build.sh` 会在构建或复用镜像后，自动验收该变体的 build 和 runtime 两种角色。
+`--gpu` 还会验证实际 CUDA 运算；不带该参数仍检查依赖、导入和源码生命周期，
+但不验证 GPU 运算。已有镜像需要独立复验时执行：
+
+```bash
 ./scripts/environment/verify.sh --gpu cu126
 ```
 
@@ -68,50 +81,33 @@ python3 scripts/environment/common.py digest
 
 ```bash
 ./scripts/environment/build.sh cpu
-./scripts/environment/verify.sh cpu
 ```
 
 `--wheelhouse-dir DIR` 可以指定本地依赖缓存，按 cpu/cu118/cu126/cu130 分目录。
 缓存中的 wheel 必须与依赖定义匹配。build 不自动导出镜像。
 
-暂存依赖时，`onnxsim==0.7.0` 的已核对源码会应用退出引用修复：将
-`_model_executor` 的类型注解延迟为字符串，避免 `typing` 缓存间接保留原生 executor。
-该修复由 `scripts/environment/patch_onnxsim_wheel.py` 检查源文件 SHA-256 后执行，
-为 wheel 添加 `1rxmet` build tag，重写 `WHEEL` / `RECORD`，并更新依赖缓存校验清单；
-包版本和原生扩展保持不变。未知源码会报错，不能静默套用补丁。
-
-四个变体的 Torch 已核对源码都会应用 FX 生成源码缓存的生命周期修复：
-CPU 为 `2.9.1` / `2.9.1+cpu`，`cu118` 为 `2.7.1` / `2.7.1+cu118`，
-`cu126` 为 `2.8.0` / `2.8.0+cu126`，`cu130` 为 `2.10.0` / `2.10.0+cu130`。
-自动生成的唯一文件名由编译代码对象持有，最后一个代码对象
-及其 traceback 释放后，才回收对应源码；仍存活的函数、生成器和 traceback 可以继续查阅源码。
-显式文件名和 profiler 内容哈希保留 Torch 原有缓存语义。fork 子进程保守保留继承的源码快照，
-子进程新编译的源码继续正常回收，避免在 fork 前引入跨组件锁顺序。
-`scripts/environment/patch_torch_wheel.py` 同样校验源文件和修复模块的 SHA-256，添加
-`1rxmet` build tag 并重写 wheel 元数据，不升级 Torch、CUDA，也不修改原生库或 ABI。
-已审核版本的源文件不匹配时会报错，避免把补丁应用到未经核对的源码。
-其他 Torch 版本会警告且不自动修改源码，随后仍须通过真实 FX 行为验收。
-该修复针对自动生成的 FX 源码生命周期，不宣称消除所有 Torch 缓存。
-
-环境验收在独立进程中按 Torch、onnxsim 的顺序导入，执行三次真实常量折叠并检查
-ONNX 和 ORT 输出。等待解释器正常退出后，还会检查完整 stderr 中的 nanobind 泄漏告警；
-退出码为 0 不足以通过此项检查。
-四个配置变体都必须检查真实 GraphModule 的函数输出、重复追踪后的 FX 缓存释放，
-以及存活代码和 traceback 的源码可用性。验收不因 Torch 版本未知而 `SKIP`，
-也不要求特定私有补丁模块或类型；上游实现满足这些行为即可通过此项检查。
-已有镜像的复用规则不变，源码修改不会修补现有镜像；受影响的旧镜像会在新增验收中报错。
-发布时须按环境版本规则构建并验收修复后的环境，不能用产品运行时修改依赖私有状态代替。
+依赖暂存时会对已核对源码应用补丁，环境验收还检查常量折叠和 FX 源码生命周期；
+具体条件见[依赖补丁与专项验收](#依赖补丁与专项验收)。源码修改不会修补已有镜像，
+复用的环境也须通过当前验收。
 
 ## 离线导出与加载
 
-```bash
-./scripts/environment/export_runtime.sh cu126
-./scripts/environment/load.sh --directory /path/to/rx-quant-env-202610 cu126
+在有镜像的机器上导出 runtime。下面显式指定交付目录，使加载命令可以使用同一目录名：
 
-# 开发构建环境可独立导出、加载；all 同时处理 build 和 runtime。
-./scripts/environment/export.sh --role all --output-dir /path/to/rx-quant-env-202610 cu126
-./scripts/environment/load.sh --role all --directory /path/to/rx-quant-env-202610 cu126
+```bash
+./scripts/environment/export_runtime.sh --output-dir ./rx-quant-env-202610 cu126
 ```
+
+将该目录复制到目标机器的仓库根目录后执行加载命令。目标机器需有 Docker 和 Python 3；
+安装现成应用包时，可以直接由应用安装器加载归档。
+
+```bash
+./scripts/environment/load.sh --directory ./rx-quant-env-202610 cu126
+```
+
+归档目录放在其他位置时，将参数换成实际路径。
+交付开发环境时，改用 `export.sh --role all` 导出 build 与 runtime，并在加载时同样传入
+`--role all`。只交付 build 镜像时，两边均使用 `--role build`。
 
 导出和加载省略变体时同样仅处理 CUDA；CPU 使用显式参数，例如
 `./scripts/environment/export_runtime.sh cpu`。
@@ -127,17 +123,20 @@ NumPy 和完整的 Python、系统依赖清单。README 说明文件用途、校
 已有归档和独立 `.sha256` 保留，加载时仍兼容旧校验清单。
 产品应用归档继续使用 `.tar.gz`，Docker 镜像归档使用 `.docker.tar.gz`，加载方式为 `docker load`。
 这些文件属于构建输出，不写回仓库配置。
+归档首次生成时还会保留 `.<归档文件名>.lock` 隐藏文件，供后续导出互斥使用；
+它不参与归档校验，也不是加载或安装的必需材料。
 
-需要导入环境时，只提供镜像归档即可；同名 `.json` 和 `.sha256` 均为辅助文件，
-缺失不会阻止安装。存在校验文件时检查其 SHA-256；没有时检查归档完整性。
-Docker 负责加载镜像内容，导入后检查实际镜像的环境元数据。
-已有兼容版本标签时直接复用。
+`load.sh` 需要 `--directory`，但已有兼容版本标签时直接复用，不读取归档。
+需要导入时，只提供镜像归档即可，同名 `.json` 和 `.sha256` 均为辅助文件。加载脚本优先核对
+同名 `.sha256` 或旧 `SHA256SUMS`，两者均不存在时可使用 `.json` 中记录的 SHA-256。
+没有记录可核对时仍可由 Docker 加载；导入后始终检查实际镜像的环境元数据。
 旧的无标签归档可以根据本次 docker load 返回的镜像引用验证并补齐版本标签。
 
 产品发布使用 `--with-env` 时，将 runtime 归档放入产品目录平级的
 `<环境名>-<环境版本>/`，后续应用发布可以复用该目录。
 内部构建还可以通过 `--build-env-dir DIR` 与 `--runtime-env-dir DIR` 导入环境。
-用户通常直接运行应用包 install.sh；应用包要求环境版本标签，不锁定某次构建的镜像 ID。
+用户通常直接运行应用包的 `install.sh`。应用包要求兼容的环境版本，归档的安装校验规则见
+[环境标签与文件校验](Release_packaging.md#环境标签与文件校验)。
 
 已有归档经过完整性检查后复用，损坏归档报错，不自动覆盖。
 兼容环境的重新导出文件可以继续用于同一应用包，归档文件校验值独立维护。
@@ -155,3 +154,41 @@ Docker 负责加载镜像内容，导入后检查实际镜像的环境元数据�
 GraphModule 生命周期检查、产品流程和重复运行检查。导出归档后还须重新加载并复验，
 核对归档校验值与实际加载的镜像，避免把旧缓存归档作为新环境交付。
 这些检查完成前不能仅凭环境标签、依赖版本或单元测试宣布基线验收通过。
+
+## 依赖补丁与专项验收
+
+以下机制由依赖暂存和环境验收工具执行。调整依赖或排查专项验收失败时，需要核对
+补丁适用的源码版本与可观察行为。
+
+### onnxsim 退出引用
+
+暂存依赖时，`onnxsim==0.7.0` 的已核对源码会应用退出引用修复：将
+`_model_executor` 的类型注解延迟为字符串，避免 `typing` 缓存间接保留原生 executor。
+该修复由 `scripts/environment/patch_onnxsim_wheel.py` 检查源文件 SHA-256 后执行，
+为 wheel 添加 `1rxmet` build tag，重写 `WHEEL` / `RECORD`，并更新依赖缓存校验清单；
+包版本和原生扩展保持不变。未知源码会报错，不能静默套用补丁。
+
+环境验收在独立进程中按 Torch、onnxsim 的顺序导入，执行三次真实常量折叠并检查
+ONNX 和 ORT 输出。等待解释器正常退出后，还会检查完整 stderr 中的 nanobind 泄漏告警；
+退出码为 0 不足以通过此项检查。
+
+### Torch FX 源码生命周期
+
+四个变体的 Torch 已核对源码都会应用 FX 生成源码缓存的生命周期修复：
+CPU 为 `2.9.1+cpu`，`cu118` 为 `2.7.1+cu118`，
+`cu126` 为 `2.8.0` / `2.8.0+cu126`，`cu130` 为 `2.10.0` / `2.10.0+cu130`。
+自动生成的唯一文件名由编译代码对象持有，最后一个代码对象
+及其 traceback 释放后，才回收对应源码；仍存活的函数、生成器和 traceback 可以继续查阅源码。
+显式文件名和 profiler 内容哈希保留 Torch 原有缓存语义。fork 子进程保守保留继承的源码快照，
+子进程新编译的源码继续正常回收，避免在 fork 前引入跨组件锁顺序。
+`scripts/environment/patch_torch_wheel.py` 同样校验源文件和修复模块的 SHA-256，添加
+`1rxmet` build tag 并重写 wheel 元数据，不升级 Torch、CUDA，也不修改原生库或 ABI。
+已审核版本的源文件不匹配时会报错，避免把补丁应用到未经核对的源码。
+其他 Torch 版本会警告且不自动修改源码，随后仍须通过真实 FX 行为验收。
+该修复针对自动生成的 FX 源码生命周期，不宣称消除所有 Torch 缓存。
+
+四个配置变体都必须检查真实 GraphModule 的函数输出、重复追踪后的 FX 缓存释放，
+以及存活代码和 traceback 的源码可用性。验收不因 Torch 版本未知而 `SKIP`，
+也不要求特定私有补丁模块或类型；上游实现满足这些行为即可通过此项检查。
+受影响的旧镜像会在新增验收中报错。发布时须按环境版本规则构建并验收修复后的环境，
+不能用产品运行时修改依赖私有状态代替。

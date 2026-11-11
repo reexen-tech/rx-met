@@ -1,6 +1,10 @@
-# 通用循环算子集成接口
+# QuantLSTM 集成接口与编码参考
 
-QuantLSTM 的集成逻辑在本仓库维护，`pytorch/lstm_aimet.py` 通过 mixin 提供
+本文定义 QuantLSTM 的集成方法、配置生命周期和部署编码协议，面向算子集成与维护。
+在 rx-met 中使用整模型量化时，从[循环算子接入](../../../docs/QuantLSTM_integration.md)
+进入统一流程；独立使用的前向、校准和保存示例见[算子 README](../README.md)。
+
+QuantLSTM 的集成逻辑在本算子目录维护，`pytorch/lstm_aimet.py` 通过 mixin 提供
 QuantGRU 同名的公共方法。安装 AIMET 时可选用其运行日志；独立 wheel 无需 AIMET，
 缺少日志模块时使用本地回退。工具包只需注册类、ONNX 类型和导出 hook，遍历模块
 后调用公共方法，不解析 LSTM 内部量化点。
@@ -42,11 +46,15 @@ QuantGRU 同名的公共方法。安装 AIMET 时可选用其运行日志；独�
 格式，相同配置可重复加载；改变已校准配置前必须显式 `reset_calibration()`。
 该操作同时清除锁。QAT 沿用已校准参数，不应在每个训练迭代重新进入校准上下文。
 
+以下片段接续已加载浮点权重的 `module`；`restored` 是相同结构、设备和 FP32 dtype
+的新实例，CPU 实例需处于 `eval()`。公共 encoding 只恢复网格，主权重单独复制：
+
 ```python
 module.load_bitwidth_config("stage.json")
 with module.calibration_context():
     module(calibration_batch)
 encodings = module.export_quant_params_to_aimet_format({}, module_name="encoder.lstm", for_onnx=False)
+restored.load_state_dict(module.state_dict())
 restored.load_quant_params_from_aimet_format(encodings, module_name="encoder.lstm")
 restored.use_quantization = True
 restored.set_quant_params_locked(True)
@@ -109,9 +117,11 @@ zero point 为 `-103`。默认 Po2 转换后 scale 为 `0.0625`、zero point 为
 
 部署编码与 QuantGRU / rx-met `export_onnx_json()` 使用相同的记录结构：
 
-- 顶层结构沿用已有 QuantGRU：`schema_version: 3`、`activation_encodings` 和
-  `param_encodings`。rx-met 导出器中的 `version: "1.0.0"` 来自 AIMET；算子不新增或
-  改写该字段，不新增 LSTM 专有顶层区段。
+- 直接向空字典导出时，算子沿用 QuantGRU 的 `schema_version: 3`、
+  `activation_encodings` 和 `param_encodings`。rx-met 的 `export_onnx_json()`
+  最终输出公共编译器格式 `schema_version: 4` 的 `.json`，合并原生编码时保留该版本。
+  rx-met 导出器中的 `version: "1.0.0"` 来自 AIMET；算子不新增或改写该字段，
+  不新增 LSTM 专有顶层区段。
 - 每条编码包含 `dtype`、整数 `bitwidth`、字符串 `is_symmetric`（`"True"` / `"False"`）、
   `enc_type`、`scale`、`n`、`zero_point`、`real_min`、`real_max`；不输出原生 `symmetric` 字段。
   `n = round(-log2(scale))` 与 scale 保持相同标量或数组形状；加载时校验已提供的 n。
@@ -135,10 +145,17 @@ zero point 为 `-103`。默认 Po2 转换后 scale 为 `0.0625`、zero point 为
 - ONNX 的 B 合并 bias_ih/bias_hh，要求两者 dtype、symmetric 一致。与 GRU 相同，
   阶段保存和 ONNX 导出使用相同布局，`for_onnx=False` 也适用这一约束。需要保存
   不同 bias 位宽时，使用算子独立的原生 `export_quant_params()` 接口。
+  `bias=False` 时 ONNX 省略可选 B 输入，`param_encodings` 不写 bias；真实存在且全零的
+  bias 仍需要编码。
 - 每个模块仍导出为一个标准 ONNX `LSTM` 节点，双向通过 `direction="bidirectional"`
   表示。内部量化点只写入配套编码文件，不展开成 ONNX 子图。
 - 导出 hook 应在常量折叠后运行；参数必须是 initializer。共享常量会复制，
   保留其他消费者的输入；重复归一化不改变结果。
+
+上述完整整数范围同时适用于 CPU/CUDA、QAT 饱和掩码和导出。旧版 LSTM 编码若使用
+窄范围下界，需保留 scale/zero_point，按完整范围重新导出并更新算子库；只替换 JSON
+不能使旧运行库自动采用新语义。原生扩展更新条件见
+[升级说明](installation.md#21-升级已有安装)。
 
 例如，一个内部量化点采用以下结构（数值仅作结构示例）：
 
@@ -175,6 +192,7 @@ bias，将 ONNX 的 IOFC 顺序还原为 IFGO，结合 `internal_ops` / `interna
 
 标准 ONNX 图表达浮点计算，整数部署需要消费配套编码，并支持 LSTM 的量化点和
 各方向的状态网格。与 GRU 对齐的是编码结构，不是两个算子的内部计算语义。
+编码文件不包含模型主权重，必须与同次保存的权重配套恢复。
 
 ## 验证
 
@@ -184,5 +202,7 @@ h/c 网格、公共编码直接回读、非法记录拒绝及共享 ONNX initial
 8/16 位有符号/无符号、三种校准方法、双向与深拷贝、文件加载后的舍入及 zero point
 限幅；保留 signed symmetric 校准跨度和完整负端范围的回归。
 该测试也已加入 `tools/run_end_to_end_test.sh`。rx-met 中的
-`tests.test_native_recurrent_state` 另行覆盖 GRU/LSTM 关闭量化、混合启用状态、阶段
+`tests/recurrent/test_state.py` 另行覆盖 GRU/LSTM 关闭量化、混合启用状态、阶段
 恢复、严格加载、ONNX 配套编码及 GRU 非对称 Po2 对照。
+导出回归比较 GRU/LSTM 的公共顶层字段，检查各层级没有原生元数据、参数数组与
+ONNX W/R/B 尺寸一致，并从公共编码直接验证恢复后的输出。

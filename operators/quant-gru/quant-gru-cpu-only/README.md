@@ -3,8 +3,9 @@
 本目录提供独立的 C++17 GRU 定点前向实现，使用 int32 保存量化输入、权重和输出，
 通过移位参数完成重缩放，激活使用 16 段分段线性 LUT。
 
-该参考实现维护自身的 `GRUQuantParams` 和 `shift_*` 参数接口。主 CUDA 实现使用
-`QuantParam` 和按类型派生的重缩放参数，两者通过参数转换和数值对比验证一致性。
+该参考实现维护自身的 `GRUQuantParams` 和 `shift_*` 参数接口，scale 为 `2^-shift`，
+适用于 Po2 网格。主 CPU/CUDA 包使用 `QuantParam` 和按类型派生的重缩放参数，还支持
+affine 网格。比较 Po2 执行结果时需先转换参数，再用相同输入和权重验证数值一致性。
 
 ## 构建和运行
 
@@ -14,7 +15,7 @@
 cmake -S quant-gru-cpu-only \
   -B quant-gru-cpu-only/build -DCMAKE_BUILD_TYPE=Release
 cmake --build quant-gru-cpu-only/build --parallel 2
-ctest --test-dir quant-gru-cpu-only/build --output-on-failure
+(cd quant-gru-cpu-only/build && ctest --output-on-failure)
 ./quant-gru-cpu-only/build/gru_cpu_example
 ```
 
@@ -43,7 +44,7 @@ ctest --test-dir quant-gru-cpu-only/build --output-on-failure
 
 调用方通过 `setRescaleParam()` 设置量化参数，通过 `Run()` 提供量化权重、偏置、
 输入和隐藏状态缓冲区。接入真实模型时，调用方负责填充与输入输出网格一致的 scale、
-移位量、零点和 LUT。
+移位量和零点；`setRescaleParam()` 根据门的输入输出网格生成 LUT。
 
 主模块文档见 [QuantGRU README](../README.md) 和
 [量化计算流程](../docs/GRU量化计算流程.md)。

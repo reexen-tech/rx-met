@@ -12,9 +12,9 @@ Round/Clamp 位置以[量化执行规格](quantized-execution-spec.md)为准。
 | sparse override | `schemas/lstm_quant_override.schema.json` | 构造模块或修改配置时提供用户覆盖项 |
 | resolved config | `schemas/lstm_quant_resolved.schema.json` | C++ resolver 生成的完整执行配置 |
 
-用户可调整的默认配置位于 `config/defaults/`；根目录 `schemas/` 存放文件格式与
-校验规范，通常不需要修改。默认值的唯一来源是
-`config/defaults/lstm_quant_default_v1.json`。解析顺序为：
+默认值来自 `config/defaults/lstm_quant_default_v1.json`，构建 Python wheel 时会
+打包这份文件。使用已安装的 wheel 时，通过 `quant_config` 为实例覆盖默认值。
+算子根目录的 `schemas/` 存放格式校验规范。解析顺序为：
 
 ```text
 default config <- user override -> canonical resolved config
@@ -76,7 +76,7 @@ Python 不补充默认值。`QuantLSTM` 构造函数把 override 原文交给 C+
 原 JSON 字段、结构和版本不变，`dtype` 仍使用 `INTn` / `UINTn`。
 
 Signed 量化在 CPU/CUDA 和 QAT 中均使用完整范围：INT8 `[-128,127]`、
-INT16 `[-32768,32767]`。`is_symmetric=true` 时校准仍使用
+INT16 `[-32768,32767]`。除 bias 的训练余量规则外，signed `is_symmetric=true` 校准使用
 `scale=max_abs/(2^(bitwidth-1)-1)`、`zero_point=0`。导出的 `real_min/real_max`
 由整数上下界、最终 scale 和 zero point 计算；最小负值合法，不应提前截断。
 
@@ -95,6 +95,7 @@ INT16 `[-32768,32767]`。`is_symmetric=true` 时校准仍使用
 将全部量化点设为 16 位，保留各自的 signed/unsigned 设置：
 
 ```python
+import torch
 from quant_lstm import QuantLSTM
 
 module = QuantLSTM(16, 32, device="cuda")
@@ -141,16 +142,24 @@ canonical resolved config 时会移除，因此 `get_quant_config()` 不返回�
 
 ### 4.1 方法
 
-构造参数 `calibration_method` 接受：
+构造参数 `calibration_method` 默认是 `"minmax"`，接受以下值：
 
 | 方法 | 行为 |
 | --- | --- |
 | `minmax` | 使用全部观测值的最小值和最大值 |
-| `percentile` | 使用 2,048-bin histogram 的中心 `99.99%` 范围 |
+| `percentile` | 使用 2,048-bin histogram 的中心百分位范围，`percentile_value` 默认 `99.99` |
 | `sqnr` | 在 histogram 候选范围中选择量化噪声最小的范围 |
 
-候选范围仍通过统一 MinMax、minimum-scale fallback、可选 POT2 CoverRange 和执行参数
-派生链生成最终 standard scale/zp。方法不改变外部参数格式。
+非 bias 量化点的候选范围通过统一 MinMax、minimum-scale fallback、可选 POT2
+CoverRange 和执行参数派生链生成最终 standard scale/zp。`bias_ih/bias_hh` 不进行
+直方图裁剪，三种方法均从原始观测范围生成带训练余量的独立网格：
+`scale=max(2*max_abs,0.01)/qmax`、`zero_point=0`；POT2 将该 scale 向上取整到
+2 的整数次幂。加载参数不会再次加入余量。公式与适用阶段见
+[Bias 校准规格](quantized-execution-spec.md#55-bias-校准与训练余量)。
+校准方法不改变外部参数格式。
+
+`module.percentile_value` 接受 `(0, 100]` 的有限数值。修改它或
+`calibration_method` 时，只有值发生变化才重置校准参数及参数锁。
 
 正式校准需要使用来自目标训练或推理分布的代表性数据。随机 tensor 只适用于接口
 冒烟测试，不能作为模型精度校准数据。
@@ -165,7 +174,9 @@ empty --collect--> dirty --finalize--> locked
   +------------- reset -------------+
 ```
 
-典型单向流程：
+以下流程接续已创建的 `module`。先加载模型的浮点权重，再准备同设备的
+`calibration_batches`；每项是 `(inputs, state)`，其中 `state` 可以是
+`(h_0, c_0)` 或 `None`（零初始状态）。CPU 模块先调用 `module.eval()`。
 
 ```python
 module.reset_calibration()
@@ -200,9 +211,12 @@ CPU wheel 复用 C++ 浮点 reference 的输出与 trace 进行校准，各量�
 不会生成训练 checkpoint，实际跨算子的反向传播会明确报错，也不会作为 CUDA wheel 的隐式 fallback。
 
 校准会话的 `locked` 状态与 `set_quant_params_locked(True)` 的参数锁分开管理。
-`calibration_context()` 默认开始一轮新校准，正常退出时完成 finalization，异常时恢复
-`calibrating` 标志；只有显式参数锁才使该上下文跳过已有网格。`reset_calibration()`
-会同时清除参数、校准范围缓存和参数锁。
+`calibration_state()` 查询收集会话；单向返回状态字符串，双向返回包含 `forward`
+和 `reverse` 状态的字典。从参数文件加载后各会话为 `empty`，但
+`is_calibrated()` 为 `True`，可以直接启用量化，无需再次收集数据。
+`calibration_context()` 默认开始一轮新校准，正常退出时为实际收集到数据的模块
+生成参数，异常时恢复 `calibrating` 标志。参数已锁定或已经处于校准模式时，
+上下文不会启动新会话。`reset_calibration()` 会同时清除参数、校准范围缓存和参数锁。
 
 ### 4.3 校准后转换为 Po2
 
@@ -219,19 +233,18 @@ zero point 为零。校准范围的保留、文件重载后的处理和方法参
 module.export_quant_params("/path/to/quant_params.json")
 ```
 
-新实例可以加载并直接启用量化：
+新实例应保持相同的形状、布局、方向和 bias 配置，并同时恢复主权重与量化参数。
+以下代码接续前面的 `QuantLSTM(16, 32, device="cuda")`，先复制其权重，再加载参数文件：
 
 ```python
-restored = QuantLSTM(
-    16,
-    32,
-    batch_first=True,
-    bidirectional=False,
-    device="cuda",
-)
+restored = QuantLSTM(16, 32, device="cuda").eval()
+restored.load_state_dict(module.state_dict())
 restored.load_quant_params("/path/to/quant_params.json")
 restored.use_quantization = True
 ```
+
+量化参数文件不包含模型主权重。跨进程恢复时，从同次保存的 `state_dict` 加载权重；
+完整保存和重载示例见[算子 README](../README.md#保存与重载)。
 
 算子独立的原生检查点使用 schema v1。下列字段不写入 rx-met 提供给编译器的
 encodings；rx-met 的导出和回读格式见 [通用循环算子集成接口](aimet_integration.md)。
@@ -253,6 +266,10 @@ encodings；rx-met 的导出和回读格式见 [通用循环算子集成接口](
 }
 ```
 
+CPU wheel 也沿用 `carrier: "cuda_fp32_qcarrier"` 这一格式标识以兼容原生 schema v1；
+它不表示该次执行使用了 CUDA。实际设备由所安装的 CPU/CUDA extension 及输入 tensor
+决定，CPU binding 不执行 cuBLAS，`cublas_math_mode` 字段仅随参数文档保留。
+
 每个 operator 使用：
 
 ```json
@@ -273,7 +290,9 @@ encodings；rx-met 的导出和回读格式见 [通用循环算子集成接口](
 必须缺失。
 
 参数文档以 standard scale/zp 定义量化网格，不保存原始校准统计、raw ratio、
-M+shift、POT2 shift 或 Q31 编码。加载时 Python adapter 转换为内部 canonical bundle，C++ 随后审计 shape、
+M+shift、POT2 shift 或 Q31 编码。公开 JSON 的 scale 使用数值，Python adapter
+将其舍入到 FP32 并转换为内部 canonical bundle 的规范字符串；无需在公开文件中
+使用该字符串表示。C++ 随后审计 shape、
 数值范围、scale、zero point 和执行安全性，并重新派生执行编码。
 
 ## 6. 加载时机与失效规则
@@ -281,9 +300,10 @@ M+shift、POT2 shift 或 Q31 编码。加载时 Python adapter 转换为内部 c
 | 操作 | 校验时机 | 对已有校准参数的影响 |
 | --- | --- | --- |
 | 构造 `QuantLSTM` | 构造期间解析 override | 创建空校准状态 |
+| `load_quant_config()` | 调用期间重新运行 resolver | 相同配置保留参数；已有参数时拒绝不同配置，须先 `reset_calibration()` |
 | `adjust_quant_config()` | 调用期间重新运行 resolver | 失效 |
 | `set_all_bitwidth()` | 调用期间重新运行 resolver | 失效 |
-| 修改 `calibration_method` | property 赋值期间验证 | 失效 |
+| 修改 `calibration_method` / `percentile_value` | property 赋值期间验证 | 值变化时失效 |
 | `reset_calibration()` | 立即执行 | 清除参数、参数锁、校准范围缓存和 safety report |
 | `finalize_calibration()` | finalization 期间派生并审计 | 生成参数及校准范围缓存，锁定当前收集会话 |
 | `enable_pot2()` | 转换后经原生加载器审计 | 更新已有 scale/zp 和实数范围；受参数锁保护 |
@@ -303,10 +323,10 @@ scale、zero point 和位宽，不按 epoch 重新校准。浮点主权重继续
 - 在 CPU 算子上执行反向传播；
 - 未知 operator/字段、非法位宽、非法固定值或 compact 参数向量；
 - 双向文档缺失 reverse 参数或两个方向的 input 网格不同；
-- scale 非有限、非正或不是 canonical FP32；
-- 内部 shift 越界、整数载体无法证明安全或可能产生 Inf/NaN；
-- `require_exact_accumulation=True` 时任一 FP32 整数运算超过精确范围。
+- scale 非有限、非正，或转换后不能表示为有限正 FP32；内部 bundle 另需符合 canonical FP32 字符串格式；
+- 内部 shift 越界、所选执行路径无法通过数值安全审计或可能产生 Inf/NaN；int32 reference 另需通过宽整数溢出证明；
+- `require_exact_accumulation=True` 时，FP32 整数运算的数值审计上界达到或超过 `2^24`。
 
-普通模式下，超过 FP32 精确整数范围但仍有限的配置允许继续执行。接口会发出
+普通模式下，达到该阈值但仍有限的配置允许继续执行。接口会发出
 `RuntimeWarning`，并在 safety report 中记录 `precision_risk`。该告警不会切换到
 CPU、int32 或浮点 LSTM fallback；调用方需要通过精度门禁判断该配置是否可接受。

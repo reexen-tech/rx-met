@@ -12,8 +12,8 @@ ONNX 的 time-major `Y=[T,D,B,H]`。
 
 ## 2. 使用方式
 
-导出要求当前 Python 环境已经构建 `_quant_lstm` extension，并安装 `torch`、`onnx`
-和 `onnxruntime`。以下代码从仓库根目录执行，输出文件为
+导出要求当前 Python 环境已经安装 `_quant_lstm` extension、`torch` 和 `onnx`。
+使用 ONNX Runtime 比较数值时另需安装 `onnxruntime`。以下代码从算子根目录执行，输出文件为
 `quant_lstm.onnx`：
 
 ```python
@@ -97,7 +97,7 @@ forward、reverse。`bias=False` 省略 ONNX 的可选 B 输入，也不生成 b
 ## 4. rx-met 的配套编码
 
 上述独立导出示例生成浮点 ONNX。rx-met 用户使用工具包的 `export_onnx_json()`
-生成 ONNX 与 `.encodings` 配对文件：每个 QuantLSTM 仍对应一个标准 `LSTM` 节点，
+生成 ONNX 与 `.json` 配对文件：每个 QuantLSTM 仍对应一个标准 `LSTM` 节点，
 内部激活量化点放在 `activation_encodings`，W/R/B 对应编码放在 `param_encodings`。
 层名称、参数名称和 IOFC 门顺序由算子导出接口与工具包共同对齐。
 
@@ -106,7 +106,8 @@ h0/h 使用各方向的 `output` 网格，c0/c 使用 `cell_state` 网格，均�
 文件；即使模块此前已经校准，也按当前量化开关处理。
 
 算子独立的 `export_quant_params()` 生成原生参数检查点，包含模型和执行信息。
-编译器使用 rx-met 导出的公共 `.encodings`；具体字段、参数打包和回读规则见
+编译器使用 rx-met 导出的公共 `.json`；AIMET 原始 `.encodings` 是导出中间文件。
+具体字段、参数打包和回读规则见
 [循环算子集成接口](aimet_integration.md#编码与-onnx)。
 
 ## 5. 验收

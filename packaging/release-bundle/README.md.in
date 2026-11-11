@@ -8,12 +8,13 @@
 
 ## 步骤 1：安装
 
-宿主机需要 Linux x86_64、Docker、NVIDIA Container Toolkit 和兼容的 NVIDIA 驱动，
-以及 Bash、gzip、flock 等常用工具。
+宿主机需要 Linux x86_64、Docker，以及 Bash、gzip、flock 等常用工具。
+CUDA 运行环境还需要 NVIDIA Container Toolkit 和兼容的 NVIDIA 驱动；CPU 运行环境无需 GPU。
 无需在宿主机安装 Python 或 CUDA Toolkit。
 
 | 运行环境 | CUDA | Python | 最低驱动 |
 | --- | --- | --- | --- |
+| cpu | 无 | 3.10 | 无需 NVIDIA 驱动 |
 | cu118 | 11.8 | 3.10 | 520.61.05 |
 | cu126 | 12.6 | 3.10 | 560.35.05 |
 | cu130 | 13.0 | 3.12 | 580.126.20 |
@@ -39,7 +40,8 @@ GPU 运行环境支持 sm_80/86/89/90，cu130 另支持 sm_120。当前产品包
 
 | 示例 | 模型目录内容 | 数据目录内容 |
 | --- | --- | --- |
-| KWS（GRU / LSTM） | 无需预先准备，示例会执行浮点训练 | 已解压的 `speech_commands_v0.02/`，包含 `yes/`、`no/`、`_background_noise_/` 等目录 |
+| KWS（GRU / LSTM，CUDA 完整流程） | 无需预先准备，示例会执行浮点训练 | 已解压的 `speech_commands_v0.02/`，包含 `yes/`、`no/`、`_background_noise_/` 等目录 |
+| KWS（CPU / CUDA PTQ） | 与所选 GRU / LSTM 对应的浮点检查点 `model_fp_kws.pth` | 同上，或复用固定的校准、验证样本 |
 | ONNX PTQ | `mobilenetv2-12.onnx` | `imagenette2-320.parquet` |
 
 没有现成数据时，可按 [examples/README.md](examples/README.md) 准备公开示例输入。
@@ -61,13 +63,21 @@ cp -a examples "$HOME/rx-met-user/"
 并提前在宿主机创建这些目录。
 
 ```bash
+gpu_args=()
+example_device=cpu
+if [[ @VARIANT@ != cpu ]]; then
+  gpu_args=(--gpus device=0)
+  example_device=cuda
+fi
+
 docker run --rm -it --pull=never --shm-size=2g \
   --user "$(id -u):$(id -g)" \
   -e HOME=/tmp \
   -e USER="$(id -un)" -e LOGNAME="$(id -un)" \
   -w /workspace \
   -e PYTHONPATH=/opt/rx-met/python \
-  --gpus device=0 \
+  -e RX_MET_EXAMPLE_DEVICE="$example_device" \
+  "${gpu_args[@]}" \
   -v "$HOME/.local/share/rx-met/@BUNDLE_NAME@:/opt/rx-met:ro" \
   -v "/path/to/models:/models:ro" \
   -v "/path/to/datasets:/datasets:ro" \
@@ -80,13 +90,24 @@ docker run --rm -it --pull=never --shm-size=2g \
 
 ### KWS：GRU 或 LSTM
 
-默认执行浮点训练和 QAT，各运行 1 epoch：
+CUDA 完整流程默认执行浮点训练和 QAT，各运行 1 epoch：
 
 ```bash
 python3 /workspace/examples/quick_start_kws.py --rnn_type gru
 ```
 
 运行 LSTM 时将 `gru` 改为 `lstm`。
+
+CPU 仅支持校准与 PTQ，需要先把对应的浮点检查点放入宿主机模型目录，再执行：
+
+```bash
+python3 /workspace/examples/quick_start_kws.py --rnn-type gru --device cpu --ptq-only \
+  --fp-checkpoint /models/model_fp_kws.pth \
+  --data-dir /datasets/speech_commands_v0.02
+```
+
+CUDA 也支持此模式，将 `--device cpu` 改为 `--device cuda`。复用固定校准与验证样本时，
+使用 [示例说明](examples/README.md) 中的 `--calib-dir` 和 `--validation-dir`。
 
 ### ONNX PTQ
 
@@ -99,21 +120,23 @@ python3 /workspace/examples/prepare_onnx_ptq_data.py \
   --parquet /datasets/imagenette2-320.parquet
 
 # 量化
-python3 /workspace/examples/quick_start_onnx_ptq.py
+python3 /workspace/examples/quick_start_onnx_ptq.py --device "$RX_MET_EXAMPLE_DEVICE"
 ```
 
 后续输入不变时，可直接执行量化命令。
 
 ### 查看结果和再次运行
 
-两个示例的日志包含“量化流程完成”且退出码为 0，即表示运行成功。
+进程退出码为 0 且本次任务目录中 `run.json` 的 `status` 为 `success`，表示流程完成。
+完整流程日志包含“量化流程完成”，KWS PTQ 模式日志包含“PTQ-only 完成”。
 
 | 示例 | 宿主机输出目录 |
 | --- | --- |
-| KWS GRU / LSTM | `$HOME/rx-met-user/output/quick_start_kws/gru/` 或 `lstm/` |
-| ONNX PTQ | `$HOME/rx-met-user/output/onnx_ptq_quick_start/` |
+| KWS GRU / LSTM | `$HOME/rx-met-user/output/quick_start_kws/<gru或lstm>/<execution-id>/` |
+| ONNX PTQ | `$HOME/rx-met-user/output/onnx_ptq_quick_start/<execution-id>/` |
 
-目录内保存 ONNX、配套 encodings、检查点或运行 metadata。详细说明见
+每次任务目录分别在 `exports/`、`checkpoints/`、`config/` 中保存导出制品、检查点和配置快照，
+`run.log` 和 `run.json` 记录本次执行。ONNX 必须与同次导出的 JSON 量化参数配套使用。详细说明见
 [examples/README.md](examples/README.md)，量化配置说明见
 [examples/config/README.md](examples/config/README.md)。
 

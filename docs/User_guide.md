@@ -1,76 +1,77 @@
 # rx-met 用户使用指南
 
-本文档说明如何安装应用包、启动匹配的 runtime，并运行 PyTorch 或 ONNX 量化流程。
-文中的版本和命令以当前仓库为准。
-
-相关文档：
-
-- 量化配置详解：[`docs/Quant_config.md`](./Quant_config.md)
-- 构建与发布：[`docs/Release_packaging.md`](./Release_packaging.md)
-- 项目总览：[`README.md`](../README.md)
-
-本仓库面向小模型量化。
+本文档面向使用应用包的用户，说明平台选择、安装、容器启动和量化任务入口。
+应用包已经提供项目 Python 包和原生算子，无需另行编译。完整文档分类见[文档索引](README.md)。
+维护者从源码构建环境和应用包时，阅读[构建与发布](Release_packaging.md)。
 
 ---
 
 ## 1. rx-met 是什么
 
-rx-met 是面向 Linux x86_64 NVIDIA GPU 的**小模型量化工具包**，包含定制
+rx-met 是面向 Linux x86_64 CPU 和 NVIDIA GPU 的**小模型量化工具包**，包含定制
 AIMET（`aimet_torch`、`aimet_onnx`、`aimet_common`）和 QuantGRU、QuantLSTM。项目通过独立
 runtime 镜像提供第三方环境，项目代码由应用包安装后挂载。
 
 | 工作流 | 适用对象 | 底层引擎 | 入口 | 对应章节 |
 |--------|----------|----------|------|----------|
-| **普通模型量化** | CNN / RNN / KWS 等中小模型（PyTorch） | `aimet_torch` | `examples/quick_start_kws.py` | [第 5.2 节](#52-运行示例脚本) |
+| **PyTorch 模型量化** | 已有浮点模型、权重和校准数据 | `aimet_torch` | [自有模型接入教程](PyTorch_quantization.md)；KWS 为可运行实例 | [第 5.1 节](#51-完整流程总览) |
 | **ONNX 直量化 PTQ** | 已有 ONNX、无 PyTorch 训练图 | `aimet_onnx` | `examples/quick_start_onnx_ptq.py` | [第 5.4 节](#54-已有-onnx-模型的-ptq) |
 
 选择原则：
 
-- 模型能在单卡显存内用 PyTorch 训练 / 推理，需要 **QAT、混合精度、Power-of-2 量化、ONNX 导出** → 走「普通模型」流程。
+- 已有 PyTorch 模型、权重和代表性数据 → 走「PyTorch 模型量化」流程；CPU 可用于 PTQ，需要浮点训练或 QAT 时使用 CUDA。
 - 已有 ONNX 模型需要 **PTQ + 编译器 encodings** → 走「ONNX 直量化 PTQ」。
 
 ---
 
 ## 2. 支持平台与版本要求
 
-三个镜像都是 Linux x86_64 GPU 镜像，但 CUDA、Python、Torch 和 ONNX Runtime
-版本不同：
+runtime 提供一个 CPU 变体和三个 CUDA 变体，均面向 Linux x86_64。
+CPU 支持校准与 PTQ；浮点训练和 QAT 使用 CUDA。各变体的依赖如下：
 
-| 镜像变体 | 系统 / Python | CUDA | PyTorch | ONNX Runtime GPU | 严格最低 NVIDIA Driver |
+| 镜像变体 | 系统 / Python | CUDA | PyTorch | ONNX Runtime | 严格最低 NVIDIA Driver |
 |------|------|------|------|------|------|
+| `cpu` | Ubuntu 22.04 / 3.10 | 无 | 2.9.1 CPU | 1.23.2 CPU | 无 |
 | `cu118` | Ubuntu 22.04 / 3.10 | 11.8 | 2.7.1 | 1.20.1 | 520.61.05 |
 | `cu126` | Ubuntu 22.04 / 3.10 | 12.6 | 2.8.0 | 1.23.2 | 560.35.05 |
 | `cu130` | Ubuntu 24.04 / 3.12 | 13.0 | 2.10.0 | 1.27.0 | 580.126.20 |
 
-宿主机需要 Docker、NVIDIA Driver 和 NVIDIA Container Toolkit。镜像已经包含对应
-版本的 CUDA 运行环境。镜像变体由宿主机驱动版本和 GPU 计算能力共同决定；宿主机
+宿主机需要 Bash、GNU coreutils、GNU findutils、`flock`（util-linux），以及通过 Unix socket
+访问本机 daemon 的 Docker CLI；安装器不支持远程 Docker context 或 TCP/SSH
+`DOCKER_HOST`。加载 runtime 归档时还需要 `gzip`，在线下载归档时另需 `curl`。
+离线安装不需要宿主机 Python 或编译器。
+CUDA 变体还需要 NVIDIA Driver 和 NVIDIA Container Toolkit。
+CUDA 镜像已经包含对应版本的 CUDA 运行环境，变体由宿主机驱动版本和 GPU 计算能力共同决定；宿主机
 `nvcc --version` 显示本地 CUDA Toolkit 版本。`cu130` 包含 `sm_120` 目标；
-实验性 ExportedProgram API 适用于 `cu126` 和 `cu130`。
+实验性 ExportedProgram API 适用于 `cu126` 和 `cu130`，与本指南所用的 legacy ONNX
+导出接口不同；普通量化流程无需使用它。
 
-CUDA 版 ONNX Runtime 安装在 runtime 中；QuantGRU 和 QuantLSTM 来自挂载的应用安装目录。ONNX PTQ
-默认要求 `CUDAExecutionProvider`。
+CPU runtime 安装 `onnxruntime`，CUDA runtime 安装 `onnxruntime-gpu`；QuantGRU 和
+QuantLSTM 来自挂载的应用安装目录。ONNX PTQ 示例默认要求 `CUDAExecutionProvider`，
+使用 CPU 时显式指定 `--device cpu` 或 `RX_MET_ONNX_PTQ_DEVICE=cpu`。
+精确依赖及 GPU 架构以 [docker/variants.json](../docker/variants.json) 为准。
 
 ---
 
 ## 3. 加载并启动镜像
 
-当前安装入口是应用包内的 `install.sh`。离线首次交付时，将 `rx-quant-env-202610/`
-公共运行环境目录与 `rx-met-v<版本>/` 产品目录平级放置。在产品目录内解压所选应用包，
-进入解压后的应用包目录安装；也可用 `--runtime-image FILE` 显式指定归档。从源码构建应用包见
-[`Release_packaging.md`](./Release_packaging.md)。
+在宿主机解压所选应用包，进入解压目录后执行 `install.sh`。本机 Docker 已有匹配镜像时，
+安装器会复用它。首次离线安装且缺少镜像时，将 `rx-quant-env-<环境版本>/` 公共运行环境
+目录与存放应用包的 `rx-met-v<版本>/` 产品目录平级放置，或通过 `--runtime-image FILE`
+指定镜像归档。环境与应用包的对应关系见[公共环境](Shared_environment.md)。
 
 ```bash
 ./install.sh --offline
 ```
 
-安装器打印应用目录和公共环境版本标签。将它们填入以下命令，并选择实际分配的 GPU、工作目录和数据目录：
+安装器打印应用目录和公共环境版本标签。先在宿主机创建工作目录，并准备模型与数据目录。
+将实际路径和镜像标签填入以下 CUDA 容器命令；CPU 应用包省略 `--gpus device=0`：
 
 ```bash
-RUNTIME_IMAGE_ID='sha256:替换为安装器输出的镜像ID'
-docker run --gpus device=0 --rm -it \
-  --ipc=host \
+RUNTIME_IMAGE='替换为安装器启动命令中的镜像版本标签'
+docker run --gpus device=0 --rm -it --pull=never \
+  --shm-size=2g \
   --user "$(id -u):$(id -g)" \
-  --group-add "$(stat -c '%g' /path/to/datasets)" \
   -e HOME=/tmp \
   -e USER="$(id -un)" \
   -e LOGNAME="$(id -un)" \
@@ -80,12 +81,13 @@ docker run --gpus device=0 --rm -it \
   -v /path/to/models:/models:ro \
   -v /path/to/datasets:/datasets:ro \
   -w /workspace \
-  "$RUNTIME_IMAGE_ID" bash
+  "$RUNTIME_IMAGE" bash
 ```
 
-`--group-add` 让非 root 容器继承数据目录的只读组权限，适用于 CIFS/NFS
-挂载存储；数据通过 `:ro` 挂载。容器身份由 `--user` 指定，`USER` 和 `LOGNAME`
-用于初始化 PyTorch 缓存目录。
+模型和数据以 `:ro` 挂载；应用目录也保持只读，工作目录用于保存代码和输出。
+容器身份由 `--user` 指定，`USER` 和 `LOGNAME` 用于初始化 PyTorch 缓存目录。
+若 CIFS/NFS 数据需要额外的组权限，可在同一条 Docker 命令中加入
+`--group-add "$(stat -c '%g' /path/to/datasets)"`，让非 root 容器继承数据目录的组权限。
 
 验证环境：
 
@@ -93,9 +95,8 @@ docker run --gpus device=0 --rm -it \
 python3 -c "import torch, aimet_torch, aimet_onnx, quant_gru, quant_lstm; print(torch.__version__, torch.version.cuda)"
 ```
 
-命令退出码为 0，并打印与所选镜像匹配的 PyTorch 和 CUDA 版本，即表示基础环境可用。
-发布镜像已经包含完整运行依赖。开发侧构建见
-[`docs/Release_packaging.md`](./Release_packaging.md)。
+命令退出码为 0，并打印与所选镜像匹配的 PyTorch 和 CUDA 版本，即表示基础环境可用；
+CPU runtime 的 CUDA 版本打印为 `None`。runtime 提供第三方依赖，应用挂载提供项目包。
 
 ---
 
@@ -103,10 +104,13 @@ python3 -c "import torch, aimet_torch, aimet_onnx, quant_gru, quant_lstm; print(
 
 | 变量 / 路径 | 作用 | 适用流程 |
 |-------------|------|----------|
-| `RX_MET_SPEECH_COMMANDS_ROOT` | Speech Commands 数据集根目录，默认 `/datasets/speech_commands_v0.02` | 普通模型 |
+| `RX_MET_SPEECH_COMMANDS_ROOT` | Speech Commands 数据集根目录，默认 `/datasets/speech_commands_v0.02` | KWS 示例 |
+| `RX_MET_KWS_OUTPUT_DIR` | KWS 输出根目录，默认 `./output/quick_start_kws`，自动追加网络类型和运行 ID | KWS 示例 |
+| `RX_MET_KWS_FP_MODEL` | 浮点检查点路径；`--ptq-only` 时必须由此变量或 `--fp-checkpoint` 提供 | KWS 示例 |
 | `RX_MET_ONNX_PTQ_ROOT` | 校准数据根目录，默认 `./output/onnx_ptq_quick_start/datasets` | ONNX PTQ |
 | `RX_MET_ONNX_PTQ_EXAMPLE` | 示例名称，默认 `mobilenetv2` | ONNX PTQ |
 | `RX_MET_ONNX_PTQ_MODEL` / `RX_MET_ONNX_PTQ_CALIB` | 覆盖模型与校准目录 | ONNX PTQ |
+| `RX_MET_ONNX_PTQ_VAL` | 可选验证目录；默认查找校准目录的平级 `val/`，不存在时复用校准样本作数值比较 | ONNX PTQ |
 | `RX_MET_ONNX_PTQ_OUTPUT_DIR` | 输出目录，默认当前运行目录下的 `output/onnx_ptq_quick_start` | ONNX PTQ |
 | `RX_MET_ONNX_PTQ_DEVICE` | `cuda`（默认）或显式设置为 `cpu` | ONNX PTQ |
 | 镜像内示例目录 | `/opt/rx-met/examples` | 两者 |
@@ -116,111 +120,70 @@ python3 -c "import torch, aimet_torch, aimet_onnx, quant_gru, quant_lstm; print(
 
 ## 5. 量化流程
 
-本章基于 `examples/quick_start_kws.py`（Speech Commands + QuantGRU / QuantLSTM 关键词识别），演示 AIMET v2 的完整量化流程。该脚本的 `main()` 内联了标准 AIMET API，可作为接入模板。
+环境可用后，按下面的任务选择入口。示例的数据准备和命令由
+[示例说明](../examples/README.md)维护；自有模型的接入步骤见
+[PyTorch 模型量化](PyTorch_quantization.md)。
 
 ### 5.1 完整流程总览
 
 ```
-FP 训练 → prepare_model → QuantizationSimModel + 混合精度位宽
+已有浮点模型与权重 → prepare_model → QuantizationSimModel + 混合精度位宽
   → compute_encodings 校准 (PTQ)
   → apply_power_of_2_workflow (NPU 友好的 Po2 量化)
-  → freeze_quantizer_parameters + QAT 微调
-  → 保存 state_dict + ONNX + .json 编码文件三件套
-  → 重建 sim → load_state_dict → load_quantizer_encodings → 精度对比
+  → 可选：freeze_quantizer_parameters + CUDA QAT 微调
+  → 分别保存主权重检查点、ONNX 和 .json 编码文件
+  → 重建并加载主权重 → 创建 sim → load_quantizer_encodings → 精度对比
 ```
+
+已有权重可直接进行 PTQ；浮点训练不是量化前必须重复执行的步骤。KWS 完整示例同时演示
+浮点训练与 QAT，CPU 模式使用已有检查点，只执行校准、PTQ、Po2、导出与恢复。
+按[自有模型接入教程](PyTorch_quantization.md)准备模型、数据和评估函数，
+再根据[配置参考](Quant_config.md)调整量化设置。
 
 ### 5.2 运行示例脚本
 
+在容器内将示例复制到可写工作目录；已按发布包 README 在宿主机复制过示例时，直接进入
+`/workspace`。以下路径与[示例说明](../examples/README.md)一致：
+
 ```bash
-cp -a /opt/rx-met/examples /workspace/rx-met-examples
-cd /workspace/rx-met-examples
-export RX_MET_SPEECH_COMMANDS_ROOT=/datasets/speech_commands_v0.02
-python3 quick_start_kws.py --rnn_type gru
-# 选择 LSTM 时使用同一套流程和配置文件
-python3 quick_start_kws.py --rnn_type lstm
+cp -a /opt/rx-met/examples /workspace/
+cd /workspace
 ```
 
-脚本会依次打印 8 个步骤的耗时与精度汇总（浮点 / PTQ / Po2 / QAT / 重载）。命令
-退出码为 0，并输出“量化流程完成（已通过加载验证）”，即表示示例成功。生成文件位于
-`RX_MET_KWS_OUTPUT_DIR` 指定的根目录下，再按 `gru/`、`lstm/` 分开；未设置时使用
-当前运行目录下的 `output/quick_start_kws/<gru|lstm>/`。也可使用 `--output-dir` 指定根目录。
-默认各训练 1 epoch，仅用于学习流程。校准使用无随机增强的训练集，测试集只用于评估。
-检查点记录网络类型，恢复时严格检查权重、同批样本输出与测试精度；失败返回非零退出码。
-可独立阅读并随包交付的完整说明见 [examples/README.md](../examples/README.md)。
+| 任务 | 输入与运行说明 |
+| --- | --- |
+| CUDA 上运行完整 KWS GRU/LSTM 流程 | [KWS 示例](../examples/README.md#kwsgru--lstm)，需要 Speech Commands v0.02 |
+| CPU/CUDA 上只做 KWS 校准与 PTQ | [固定检查点 PTQ](../examples/README.md#只校准和-ptqcpu--gpu)，需要同类型浮点检查点及数据 |
+| ONNX PTQ 公开演示 | [MobileNetV2 两步流程](../examples/README.md#onnx-ptqmobilenetv2)，先准备模型和校准样本，再量化 |
+
+KWS 默认浮点训练和 QAT 各 1 epoch，用于学习流程，不能据此推断充分训练后的精度。
+示例验证重载输出，失败返回非零；产物位置和日志说明见[运行目录与日志](Runtime_outputs.md)。
 
 ### 5.3 配置和一致性
 
-完整 API 示例由 `examples/quick_start_kws.py` 维护，配置字段和最小代码片段见
-[`Quant_config.md`](./Quant_config.md)。用户指南说明两类配置的职责边界：
-
-普通模型采用**双层配置**，详细字段说明见 [`Quant_config.md`](./Quant_config.md)：
+PyTorch 和 ONNX 采用两层配置。下表以 PyTorch 调用为例；完整字段、匹配优先级和校准后的
+修改限制见[PyTorch 配置参考](Quant_config.md)及 [ONNX PTQ 配置说明](ONNX_PTQ_COMPILER.md)。
 
 | 配置 | 传入时机 | 控制内容 | 命名规则 |
 |------|----------|----------|----------|
 | **基础配置（JSON 1）** | 创建 `QuantizationSimModel` 时 | 是否量化、per-channel、对称性 | ONNX 算子名（如 `Conv`、`Gemm`、`Add`） |
-| **阶段配置（JSON 2）** | `apply_mixed_precision_bitwidth` 时 | 各层位宽、输入/输出对称性 | AIMET 量化后类名（如 `QuantizedConv2d`、`QuantizedLinear`） |
+| **混合精度配置（JSON 2）** | `apply_mixed_precision_bitwidth` 时 | 普通层位宽与整数网格、循环层配置 | AIMET 量化后类名或完整模块名；循环层用 `GRU_config` / `LSTM_config` |
 
-`QuantGRU` / `QuantLSTM` 的内部配置分别位于阶段配置的 `GRU_config` /
+`QuantGRU` / `QuantLSTM` 的内部配置分别位于混合精度配置的 `GRU_config` /
 `LSTM_config` 中，普通层共用 `layer_type_config`。两种循环层配置可同时存在，
 模型中的算子读取各自配置。一次 `compute_encodings` 前向同时完成循环层和普通层校准。
 重建 QuantSim 时，`prepare_model` 参数、两份配置、默认位宽和量化方案必须与训练侧
 一致；否则量化器名称或参数会错位。
 
-两侧统一使用 `export_onnx_json()`：PyTorch 入口位于 `aimet_torch.rx_export`，保留
-原参数、默认值和 `(onnx_path, encodings_path)` 字符串元组返回值；ONNX PTQ 入口
-位于 `aimet_onnx.rx_ptq`，返回包含 `onnx`、`encodings`、`aimet_encodings` 和
-`coverage` 的字典。旧 ONNX 名称 `export_onnx_compiler_artifacts()` 也保留原字典
-返回值。两侧最终编译器编码文件名统一为 `{filename_prefix}.json`，共用编码规范化
-和校验，框架相关的图处理分别维护。加载时使用返回路径，避免与 AIMET 原始编码混淆。
-
-PyTorch 多输入模型可将按 `forward` 参数顺序排列的多个 shape、Tensor 或 NumPy 数组
-作为 `dummy_input_shape` 传入。数组输入保留实际值、dtype 和 shape，并自动转到 CPU；
-shape 输入生成浮点零张量。ONNX 输入名由导出器生成，后处理从生成的图读取各输入名和
-静态 shape。单输入模型原有的 shape tuple 调用方式继续可用。例如双输入 Add：
-
-```python
-onnx_path, encodings_path = export_onnx_json(
-    sim, export_dir, "two_input_add",
-    dummy_input_shape=(left_array, right_array),
-)
-```
-
-导出器在所有图后处理和循环算子编码合并完成后，强制校验最终 ONNX
-及 encodings，通过后才返回文件路径。校验以 `sim.model` 中启用的量化器为基准，检查：
-
-- 输入、输出和权重量化编码是否完整，包括输入编号、每个通道及原生 GRU/LSTM 内部编码。
-- 编码字段和值是否与模型一致，scale 是否为正数且有限。
-- 最终 ONNX 的结构和 shape 是否有效、节点名是否重复，以及原生循环层节点是否匹配。
-- 每个浮点计算节点的名称是否对应 activation encoding key；权重输入是否对应 initializer
-  的 parameter encoding key。无法在最终图或简化前图中找到来源的编码 key 也会报错。
-- 直接按 ONNX 输入检查覆盖率：Add/Mul/MatMul 等双浮点输入必须覆盖两路；单输入
-  激活检查一路；Conv/Gemm 的激活和权重分别检查。即使量化器未启用，也不能绕过此检查。
-
-缺少编码、缺少通道、编码值不一致或启用的张量量化器未校准时抛出 `RuntimeError`，
-错误中列出模块及具体字段，例如 `encodings.activation_encodings.module_add.output.0`。
-标量常量以及 shape/index 等非浮点输入无需编码；简化消除的节点可以保留有原始图来源
-的编码。关闭量化的计算输入如果仍出现在最终浮点计算节点上，会因缺少编码而报错。
-带偏置的高维 Linear 在导出副本中转换为 Reshape → Gemm → Reshape，保留融合计算
-及原有输入、输出和参数编码；无偏置 Linear 保持单个 MatMul。Gemm 节点使用原模块
-名称，权重与偏置名称保持对应，不新增中间量化位置，也不修改训练侧 QuantSim。
-`prepare_model()` 自动将 `nn.GELU` 和 `F.gelu` 替换成显式计算模块，保留
-`approximate="none"` 的 Erf 公式和 `approximate="tanh"` 的近似公式。展开后的
-Div/Erf/Add/Mul/Pow/Tanh 按实际所选公式参与校准和 QAT，标量常量仍豁免。
-必须在创建 QuantSim 前完成 prepare；已有 GELU 模型的浮点权重可复用，但原来的
-模块边界编码不能覆盖新增中间量化器，需要重新校准并评估 QAT 精度。
-
-KWS 示例使用 `QuantizableBatchNorm2d`，在 prepare 阶段展开为 Sub/Div/Mul/Add，
-统计量通过算子输入参与校准；标准 BatchNorm 没有统计量编码时仍不能通过全部浮点输入
-覆盖检查。导出器按 FX 参数使用位置将 reshape/常量折叠后的 initializer 恢复为参数编码
-名称，不依赖参数数值猜测。乘一、加零和单输入 Concat 的量化边界保留在最终 ONNX。
-这项校验不替代推理精度验证。
-失败时已写出的文件仅用于排查，不应作为通过验证的部署产物使用。
+导出、重载、多输入模型和图准备约束见[导出与恢复参考](Export_and_reload.md)。
+部署时使用同次导出返回的 ONNX 和 `.json` 配套路径，严格校验成功后再进行精度验证；
+失败时已写出的文件仅用于排查。
 
 ### 5.4 已有 ONNX 模型的 PTQ
 
-已有 ONNX 模型的 PTQ 入口是 `examples/quick_start_onnx_ptq.py`。该示例与
-`quick_start_kws.py` 使用相同的步骤编号和 `apply_power_of_2_workflow` 实现，其余
-步骤调用 `aimet_onnx.rx_ptq`。
+已有 ONNX 模型使用 `examples/quick_start_onnx_ptq.py`，无需先转换为 PyTorch。
+准备静态模型与代表性的 NPY/NPZ 校准样本，建议另备独立验证样本，按
+[ONNX PTQ 文档](ONNX_PTQ_COMPILER.md)运行；输入名、shape 和 dtype 必须与模型一致。
 
 ```
 加载 ONNX + 真实校准样本
@@ -231,25 +194,8 @@ KWS 示例使用 `QuantizableBatchNorm2d`，在 prepare 阶段展开为 Sub/Div/
   → clean ONNX + compiler encodings
 ```
 
-```bash
-cp -a /opt/rx-met/examples /workspace/rx-met-examples
-cd /workspace/rx-met-examples
-python3 quick_start_onnx_ptq.py
-```
-
-命令退出码为 0，并输出“量化流程完成”以及 metadata 路径，即表示示例成功。
-通用入口只读取用户已准备的静态 ONNX 和校准 NPY/NPZ；使用自己的模型时，通过
-`RX_MET_ONNX_PTQ_MODEL` 和 `RX_MET_ONNX_PTQ_CALIB` 指定输入，预处理由用户负责。
-
-复现 MobileNetV2 + ImageNette 公开演示时，另运行专用的
-`examples/prepare_onnx_ptq_data.py`。它只需 `--onnx` 和 `--parquet`，将原始模型
-转换为静态 batch=1 模型，并按 ImageNet 协议生成 calib/val NPY，分别写入当前
-运行目录的 `output/onnx_ptq_quick_start/models/`、`datasets/`。原始模型和数据
-挂载始终可为只读；在同一容器、同一运行目录执行第二步量化，示例默认读取准备
-结果，无需设置输入路径变量。
-可选 `--out-root DIR` 指定另一可写输出根目录。完整两步示例见
-[`examples/README.md`](../examples/README.md)。制品和限制
-说明见 [`ONNX_PTQ_COMPILER.md`](./ONNX_PTQ_COMPILER.md)。
+CPU runtime 显式传入 `--device cpu`。公开 MobileNetV2 演示的下载、预处理和量化命令见
+[示例说明](../examples/README.md#onnx-ptqmobilenetv2)；通用入口不负责用户模型的预处理。
 
 当前 ONNX 流程适用于 PTQ；QAT 使用 PyTorch 流程。编译器 encodings 是 rx-met 的
 部署格式，必须与同次导出的 Clean ONNX 配套使用。
@@ -266,22 +212,22 @@ python3 quick_start_onnx_ptq.py
 | --- | --- | --- |
 | `import quant_gru` 失败 | 应用挂载或 Python 搜索路径不正确 | 按应用包 README 检查只读挂载与 PYTHONPATH，并运行 install.sh 自检 |
 | `libpymo` 或 QuantGRU 报 CUDA 动态库缺失 | 镜像归档损坏，或容器中的 Torch/CUDA 包被替换 | 执行 `python3 -m pip check`，使用应用包指定的公共 runtime 并保留其固定 Torch/CUDA 依赖 |
-| `torch.cuda.is_available()` 为 `False` | 容器缺少 GPU 映射，或宿主机驱动、Container Toolkit 异常 | 检查 `--gpus all`、宿主机 `nvidia-smi` 和 Container Toolkit，再确认镜像变体满足驱动要求 |
+| CUDA runtime 中 `torch.cuda.is_available()` 为 `False` | 容器缺少 GPU 映射，或宿主机驱动、Container Toolkit 异常 | 检查 `--gpus all`、宿主机 `nvidia-smi` 和 Container Toolkit，再确认镜像变体满足驱动要求；CPU runtime 返回 `False` 为正常情况 |
 
 ### 6.2 PyTorch 量化和重载
 
 | 现象 | 原因 | 处理 |
 | --- | --- | --- |
 | 重载后精度与训练侧差异大 | 重建 QuantSim 使用了不同的模型预处理或量化配置 | 使用与训练侧相同的 `prepare_model` 参数、配置、默认位宽和量化方案 |
-| `load_state_dict` 报缺失或多余键 | 量化模型包含额外的 quantizer 参数 | 使用 `load_state_dict(..., strict=False)`，再加载 encodings |
+| `load_state_dict` 报缺失或多余键 | 模型结构、准备方式或检查点类型不匹配 | KWS 检查点保存主权重；先用相同网络类型和准备方式严格加载，再创建 QuantSim 并加载 encodings。不要用 `strict=False` 隐藏结构差异 |
 | 报量化参数未初始化 | 校准未覆盖已启用量化器，或加载时名称未匹配 | 检查校准数据路径和前向覆盖范围，并核对模型结构与配置文件 |
 
 ### 6.3 ONNX PTQ
 
 | 现象 | 原因 | 处理 |
 | --- | --- | --- |
-| 找不到 `CUDAExecutionProvider` | ONNX Runtime、CUDA 变体或宿主机驱动存在兼容性差异 | 使用对应发布镜像；CPU 调试通过 `RX_MET_ONNX_PTQ_DEVICE=cpu` 启用 |
-| 校准样本无法加载 | NPY/NPZ 的输入名、shape 或 dtype 与 ONNX 模型存在差异 | 根据模型输入重新生成校准数据，多输入模型使用同前缀 NPY 或单个 NPZ |
+| 找不到 `CUDAExecutionProvider` | 选用了 CPU runtime，或 CUDA 运行环境不兼容 | CPU PTQ 使用 `--device cpu` 或 `RX_MET_ONNX_PTQ_DEVICE=cpu`；CUDA PTQ 检查匹配的 runtime 和宿主机驱动 |
+| 校准样本无法加载 | NPY/NPZ 的输入名、shape、dtype 或数值不符合模型要求 | 按 [ONNX 输入要求](ONNX_PTQ_COMPILER.md#量化自己的-onnx-模型)生成数据；多输入推荐每份样本保存一个以完整输入名为键的 NPZ |
 
 ---
 

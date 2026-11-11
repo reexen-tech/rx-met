@@ -108,9 +108,13 @@
 实数与量化整数的关系为：
 
 ```text
-q = clamp(round(x / scale + zero_point), qmin, qmax)
+q = clamp(round(x / scale) + zero_point, qmin, qmax)
 x_hat = scale * (q - zero_point)
 ```
+
+公共整数前向先对 `x / scale` 舍入，再加零点；`round` 使用 round half to even，
+例如 `1.5 -> 2`、`2.5 -> 2`。逐位对齐时使用执行后端的有效 scale；输入输出网格
+可通过 `get_io_quant_meta()` 查询。
 
 affine 模式保存连续 scale，定点执行时将缩放比编码为乘子和移位。Po2 模式的 scale
 为 `2^-n`，按默认 `CoverRange` 规则生成。
@@ -147,7 +151,9 @@ gru.finalize_calibration()
 `set_all_bitwidth(bitwidth, is_symmetric=True)` 设置统一位宽和激活对称性，权重、
 偏置保持对称。已有标定参数可通过 `adjust_quant_config()` 显式设置
 `bitwidth`、`is_symmetric`、`scale` 和 `zero_point`。修改位宽后，调用方负责
-提供配套 scale 或重新标定，并验证输出变化。
+提供配套 scale 或重新标定，并验证输出变化。权重和偏置的 `scale` 必须传入与当前
+逐通道数组等长的列表，不能传标量广播。该方法不自动重新校准；双向模型的直接 scale
+修改只作用于正向参数，调整整个双向模型时应重新校准两方向。
 
 `get_quant_config()` 返回当前位宽和对称性。标定完成后，结果还包含可用的
 `scale` 和 `zero_point`。权重、偏置 scale 以逐通道数组表示：
@@ -166,7 +172,7 @@ print(config.get("scale"), config.get("zero_point"))
 | --- | --- | --- |
 | `calibration_method` | `"minmax"` | MinMax 范围统计；`"sqnr"` 使用直方图误差搜索；`"percentile"` 使用百分位裁剪 |
 | `percentile_value` | `100.0` | Percentile 校准百分位 |
-| `quant_storage_dtype` | `"float32"` | 量化值以 float32 存储；`"int32"` 进入整数存储路径 |
+| `quant_storage_dtype` | `"float32"` | 反向缓存中的量化码以 float32 保存；`"int32"` 保留 int32 缓存，两者使用同一整数/LUT 前向 |
 | `calibrating` | `False` | 收集校准数据 |
 | `export_mode` | `False` | ONNX 图导出 |
 

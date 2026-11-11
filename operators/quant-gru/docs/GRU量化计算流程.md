@@ -22,7 +22,7 @@ flowchart LR
 ```
 
 Python 层管理配置、校准状态、双向执行和导出，binding 负责数据转换，C++ CPU/CUDA 层
-负责量化、矩阵乘、门计算和梯度计算。
+负责量化、矩阵乘和门计算。梯度计算由 CUDA 后端提供，CPU 包只支持校准与 PTQ 推理。
 
 ## GRU 递推与张量布局
 
@@ -78,14 +78,16 @@ flowchart TB
     ZACT --> OLD["z * h_(t-1)"]
     H0 --> OLD
     ZACT --> ONE["1 - z"]
-    ONE --> NEW["(1 - z) * n"]
-    NACT --> NEW
-    OLD --> HNEW["对齐并相加: h_t"]
+    ONE --> NEW["(1 - z) * n_aligned"]
+    NACT --> NALIGN["n 对齐到 h 网格"]
+    NALIGN --> NEW
+    OLD --> HNEW["合并乘积后重缩放: h_t"]
     NEW --> HNEW
 ```
 
-图中的每条边携带量化整数及其 scale、zero point。节点在执行前把输入转换到目标
-量化网格。权重和偏置按输出通道保存参数，门输入输出和隐藏状态使用张量级参数。
+图中的边表示量化码及其网格或去零点后的整数乘积。更新门和重置门先对齐两路线性结果，
+再相加；隐藏状态更新先把候选状态对齐到隐藏状态网格，将两项贡献在共享乘积网格中
+相加后统一重缩放。权重和偏置按输出通道保存参数，门输入输出和隐藏状态使用张量级参数。
 
 ## 量化基础公式
 
@@ -154,7 +156,8 @@ flowchart LR
 `finalize_calibration()` 通过 binding 调用对应参数计算接口。
 
 MinMax 的输入与隐藏状态范围使用全局极值累计。隐藏状态统计从 `h[1]` 开始，
-初始状态 `h[0]` 的处理前提为零初始化。有状态部署需要额外检查初始状态范围覆盖。
+不包含初始状态 `h[0]`。省略 `hx` 时初始状态为零；显式传入非零 `hx` 时，调用方需要
+额外检查它是否位于隐藏状态量化网格的覆盖范围内。
 
 配置加载、统一位宽设置、scale 模式切换和校准统计更新通过 `_quant_params_dirty`
 标记参数过期。常规量化前向与导出流程在消费参数前检查更新状态，
@@ -166,9 +169,12 @@ MinMax 的输入与隐藏状态范围使用全局极值累计。隐藏状态统�
 通用量化关系为：
 
 ```text
-q = clamp(round(x / s + zp), qmin, qmax)
+q = clamp(round(x / s) + zp, qmin, qmax)
 x_hat = s * (q - zp)
 ```
+
+公共整数前向采用 round half to even，先舍入再加零点。公式中的 scale 在逐位对齐时
+取执行后端的有效值；affine 模式保存的连续 scale 经 M16 编码后可能产生近似误差。
 
 | 结构 | 数据和用途 |
 | --- | --- |
@@ -368,7 +374,7 @@ $$
 三份表。
 
 生成阶段根据实际输入、输出 scale 和零点计算分段边界，并为每段拟合
-`y ≈ b_i * x + c_i`。实现位于 [quantize_ops.cu](../src/quantize_ops.cu)。
+`y ≈ b_i * x + c_i`。实现位于 [quantize_lut.cc](../src/quantize_lut.cc)。
 输出零点合并到截距预计算项中。
 
 ### 分段与最小二乘拟合
@@ -460,8 +466,8 @@ $$
 双向模型同时保存反向参数。导出前同步待更新参数，重载按同一模型结构恢复权重和
 量化参数。
 
-ONNX 导出使用 `export_mode` 生成标准 GRU 节点。下游整图工具负责图命名和
-encodings 组装。
+[ONNX 导出](../README.md#onnx-导出)使用 `export_mode` 生成标准 GRU 节点，要求
+`bias=True`。下游整图工具负责图命名和 encodings 组装。
 
 ## 源码索引与验证
 
@@ -471,8 +477,11 @@ encodings 组装。
 | [pytorch/lib/gru_interface_binding.cc](../pytorch/lib/gru_interface_binding.cc) | Python/C++ 数据转换 |
 | [src/gru_interface.cc](../src/gru_interface.cc) | 校准参数计算与执行接口 |
 | [src/calibration_gpu.cu](../src/calibration_gpu.cu) | GPU 范围与直方图统计 |
+| [src/gru_host.cc](../src/gru_host.cc) | CPU 参数校准、量化和前向入口 |
+| [src/quantize_lut.cc](../src/quantize_lut.cc) | CPU/CUDA 共用的 16 段 PWL 生成 |
 | [include/scale_encoding.h](../include/scale_encoding.h) | scale 编码与重缩放参数派生 |
 | [src/gru_forward_gpu_quant.cu](../src/gru_forward_gpu_quant.cu) | CUDA 公共量化前向的整数核心 |
+| [src/gru_forward_cpu_quant.cc](../src/gru_forward_cpu_quant.cc) | 主 CPU 包的整数前向核心 |
 | [src/gru_forward_gpu_quant_fp.cu](../src/gru_forward_gpu_quant_fp.cu) | 保留的浮点载体参考实现，公共量化前向不调用 |
 | [src/gru_backward_gpu_quant.cu](../src/gru_backward_gpu_quant.cu) | 量化训练反向 |
 | [tests/test_quant_gru.py](../tests/test_quant_gru.py) | 输出、梯度和误差检查 |

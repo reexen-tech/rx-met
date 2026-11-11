@@ -5,7 +5,7 @@
 
 ## 1. 文档目的与边界
 
-本文从浮点 LSTM 定义出发，推导量化 Linear、四门、Cell 更新和 Hidden 更新的完整公式，并与 `quant-gru` 当前优化后的融合公式逐项对照。
+本文从浮点 LSTM 定义出发，推导量化 Linear、四门、Cell 更新和 Hidden 更新的完整公式，并与第 15 节固定的 `quant-gru` 版本逐项对照。
 
 本文冻结的是“应该逼近哪个量化数学结果”，不提前冻结 FP32 载体和 int32 载体的具体指令实现。两种载体必须共享量化点、zero-point 语义和融合计算图，但允许使用不同的 rescale 和激活实现：
 
@@ -80,7 +80,8 @@ S_symmetric = max(abs(r_min), abs(r_max)) / qmax(b)
 Z_symmetric = 0
 ```
 
-常量或全零范围执行第 2.3.1 节的固定 minimum-scale fallback。四组 weight/bias 的外部完整 `4H` zero-point 向量全部为 0；非对称、unsigned 或非零 zp 配置无效。输入、状态、Linear 输出和门激活仍可按各自配置使用非零 zero point。导出范围由最终 scale、zero point 和整数范围派生：`real_min = (qmin - Z) * S`，`real_max = (qmax - Z) * S`；INT8 对称量化为 `[-128*S,127*S]`。校准诊断仍保留对称区间 `[-qmax*S,qmax*S]`，供 POT2 CoverRange 使用。
+此处是非 bias 量化点的对称 MinMax 规则；bias 的训练余量规则见第 2.3.2 节。
+常量或全零范围执行第 2.3.1 节的固定 minimum-scale fallback。四组 weight/bias 的外部完整 `4H` zero-point 向量全部为 0；非对称、unsigned 或非零 zp 配置无效。输入、状态、Linear 输出和门激活仍可按各自配置使用非零 zero point。导出范围由最终 scale、zero point 和整数范围派生：`real_min = (qmin - Z) * S`，`real_max = (qmax - Z) * S`；INT8 对称量化为 `[-128*S,127*S]`。非 bias 的对称校准诊断保留区间 `[-qmax*S,qmax*S]`，供 POT2 CoverRange 使用。
 
 signed asymmetric 使用完整二进制补码范围，最小负值在该模式下是合法量化值：
 
@@ -174,6 +175,25 @@ asymmetric fallback 的触发条件保证扩展后的 `adjusted_max` 仍覆盖�
 
 校准诊断必须逐量化点/组记录 `fallback_used`、原始 min/max、调整后 min/max、`N` 和 `S_min`。这属于每次运行生成的校准报告，不进入外部量化参数或 JSON 配置。
 
+#### 2.3.2 Bias 的固定训练余量
+
+Bias 每组从原始观测范围计算独立网格：
+
+```text
+extent = max(abs(r_min), abs(r_max))
+S_bias = max(2 * extent, 0.01) / qmax(b)
+Z_bias = 0
+```
+
+SQNR/Percentile 的 histogram 范围选择跳过 `bias_ih/bias_hh`，因此三个校准方法
+使用相同的 bias 余量规则。非零 bias 保留约两倍幅值，全零 bias 也有至少 `0.01`
+的正端实数范围，允许固定网格 QAT 中的小幅偏置更新。Affine 使用 FP32 `S_bias`；
+POT2 将其向上取整到 `2^ceil(log2(S_bias))`，不使用近幂次范围的 2% 容差。
+Bias 调整后诊断范围使用完整的 `[qmin*S_bias,qmax*S_bias]`。
+
+余量只在新校准时生成；导入参数和后续量化前向不再次扩展 scale。Bias 仍在
+第 5 节按独立 scale 对齐到 GEMM 累加域，不变成输入与权重的乘积 scale。
+
 ### 2.4 Standard scale 与内部执行比例
 
 Affine 模式下，校准得到的连续 scale 是唯一 standard scale：
@@ -251,9 +271,9 @@ else:
 S_std = 2^(-n_pot)
 ```
 
-这就是唯一生产策略 `CoverRange`。`tolerance` 固定为 `0.02`，严格使用 `<`；相对误差恰好等于 `0.02` 时进入 `floor` 分支。`n_pot` 必须可表示为 `int8_t`，无效/非有限 scale、range 或越界指数均在校准 finalize 阶段失败。常量/全零 range 仍由统一 fallback 先产生合法的非退化范围，再进入本转换。
+这是非 bias 量化点原生校准使用的 `CoverRange` 策略；bias 使用第 2.3.2 节的向上取整规则。`tolerance` 固定为 `0.02`，严格使用 `<`；相对误差恰好等于 `0.02` 时进入 `floor` 分支。`n_pot` 必须可表示为 `int8_t`，无效/非有限 scale、range 或越界指数均在校准 finalize 阶段失败。常量/全零 range 仍由统一 fallback 先产生合法的非退化范围，再进入本转换。
 
-POT2 策略和 tolerance 不进入 JSON，也不存在运行时 `Round/Floor/CoverRange` 分支。JSON 只选择 `scale_mode=pot2|affine`；`pot_scale_method`、`pot_scale_tolerance` 或等价字段均作为 unknown field 拒绝。内部只能保留一个 `convertScaleToPot2CoverRange` 公共入口，测试辅助函数不得变成生产配置接口。
+原生校准的 POT2 策略和 tolerance 不进入 JSON。JSON 只选择 `scale_mode=pot2|affine`；`pot_scale_method`、`pot_scale_tolerance` 或等价字段均作为 unknown field 拒绝。校准后调用 Python `enable_pot2()` 转换已有网格时，可显式选择 `method="round"` 或调整容差；该接口不改变原生校准策略，见[Po2 转换约定](aimet_integration.md#已校准参数的-po2-转换)。
 
 转换后对称量化继续使用 `Z=0`；非对称量化以转换后的 `S_std` 重新计算。这里的
 `r_lo` 是包含实数零并完成第 2.3.1 节 fallback 后的调整下界，不是原始观测
@@ -268,7 +288,7 @@ Z = Clamp(
 
 此后边界 quant/dequant、激活、导入导出均使用该 POT2 standard scale 和重算后的 zero point；算术 rescale ratio 通过 shift 执行。接近幂次范围时的 round 分支允许在固定 2% 容差内略微缩小覆盖范围，因此严格报告必须包含饱和率。
 
-因此 LSTM 不复制 GRU 当前的混合行为：Affine 边界不能使用单个 tensor scale 经 `toFixedScale()` 后的 effective scale，同时又在 FP pointwise 中使用 continuous ratio。
+因此 LSTM 不复制第 15 节 GRU 比较基线的混合行为：Affine 边界不能使用单个 tensor scale 经 `toFixedScale()` 后的 effective scale，同时又在 FP pointwise 中使用 continuous ratio。
 
 ### 2.5 统一银行家舍入接口
 
@@ -337,8 +357,8 @@ B_cell_q31 =
 FP32 载体按精度而不是整数溢出分类：
 
 - 所有相关整数操作数、乘积和绝对累加上界 `<2^24` 时，标记为 `exact_integer_range`。
-- 超过 `2^24` 但仍处于有限 FP32 范围时，标记为 `precision_risk`；普通模式允许执行，但必须通过 MAE、MSE、余弦相似度和逐时间步漂移门禁。
-- `require_exact_accumulation=true` 时，任何相关上界超过 `2^24` 都在 setup 阶段失败。
+- 达到或超过 `2^24` 但仍处于有限 FP32 范围时，标记为 `precision_risk`；普通模式允许执行，但必须通过 MAE、MSE、余弦相似度和逐时间步漂移门禁。
+- `require_exact_accumulation=true` 时，任何相关上界达到或超过 `2^24` 都在 setup 阶段失败。
 - 可能产生 Inf/NaN 或超出 FP32 有限范围时，无论模式如何都直接失败。
 
 安全分析集中在公共 `numeric_safety` 模块，生成可序列化的 `NumericSafetyReport`。正常 kernel 不执行逐元素安全分支，避免增加主路径开销。
@@ -590,7 +610,7 @@ alpha = S_f * S_c_old / S_c_new
 beta  = S_i * S_g     / S_c_new
 ```
 
-这里所有 `S` 都是第 2.4 节定义的 standard scale。FP32 载体的 `alpha/beta` 同样需要模拟内部编码后的执行比例；Cell 当前暂定使用第 7.5 节的公共 Q31 编码，而不是直接使用未经编码的连续比例。
+这里所有 `S` 都是第 2.4 节定义的 standard scale。FP32 载体的 `alpha/beta` 使用内部编码后的执行比例。可表示时使用第 7.5 节的公共 Q31 编码；比例过小而会舍入为零，或过大而无法用 Q31 multiplier 表示时，FP32 路径使用尾数和指数保存该比例。两种编码都先融合两路 contribution，再执行一次最终 Round；int32 reference 拒绝仅 FP32 可执行的比例。
 
 FP32 载体不对两路 contribution 分别执行量化 Round，而是先计算目标 Cell 整数域中的和：
 
@@ -653,7 +673,7 @@ d_c_new = RoundShift(wide_acc, 31)
 - `p_forget`、`p_input` 至少使用 `int64_t` 保存，乘 multiplier 和求和提升到 `__int128`。
 - `__int128` 只用于 CPU reference 的 Cell 融合累加，不进入公共 JSON，也不约束未来可选 CUDA int32 后端。
 - `RoundShift` 是唯一最终量化舍入，并调用第 2.5 节的 `roundToNearestEven(wide_acc, 31)`。
-- 当比例绝对值小于 `0.5*2^-31` 而编码为 0 时，报告 contribution 消失次数及其相对目标 Cell LSB 的误差。
+- 对正比例，仅当 `ratio*2^31 > 0.5` 且小于 `int64_t` 上界时使用 Q31 编码；否则 FP32 路径使用尾数和指数，int32 reference 在执行前拒绝。等于 `0.5` 的 half-tie 也不能作为零 multiplier 执行。
 - 该编码需要以下三层验证保护。
 
 三层验证方法已经冻结：
@@ -816,7 +836,7 @@ q_h_new = Clamp(
 
 优化前会分别量化、Clamp 两路 contribution，再对齐到 `h`；优化后先在宽域相加，最后只做一次到 `h` 的 rescale 和 Clamp。
 
-非对称量化时必须直接使用上面的中心化定义。`quant_one` 若保存为完整量化值，则应先转换为中心化值；`quant_one-q_u` 本身已经消除了 zero point，不能再次无条件减 `Z_u`。GRU 当前源码的非对称条件分支存在重复处理 zero point 的风险，LSTM 不复制该分支写法。
+非对称量化时必须直接使用上面的中心化定义。`quant_one` 若保存为完整量化值，则应先转换为中心化值；`quant_one-q_u` 本身已经消除了 zero point，不能再次无条件减 `Z_u`。第 15 节 GRU 比较基线中的非对称条件分支需要按这一规则审计，不能由该历史实现推断当前 GRU 的行为。
 
 ## 11. LSTM 与 GRU 融合关系
 
@@ -849,7 +869,7 @@ Rescale ratio：Affine 使用 M+shift 编码，POT2 使用 shift
 乘积/累加：FP32
 ```
 
-FP32 只能连续精确表示绝对值小于 `2^24` 的整数。即使输入和权重是 8/16 bit，GEMM 累加或 Cell contribution 超过该范围后也可能丢失低位。所有配置先按第 2.6 节分类；正确性模式必须显式关闭 TF32/Tensor Core，性能模式单独评估。
+FP32 能连续精确表示绝对值不大于 `2^24` 的整数。即使输入和权重是 8/16 bit，GEMM 累加或 Cell contribution 超过该范围后也可能丢失低位。第 2.6 节的数值审计采用严格小于 `2^24` 的上界；正确性模式必须显式关闭 TF32/Tensor Core，性能模式单独评估。
 
 generation-key 缓存只复用已经按本节公式量化的 W/R/bias 和 weight sums，不新增
 量化点、舍入或 Clamp。key 变化后重新执行相同量化边界；cache hit 与 miss 的
@@ -909,8 +929,10 @@ da_o = do * o_t * (1 - o_t)
 完全浮点训练由 native forward 保存 gate/cell trace，再由 CUDA pointwise kernel
 和 cuBLAS 直接执行同一组公式。量化模式把前向保存的 q-carrier master 和
 gate/cell/hidden checkpoint 按各自 standard scale/zp 反量化后代入同一组公式。
-CPU 浮点实现只作为显式 C++ reference model，不进入 PyTorch 执行 binding 的设备
-分发；完全浮点、量化和 QAT 的 Python 运行时均要求 CUDA tensor。
+CPU Python binding 复用浮点 reference 执行 `eval()` 前向与校准，并提供 FP32
+q-carrier PTQ；不生成训练 checkpoint，实际反向传播会明确报错。完全浮点训练与
+QAT 的 Python 运行时仍要求 CUDA tensor；CPU/CUDA 使用各自构建的 wheel，
+CUDA wheel 不提供隐式 CPU fallback。
 
 QAT 对 Round 使用恒等 STE。对任意真实量化边界 `y=Clamp(Round(x))`，只有前向
 记录为 Clamp 的位置使用 `dy/dx=0`，其余位置使用 `dy/dx=1`。Mask 按计算图逆序
@@ -956,7 +978,7 @@ input_contribution
 
 版本化默认值保存在 `config/defaults/lstm_quant_default_v1.json`：基础位宽为 8 bit、`scale_mode=affine`、四组 weight/bias 为 `per_channel`，signedness/symmetry 使用第 2.3 节冻结的基础 profile。Weight/bias 的 override 只接受 `bitwidth` 和 `granularity`；`is_unsigned/is_symmetric` 在内部固定为 `false/true`，不作为配置字段展示或接受。其他真实量化点可逐字段覆盖 `bitwidth/is_unsigned/is_symmetric`，其 granularity 在内部固定为 `per_tensor`，resolved config 不展示也不接受该字段。
 
-首版所有真实量化点的 `bitwidth` 枚举严格限制为 `{8,16}`，允许不同量化点混合使用这两个值。`int32_t` carrier、`int64_t/__int128` 累加器、16-bit M+shift multiplier 和 Q31 Cell multiplier 是执行类型或编码参数，不属于该枚举。任何其他 bitwidth 在 override 校验/resolution 阶段直接失败；未来扩展必须升级 schema 版本，并先补充数值安全证明、Golden、严格矩阵和独立精度阈值。
+真实量化点的 `bitwidth` 支持 signed `1–32`、unsigned `1–31`，可混合使用；signed symmetric 从 `2` 位起，因此权重和偏置支持 `2–32` 位。INT1 对称量化和 UINT32 在 override 校验/resolution 阶段拒绝。该范围沿用 schema v1，不改变 FP32 载体或进行低位打包。`int32_t` carrier、`int64_t/__int128` 累加器、16-bit M+shift multiplier 和 Q31 Cell multiplier 是执行类型或编码参数，不属于量化点位宽。高位宽网格和大累加值可能超出 FP32 精确整数范围，必须遵守第 2.6 节的安全审计与精度门禁；数学整数端点和 FP32 可表示端点的区别见[执行规格](quantized-execution-spec.md#7-统一舍入与数值安全)。
 
 解析器按字段执行一次确定性合并：`versioned defaults <- user override`。不支持全局/类别/多级继承，不把 JSON Schema 的 `default` 注解当作运行时赋值机制。默认文件及 override 中每个量化点可带一条字符串 `comment` 解释该张量，解析器校验类型后移除；注释不参与量化。解析完成后立即产生 canonical resolved config；Python binding、CPU reference、CUDA 和报告模块共享同一个 C++ resolver，不得分别补默认值。Golden 用例只嵌入 resolved config，不能嵌入稀疏 override。
 

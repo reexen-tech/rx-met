@@ -46,7 +46,8 @@ Python 入口要求 `eval()`，普通前向无需额外关闭梯度；推荐使�
 | `src/lstm/` | LSTM CPU/CUDA 实现、校准和参数 I/O | 由 `quant_lstm` target 编译 |
 | `src/quantization/` | 量化公共实现 | 由 `quant_lstm` target 编译 |
 | `pytorch/` | `QuantLSTM`、autograd、ONNX 和 C++ binding | `quant_lstm.QuantLSTM` |
-| `config/` | 默认配置与 JSON Schema | `lstm_quant_default_v1.json` |
+| `config/defaults/` | 运行时默认配置 | `lstm_quant_default_v1.json` |
+| `schemas/` | 配置、内部 bundle 和公共参数文档的 JSON Schema | 各格式对应的 `*.schema.json` |
 | `tests/` | C++、CUDA、Python、Golden、性能和真实网络验证 | CTest 与测试脚本 |
 | `tools/` | 端到端测试、Golden 生成、格式化和性能检查 | 各脚本的 `--help` 或目录 README |
 
@@ -123,8 +124,8 @@ CMake 构建 `quant_lstm` 静态库，并根据选项加入 CUDA 源码。安装
 - 可选 C++ 示例。
 
 Python extension 通过 `pytorch/setup.py` 链接 `build/libquant_lstm.a`。wheel 包含
-Python 模块、native extension 和默认配置，安装后不依赖源码目录。项目尚未发布
-PyPI package，wheel 由用户在兼容环境中从源码构建。完整命令见
+Python 模块、native extension 和默认配置，安装后不依赖源码目录。rx-met 应用包
+提供配套 wheel；单独使用 QuantLSTM 时可在兼容环境中从源码构建。完整命令见
 [安装指南](installation.md)。
 
 ## 7. 验证策略
@@ -142,8 +143,9 @@ Golden schema、测试矩阵和阈值入库。构建产物、运行日志和逐�
 
 ## 8. 约束、风险与扩展
 
-- FP32 q-carrier 只能连续精确表示绝对值小于 `2^24` 的整数。超过该范围但仍有限的
-  配置会产生 `precision_risk`，并由严格精度门禁约束。
+- FP32 q-carrier 能连续精确表示绝对值不大于 `2^24` 的整数。数值审计使用
+  严格小于 `2^24` 的上界；达到该阈值但仍有限的配置会产生 `precision_risk`，
+  需要单独评估精度。
 - CPU int32 reference 在激活边界使用浮点 sigmoid/tanh，不表示完整硬件整数语义。
 - CUDA int32 backend 和整数 PWL LUT 只有在独立 execution model、Golden、误差预算
   和性能收益明确后才会启动。

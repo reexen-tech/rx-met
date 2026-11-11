@@ -12,14 +12,12 @@ RX-MET 在库内部自动创建运行记录，用户无需初始化 logger 或�
     exports/
       <prefix>.onnx
       <prefix>.json
-      <prefix>.encodings
-      <prefix>.aimet.encodings
-      <prefix>.meta.json
     checkpoints/
     _work/
 ```
 
-`config/`、`exports/`、`checkpoints/` 和 `_work/` 按需创建。
+`config/`、`exports/`、`checkpoints/` 和 `_work/` 按需创建；编码副本和 metadata
+取决于使用的接口与示例。
 执行 ID 使用北京时间（UTC+8）微秒时间戳，格式为 `YYYYMMDD_HHMMSS_ffffff`，
 不依赖宿主机或容器的默认时区。冲突时追加 `-1`、`-2`，通过原子创建目录防止覆盖。
 同一次完整流程中的校准、导出和恢复验证复用运行目录；重复调用完整流程会创建新目录。
@@ -69,17 +67,18 @@ configure_output(timestamp_output=False)
 | `run.json` | 输出策略、状态、开始结束时间、工具与依赖版本、构建来源、配置快照和产物校验值 |
 | `config/` | JSON 配置快照；配置内容改变时保留另一份快照 |
 | `exports/` | 最终模型、编码及配套产物 metadata |
-| `checkpoints/` | KWS 浮点和 QAT 检查点 |
+| `checkpoints/` | KWS 浮点、PTQ 和 QAT 主权重检查点 |
 | `_work/` | 本次流程由工具创建的中间文件 |
 
-Torch 与 ONNX PTQ 的最终编译器编码均为 `<prefix>.json`。
-`.encodings` 和 ONNX PTQ 的 `.aimet.encodings` 为 AIMET 原始编码，用于恢复量化状态，随最终产物保留。
+Torch 与 ONNX PTQ 的最终编译器编码均为 `<prefix>.json`，与同次导出的 ONNX 一起使用。
+PyTorch 恢复示例通过 `load_quantizer_encodings()` 加载该 `.json`；ONNX PTQ 的恢复验证从
+`<prefix>.aimet.encodings` 重建 QuantSim，再对照编译器 `.json`。`<prefix>.encodings` 是
+底层 AIMET 导出留下的编码文件。具体恢复方式见[导出与恢复](Export_and_reload.md)。
 工具版本记录在 `run.json` 的 `tool` 中；编码文件中的 `version` / `schema_version`
 仍表示编码格式版本，不作为 RX-MET 软件版本。
 源码运行在 Git 可用时记录提交和修改状态，发布包运行记录包内清单的构建信息。
 
-导出接口的参数、返回类型和返回字典键保持不变，返回的路径指向实际的 `exports/` 文件。
-加载时使用返回路径，示例产物位置见终端输出；不再假设模型直接位于根目录。
+导出接口返回实际的 `exports/` 文件路径。加载时使用返回路径，示例产物位置见终端输出。
 显式指定的单个保存文件路径仍被尊重，例如阶段编码或 `RX_MET_KWS_FP_MODEL`。
 
 ## 默认位置
@@ -111,8 +110,9 @@ ONNX 演示准备脚本生成的 `models/` 和 `datasets/` 继续位于输出根
 目录正在被其他任务或 metadata 写者占用时会报错，调用者可在其完成后重试。
 fork 子进程不继承目录锁的所有权，asyncio 子任务也不能复用父任务的 metadata 锁。
 
-任务开始即写入 `status=running`。成功后记录产物路径、大小和 SHA-256，
-清理本次 `_work/`。
+任务开始即写入 `status=running`。成功后记录产物路径、大小和 SHA-256，清理本次 `_work/`。
+单独调用导出接口时，`status=success` 只覆盖导出任务；自行在导出之后进行的重载、
+评估或写文件不属于该记录。KWS 和 ONNX PTQ 示例在同一任务中执行各自的恢复验证。
 失败时保留日志、运行记录和中间文件，记录 `status=failed`，继续抛出原来的异常；
 默认时间戳模式下，已有成功运行不被失败任务替换，历史任务不会自动删除。
 固定模式覆盖同名文件，不保证保留上次成功产物。
