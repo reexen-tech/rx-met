@@ -106,11 +106,10 @@ with torch.no_grad(), lstm.calibration_context():
 lstm.use_quantization = True
 ```
 
-默认配置使用 `scale_mode="affine"`，`scale_mode="pot2"` 将 scale 限制为 2 的整数
-次幂。构造函数的 `quant_config` 接受配置字典、JSON 文本或文件路径；逐量化点
+新建算子默认使用 affine scale。构造函数的 `quant_config` 接受配置字典、JSON 文本或文件路径；逐量化点
 调整使用 `adjust_quant_config()`。配置字段、默认值与失效规则见
 [配置说明](docs/configuration.md)。已完成 affine 校准时，可在 QAT 和参数锁定前
-调用 `lstm.enable_pot2()` 转换已有网格；转换会同时重算非对称 zero point 和实数范围，
+调用 `lstm.enable_po2()` 转换已有网格；转换会同时重算非对称 zero point 和实数范围，
 见[Po2 转换约定](docs/aimet_integration.md#已校准参数的-po2-转换)。
 
 QAT 在 PTQ 评估后使用 `lstm.train()` 和常规 PyTorch 训练循环。
@@ -183,7 +182,7 @@ finally:
 | `get_quant_config()`、`adjust_quant_config()` | 查询或调整量化点的配置 |
 | `calibration_context()` | 管理一轮校准，成功退出时完成参数计算，异常时恢复模式 |
 | `finalize_calibration()`、`reset_calibration()` | 完成当前校准会话，或清除校准状态及参数锁 |
-| `enable_pot2()` | 转换已有网格的 scale、非对称 zero point 和实数范围 |
+| `enable_po2()` | 转换已有网格的 scale、非对称 zero point 和实数范围 |
 | `set_quant_params_locked()` | 控制共享校准是否允许覆盖已有参数 |
 | `is_calibrated()`、`calibration_state()` | 查询校准是否完成及会话状态 |
 | `export_quant_params()`、`load_quant_params()` | 导出或加载算子独立的原生参数 JSON |

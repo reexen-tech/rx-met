@@ -6,6 +6,11 @@
 
 ## [Unreleased]
 
+### Changed
+
+- GRU/LSTM 示例 JSON 不再展示初始 PO2 模式设置；新建算子默认使用 affine 校准，示例统一通过 `apply_power_of_2_workflow()` 显式开启 PO2。底层配置能力保持兼容。
+- 原生 GRU/LSTM 公共转换接口统一为 `enable_po2()`，GRU 使用 `use_po2_scale`，工作流统计使用 `quant_gru_po2_count` / `quant_lstm_po2_count`；原 POT2 名称保留兼容别名，已有量化参数文件格式不变。
+
 ## [1.1.1] - 2026-10-30
 
 ### Added

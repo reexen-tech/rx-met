@@ -6,7 +6,7 @@
 
 ## 配置层次
 
-`GRU_config.default_config` 控制量化开关和 scale 模式，
+`GRU_config.default_config` 在本示例中控制量化开关，
 `GRU_config.operator_config` 控制各算子的位宽、对称性和粒度。
 
 以下片段展示配置结构，完整配置以同目录 JSON 为准：
@@ -15,8 +15,7 @@
 {
   "GRU_config": {
     "default_config": {
-      "disable_quantization": false,
-      "use_pot2_scale": false
+      "disable_quantization": false
     },
     "operator_config": {
       "input": {
@@ -42,14 +41,13 @@
 | 字段 | 配置值与行为 |
 | --- | --- |
 | `disable_quantization` | `false` 设置 `use_quantization=True`，`true` 设置 `use_quantization=False` |
-| `use_pot2_scale` | `false` 使用 affine scale，`true` 使用 Power-of-2 scale |
 
-新建 QuantGRU 的 `use_quantization` 和 `use_pot2_scale` 均为 `False`。
+新建 QuantGRU 默认关闭量化，使用 affine scale。
 配置文件省略全局字段时，对应属性沿用实例当前值。
 
-同目录完整 JSON 设置 `disable_quantization=false`、`use_pot2_scale=false`。
-需要 Po2 scale 的配置设置 `use_pot2_scale=true`。Po2 模式采用默认
-`CoverRange` 策略和 2% 容差。
+同目录完整 JSON 设置 `disable_quantization=false`，不设置初始 scale 模式。
+rx-met 示例统一在校准后调用 `apply_power_of_2_workflow()` 开启 PO2；独立模块可调用
+`enable_po2()`。PO2 默认采用 `CoverRange` 策略和 2% 容差。
 
 ## 算子配置字段
 

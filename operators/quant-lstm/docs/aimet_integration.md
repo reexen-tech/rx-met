@@ -13,7 +13,7 @@ QuantGRU 同名的公共方法。安装 AIMET 时可选用其运行日志；独�
 | --- | --- |
 | `load_bitwidth_config(config_file, verbose=False)` | 从完整阶段 JSON 文件/字典读取 `LSTM_config`，复用原生配置校验 |
 | `calibration_context()` | 开始新一轮收集，成功退出时 finalize，异常恢复标志；跳过锁定参数和未执行分支 |
-| `enable_pot2(method="cover_range", tolerance=0.02)` | 转换 scale、重算非对称 zero point 和实数范围，通过原生加载器重建执行参数并做数值审计 |
+| `enable_po2(method="cover_range", tolerance=0.02)` | 转换 scale、重算非对称 zero point 和实数范围，通过原生加载器重建执行参数并做数值审计 |
 | `export_quant_params_to_aimet_format(encodings_dict, module_name=None, verbose=False, for_onnx=True)` | 仅向公共 activation_encodings / param_encodings 合并部署参数 |
 | `load_quant_params_from_aimet_format(encodings_dict, module_name=None, verbose=False)` | 从公共编码恢复量化网格；缺少当前模块时返回 False；不修改量化开关 |
 | `set_module_name(name)` | 设置编码所用模块路径 |
@@ -32,7 +32,6 @@ QuantGRU 同名的公共方法。安装 AIMET 时可选用其运行日志；独�
     "use_quantization": true,
     "quant_config": {
       "schema_version": 1,
-      "scale_mode": "affine",
       "operators": {
         "cell_state": {"bitwidth": 16},
         "weight_ih": {"bitwidth": 8, "granularity": "per_gate"}
@@ -44,7 +43,9 @@ QuantGRU 同名的公共方法。安装 AIMET 时可选用其运行日志；独�
 
 未提供 `LSTM_config` 时不改变模块设置。`quant_config` 采用原生 sparse override
 格式，相同配置可重复加载；改变已校准配置前必须显式 `reset_calibration()`。
-该操作同时清除锁。QAT 沿用已校准参数，不应在每个训练迭代重新进入校准上下文。
+该操作同时清除锁。新建实例默认使用 affine scale，示例 JSON 不设置初始 scale 模式；
+rx-met 在校准后统一通过 `apply_power_of_2_workflow()` 选择 PO2 转换。
+QAT 沿用已校准参数，不应在每个训练迭代重新进入校准上下文。
 
 以下片段接续已加载浮点权重的 `module`；`restored` 是相同结构、设备和 FP32 dtype
 的新实例，CPU 实例需处于 `eval()`。公共 encoding 只恢复网格，主权重单独复制：
@@ -86,10 +87,10 @@ rx-met 的 `save_quantizer_encodings()` 和 `export_onnx_json()` 按量化开关
 
 ## 已校准参数的 Po2 转换
 
-`enable_pot2()` 在校准前调用时选择后续校准的 `pot2` 模式；在校准后调用时转换
-已有网格，不重新执行校准前向。已处于 Po2 模式时重复调用不改变参数。
+`enable_po2()` 在校准前调用时选择后续校准的 PO2 模式；在校准后调用时转换
+已有网格，不重新执行校准前向。已处于 PO2 模式时重复调用不改变参数。
 已用 `set_quant_params_locked(True)` 锁定的 affine 参数不能直接转换，应在锁定前
-完成转换，或在首次配置中指定 `scale_mode: "pot2"`。
+完成转换。
 
 默认 `method="cover_range"`、`tolerance=0.02`；校准后转换也支持 `method="round"`。
 这些是 Python 方法参数，不增加 JSON 配置字段。原生 Po2 校准使用固定的

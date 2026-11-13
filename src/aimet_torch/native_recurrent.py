@@ -1,6 +1,6 @@
 """Single registration seam for operator-owned recurrent quantization.
 
-Operators implement load_bitwidth_config, calibration_context, enable_pot2,
+Operators implement load_bitwidth_config, calibration_context, enable_po2,
 export/load_quant_params_{to/from}_aimet_format and set_quant_params_locked.
 This module knows discovery and dispatch, not gates, grids or native JSON.
 """
@@ -74,7 +74,10 @@ def validate_native_po2_targets(model):
 def apply_native_po2(targets, method, tolerance):
     """Let each operator enforce its locking rules and derive its own Po2 grids."""
     for _, module, _ in targets:
-        module.enable_pot2(method=method, tolerance=tolerance)
+        enable_po2 = getattr(module, "enable_po2", None)
+        if enable_po2 is None:
+            enable_po2 = module.enable_pot2
+        enable_po2(method=method, tolerance=tolerance)
 
 
 def verify_native_po2(targets):

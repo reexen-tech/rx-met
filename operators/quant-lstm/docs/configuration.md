@@ -220,7 +220,7 @@ CPU wheel 复用 C++ 浮点 reference 的输出与 trace 进行校准，各量�
 
 ### 4.3 校准后转换为 Po2
 
-已校准模块可以在锁定参数前调用 `module.enable_pot2()`。转换同时更新 scale、
+已校准模块可以在锁定参数前调用 `module.enable_po2()`。转换同时更新 scale、
 非对称 zero point 和由整数范围派生的 `real_min/real_max`；已校准的对称参数保持
 zero point 为零。校准范围的保留、文件重载后的处理和方法参数见
 [集成接口中的 Po2 转换](aimet_integration.md#已校准参数的-po2-转换)。
@@ -306,7 +306,7 @@ M+shift、POT2 shift 或 Q31 编码。公开 JSON 的 scale 使用数值，Pytho
 | 修改 `calibration_method` / `percentile_value` | property 赋值期间验证 | 值变化时失效 |
 | `reset_calibration()` | 立即执行 | 清除参数、参数锁、校准范围缓存和 safety report |
 | `finalize_calibration()` | finalization 期间派生并审计 | 生成参数及校准范围缓存，锁定当前收集会话 |
-| `enable_pot2()` | 转换后经原生加载器审计 | 更新已有 scale/zp 和实数范围；受参数锁保护 |
+| `enable_po2()` | 转换后经原生加载器审计 | 更新已有 scale/zp 和实数范围；受参数锁保护 |
 | `set_quant_params_locked(True)` | 检查已有参数 | 阻止共享校准覆盖及 affine→Po2 转换 |
 | `load_quant_params()` | 加载期间完整审计 | 用导入参数替换会话并清除旧校准范围缓存 |
 

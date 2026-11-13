@@ -273,7 +273,7 @@ S_std = 2^(-n_pot)
 
 这是非 bias 量化点原生校准使用的 `CoverRange` 策略；bias 使用第 2.3.2 节的向上取整规则。`tolerance` 固定为 `0.02`，严格使用 `<`；相对误差恰好等于 `0.02` 时进入 `floor` 分支。`n_pot` 必须可表示为 `int8_t`，无效/非有限 scale、range 或越界指数均在校准 finalize 阶段失败。常量/全零 range 仍由统一 fallback 先产生合法的非退化范围，再进入本转换。
 
-原生校准的 POT2 策略和 tolerance 不进入 JSON。JSON 只选择 `scale_mode=pot2|affine`；`pot_scale_method`、`pot_scale_tolerance` 或等价字段均作为 unknown field 拒绝。校准后调用 Python `enable_pot2()` 转换已有网格时，可显式选择 `method="round"` 或调整容差；该接口不改变原生校准策略，见[Po2 转换约定](aimet_integration.md#已校准参数的-po2-转换)。
+原生校准的 POT2 策略和 tolerance 不进入 JSON。JSON 只选择 `scale_mode=pot2|affine`；`pot_scale_method`、`pot_scale_tolerance` 或等价字段均作为 unknown field 拒绝。校准后调用 Python `enable_po2()` 转换已有网格时，可显式选择 `method="round"` 或调整容差；该接口不改变原生校准策略，见[Po2 转换约定](aimet_integration.md#已校准参数的-po2-转换)。
 
 转换后对称量化继续使用 `Z=0`；非对称量化以转换后的 `S_std` 重新计算。这里的
 `r_lo` 是包含实数零并完成第 2.3.1 节 fallback 后的调整下界，不是原始观测

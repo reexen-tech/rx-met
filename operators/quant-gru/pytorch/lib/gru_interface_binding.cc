@@ -1461,6 +1461,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         .def_readwrite("R_granularity_", &OperatorQuantConfigPy::R_granularity_)
         .def_readwrite("bw_granularity_", &OperatorQuantConfigPy::bw_granularity_)
         .def_readwrite("br_granularity_", &OperatorQuantConfigPy::br_granularity_)
+        .def_readwrite("usePO2_", &OperatorQuantConfigPy::usePOT2_)
         .def_readwrite("usePOT2_", &OperatorQuantConfigPy::usePOT2_)
         .def_readwrite("pot_scale_method_", &OperatorQuantConfigPy::pot_scale_method_)
         .def_readwrite("pot_scale_tolerance_", &OperatorQuantConfigPy::pot_scale_tolerance_);

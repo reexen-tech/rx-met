@@ -85,7 +85,7 @@ model.encoder.rnn = replace_recurrent_layer(model.encoder.rnn)
    原生收集器，已锁定参数跳过收集，异常时恢复校准标志。
 5. 如需在校准后统一转换到 Po2，调用 `apply_power_of_2_workflow()`，在冻结参数和 QAT 前完成转换。
    该入口分别处理普通量化器与原生循环层；模型只有循环层时仍执行并验证原生 Po2。
-   原生算子也可由自身配置选择直接按 Po2 校准；整模型转换开关不会改变其初始校准模式。
+   示例 JSON 不设置初始 scale 模式，新建原生循环层默认按 affine 校准，PO2 由此入口统一转换。
 6. CPU 路径直接评估和导出；CUDA 路径可冻结量化参数后执行 QAT，沿用已校准网格。
 7. 配套保存主权重和编码，重建模型后比较相同输入的输出及任务指标。
 
@@ -135,7 +135,7 @@ LSTM 修改先在独立 `quant-lstm` 仓库实现，再将源码同步至 `opera
 
 - `load_bitwidth_config()` 解析 `LSTM_config`，与 GRU 使用同名配置入口。
 - `calibration_context()` 管理收集、完成校准、锁定及异常恢复。
-- `enable_pot2()` 负责本算子的 scale 转换与数值审计。
+- `enable_po2()` 负责本算子的 scale 转换与数值审计。
 - `export_quant_params_to_aimet_format()` / `load_quant_params_from_aimet_format()`
   负责编码，工具包不解析 h/c 状态、内部算子和门顺序。
 - `normalize_quant_lstm_onnx()` 负责节点及参数命名，共享 initializer 安全复制。
@@ -144,7 +144,7 @@ LSTM 修改先在独立 `quant-lstm` 仓库实现，再将源码同步至 `opera
 ConnectedGraph、QuantSim 包装、配置/Po2、阶段参数、校准和导出调用该注册信息或
 公共接口。新增同类算子无需在上述位置分别添加类型分支。
 
-GRU 提供 `calibration_context()`、`enable_pot2()` 和 `owns_quantization`，
+GRU 提供 `calibration_context()`、`enable_po2()` 和 `owns_quantization`，
 与现有配置和编码接口协作。其定点执行专用 `aimet_configure()` 不用于 PTQ 生命周期。
 原生算子的 `owns_quantization=True` 使通用量化配置跳过这些模块，避免二次量化。
 
@@ -171,7 +171,7 @@ QuantLSTM 的 `load_quant_config()`、`percentile_value`、量化参数锁和安
 | bias 编码 scale | 对齐后为 `Sx * Sw` | 根据 bias 自身范围独立计算 `Sb` |
 | bias 量化位宽 | 对齐后默认有符号 32 位，可显式指定并检查范围 | 由算子配置控制的有符号 2–32 位；当前 KWS 示例两种 RNN 均配置为 8 位 |
 | 加入累加器前 | 同一 scale，可直接相加 | 先将 bias 从 `Sb` 重缩放到 `Sacc` |
-| Po2 工作流 | 启用 bias 对齐时执行乘积 scale 和 bias 位宽对齐 | 调用算子自身的 `enable_pot2()`，不自动改为 INT32 或乘积 bias scale |
+| PO2 工作流 | 启用 bias 对齐时执行乘积 scale 和 bias 位宽对齐 | 调用算子自身的 `enable_po2()`，不自动改为 INT32 或乘积 bias scale |
 
 普通层在统计 PTQ 阶段仍可按配置校准 bias；上表的乘积 scale 指启用
 `align_bias_scale=True` 后的对齐结果，不能泛化为所有阶段始终使用乘积 scale。

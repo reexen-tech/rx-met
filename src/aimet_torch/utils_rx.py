@@ -387,8 +387,9 @@ def apply_power_of_2_workflow(sim_model, method: str = "cover_range", tolerance:
                        modified_info=print_quantizer_info(sim_model, "最终普通量化参数", verbose=verbose),
                        all_power_of_2=True)
         for _, _, op in native_targets:
-            key = f'{op.package}_pot2_count'
+            key = f'{op.package}_po2_count'
             results[key] = results.get(key, 0) + 1
+            results[f'{op.package}_pot2_count'] = results[key]
         results['verification'] = {
             'status': 'verified' if generic_targets or native_targets else 'not_applicable',
             'generic': {'status': 'verified' if generic_targets else 'not_applicable',

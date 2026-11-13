@@ -309,7 +309,10 @@ def align_sim_encodings_to_po2(
     validate_quantizer_state(sim, allow_pending_bias=True)
     for adapter in getattr(sim, "_rx_native_recurrent", {}).values():
         if adapter.module.use_quantization:
-            adapter.module.enable_pot2(method=method, tolerance=tolerance)
+            enable_po2 = getattr(adapter.module, "enable_po2", None)
+            if enable_po2 is None:
+                enable_po2 = adapter.module.enable_pot2
+            enable_po2(method=method, tolerance=tolerance)
     temporarily_disabled = set(getattr(sim, "_rx_calibration_bias_quantizers", ()))
     if temporarily_disabled and not align_bias_scale:
         raise RuntimeError("Temporarily disabled bias quantizers require bias-scale alignment")

@@ -4,8 +4,7 @@
 
   "GRU_config": {
     "default_config": {
-      "disable_quantization": false,
-      "use_pot2_scale": false
+      "disable_quantization": false
     },
     "operator_config": {
       "input": {

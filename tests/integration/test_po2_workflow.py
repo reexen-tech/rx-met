@@ -339,13 +339,6 @@ class PowerOfTwoWorkflowTest(unittest.TestCase):
                 self.assert_report(report, generic=False, native=0)
                 self.assertTrue(torch.isfinite(sim.model(x)).all())
 
-    def affine_config(self):
-        config = json.loads(MIXED_CONFIG.read_text())
-        config['GRU_config']['default_config']['use_pot2_scale'] = False
-        path = self.directory / 'affine.json'
-        path.write_text(json.dumps(config))
-        return path
-
     def assert_native_non_po2(self, model):
         def scales(value):
             if isinstance(value, dict):
@@ -365,18 +358,45 @@ class PowerOfTwoWorkflowTest(unittest.TestCase):
                                     for scale in scales(document)),
                                 'Affine calibration must exercise an actual Po2 conversion')
 
-    def test_affine_native_grids_are_actually_converted_with_and_without_generic_layers(self):
-        config = self.affine_config()
+    def test_example_affine_grids_are_only_converted_by_the_workflow(self):
         for device in self.devices:
             for kind in ('gru', 'lstm'):
                 for ordinary in (False, True):
                     with self.subTest(device=device, kind=kind, ordinary=ordinary):
-                        sim, x = self.sim(kind, device, ordinary=ordinary, mixed_config=config)
+                        sim, x = self.sim(kind, device, ordinary=ordinary)
                         self.assert_native_non_po2(sim.model)
-                        report = apply_power_of_2_workflow(sim.model, verbose=False)
+                        module = sim.model.get_submodule(kind)
+                        with patch.object(module, 'enable_po2', wraps=module.enable_po2) as enable_po2:
+                            report = apply_power_of_2_workflow(sim.model, verbose=False)
+                        enable_po2.assert_called_once_with(method='cover_range', tolerance=0.02)
                         self.assert_report(report, generic=ordinary, native=1)
+                        self.assertEqual(report[f'quant_{kind}_po2_count'], 1)
+                        self.assertEqual(report[f'quant_{kind}_pot2_count'], 1)
                         self.assert_native_po2(sim.model)
                         self.assertTrue(torch.isfinite(sim.model(x)).all())
+
+    def test_example_affine_grids_export_and_reload_without_po2_workflow(self):
+        for device in self.devices:
+            for kind in ('gru', 'lstm'):
+                with self.subTest(device=device, kind=kind):
+                    sim, x = self.sim(kind, device, ordinary=True, bidirectional=True)
+                    self.assert_native_non_po2(sim.model)
+                    expected = sim.model(x).detach().clone()
+                    before = self.native_encodings(sim.model)
+                    _, json_path = export_onnx_json(
+                        sim, str(self.directory), f'{device}-{kind}-affine', tuple(x.shape))
+                    self.assert_native_non_po2(sim.model)
+                    fresh, _ = self.sim(kind, device, ordinary=True, bidirectional=True,
+                                        calibrate=False)
+                    quantizer_keys = self.quantizer_state_keys(sim.model)
+                    weights = {name: value for name, value in sim.model.state_dict().items()
+                               if name not in quantizer_keys}
+                    fresh.model.load_state_dict(weights, strict=False)
+                    load_quantizer_encodings(fresh.model, json_path,
+                                             allow_overwrite=False, verbose=False)
+                    self.assert_native_non_po2(fresh.model)
+                    self.assertEqual(before, self.native_encodings(fresh.model))
+                    torch.testing.assert_close(fresh.model(x), expected, atol=0, rtol=0)
 
     def test_generic_verification_requires_nonempty_finite_power_of_two_scales(self):
         cases = (([], False), ([float('nan')], False), ([float('inf')], False),
@@ -393,11 +413,10 @@ class PowerOfTwoWorkflowTest(unittest.TestCase):
                         self.assertEqual(verify_model_power_of_2(sim.model, verbose=False), expected)
 
     def test_locked_native_conversion_fails_without_changing_generic_encodings(self):
-        config = self.affine_config()
         for device in self.devices:
             for kind in ('gru', 'lstm'):
                 with self.subTest(device=device, kind=kind):
-                    sim, _ = self.sim(kind, device, ordinary=True, mixed_config=config)
+                    sim, _ = self.sim(kind, device, ordinary=True)
                     before = collect_quantizer_info(sim.model)
                     for _, module, _ in named_native_recurrent(sim.model):
                         module.set_quant_params_locked(True)
