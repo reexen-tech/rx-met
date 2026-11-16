@@ -1723,7 +1723,7 @@ class QuantGRU(nn.Module):
     @logged_operation
     def finalize_calibration(self, verbose: bool = False):
         """
-        完成校准，计算量化参数并初始化 LUT
+        完成校准并计算量化参数；LUT 构建模式下同时初始化查找表
         
         Args:
             verbose: 是否打印校准信息
@@ -2263,7 +2263,7 @@ class QuantGRU(nn.Module):
         )
 
         # 前向方向
-        # LUT 现在存储在 quant_params 中，通过 setRescaleParam 复制到前向传播的 rescale 参数
+        # LUT builds pass gate tables through quant_params; real activation builds omit them.
         output_forward, h_n_forward = GRUFunction.apply(
             input, self.weight_ih_l0, self.weight_hh_l0,
             self.bias_ih_l0 if self.bias else None,
@@ -2273,7 +2273,7 @@ class QuantGRU(nn.Module):
         # 反向方向(双向时)
         output_reverse, h_n_reverse = None, None
         if self.bidirectional:
-            # LUT 存储在 quant_params_reverse 中
+            # Each direction owns its quantization grids and optional LUT parameters.
             output_reverse, h_n_reverse = GRUFunction.apply(
                 input.flip(0), self.weight_ih_l0_reverse, self.weight_hh_l0_reverse,
                 self.bias_ih_l0_reverse if self.bias else None,
@@ -4629,7 +4629,7 @@ def _load_quant_params_impl(
     # 设置位宽配置到量化参数中（pybind11 值复制语义，这里是复制而非引用）
     gru.quant_params.bitwidth_config_ = gru._bitwidth_config
     
-    # 注意：LUT 会在 forward 时通过 to_cpp() 自动生成，无需在此显式调用
+    # LUT builds regenerate tables in to_cpp(); real activation builds skip that step.
     
     # 加载反向参数（双向）
     # 设计说明：正向和反向共用同一个 _bitwidth_config，这是有意为之：

@@ -10,6 +10,12 @@
 
 - GRU/LSTM 示例 JSON 不再展示初始 PO2 模式设置；新建算子默认使用 affine 校准，示例统一通过 `apply_power_of_2_workflow()` 显式开启 PO2。底层配置能力保持兼容。
 - 原生 GRU/LSTM 公共转换接口统一为 `enable_po2()`，GRU 使用 `use_po2_scale`，工作流统计使用 `quant_gru_po2_count` / `quant_lstm_po2_count`；原 POT2 名称保留兼容别名，已有量化参数文件格式不变。
+- 恢复 CUDA QuantGRU 的独立 FP32/INT32 carrier 计算路径，`quant_storage_dtype="float32"` 使用 SGEMM 与显式量化舍入，不再转调整数核心。两种路径统一由 `USE_REAL_ACTIVATION` 选择真实激活或 LUT；真实激活构建跳过全部 LUT 生成与参数初始化。通过 `RX_MET_USE_REAL_ACTIVATION=0/1` 同步构建共享库与 Python 扩展，默认关闭，切换需重新编译。CPU 当前仍使用整数核心。
+
+### Fixed
+
+- QuantGRU 的 FP32/INT32 量化边界统一为先对 `x / scale` 做最近偶数舍入，再加 `zero_point`，修正奇数零点下半格输入的量化码与截断 mask 差异。
+- 修复 QuantGRU 浮点量化码转 INT32 前未饱和，以及 FP32 上界向整数范围外舍入的问题；越界输入在转换前截断并正确记录 STE mask。
 
 ## [1.1.1] - 2026-10-30
 

@@ -723,9 +723,19 @@ void fillGateParams(GateQuantParamsT<R> &gp, const GRUQuantParams &parms) {
     gp.rescale_update_old_to_h_ = makeRescaleProduct<R>(parms.update_gate_output_, parms.h_, parms.h_);
 
     gp.bitwidth_config_ = parms.bitwidth_config_;
+#ifdef USE_REAL_ACTIVATION
+    const bool pot = parms.bitwidth_config_.usePOT2_;
+    gp.scale_update_gate_input_ = decode_scale(toFixedScale(parms.update_gate_input_, pot));
+    gp.scale_update_gate_output_ = decode_scale(toFixedScale(parms.update_gate_output_, pot));
+    gp.scale_reset_gate_input_ = decode_scale(toFixedScale(parms.reset_gate_input_, pot));
+    gp.scale_reset_gate_output_ = decode_scale(toFixedScale(parms.reset_gate_output_, pot));
+    gp.scale_new_gate_input_ = decode_scale(toFixedScale(parms.new_gate_input_, pot));
+    gp.scale_new_gate_output_ = decode_scale(toFixedScale(parms.new_gate_output_, pot));
+#else
     gp.sigmoid_update_gate_lut_ = parms.sigmoid_update_gate_lut_;
     gp.sigmoid_reset_gate_lut_ = parms.sigmoid_reset_gate_lut_;
     gp.tanh_new_gate_lut_ = parms.tanh_new_gate_lut_;
+#endif
 
 #ifdef DEBUG
     gp.test = parms;

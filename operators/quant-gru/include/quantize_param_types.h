@@ -134,9 +134,11 @@ struct GRUQuantParams {
     QuantParam mul_old_contribution_;   ///< u * h
 
     // -------------------- LUT 表（每层独立，finalize_calibration 时生成） --------------------
+#ifndef USE_REAL_ACTIVATION
     SigmoidLUT sigmoid_update_gate_lut_;
     SigmoidLUT sigmoid_reset_gate_lut_;
     SigmoidLUT tanh_new_gate_lut_;
+#endif
 };
 
 // ============================================================================
@@ -182,10 +184,19 @@ struct GateQuantParamsT {
     // -------------------- 运行时配置 --------------------
     OperatorQuantConfig bitwidth_config_;
 
-    // -------------------- LUT 表 --------------------
+    // -------------------- 激活执行参数 --------------------
+#ifdef USE_REAL_ACTIVATION
+    float scale_update_gate_input_ = 1.0f;
+    float scale_update_gate_output_ = 1.0f;
+    float scale_reset_gate_input_ = 1.0f;
+    float scale_reset_gate_output_ = 1.0f;
+    float scale_new_gate_input_ = 1.0f;
+    float scale_new_gate_output_ = 1.0f;
+#else
     SigmoidLUT sigmoid_update_gate_lut_;
     SigmoidLUT sigmoid_reset_gate_lut_;
     SigmoidLUT tanh_new_gate_lut_;
+#endif
 
 #ifdef DEBUG
     GRUQuantParams test;  ///< 保存完整量化参数用于调试
@@ -233,13 +244,13 @@ struct LinearQuantParamsCPUT {
 };
 
 // ============================================================================
-// 浮点存储版量化参数（FP 后端独立，含激活 scale、float 零点、无 LUT）
+// 浮点存储版量化参数（FP 后端独立，激活实现由编译宏控制）
 // ============================================================================
 
 /**
  * @brief 门计算量化参数（浮点存储版本）。
  *
- * rescale 以 inv_div = src_scale/dst_scale 形式存储；零点使用 float；激活用 real_sigmoid/real_tanh。
+ * rescale 以 inv_div = src_scale/dst_scale 形式存储；零点使用 float。
  */
 struct GateQuantParamsFP {
     // -------------------- Linear 输出零点 --------------------
@@ -270,13 +281,19 @@ struct GateQuantParamsFP {
     float inv_div_update_old_to_h_ = 1.0f;
     float inv_div_new_gate_output_to_h_ = 1.0f;
 
-    // -------------------- 激活函数 scale（real_sigmoid/real_tanh） --------------------
+    // -------------------- 激活执行参数 --------------------
+#ifdef USE_REAL_ACTIVATION
     float scale_update_gate_input_ = 1.0f;
     float scale_update_gate_output_ = 1.0f;
     float scale_reset_gate_input_ = 1.0f;
     float scale_reset_gate_output_ = 1.0f;
     float scale_new_gate_input_ = 1.0f;
     float scale_new_gate_output_ = 1.0f;
+#else
+    SigmoidLUT sigmoid_update_gate_lut_;
+    SigmoidLUT sigmoid_reset_gate_lut_;
+    SigmoidLUT tanh_new_gate_lut_;
+#endif
 };
 
 /**

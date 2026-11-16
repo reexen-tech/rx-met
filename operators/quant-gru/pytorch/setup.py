@@ -20,6 +20,10 @@ SHARED_LIB_NAME = 'libgru_quant_shared.so'
 SOURCE_LIB = os.path.join(here, 'lib', SHARED_LIB_NAME)
 VERSION_FILE = os.path.join(here, '_version.py')
 ENABLE_CUDA = os.environ.get('RX_MET_ENABLE_CUDA', '1') != '0'
+REAL_ACTIVATION = os.environ.get('RX_MET_USE_REAL_ACTIVATION', '0')
+if REAL_ACTIVATION not in {'0', '1'}:
+    raise RuntimeError('RX_MET_USE_REAL_ACTIVATION must be 0 or 1')
+ACTIVATION_MACROS = [('USE_REAL_ACTIVATION', '1')] if REAL_ACTIVATION == '1' else []
 if not ENABLE_CUDA:
     SOURCE_LIB = os.path.join(os.environ.get('RX_MET_QUANT_GRU_BUILD_DIR',
                              os.path.join(here, '../build_release')), SHARED_LIB_NAME)
@@ -197,7 +201,7 @@ cpu_extension = CppExtension(
     name='gru_interface_binding',
     sources=['lib/gru_interface_binding.cc'],
     include_dirs=[os.path.join(here, '../include')],
-    define_macros=[('RX_MET_CPU_ONLY', '1')],
+    define_macros=[('RX_MET_CPU_ONLY', '1')] + ACTIVATION_MACROS,
     libraries=['gru_quant_shared'],
     library_dirs=[os.path.dirname(SOURCE_LIB)],
     extra_compile_args=['-std=c++17', '-O3', '-fopenmp', '-Wno-unused-variable'],
@@ -214,6 +218,7 @@ setup(
             name='gru_interface_binding',
             sources=['lib/gru_interface_binding.cc'],
             include_dirs=[os.path.join(here, '../include')],
+            define_macros=ACTIVATION_MACROS,
             libraries=['gru_quant_shared'],
             library_dirs=[os.path.join(here, 'lib')],
             extra_compile_args={

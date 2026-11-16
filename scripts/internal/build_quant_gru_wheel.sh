@@ -17,6 +17,13 @@ case "${ENABLE_CUDA}" in
     *) log "ERROR: RX_MET_ENABLE_CUDA must be 0 or 1"; exit 1 ;;
 esac
 
+REAL_ACTIVATION="${RX_MET_USE_REAL_ACTIVATION:-0}"
+case "${REAL_ACTIVATION}" in
+    0) cmake_real_activation=OFF ;;
+    1) cmake_real_activation=ON ;;
+    *) log "ERROR: RX_MET_USE_REAL_ACTIVATION must be 0 or 1"; exit 1 ;;
+esac
+
 if ! command -v "${PYTHON}" >/dev/null 2>&1; then
     log "ERROR: ${PYTHON} is required"
     exit 1
@@ -33,7 +40,8 @@ if [[ "${ENABLE_CUDA}" == "1" ]]; then
 fi
 
 log "build native library -> ${BUILD_DIR}"
-cmake_args=(-DCMAKE_BUILD_TYPE=Release "-DRX_MET_ENABLE_CUDA=${cmake_cuda}")
+cmake_args=(-DCMAKE_BUILD_TYPE=Release "-DRX_MET_ENABLE_CUDA=${cmake_cuda}"
+    "-DUSE_REAL_ACTIVATION=${cmake_real_activation}")
 if [[ "${ENABLE_CUDA}" == "1" && -n "${RX_MET_CUDA_ARCHITECTURES:-}" ]]; then
     cmake_args+=("-DCMAKE_CUDA_ARCHITECTURES=${RX_MET_CUDA_ARCHITECTURES}")
 fi
@@ -44,6 +52,7 @@ rm -f "${OUT_DIR}"/quant_gru-*.whl
 mkdir -p "${OUT_DIR}"
 log "build wheel -> ${OUT_DIR}"
 export RX_MET_ENABLE_CUDA="${ENABLE_CUDA}"
+export RX_MET_USE_REAL_ACTIVATION="${REAL_ACTIVATION}"
 export RX_MET_QUANT_GRU_BUILD_DIR="${BUILD_DIR}"
 if [[ -n "${CUDA_VARIANT:-}" ]]; then
     export RX_MET_QUANT_GRU_VERSION="${RX_MET_VERSION:?RX_MET_VERSION is required}+${CUDA_VARIANT}"

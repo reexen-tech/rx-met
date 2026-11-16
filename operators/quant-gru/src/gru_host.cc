@@ -117,8 +117,10 @@ GRUQuantParams calculateGRUQuantitativeParameters(
     quant_params.mul_old_contribution_ = calibrateScalar(bitwidth_config.mul_old_contribution_,
         bitwidth_config.mul_old_contribution_symmetric_, quant_ranges.min_mul_old_contribution_, quant_ranges.max_mul_old_contribution_);
 
+#ifndef USE_REAL_ACTIVATION
     // 生成 LUT 并存储到参数中
     generate_piecewise_linear_lut_to_params(quant_params);
+#endif
     return quant_params;
 }
 
@@ -326,6 +328,8 @@ GRUQuantParams calculateGRUQuantitativeParametersFromHistograms(
     quant_params.mul_new_contribution_ = histCalibrate(hist_collectors.mul_new_contribution_hist, bitwidth_config.mul_new_contribution_, bitwidth_config.mul_new_contribution_symmetric_, "scale_mul_new_contribution");
     quant_params.mul_old_contribution_ = histCalibrate(hist_collectors.mul_old_contribution_hist, bitwidth_config.mul_old_contribution_, bitwidth_config.mul_old_contribution_symmetric_, "scale_mul_old_contribution");
 
+#ifndef USE_REAL_ACTIVATION
     generate_piecewise_linear_lut_to_params(quant_params);
+#endif
     return quant_params;
 }

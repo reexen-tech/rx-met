@@ -1308,9 +1308,10 @@ GRUQuantParams GRUQuantParamsPy::to_cpp() const {
     // ⚠️ 关键：复制位宽配置
     cpp_params.bitwidth_config_ = bitwidth_config_.to_cpp();
 
-    // 重新生成 LUT（因为 LUT 不能直接序列化到 Python）
-    // 这会在每次 to_cpp() 时重新生成，但开销可以接受（只在 forward 前调用一次）
+#ifndef USE_REAL_ACTIVATION
+    // LUT parameters are reconstructed from the public quantization grids.
     generate_piecewise_linear_lut_to_params(cpp_params);
+#endif
 
     return cpp_params;
 }
@@ -1329,6 +1330,15 @@ float decode_effective_scale_wrapper(float scale, bool usePOT2) {
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.doc() = "GRU Interface Python Bindings";
+#ifdef USE_REAL_ACTIVATION
+    constexpr bool use_real_activation = true;
+#else
+    constexpr bool use_real_activation = false;
+#endif
+    TORCH_CHECK(quant_gru_uses_real_activation() == use_real_activation,
+        "QuantGRU activation build mismatch: rebuild the shared library and Python extension "
+        "with the same RX_MET_USE_REAL_ACTIVATION value");
+    m.attr("use_real_activation") = use_real_activation;
 #ifdef RX_MET_CPU_ONLY
     m.attr("cpu_only") = true;
 #else

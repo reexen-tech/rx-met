@@ -61,6 +61,22 @@ CMake 生成 `pytorch/lib/libgru_quant_shared.so` 和 `build/gru_example`，pip 
 配置中传入 `-DCMAKE_CUDA_ARCHITECTURES`，并在 pip 构建时设置
 `TORCH_CUDA_ARCH_LIST`，为两个构建步骤指定同一目标架构。
 
+量化激活由统一编译宏 `USE_REAL_ACTIVATION` 控制。环境变量
+`RX_MET_USE_REAL_ACTIVATION=0`（默认）不定义宏，两种 CUDA carrier 都使用 LUT；
+设为 `1` 时定义宏，均执行反量化、标准 sigmoid/tanh、再量化，并跳过 LUT 生成、
+参数初始化和传递。它与 `quant_storage_dtype` 独立，也不随 train/eval 切换。
+切换后须用相同设置重新编译共享库和 Python 扩展，例如：
+
+```bash
+RX_MET_USE_REAL_ACTIVATION=1 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build --parallel 2
+RX_MET_USE_REAL_ACTIVATION=1 python3 -m pip install ./pytorch --no-deps --no-build-isolation
+```
+
+CMake 也接受 `-DUSE_REAL_ACTIVATION=ON/OFF`；Python 扩展和 wheel 构建使用上述环境变量。
+显式 CMake 选项和已有构建缓存优先；环境变量仅在首次配置且未设置该选项时提供默认值。
+关闭时不向 C++ 编译器传入该宏，不能用 `-DUSE_REAL_ACTIVATION=0` 代替取消定义。
+
 ## 最小示例
 
 以下示例检查 CUDA 模块加载、前向接口和输出形状。使用 CPU wheel 时将 `device`
@@ -119,13 +135,30 @@ clamp STE mask 截断；序列输出与最终隐藏状态的损失均遵循此�
 输入线性输出的截断同样作用于输入、权重和 bias 梯度，并在跨 stream 消费梯度前完成。
 训练和部署评估分别记录损失、输出误差和任务指标。
 非零更新门 zero point 下，`q_one-q_z` 已经是 `(1-z)` 的 centered 码，隐藏状态
-更新直接使用该差值；主整数核、浮点参考与独立 CPU 参考均遵守此约定。
+更新直接使用该差值；两种 CUDA carrier 与独立 CPU 参考均遵守此约定。
 
-`quant_storage_dtype="float32"` 与 `"int32"` 共用整数/LUT 前向，包括量化、重缩放、门值和
-截断 mask；该选项只改变提供给反向传播的量化码缓存类型。FP32 carrier 通过临时 INT32
-缓存再转换为 FP32，增加分配和转换成本。8/16 位码可精确表示；超过 2^24 的整数码不能
-保证 FP32 缓存精度。标准 STE 反向继续使用反量化门值，未改为 LUT 的分段导数。
-底层 `ForwardPassQuantFP` 是保留的真实激活参考，不再是公共 QAT 前向。
+CUDA 下 `quant_storage_dtype` 选择独立计算路径：
+
+| 配置 | 量化码载体与计算 |
+| --- | --- |
+| `"float32"`（默认） | `quantGRUForwardFP()` 调用 `ForwardPassQuantFP`，使用 FP32 量化码、cuBLAS SGEMM，以及浮点重缩放、显式舍入和截断 |
+| `"int32"` | `quantGRUForwardInt()` 使用 INT32 量化码、整数矩阵乘和重缩放，乘累加使用 INT64 |
+
+两条路径都通过 `USE_REAL_ACTIVATION` 选择真实激活或 16 段 PWL。
+量化边界统一使用 `clamp(round_to_nearest_even(x / scale) + zero_point)`；零点在舍入后相加，
+输入、初始状态和真实激活输出遵循同一顺序。
+调用层统一使用完整的 `quantize()` / `quantize_f()`，由入口负责饱和和训练 mask，
+不再分别调用未截断码值计算与 clamp；内部共享数值步骤不作为独立调用入口。
+CPU 包目前只有整数计算核心，`float32` 只改变返回的量化码缓存类型。
+常规量化前向接收浮点输入和 master 权重，入口量化、出口反量化；FP32 carrier 的码值
+如 `3.0` 仍表示整数码，不是反量化实数。标准 STE 反向使用反量化门值和截断 mask，
+LUT 模式下也不使用分段斜率作为导数。
+
+FP32 可精确表示 8/16 位码，但累加和乘积仍受浮点有效精度限制，绝对值超过 `2^24`
+的整数不能保证精确表示。两条路径的缩放实现、舍入误差和 mask 可能不同，不保证跨
+carrier 逐位一致；性能和任务精度应在目标模型、设备与激活构建模式下分别评估。
+浮点到 INT32 的边界量化在类型转换前完成饱和；FP32 饱和端点取整数范围内最近的可表示值，避免
+`INT32_MAX` 转成 FP32 后超出量化范围。训练 mask 以未截断码值是否处于合法范围为准。
 
 `forward_quantized()` 和 `get_io_quant_meta()` 要求量化参数已就绪，不会自动完成待更新
 参数的校准。更改位宽、scale 模式或校准统计后，先调用 `finalize_calibration()`，
@@ -135,7 +168,8 @@ clamp STE mask 截断；序列输出与最终隐藏状态的损失均遵循此�
 与 LSTM 的重载约定一致；不向编译器编码添加执行元数据。锁定前会完成尚未执行的网格
 更新（例如 affine 切换 Po2），避免冻结旧 scale 与新执行模式的混合状态；若缺少用于
 推导新网格的校准数据则报错，保持未锁定。验证见
-rx-met 的 `tests/recurrent/test_gru_storage.py` 的输出/缓存/mask/梯度和单向/双向重载对照。
+rx-met 的 `tests/recurrent/test_gru_storage.py`，分别验证 carrier 的输出、缓存、mask、
+梯度和单向/双向重载。
 
 ## 保存与重载
 

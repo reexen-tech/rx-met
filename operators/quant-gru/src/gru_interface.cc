@@ -32,11 +32,6 @@
 // 统一前向/反向传播接口（主入口）
 // =====================================================================
 
-// 量化模式选择宏：默认使用浮点存储版（方案2）
-// 如需使用 INT32 版本（方案1），注释掉此行
-#define USE_FP_STORAGE 1
-
-
 // =====================================================================
 // Haste GRU 前向传播实现
 // =====================================================================
@@ -647,7 +642,7 @@ void quantGRUForwardFP(
     const cublasHandle_t &g_blas_handle,
     float *h, float *v,
     // 输出量化后的值（必须由外部分配内存，训练和推理模式都需要）
-    // 保存与整数目标相同的量化码，仅将缓存转换为 FP32 carrier
+    // FP32 carrier buffers hold quantized codes throughout this forward.
     float *W_q_out,
     float *R_q_out,
     float *bw_q_out,
@@ -667,26 +662,52 @@ void quantGRUForwardFP(
     uint8_t *gate_output_mask,
     uint8_t *h_mask) {
     
-    // The carrier selects cache storage, not a different numerical function.
-    // Reuse the integer/LUT target for quantization, rescaling, gates and masks.
-    const std::size_t hidden3 = static_cast<std::size_t>(hidden_size) * 3;
+    const auto &bw_cfg = quant_params.bitwidth_config_;
+    const bool use_pot2 = bw_cfg.usePOT2_;
     const std::size_t x_size = static_cast<std::size_t>(time_steps) * batch_size * input_size;
-    dev::vector<int32_t> W_q(input_size * hidden3), R_q(hidden_size * hidden3);
-    dev::vector<int32_t> bw_q(hidden3), br_q(hidden3), x_q(x_size);
-    quantGRUForwardInt(is_training, time_steps, batch_size, input_size, hidden_size,
-        W, R, bw, br, x, h0, quant_params, g_blas_handle, h, v,
-        x_mask, h0_mask, W_mask, R_mask, bw_mask, br_mask,
-        weight_ih_linear_mask, weight_hh_linear_mask, gate_input_mask, gate_output_mask, h_mask,
-        W_q.data(), R_q.data(), bw_q.data(), br_q.data(), x_q.data());
+    const std::size_t h_size = static_cast<std::size_t>(time_steps + 1) * batch_size * hidden_size;
+    const std::size_t state_size = static_cast<std::size_t>(batch_size) * hidden_size;
 
-    // Preserve the public FP32 q-cache ABI consumed by the existing STE backward.
-    // Identity dequantization only changes storage, without rescaling the codes.
-    const FixedPointScale identity{1, 0};
-    dev::dequantification(W_q.data(), W_q_out, W_q.size(), identity, 0);
-    dev::dequantification(R_q.data(), R_q_out, R_q.size(), identity, 0);
-    dev::dequantification(bw_q.data(), bw_q_out, bw_q.size(), identity, 0);
-    dev::dequantification(br_q.data(), br_q_out, br_q.size(), identity, 0);
-    dev::dequantification(x_q.data(), x_q_out, x_q.size(), identity, 0);
+    if (is_training) {
+        quantizeGRUWeights<true>(W, R, bw, br, W_q_out, R_q_out, bw_q_out, br_q_out,
+            W_mask, R_mask, bw_mask, br_mask, input_size, hidden_size, quant_params);
+        dev::quantificationFP<true>(x, x_q_out, x_mask, x_size,
+            toFixedScale(quant_params.x_, use_pot2), quant_params.x_.zero_point, bw_cfg.x_);
+    } else {
+        quantizeGRUWeights<false>(W, R, bw, br, W_q_out, R_q_out, bw_q_out, br_q_out,
+            nullptr, nullptr, nullptr, nullptr, input_size, hidden_size, quant_params);
+        dev::quantificationFP<false>(x, x_q_out, nullptr, x_size,
+            toFixedScale(quant_params.x_, use_pot2), quant_params.x_.zero_point, bw_cfg.x_);
+    }
+
+    if (h0 != nullptr) {
+        if (is_training) {
+            dev::quantificationFP<true>(h0, h, h0_mask, state_size,
+                toFixedScale(quant_params.h_, use_pot2), quant_params.h_.zero_point, bw_cfg.h_);
+        } else {
+            dev::quantificationFP<false>(h0, h, nullptr, state_size,
+                toFixedScale(quant_params.h_, use_pot2), quant_params.h_.zero_point, bw_cfg.h_);
+        }
+    } else {
+        dev::fill_n(h, state_size, static_cast<float>(quant_params.h_.zero_point));
+    }
+
+    gru::ForwardPassQuantFP forward(is_training, batch_size, input_size, hidden_size,
+        g_blas_handle);
+    forward.setRescaleParam(quant_params);
+    forward.Run(time_steps, W_q_out, R_q_out, bw_q_out, br_q_out, x_q_out, h, v,
+        0.0f, nullptr, weight_ih_linear_mask, weight_hh_linear_mask,
+        gate_input_mask, gate_output_mask, h_mask);
+
+    dev::dequantificationFPInplace(h, h_size,
+        toFixedScale(quant_params.h_, use_pot2), quant_params.h_.zero_point);
+    if (v != nullptr) {
+        dev::dequantificationVFPInplace(v, time_steps, batch_size, hidden_size,
+            toFixedScale(quant_params.update_gate_output_, use_pot2), quant_params.update_gate_output_.zero_point,
+            toFixedScale(quant_params.reset_gate_output_, use_pot2), quant_params.reset_gate_output_.zero_point,
+            toFixedScale(quant_params.new_gate_output_, use_pot2), quant_params.new_gate_output_.zero_point,
+            toFixedScale(quant_params.weight_hh_linear_, use_pot2), quant_params.weight_hh_linear_.zero_point);
+    }
     cudaDeviceSynchronize();
     const cudaError_t err = cudaGetLastError();
     if (err != cudaSuccess) {
@@ -891,8 +912,9 @@ GRUQuantParams calculateGRUQuantitativeParametersFromGPUHistograms(
     // 同步 CUDA 操作
     cudaDeviceSynchronize();
 
-    // 生成 LUT 并存储到参数中
+#ifndef USE_REAL_ACTIVATION
     generate_piecewise_linear_lut_to_params(quant_params);
+#endif
     
     // 检查 CUDA 错误
     cudaError_t err = cudaGetLastError();

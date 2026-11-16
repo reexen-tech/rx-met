@@ -1,5 +1,9 @@
 # GRU carrier 共用整数目标前向
 
+状态：已被 [0007：GRU 独立 carrier 与统一激活开关](0007-gru-independent-carriers-and-activation.md)
+替代。下文保留原决策及其动机，描述的是当时的共享前向方案，不再代表当前 CUDA
+`quant_storage_dtype` 的执行契约；参数锁定与网格恢复的独立修复继续保留。
+
 GRU 的 FP32 carrier 曾使用真实 sigmoid/tanh 和浮点比例，INT32 carrier 使用 LUT 与整数重缩放，
 使 QAT 优化的函数与整数执行不同。公共 FP32 前向现在调用同一整数核心，直接复用输出、
 门缓存和 mask，仅将反向所需的量化码缓存转换为 FP32，保留现有 STE 反向接口。
