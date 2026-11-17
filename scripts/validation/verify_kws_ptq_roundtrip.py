@@ -344,6 +344,7 @@ def run(args):
     if len(stage_outputs) < 2:
         raise RuntimeError("Missing ONNX PTQ/Po2 evaluation stages")
     ptq_comparison = compare_output_batches(torch_ptq_outputs, stage_outputs[0])
+    ptq_functional_match = all(item["max_abs"] == 0 for item in ptq_comparison)
     ptq_prediction_differences = sum(
         int(np.argmax(left[0]) != np.argmax(right[0]))
         for left, right in zip(torch_ptq_outputs, stage_outputs[0]))
@@ -373,12 +374,14 @@ def run(args):
     metadata = json.loads(second["metadata"].read_text())
     onnx_comparison = compare_models(first_onnx, second["onnx"])
     enc_comparison = compare_encodings(first, second_enc)
-    identical = onnx_comparison["file_equal"] and enc_comparison["json_equal"] and functional_match
+    identical = (onnx_comparison["file_equal"] and enc_comparison["json_equal"]
+                 and ptq_functional_match and functional_match)
     report = {
         "status": "identical" if identical else "different", "qat_steps": 0,
         "rnn_type": args.rnn_type,
         "strict_acceptance": strict_acceptance,
         "functional_match": functional_match, "torch_vs_onnx_po2": cross_evaluation,
+        "ptq_functional_match": ptq_functional_match,
         "torch_vs_onnx_ptq": {"comparison": ptq_comparison,
                               "prediction_differences": ptq_prediction_differences},
         "fp_checkpoint": str(args.fp_checkpoint.resolve()), "input_fingerprints": fingerprints,
@@ -405,6 +408,7 @@ def run(args):
     write_summary(args.output_dir, report)
     print(f"ONNX identical: {onnx_comparison['file_equal']}", flush=True)
     print(f"Encoding JSON identical: {enc_comparison['json_equal']}", flush=True)
+    print(f"Torch/ONNX PTQ outputs identical: {ptq_functional_match}", flush=True)
     print(f"Torch/ONNX Po2 outputs identical: {functional_match}", flush=True)
     print(f"Comparison: {report['status'].upper()}", flush=True)
     print(f"Report: {args.output_dir.resolve() / 'comparison.json'}", flush=True)

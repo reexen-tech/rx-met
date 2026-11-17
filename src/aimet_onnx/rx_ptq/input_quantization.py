@@ -29,6 +29,9 @@ def input_quantizer(sim, op, index):
     if index >= len(names) or not names[index]:
         return None
     name = names[index]
+    group = getattr(sim, '_rx_linear_groups', {}).get(op.name)
+    if group is not None and index == 0:
+        name = group['input']
     quantizer = sim.qc_quantize_op_dict.get(name)
     if quantizer is not None:
         return quantizer

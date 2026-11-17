@@ -19,6 +19,7 @@ from aimet_common.quantization_grid import IntegerGrid, integer_bounds
 from aimet_common.quantsim_config.compute_ops import is_grid_preserving_op
 from aimet_onnx.quantization_roles import QuantizationInputRoles
 from .validation import validate_quantizer_state
+from .linear import linear_groups, validate_legacy_linear_boundaries
 
 _FLOAT_TENSOR_TYPES = frozenset({
     onnx.TensorProto.FLOAT, onnx.TensorProto.FLOAT16,
@@ -87,6 +88,7 @@ class CompilerEncodingConverter:
     """Build the node-I/O compiler schema from an ONNX QuantSim."""
 
     def __init__(self, sim: Any, original_model: onnx.ModelProto):
+        original_model = getattr(sim, '_rx_normalized_model', original_model)
         self.sim = sim
         self.graph = _GraphIndex.build(original_model, getattr(sim, "activation_dtypes", {}))
         self.original_model = original_model
@@ -244,6 +246,18 @@ class CompilerEncodingConverter:
                     changed = True
 
     def convert(self) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+        validate_legacy_linear_boundaries(self.original_model)
+        groups = getattr(self.sim, '_rx_linear_groups', None)
+        if groups is None:
+            groups = linear_groups(self.original_model)
+        for name, group in groups.items():
+            owners = {group['gemm_output'], group['output']}
+            enabled = [tensor for tensor in owners
+                       if tensor in self.sim.qc_quantize_op_dict
+                       and self.sim.qc_quantize_op_dict[tensor].enabled]
+            if len(enabled) > 1:
+                raise RuntimeError(f'{name}: multiple Linear output quantizers: {sorted(enabled)}; '
+                                   'recalibrate with one terminal output boundary')
         validate_quantizer_state(self.sim)
         tensor_encodings: Dict[str, Dict[str, Any]] = {}
         port_encodings: Dict[str, Dict[str, Any]] = {}

@@ -6,13 +6,17 @@
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from aimet_common.mixed_precision import (
     QuantizerConfigPlan, default_layer_config, is_config_comment,
     load_mixed_precision_config, select_layer_config,
 )
+from aimet_common.quantsim_config.quantsim_config import _get_config_file
 from .input_quantization import input_quantizer
+from .linear import linear_groups
 from aimet_common.run_context import log_details, log_print as print, logged_operation
 
 # JSON 2 的 Torch 类名 → 当前图里可能出现的 ONNX op_type。
@@ -68,6 +72,150 @@ _UNMAPPED_TYPES = _INT_ONLY_TYPES | {"QuantizedVar", "QuantizedSnake2d"}
 
 def _is_comment_key(key: str) -> bool:
     return is_config_comment(key)
+
+
+def _linear_groups_for_sim(sim):
+    cached = getattr(sim, '_rx_linear_groups', None)
+    if cached is not None:
+        return cached
+    model = getattr(sim, '_rx_normalized_model', None)
+    if model is None:
+        model = getattr(sim, '_rx_original_onnx', None)
+    if model is None:
+        model = sim.model.model
+    groups = linear_groups(model)
+    sim._rx_linear_groups = groups
+    return groups
+
+
+def _validate_linear_supergroups(model, groups, patterns):
+    if not patterns:
+        return
+    generated = {name for group in groups.values() for name in group['generated_nodes']}
+    canonical = {node.name: (node.op_type, tuple(node.input), tuple(node.output))
+                 for node in model.graph.node}
+    # Recover the source FC nodes to compare only active supergroup effects.
+    original = {}
+    aliases = {}
+    intermediates = {group['intermediate'] for group in groups.values()}
+    for name, node in canonical.items():
+        if name in generated:
+            continue
+        group = groups.get(name)
+        if group is None:
+            original[name] = node
+            continue
+        original[group['matmul']] = ('MatMul', (group['input'], group['weight']),
+                                     (group['intermediate'],))
+        original[group['add']] = ('Add', (group['intermediate'], group['bias']), (group['output'],))
+        aliases[node[1][0]] = group['input']
+        aliases[group['gemm_output']] = group['output']
+
+    def disabled_outputs(graph):
+        consumers = {}
+        for name, (_, inputs, _) in graph.items():
+            for tensor in inputs:
+                consumers.setdefault(tensor, set()).add(name)
+        disabled = set()
+        for pattern in patterns:
+            for start in graph:
+                current, matched = start, []
+                for index, kind in enumerate(pattern):
+                    op_type, _, outputs = graph[current]
+                    if op_type != kind:
+                        break
+                    matched.append(current)
+                    if index == len(pattern) - 1:
+                        disabled.update(tensor for name in matched[:-1] for tensor in graph[name][2])
+                        break
+                    children = set().union(*(consumers.get(tensor, set()) for tensor in outputs))
+                    if len(children) != 1:
+                        break
+                    current = next(iter(children))
+        return disabled
+
+    forced_outputs = {value.name for value in model.graph.output}
+    old = disabled_outputs(original) - intermediates - forced_outputs
+    new = {aliases.get(tensor, tensor) for tensor in disabled_outputs(canonical)} - forced_outputs
+    if old != new:
+        changed = ', '.join(sorted(old ^ new))
+        raise ValueError(f'Linear normalization cannot preserve active supergroup quantization at {changed}')
+
+
+def validate_linear_quantizer_config(normalized_model, config_file):
+    """Reject JSON1 settings whose meaning would be lost by FC normalization."""
+    groups = linear_groups(normalized_model)
+    if not groups:
+        return
+    config = json.loads(Path(_get_config_file(config_file)).read_text(encoding='utf-8'))
+    _validate_linear_supergroups(normalized_model, groups,
+        [supergroup.get('op_list', ()) for supergroup in config.get('supergroups', ())])
+
+    defaults = config.get('defaults', {})
+    op_configs = config.get('op_type', {})
+    gemm = op_configs.get('Gemm', {})
+    effective = dict(defaults.get('ops', {}))
+    effective.setdefault('is_input_quantized', 'True')
+    for field in ('per_channel_quantization', 'strict_symmetric', 'unsigned_symmetric'):
+        if field in defaults:
+            effective[field] = defaults[field]
+    effective.update({key: value for key, value in gemm.items() if key != 'params'})
+
+    def comparable(value):
+        if isinstance(value, str) and value.lower() in ('true', 'false'):
+            return value.lower() == 'true'
+        if isinstance(value, dict):
+            return {key: comparable(item) for key, item in value.items()}
+        if isinstance(value, list):
+            return [comparable(item) for item in value]
+        return value
+
+    for kind, alias in (('MatMul', 'matmul'), ('Add', 'add')):
+        for field, value in op_configs.get(kind, {}).items():
+            if is_config_comment(field):
+                continue
+            if field == 'params':
+                for role, settings in value.items():
+                    target = dict(defaults.get('params', {}))
+                    target.update(config.get('params', {}).get(role, {}))
+                    target.update(gemm.get('params', {}).get(role, {}))
+                    for param_field, setting in settings.items():
+                        if comparable(setting) != comparable(target.get(param_field)):
+                            name = next(iter(groups.values()))[alias]
+                            raise ValueError(f'{name}: Linear normalization cannot preserve '
+                                             f'{kind}.params.{role}.{param_field}')
+                continue
+            if comparable(value) != comparable(effective.get(field)):
+                name = next(iter(groups.values()))[alias]
+                raise ValueError(f'{name}: Linear normalization cannot preserve {kind}.{field}')
+
+
+def _linear_layer_config(group, type_config, name_config):
+    entry, match, _ = select_layer_config(group['matmul'], 'Gemm', type_config, name_config)
+    for field in ('input_bitwidths', 'input_signeds'):
+        values = (entry or {}).get(field, ())
+        if any(value is not None for value in values[1:]):
+            raise ValueError(f"{group['matmul']}: {field} cannot configure a Linear weight/bias "
+                             'parameter port; use weight/bias settings instead')
+    terminal, terminal_match, _ = select_layer_config(group['add'], 'Gemm', type_config, name_config)
+    if terminal_match not in ('name', 'pattern'):
+        return entry, match
+    terminal = {key: value for key, value in terminal.items() if not is_config_comment(key)}
+    if terminal.get('disable_quantization') and not (
+            match in ('name', 'pattern') and (entry or {}).get('disable_quantization')):
+        raise ValueError(f"{group['add']}: disable_quantization affects an internal Linear "
+                         'input; explicitly disable both original nodes to disable the group')
+    for field in terminal:
+        if not field.startswith('output_') and field != 'disable_quantization':
+            raise ValueError(f"{group['add']}: explicit {field} refers to a removed internal "
+                             'Linear input or parameter; configure the MatMul alias instead')
+    merged = dict(entry or {})
+    for field, value in terminal.items():
+        if field in merged and merged[field] != value and match in ('name', 'pattern'):
+            raise ValueError(f"Conflicting Linear {field}: {group['matmul']}={merged[field]} "
+                             f"vs {group['add']}={value}")
+        merged[field] = value
+    return merged, terminal_match
 
 
 def map_json2_types_to_onnx(
@@ -129,7 +277,9 @@ def _quantizers_for_op(sim: Any, op: Any, *, matmul_operands: bool = False
             not products[name].is_parm and name not in parameter_names)) else None
         for index, name in enumerate(names)
     ]
-    outputs = [sim.qc_quantize_op_dict.get(product.name) for product in op.outputs]
+    group = _linear_groups_for_sim(sim).get(op.name)
+    outputs = ([sim.qc_quantize_op_dict.get(group['output'])] if group is not None
+               else [sim.qc_quantize_op_dict.get(product.name) for product in op.outputs])
     return inputs, outputs, params
 
 
@@ -287,6 +437,8 @@ def apply_onnx_mixed_precision_bitwidth(
     }
 
     ops = list(sim.connected_graph.get_all_ops().values())
+    groups = _linear_groups_for_sim(sim)
+    generated_nodes = {name for group in groups.values() for name in group['generated_nodes']}
     present_types = {op.type for op in ops}
     unknown = set(layer_type_config) - _TORCH_TYPE_TO_ONNX.keys() - _UNMAPPED_TYPES
     if unknown:
@@ -323,12 +475,19 @@ def apply_onnx_mixed_precision_bitwidth(
     for op in ops:
         if op.name in getattr(sim, "_rx_native_recurrent", {}):
             continue
+        if op.name in generated_nodes:
+            if op.name in layer_name_config:
+                raise ValueError(f'{op.name}: generated Linear reshape has no independent quantization settings')
+            continue
         type_config = {} if op.name in layer_name_config else _type_config_for_op(
             sim, op, layer_type_config
         )
-        layer_config, match, _ = select_layer_config(
-            op.name, op.type, type_config, layer_name_config
-        )
+        if op.name in groups:
+            layer_config, match = _linear_layer_config(groups[op.name], type_config, layer_name_config)
+        else:
+            layer_config, match, _ = select_layer_config(
+                op.name, op.type, type_config, layer_name_config
+            )
         if match in {"name", "pattern"}:
             stats["name_matched"] += 1
         elif match == "type":

@@ -199,6 +199,7 @@ def align_onnx_bias_scale(sim: Any, *, bias_bitwidth: int = 32) -> Dict[str, Any
     validate_bias_bitwidth(bias_bitwidth)
     temporarily_disabled = set(getattr(sim, "_rx_calibration_bias_quantizers", ()))
     pending = []
+    shared_biases = {}
     for op in sim.connected_graph.get_all_ops().values():
         if op.type not in _ANALYTIC_BIAS_OPS:
             continue
@@ -266,6 +267,15 @@ def align_onnx_bias_scale(sim: Any, *, bias_bitwidth: int = 32) -> Dict[str, Any
             raise ValueError(f"{bias.name}: per-tensor bias cannot represent output-channel weight scales")
         if bias_quantizer.is_encoding_frozen():
             raise ValueError(f"{bias.name}: bias quantizer is frozen")
+        signature = (tuple(item['scale'] for item in aligned), per_channel)
+        previous = shared_biases.get(id(bias_quantizer))
+        if previous is not None:
+            old_signature, old_op = previous
+            if old_signature != signature:
+                raise ValueError(f'Shared bias {bias.name} requires conflicting accumulator '
+                                 f'scales for {old_op} and {op.name}')
+            continue
+        shared_biases[id(bias_quantizer)] = (signature, op.name)
         pending.append((bias, op, bias_quantizer, aligned, old_scales, per_channel))
 
     for bias, op, bias_quantizer, aligned, old_scales, per_channel in pending:

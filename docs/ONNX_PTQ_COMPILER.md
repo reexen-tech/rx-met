@@ -127,6 +127,34 @@ ONNX 的 `aimet_onnx.rx_ptq.export_onnx_json()` 返回 `onnx`、`encodings`、`a
 库函数未指定 `validation_dir` 时使用校准数据评估；它不会自动查找同级 `val/`。
 PyTorch 同名导出入口及其元组返回值见[导出与重载](Export_and_reload.md)。
 
+## 全连接量化边界
+
+`create_onnx_ptq_sim()` 在建立量化器前将可证明等价的 `MatMul -> Add(bias)`
+规范为完整全连接，只在 `xW+b` 后量化输出，与 PyTorch 标准 `nn.Linear` 一致。
+二维输入生成 `Gemm`；高维静态输入生成 `Reshape -> Gemm -> Reshape`，两侧
+Reshape 共享原来的输入和最终输出网格，不增加独立舍入。该规则不依赖 Po2；
+两个输出的 Po2 scale 相同不能替代正确的单次输出量化。
+
+首版处理标准 ONNX 域的 FP32、静态正维度输入、二维 initializer 权重 `[K,N]`
+和一维 initializer bias `[N]`。MatMul 中间结果必须只有该 Add 一个消费者，且不能
+作为模型输出。动态矩阵、未知维度、非通道 bias、旁路或特殊算子语义不自动融合；
+若残留结构无法满足目标编译器的全连接约定，导出明确报错。
+
+原始输入文件和模型输入输出契约保留，最终 Clean ONNX 的内部结构会改变。
+Gemm 保留原 MatMul 节点名，原 Add 别名、形状与规范化映射保存于 ONNX metadata，
+用于配置匹配和重载。识别后的组按 `QuantizedLinear` 应用配置，输出位宽作用于
+最终量化器；会丢失的内部端口配置、冲突配置和共享 bias 的不兼容累加器网格在
+修改前拒绝。显式关闭 bias 量化的配置继续保留。
+
+`run_onnx_ptq()` 使用全部校准和验证输入检查原始图与规范图的 FP32 输出，要求
+有限值且满足 `atol=1e-6, rtol=1e-5`。超限失败，不自动放宽；此门槛仅用于浮点
+规范化，不用于放宽量化结果。规范图与导出 Clean ONNX 仍要求输出精确相同，
+量化编码及重载输出继续使用原有严格检查。metadata 的 `linear_normalization`
+记录映射和浮点误差，`clean_onnx_vs_fp32` 保留对原始图的真实比较，
+`clean_onnx_vs_normalized_fp32` 记录导出精确检查。
+
+模型结构变化后需重新生成配套 ONNX 和 JSON，不能把旧编码单独套到新模型。
+
 ## 编码格式与验收
 
 编译器 encodings 使用 `schema_version=4`，普通算子和原生 GRU/LSTM 均采用标准零点：
