@@ -192,11 +192,24 @@ def validate_linear_quantizer_config(normalized_model, config_file):
 
 def _linear_layer_config(group, type_config, name_config):
     entry, match, _ = select_layer_config(group['matmul'], 'Gemm', type_config, name_config)
-    for field in ('input_bitwidths', 'input_signeds'):
-        values = (entry or {}).get(field, ())
-        if any(value is not None for value in values[1:]):
-            raise ValueError(f"{group['matmul']}: {field} cannot configure a Linear weight/bias "
-                             'parameter port; use weight/bias settings instead')
+    if entry is not None:
+        entry = dict(entry)
+        # Original MatMul has two operands; normalization moves its second
+        # operand to Gemm's weight parameter without changing name rules.
+        weight_settings = any(entry.get(field) is not None for field in
+                              ('weight_bitwidth', 'weight_symmetric', 'weight_signed'))
+        for field, scalar, target in (
+                ('input_bitwidths', 'input_bitwidth', 'weight_bitwidth'),
+                ('input_signeds', 'input_signed', 'weight_signed')):
+            values = entry.get(field, ())
+            if any(value is not None for value in values[2:]):
+                raise ValueError(f"{group['matmul']}: {field} exceeds the original MatMul input ports")
+            value = (values[1] if len(values) > 1 else None) if field in entry else entry.get(scalar)
+            if match in ('name', 'pattern') and not weight_settings and value is not None:
+                entry[target] = value
+        if (match in ('name', 'pattern') and not weight_settings
+                and entry.get('input_symmetric') is not None):
+            entry['weight_symmetric'] = entry['input_symmetric']
     terminal, terminal_match, _ = select_layer_config(group['add'], 'Gemm', type_config, name_config)
     if terminal_match not in ('name', 'pattern'):
         return entry, match
@@ -505,7 +518,8 @@ def apply_onnx_mixed_precision_bitwidth(
             stats["default_ops"] += 1
 
         matmul_operands = (op.type == "MatMul" and (
-            "QuantizedMatMul" in layer_type_config or "QuantizedLinear" not in layer_type_config))
+            match in {'name', 'pattern'} or "QuantizedMatMul" in layer_type_config
+            or "QuantizedLinear" not in layer_type_config))
         action = _apply_layer_config(sim, op, layer_config, plan, fallback=match == "default",
                                      matmul_operands=matmul_operands)
         if action == "disabled":

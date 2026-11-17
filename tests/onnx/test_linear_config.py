@@ -70,10 +70,13 @@ class NormalizedLinearConfigurationTest(unittest.TestCase):
         }})
         self.assertTrue(all(not sim.qc_quantize_op_dict[name].enabled for name in ('x', 'w', 'b', 'y')))
 
-    def test_explicit_matrix_parameter_port_configuration_is_not_silently_lost(self):
+    def test_original_matrix_input_configuration_reaches_linear_weight(self):
         sim = self.sim()
-        with self.assertRaisesRegex(ValueError, 'fc.*input_bitwidths.*weight'):
-            self.fixture.apply_config(sim, {'layer_name_config': {'fc': {'input_bitwidths': [8, 16]}}})
+        self.fixture.apply_config(sim, {'layer_name_config': {'fc': {
+            'input_bitwidths': [8, 16], 'input_signeds': [True, False]}}})
+        self.assertEqual(sim.qc_quantize_op_dict['x'].bitwidth, 8)
+        self.assertEqual(sim.qc_quantize_op_dict['w'].bitwidth, 16)
+        self.assertFalse(sim.qc_quantize_op_dict['w'].signed)
 
     def test_linear_type_does_not_inherit_general_matmul_configuration(self):
         sim = self.sim()

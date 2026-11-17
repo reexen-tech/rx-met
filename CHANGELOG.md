@@ -14,6 +14,7 @@
 
 ### Fixed
 
+- 修复 ONNX MatMul 输入混合精度与 PyTorch 不一致：名称规则的 `[8, 8]` 可覆盖全局激活 16 位，保留上游输出及其他 MatMul 分支的独立网格；未选中的 Linear 类型规则不再影响右操作数，规范化前的 MatMul 输入配置映射到对应权重，并保持导出与恢复一致。
 - ONNX PTQ 在校准前将安全的静态 FP32 `MatMul + bias Add` 全连接规范为 `Gemm`，高维输入使用前后 `Reshape`，与 PyTorch Linear 保持单次最终输出量化。保存原节点配置映射，修正终端输出位宽与 bias 编码，并分别检查浮点改图误差、导出和重载一致性。旧 ONNX 与 JSON 需作为一组重新量化生成。
 - QuantGRU 的 FP32/INT32 量化边界统一为先对 `x / scale` 做最近偶数舍入，再加 `zero_point`，修正奇数零点下半格输入的量化码与截断 mask 差异。
 - 修复 QuantGRU 浮点量化码转 INT32 前未饱和，以及 FP32 上界向整数范围外舍入的问题；越界输入在转换前截断并正确记录 STE mask。

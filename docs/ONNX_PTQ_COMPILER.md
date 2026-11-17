@@ -143,8 +143,11 @@ Reshape 共享原来的输入和最终输出网格，不增加独立舍入。该
 原始输入文件和模型输入输出契约保留，最终 Clean ONNX 的内部结构会改变。
 Gemm 保留原 MatMul 节点名，原 Add 别名、形状与规范化映射保存于 ONNX metadata，
 用于配置匹配和重载。识别后的组按 `QuantizedLinear` 应用配置，输出位宽作用于
-最终量化器；会丢失的内部端口配置、冲突配置和共享 bias 的不兼容累加器网格在
-修改前拒绝。显式关闭 bias 量化的配置继续保留。
+最终量化器。按原 MatMul 名称或通配符配置时，`input_bitwidths[1]` 和
+`input_signeds[1]` 映射到权重；标量 `input_bitwidth`、`input_signed` 和
+`input_symmetric` 也覆盖原来的两个操作数。显式 `weight_*` 规则仍优先，
+`QuantizedLinear` 类型规则继续区分激活和权重。会丢失的内部端口配置、冲突配置
+和共享 bias 的不兼容累加器网格在修改前拒绝。显式关闭 bias 量化的配置继续保留。
 
 `run_onnx_ptq()` 使用全部校准和验证输入检查原始图与规范图的 FP32 输出，要求
 有限值且满足 `atol=1e-6, rtol=1e-5`。超限失败，不自动放宽；此门槛仅用于浮点
@@ -253,6 +256,12 @@ CUDA provider 默认设置 `use_tf32=0`，使校准、评价和恢复使用完�
 显式传入的 provider 选项保持优先。
 
 输入经过 Transpose/Reshape 等数据搬运算子时，JSON2 输入设置作用于上游有效量化网格。
+MatMul 及其规范化 Linear 的输入在已有上游计算输出之后使用独立网格，因此可保持
+上游输出 INT16，同时将目标 MatMul 的两个输入设为 INT8；共享模型输入的分支也使用
+各自的输入网格。按目标节点名设置 `"input_bitwidths": [8, 8]` 即指定左右两个
+操作数，`[8, null]` 只覆盖左侧。未匹配的全局默认位宽和未选中的类型规则不会覆盖
+该名称规则；缺省或 `null` 的输入保留当前位宽。这些端口网格只加入仿真图，导出及
+恢复按原节点输入端口保存编码。
 `QuantizedMatMul` 的 `input_bitwidth` / `input_bitwidths` 包括常量矩阵，默认使用逐张量
 输入网格；常量仍存入 `param_encodings`。显式 `weight_*` 字段保留参数配置的优先级；
 只使用 `QuantizedLinear` 映射 MatMul 时，权重仍与激活输入分开配置。共享网格收到

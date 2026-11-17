@@ -26,6 +26,11 @@ KWS 的 QAT 循环沿用转换后的固定参数。
 低优先级规则。普通层位宽字段接受 2 到 32 的整数；`default_config.disable_quantization`
 控制未匹配普通层，单条规则的 `disable_quantization` 控制该规则匹配的层。
 
+按 MatMul 名称设置 `"input_bitwidths": [8, 8]` 可将左右操作数设为 8 位，
+`[8, null]` 只覆盖左侧；该名称规则优先于默认激活 16 位配置。Torch 和 ONNX
+均支持，ONNX 会为已有上游输出及共享模型输入的 MatMul 分支保留独立输入网格。
+规范化为 Linear 后，原 MatMul 的右输入配置映射到权重，显式 `weight_*` 设置优先。
+
 ## GRU 与 LSTM 的区别
 
 | 内容 | `GRU_config` | `LSTM_config` |
