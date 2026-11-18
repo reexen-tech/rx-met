@@ -87,7 +87,23 @@ class InputQuantizationSim(QuantizationSimModel):
                         for name in node.input if self._is_quantizable_dtype(name)
                         and (node.op_type == "Concat" or (node.name in matrix_nodes
                              and len(consumers.get(origin(name), ())) > 1))} & graph_inputs
-        exposed_inputs = local_inputs & {value.name for value in self._rx_original_onnx.graph.output}
+        native_ports = {name for adapter in getattr(self, "_rx_native_recurrent", {}).values()
+                        for name in (adapter.inputs[0], *adapter.inputs[5:]) if name}
+        native_sources = {origin(name) for name in native_ports}
+        native_inputs = native_sources & graph_inputs
+        local_inputs.update(native_inputs)
+        # Only the native input path bypasses shared grids, not other producers.
+        native_carriers = set(native_inputs)
+        for name in native_ports:
+            if origin(name) not in native_inputs:
+                continue
+            while name in producers and is_grid_preserving_op(producers[name].op_type):
+                native_carriers.add(name)
+                name = producers[name].input[0]
+        exposed_inputs = (local_inputs | native_carriers) & {
+            value.name for value in self._rx_original_onnx.graph.output
+        }
+        self._rx_input_owned_io.update(native_carriers - exposed_inputs)
         # An input returned by the model keeps its output QDQ. Other branches
         # read the original input before applying their own port grids.
         raw_inputs = {name + "_updated": name for name in exposed_inputs}
@@ -110,10 +126,13 @@ class InputQuantizationSim(QuantizationSimModel):
                 own_grid = self.qc_quantize_op_dict.get(name)
                 matrix_input = node.name in matrix_nodes and (source in producers or (
                     name in producers and own_grid is not None and own_grid.enabled))
-                if (source not in native_outputs | local_inputs and node.op_type != "Concat"
+                if (source not in native_outputs | local_inputs | native_sources and node.op_type != "Concat"
                         and not matrix_input):
                     continue
                 template = self._get_enabled_quantizer(name)
+                if template is None and source in native_sources:
+                    # Native ownership can disable the propagated input grid.
+                    template = self.qc_quantize_op_dict.get(name) or self.qc_quantize_op_dict.get(source)
                 if template is None:
                     continue  # Preserve JSON1 exclusions and disabled input grids.
                 identity = hashlib.sha256(node.name.encode("utf-8")).hexdigest()[:16]

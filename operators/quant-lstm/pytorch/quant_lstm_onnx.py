@@ -117,8 +117,9 @@ class OnnxLSTM:
         _contexts[self.identifier] = self
 
     def runtime_node(self, node):
+        inputs = list(node.input) + [""] * (8 - len(node.input))
         outputs = list(node.output) + [""] * (3 - len(node.output))
-        return onnx.helper.make_node(OP_TYPE, [self.inputs[0], self.inputs[5], self.inputs[6]],
+        return onnx.helper.make_node(OP_TYPE, [inputs[0], inputs[5], inputs[6]],
                                      outputs, name=node.name, domain=DOMAIN, context_id=self.identifier)
 
     def configure(self, config_file):

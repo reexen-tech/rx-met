@@ -21,6 +21,7 @@ from aimet_common.run_context import (
 from aimet_common.onnx_shapes import save_onnx_with_shapes, validate_onnx_shapes
 from .calibration import inspect_model_input_dtypes, inspect_model_inputs, iter_calibration_feeds
 from .compiler_encodings import CompilerEncodingConverter
+from .conv_bn import apply_conv_bn_boundaries
 from .evaluation import evaluate_onnx_dataset, load_onnx_validation_inputs
 from .mixed_precision import apply_onnx_mixed_precision_bitwidth, validate_linear_quantizer_config
 from .linear import linear_groups, normalize_linear_graph, validate_legacy_linear_boundaries
@@ -109,6 +110,8 @@ def force_model_io_quantizers(sim: Any, model: onnx.ModelProto) -> None:
     model = getattr(sim, '_rx_normalized_model', model)
     input_names = {value_info.name for value_info in model.graph.input}
     output_names = {value_info.name for value_info in model.graph.output}
+    conv_bn_outputs = {group['bn_output']
+                       for group in getattr(sim, '_rx_conv_bn_groups', {}).values()}
     missing = []
     added = False
     for name in sorted(input_names | output_names):
@@ -118,6 +121,8 @@ def force_model_io_quantizers(sim: Any, model: onnx.ModelProto) -> None:
             continue
         if (name in getattr(sim, "_rx_native_io", ())
                 or name in getattr(sim, "_rx_input_owned_io", ())):
+            continue
+        if name in conv_bn_outputs and getattr(sim, '_rx_conv_bn_initialized', False):
             continue
         quantizer = sim.qc_quantize_op_dict.get(name)
         if quantizer is None:
@@ -211,6 +216,8 @@ def create_onnx_ptq_sim(
     sim._rx_linear_groups = groups
     sim._rx_linear_normalization_report = normalization_report
     force_model_io_quantizers(sim, normalized_model)
+    if apply_conv_bn_boundaries(sim, normalized_model, config_file=config_file):
+        sim._rebuild_session()
     if quant_scheme == "percentile":
         setter = getattr(sim, "set_percentile_value", None)
         if setter is None:

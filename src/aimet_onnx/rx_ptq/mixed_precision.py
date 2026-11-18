@@ -451,6 +451,8 @@ def apply_onnx_mixed_precision_bitwidth(
 
     ops = list(sim.connected_graph.get_all_ops().values())
     groups = _linear_groups_for_sim(sim)
+    conv_bn = getattr(sim, '_rx_conv_bn_groups', {})
+    batch_norms = {group['bn']: group for group in conv_bn.values()}
     generated_nodes = {name for group in groups.values() for name in group['generated_nodes']}
     present_types = {op.type for op in ops}
     unknown = set(layer_type_config) - _TORCH_TYPE_TO_ONNX.keys() - _UNMAPPED_TYPES
@@ -516,6 +518,25 @@ def apply_onnx_mixed_precision_bitwidth(
             layer_config = default_layer_config(default_bitwidth)
             match = "default"
             stats["default_ops"] += 1
+
+        if not layer_config.get('disable_quantization', False):
+            internal_output = op.name in conv_bn and layer_config.get('output_bitwidth') is not None
+            input_widths = layer_config.get('input_bitwidths')
+            internal_input = op.name in batch_norms and (
+                (input_widths is not None and len(input_widths) > 0 and input_widths[0] is not None)
+                or (input_widths is None and layer_config.get('input_bitwidth') is not None))
+            if internal_output or internal_input:
+                raise ValueError(
+                    f'{op.name}: Conv/BatchNormalization internal quantization configuration '
+                    'would restore a removed intermediate boundary; fold BatchNorm in the '
+                    'floating model before creating QuantSim and recalibrate, or remove the '
+                    'internal-port override')
+            if op.name in batch_norms and layer_config.get('output_bitwidth') is not None:
+                terminal = sim.qc_quantize_op_dict.get(batch_norms[op.name]['bn_output'])
+                if terminal is None or not terminal.enabled:
+                    raise ValueError(
+                        f'{op.name}: Conv/BatchNormalization terminal output is disabled; '
+                        'an output_bitwidth override cannot silently create a new boundary')
 
         matmul_operands = (op.type == "MatMul" and (
             match in {'name', 'pattern'} or "QuantizedMatMul" in layer_type_config

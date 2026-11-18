@@ -7,6 +7,7 @@ from collections import defaultdict
 from dataclasses import dataclass
 from typing import Any, Dict, List, Tuple
 
+import numpy as np
 import onnx
 
 from aimet_common.compiler_encodings import (
@@ -18,8 +19,10 @@ from aimet_common.compiler_graph_validation import (
 from aimet_common.quantization_grid import IntegerGrid, integer_bounds
 from aimet_common.quantsim_config.compute_ops import is_grid_preserving_op
 from aimet_onnx.quantization_roles import QuantizationInputRoles
+from aimet_onnx.math_scalar_constants import scalar_constant_values
 from .validation import validate_quantizer_state
 from .linear import linear_groups, validate_legacy_linear_boundaries
+from .conv_bn import conv_bn_groups
 
 _FLOAT_TENSOR_TYPES = frozenset({
     onnx.TensorProto.FLOAT, onnx.TensorProto.FLOAT16,
@@ -247,6 +250,15 @@ class CompilerEncodingConverter:
 
     def convert(self) -> Tuple[Dict[str, Any], Dict[str, Any]]:
         validate_legacy_linear_boundaries(self.original_model)
+        for group in conv_bn_groups(self.original_model).values():
+            parameters = [*group['conv_param_tensors'], *group['bn_param_tensors']]
+            if any(name in self.sim.qc_quantize_op_dict and self.sim.qc_quantize_op_dict[name].enabled
+                   for name in parameters if name):
+                raise RuntimeError(
+                    f"{group['conv']} -> {group['bn']}: compiler export cannot preserve an unfolded "
+                    'Conv/BatchNormalization group with quantized source parameters. Fold BatchNorm '
+                    'in the floating model before creating QuantSim and recalibrate; exporting '
+                    'folded floating weights with the original parameter grids would change the computation.')
         groups = getattr(self.sim, '_rx_linear_groups', None)
         if groups is None:
             groups = linear_groups(self.original_model)
@@ -259,6 +271,18 @@ class CompilerEncodingConverter:
                 raise RuntimeError(f'{name}: multiple Linear output quantizers: {sorted(enabled)}; '
                                    'recalibrate with one terminal output boundary')
         validate_quantizer_state(self.sim)
+        literal_values = scalar_constant_values(self.original_model)
+        for name in set(self.input_roles.math_scalar_ports.values()):
+            quantizer = self.sim.qc_quantize_op_dict.get(name)
+            if quantizer is None or not quantizer.enabled:
+                continue
+            value = np.asarray(literal_values[name], dtype=np.float32)
+            decoded = np.asarray(quantizer.quantize_dequantize(value))
+            if decoded.size != 1 or decoded.reshape(()).item() != value.item():
+                raise RuntimeError(
+                    f'{name}: compiler export cannot preserve a shared mathematical GELU literal '
+                    'whose data-consumer quantizer changes its value; the mathematical port '
+                    'requires the original constant while the data port requires a different grid')
         tensor_encodings: Dict[str, Dict[str, Any]] = {}
         port_encodings: Dict[str, Dict[str, Any]] = {}
         ports = getattr(self.sim, "_rx_input_quantizers", {})
