@@ -12,6 +12,7 @@ from onnx import helper, numpy_helper, TensorProto
 
 from aimet_common import libpymo
 from aimet_onnx.rx_ptq import pipeline
+from aimet_onnx.rx_ptq.input_quantization import input_quantizer
 from aimet_onnx.math_scalar_constants import identify_math_scalar_constants
 from tests.support.onnx import OnnxFixture
 from tests.support.torch_export import TorchExportFixture
@@ -181,7 +182,16 @@ class MathScalarConstantTest(unittest.TestCase):
         set_onnx_grid(sim.qc_quantize_op_dict['half'], .25)
         actual = sim.session.run(None, feed)
         np.testing.assert_allclose(actual[0], expected, rtol=0, atol=2e-7)
-        quantized_input = sim.qc_quantize_op_dict['x'].quantize_dequantize(feed['x'])
+        ops = sim.connected_graph.get_all_ops()
+        data_input = input_quantizer(sim, ops['tensor_parameter'], 0)
+        self.assertTrue(data_input.enabled)
+        self.assertIsNot(data_input, sim.qc_quantize_op_dict['x'])
+        self.assertFalse(sim.qc_quantize_op_dict['x'].enabled)
+        for name in ('divide', 'half_scale'):
+            gelu_input = input_quantizer(sim, ops[name], 0)
+            self.assertTrue(gelu_input.enabled)
+            self.assertEqual(gelu_input.export_encodings('0.6.1'), data_input.export_encodings('0.6.1'))
+        quantized_input = data_input.quantize_dequantize(feed['x'])
         expected_tensor = sim.qc_quantize_op_dict['parameter_result'].quantize_dequantize(quantized_input * .5)
         self.assertTrue(np.any(expected_tensor != 0))
         np.testing.assert_array_equal(actual[1], expected_tensor)

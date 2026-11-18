@@ -262,6 +262,30 @@ ONNX 示例与 `run_onnx_ptq()` 默认使用以下两份配置，与 KWS 示例�
 - Power-of-2 使用与 `src/aimet_torch/power_of_2_quantization.py` 相同的 `cover_range`（容差 2%）
 - 权重默认 per-channel；Gemm 保持 per-channel；无 Conv+Relu supergroup
 
+JSON2 的显式激活位宽设置同时要求该有效量化点启用，与 Torch 的行为一致。
+因此基础配置或 supergroup 关闭输出后，显式 `output_bitwidth` 可以恢复普通算子
+输出量化；`input_bitwidth` / 非空的 `input_bitwidths` 对有效激活输入同理。
+默认回退、`null`、仅修改对称性或符号不会创建或恢复量化点，已显式禁用的参数
+量化也不因设置参数位宽自动恢复。数学字面量、原生层所有权、Linear 生成视图和
+Conv→BN 的内部边界保护继续生效，不会被普通配置重新打开。
+
+显式 `disable_quantization=true`（包括未匹配层的默认禁用）优先于模型 I/O 的
+默认量化规则；后续调用 `force_model_io_quantizers()` 不会静默重新启用这些点。
+共享图输入的普通计算分支使用独立输入网格，关闭一个分支不会关闭另一个分支。
+同一真实共享量化器收到不可同时满足的设置，仍在应用任何修改前拒绝。
+
+原始 `.aimet.encodings` / `.encodings` 在需要时附加可选的
+`rx_quantization_overrides`，记录版本 1 的禁用量化器名字和 generic 排除层；
+编译器 JSON 仍使用已有的 `excluded_layers`，schema 版本保持 4。
+重载先校验覆盖状态与实际编码、共享量化器及节点归属是否一致，再加载网格并
+恢复最终启停状态。未知名字、禁用却仍有编码、共享别名相互矛盾均在加载前拒绝。
+没有该字段的旧文件继续按原有编码加载规则处理；已被实际加载启用的点不会
+遗留旧的禁用或排除声明。
+
+InstanceNorm 类型设置根据该 ONNX 节点实际输入的空间维数选择 1d/2d/3d。
+不能只看外部模型输入：无 batch 的 Torch 输入导出后可能先插入 Unsqueeze。
+节点 rank 无法确定且多个别名配置不等价时，明确报错，不猜测精度。
+
 上述普通 bias 的乘积 scale 对齐不覆盖原生 GRU/LSTM。循环层内部 bias 当前按
 独立配置的 bias 网格量化并重缩放到累加器域，不能将其默认视为 INT32 乘积 scale
 编码。两种方案的差异和待确认的部署约束见

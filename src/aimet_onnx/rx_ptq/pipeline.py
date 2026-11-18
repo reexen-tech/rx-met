@@ -106,7 +106,7 @@ def _enforce_linear_boundaries(sim, model):
 
 
 def force_model_io_quantizers(sim: Any, model: onnx.ModelProto) -> None:
-    """Ensure quantizable floating graph inputs/outputs have enabled quantizers."""
+    """Establish default model I/O grids without overriding explicit exclusions."""
     model = getattr(sim, '_rx_normalized_model', model)
     input_names = {value_info.name for value_info in model.graph.input}
     output_names = {value_info.name for value_info in model.graph.output}
@@ -125,6 +125,8 @@ def force_model_io_quantizers(sim: Any, model: onnx.ModelProto) -> None:
         if name in conv_bn_outputs and getattr(sim, '_rx_conv_bn_initialized', False):
             continue
         quantizer = sim.qc_quantize_op_dict.get(name)
+        if quantizer is not None and id(quantizer) in getattr(sim, '_rx_explicit_disabled_quantizers', ()):
+            continue
         if quantizer is None:
             if name not in sim.connected_graph.get_all_products():
                 missing.append(name)

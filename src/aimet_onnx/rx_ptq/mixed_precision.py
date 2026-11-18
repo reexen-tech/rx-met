@@ -15,6 +15,7 @@ from aimet_common.mixed_precision import (
     load_mixed_precision_config, select_layer_config,
 )
 from aimet_common.quantsim_config.quantsim_config import _get_config_file
+from aimet_common.quantsim_config.compute_ops import is_compute_op
 from .input_quantization import input_quantizer
 from .linear import linear_groups
 from aimet_common.run_context import log_details, log_print as print, logged_operation
@@ -315,9 +316,39 @@ def _set_symmetric(quantizer: Any, symmetric: Optional[bool]) -> None:
         quantizer.symmetric = bool(symmetric)
 
 
+def _protected_quantizer_ids(sim):
+    roles = getattr(sim, '_input_roles', None)
+    names = set(getattr(roles, 'control_only', ()))
+    groups = _linear_groups_for_sim(sim)
+    model = getattr(sim, '_rx_normalized_model', None)
+    if model is None:
+        model = getattr(sim, '_rx_original_onnx', None)
+    if model is None:
+        model = sim.model.model
+    native = getattr(sim, '_rx_native_recurrent', {})
+    compute_outputs = {output for node in model.graph.node
+                       if node.name not in native and node.op_type != 'QcQuantizeOp'
+                       and is_compute_op(node.op_type) for output in node.output if output}
+    # A normalized Linear owns its post-Reshape result, even when only GRU consumes it.
+    compute_outputs.update(group['output'] for group in groups.values())
+    names.update(set(getattr(sim, '_rx_native_io', ())) - compute_outputs)
+    for attribute in ('_rx_native_outputs', '_rx_native_parameters', '_rx_input_owned_io'):
+        names.update(getattr(sim, attribute, ()))
+    for group in groups.values():
+        names.update(name for name in (group['gemm_input'], group['gemm_output'])
+                     if name not in (group['input'], group['output']))
+    for group in getattr(sim, '_rx_conv_bn_groups', {}).values():
+        names.update([group['conv_output'], *group['bn_param_tensors']])
+        alias = getattr(sim, '_rx_input_quantizers', {}).get((group['bn'], 0))
+        if alias is not None:
+            names.add(alias)
+    return {id(sim.qc_quantize_op_dict[name]) for name in names if name in sim.qc_quantize_op_dict}
+
+
 def _apply_layer_config(sim: Any, op: Any, layer_config: Dict[str, Any],
                         plan: QuantizerConfigPlan, *, fallback: bool = False,
-                        matmul_operands: bool = False) -> str:
+                        matmul_operands: bool = False, protected=frozenset(),
+                        activation_requests=None) -> str:
     inputs, outputs, params = _quantizers_for_op(sim, op, matmul_operands=matmul_operands)
     weight = params.get("weight")
     # MatMul's constant matrix is still an operand, despite ONNX storing it as
@@ -326,7 +357,13 @@ def _apply_layer_config(sim: Any, op: Any, layer_config: Dict[str, Any],
                          and any(q is weight for q in inputs)
                          and not any(layer_config.get(field) is not None
                                      for field in ("weight_bitwidth", "weight_symmetric", "weight_signed")))
-    def request(quantizer, field, value, role):
+    def request(quantizer, field, value, role, *, activation=False):
+        # An explicit width can restore an activation slot removed by JSON1.
+        if (activation and quantizer is not None and value is not None
+                and not fallback and id(quantizer) not in protected):
+            plan.request(quantizer, 'enabled', True, f'{op.name}.{role}', fallback=False)
+            if activation_requests is not None:
+                activation_requests.add(op.name)
         plan.request(quantizer, field, value, f"{op.name}.{role}", fallback=fallback)
 
     if layer_config.get("disable_quantization", False):
@@ -336,7 +373,7 @@ def _apply_layer_config(sim: Any, op: Any, layer_config: Dict[str, Any],
 
     if not fallback:
         for quantizer in inputs + outputs + list(params.values()):
-            if quantizer is not None and quantizer.enabled:
+            if quantizer is not None and quantizer.enabled and id(quantizer) not in protected:
                 request(quantizer, "enabled", True, "quantization")
     request(weight, "calibration_passthrough", weight_is_operand, "weight_calibration")
     for role, quantizer in params.items():
@@ -360,7 +397,7 @@ def _apply_layer_config(sim: Any, op: Any, layer_config: Dict[str, Any],
             if input_bws is not None and index < len(input_bws)
             else None if input_bws is not None else default_input_bw
         )
-        request(quantizer, "bitwidth", bitwidth, f"input[{index}]")
+        request(quantizer, "bitwidth", bitwidth, f"input[{index}]", activation=True)
         request(quantizer, "symmetric", input_sym, f"input[{index}]")
         signs = layer_config.get('input_signeds')
         signed = (signs[index] if index < len(signs) else None) if signs is not None else layer_config.get('input_signed')
@@ -369,10 +406,36 @@ def _apply_layer_config(sim: Any, op: Any, layer_config: Dict[str, Any],
     output_bw = layer_config.get("output_bitwidth")
     output_sym = layer_config.get("output_symmetric")
     for quantizer in outputs:
-        request(quantizer, "bitwidth", output_bw, "output")
+        request(quantizer, "bitwidth", output_bw, "output", activation=True)
         request(quantizer, "symmetric", output_sym, "output")
         request(quantizer, "signed", layer_config.get('output_signed'), "output")
     return "applied"
+
+
+def _input_tensor_rank(sim, op):
+    ranks = getattr(sim, '_rx_configuration_tensor_ranks', None)
+    if ranks is None:
+        import onnx
+        # ConnectedGraph leaves intermediate product shapes unset.
+        model = getattr(sim, '_rx_normalized_model', None)
+        if model is None:
+            model = getattr(sim, '_rx_original_onnx', None)
+        if model is None:
+            model = sim.model.model
+        try:
+            inferred = onnx.shape_inference.infer_shapes(model)
+        except (onnx.shape_inference.InferenceError, ValueError):
+            inferred = model
+        ranks = {value.name: len(value.type.tensor_type.shape.dim)
+                 for value in (*inferred.graph.input, *inferred.graph.value_info, *inferred.graph.output)
+                 if value.type.HasField('tensor_type') and value.type.tensor_type.HasField('shape')}
+        sim._rx_configuration_tensor_ranks = ranks
+    roles = getattr(sim, '_input_roles', None)
+    names = roles.input_names(op.name) if roles is not None else None
+    name = names[0] if names else op.inputs[0].name
+    if name in ranks:
+        return ranks[name]
+    return len(op.inputs[0].shape) if op.inputs[0].shape else None
 
 
 def _type_config_for_op(sim, op, type_configs):
@@ -387,6 +450,10 @@ def _type_config_for_op(sim, op, type_configs):
         dimensions = 2 if rank == 4 else 3 if rank == 5 else 1
         candidates = {name: value for name, value in candidates.items()
                       if name.endswith(f"{dimensions}d")}
+    if op.type == 'InstanceNormalization' and candidates:
+        rank = _input_tensor_rank(sim, op)
+        if rank is not None:
+            candidates = {name: value for name, value in candidates.items() if name.endswith(f'{rank - 2}d')}
     if op.type == "MatMul":
         if "QuantizedMatMul" in candidates:
             candidates = {"QuantizedMatMul": candidates["QuantizedMatMul"]}
@@ -484,7 +551,14 @@ def apply_onnx_mixed_precision_bitwidth(
     }
 
     plan = QuantizerConfigPlan()
+    protected = _protected_quantizer_ids(sim)
+    disabled_ops = set()
+    activation_requests = set()
     for name, quantizer in sim.qc_quantize_op_dict.items():
+        if default_disable:
+            plan.request(quantizer, 'enabled', False, f'default_config.{name}', fallback=True)
+        if id(quantizer) in protected:
+            plan.request(quantizer, 'enabled', False, f'protected_domain.{name}')
         plan.request(quantizer, 'signed', config.get('default_config', {}).get('signed'),
                      f'default_config.{name}', fallback=True)
     for op in ops:
@@ -510,10 +584,12 @@ def apply_onnx_mixed_precision_bitwidth(
         if layer_config is None:
             if default_disable:
                 action = _apply_layer_config(
-                    sim, op, {"disable_quantization": True}, plan, fallback=True
+                    sim, op, {"disable_quantization": True}, plan, fallback=True,
+                    protected=protected, activation_requests=activation_requests,
                 )
                 if action == "disabled":
                     stats["disabled_ops"] += 1
+                    disabled_ops.add(op.name)
                 continue
             layer_config = default_layer_config(default_bitwidth)
             match = "default"
@@ -542,9 +618,11 @@ def apply_onnx_mixed_precision_bitwidth(
             match in {'name', 'pattern'} or "QuantizedMatMul" in layer_type_config
             or "QuantizedLinear" not in layer_type_config))
         action = _apply_layer_config(sim, op, layer_config, plan, fallback=match == "default",
-                                     matmul_operands=matmul_operands)
+                                     matmul_operands=matmul_operands, protected=protected,
+                                     activation_requests=activation_requests)
         if action == "disabled":
             stats["disabled_ops"] += 1
+            disabled_ops.add(op.name)
         else:
             stats["applied_ops"] += 1
             if match in {'name', 'pattern'}:
@@ -552,6 +630,21 @@ def apply_onnx_mixed_precision_bitwidth(
                     print(f"  [{match}] {op.name} ({op.type})")
 
     _apply_plan(plan)
+    disabled = set(getattr(sim, '_rx_explicit_disabled_quantizers', ()))
+    for quantizer, settings in plan.entries():
+        if 'enabled' in settings:
+            if settings['enabled']:
+                disabled.discard(id(quantizer))
+            else:
+                disabled.add(id(quantizer))
+    excluded = set(getattr(sim, '_excluded_layer_names', ())) | disabled_ops
+    for op in ops:
+        if op.name in activation_requests:
+            _, outputs, _ = _quantizers_for_op(sim, op)
+            if any(quantizer is not None and quantizer.enabled for quantizer in outputs):
+                excluded.discard(op.name)
+    sim._rx_explicit_disabled_quantizers = disabled
+    sim._excluded_layer_names = sorted(excluded)
     for adapter in getattr(sim, "_rx_native_recurrent", {}).values():
         adapter.configure(config_file)
     with log_details(verbose):

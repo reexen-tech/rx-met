@@ -85,8 +85,8 @@ class InputQuantizationSim(QuantizationSimModel):
                     consumers.setdefault(origin(name), set()).add((node.name, index))
         local_inputs = {origin(name) for node in original_nodes
                         for name in node.input if self._is_quantizable_dtype(name)
-                        and (node.op_type == "Concat" or (node.name in matrix_nodes
-                             and len(consumers.get(origin(name), ())) > 1))} & graph_inputs
+                        and (node.op_type == "Concat"
+                             or len(consumers.get(origin(name), ())) > 1)} & graph_inputs
         native_ports = {name for adapter in getattr(self, "_rx_native_recurrent", {}).values()
                         for name in (adapter.inputs[0], *adapter.inputs[5:]) if name}
         native_sources = {origin(name) for name in native_ports}

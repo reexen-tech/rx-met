@@ -101,6 +101,10 @@ from aimet_common.quantsim_config.quantsim_config import _config_file_aliases, _
 from aimet_common.connected_graph.product import Product
 from aimet_common.onnx._utils import _convert_version
 from aimet_onnx import utils
+from aimet_onnx.quantization_overrides import (
+    OVERRIDES_KEY, export_quantization_overrides, restore_quantization_overrides,
+    validate_quantization_overrides,
+)
 from aimet_onnx.meta.operations import Op
 from aimet_onnx.meta.utils import (
     get_op_given_param_name,
@@ -1324,6 +1328,10 @@ class QuantizationSimModel:
                 }
             )
 
+        overrides = export_quantization_overrides(self)
+        if overrides is not None:
+            encodings_dict[OVERRIDES_KEY] = overrides
+            validate_quantization_overrides(self, encodings_dict)
         save_json_yaml(encoding_file_path, encodings_dict)
 
     @contextlib.contextmanager
@@ -2564,6 +2572,7 @@ def load_encodings_to_sim(
     # Load encodings file
     with open(onnx_encoding_path) as json_file:
         encodings = json.load(json_file)
+    overrides = validate_quantization_overrides(quant_sim_model, encodings)
 
     encoding_version = encodings.get("version", None)
     if encoding_version not in VALID_ENCODING_VERSIONS:
@@ -2654,6 +2663,7 @@ def load_encodings_to_sim(
     if getattr(quant_sim_model, "_rx_native_recurrent", None) or encodings.get("native_recurrent_encodings"):
         from aimet_onnx.rx_ptq.recurrent import restore_native_encodings
         restore_native_encodings(quant_sim_model, encodings, allow_overwrite=allow_overwrite)
+    restore_quantization_overrides(quant_sim_model, overrides)
     return mismatched_encodings
 
 

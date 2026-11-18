@@ -18,11 +18,29 @@ import onnx
 import torch
 
 from quant_lstm import QuantLSTM
+from lstm_aimet import _aimet_encoding, _native_encoding
 
 DOMAIN = "rx.quant_lstm"
 OP_TYPE = "NativeLSTM"
 _contexts = weakref.WeakValueDictionary()
 _identifiers = itertools.count(1)
+
+
+def _normalize_encoding_records(value, path='encodings'):
+    if isinstance(value, dict):
+        if 'scale' in value:
+            # The native reader validates explicit n before the writer derives it.
+            canonical = _aimet_encoding(_native_encoding(value, path))
+            normalized = copy.deepcopy(value)
+            if 'n' not in normalized:
+                normalized['n'] = canonical['n']
+            if normalized != canonical:
+                raise ValueError(f'Unsupported or inconsistent LSTM encoding fields: {path}')
+            return normalized
+        return {key: _normalize_encoding_records(child, f'{path}.{key}') for key, child in value.items()}
+    if isinstance(value, list):
+        return [_normalize_encoding_records(child, f'{path}[{index}]') for index, child in enumerate(value)]
+    return value
 
 
 def runtime_library() -> str:
@@ -171,16 +189,40 @@ class OnnxLSTM:
         if self.name in payload.get("excluded_layers", []):
             self.module.use_quantization = False
             return
-        canonical = copy.deepcopy(payload)
+        try:
+            expected = {"activation_encodings": {self.name: payload["activation_encodings"][self.name]},
+                        "param_encodings": {name: payload["param_encodings"][name] for name in self.parameter_names},
+                        "excluded_layers": []}
+        except KeyError as error:
+            raise ValueError(f'LSTM {self.name}: missing internal encodings: {error.args[0]}') from error
+        entry = expected['activation_encodings'][self.name]
+        fields = {'is_LSTM', 'input', 'output', 'internal_ops'}
+        if self.module.bidirectional:
+            fields.add('internal_ops_reverse')
+        if not isinstance(entry, dict) or set(entry) != fields:
+            raise ValueError(f'LSTM {self.name}: incomplete or inconsistent internal encodings')
+        for field in ('internal_ops', 'internal_ops_reverse'):
+            if field not in entry:
+                continue
+            if (not isinstance(entry[field], dict)
+                    or any(not isinstance(operation, dict) or set(operation) != {'output'}
+                           for operation in entry[field].values())):
+                raise ValueError(f'LSTM {self.name}: incomplete or inconsistent internal encodings: {field}')
+        expected = _normalize_encoding_records(expected)
+        entry = expected['activation_encodings'][self.name]
+        for kind in ('input', 'output'):
+            port = entry[kind]
+            if isinstance(port, list) and len(port) == 1:
+                entry[kind] = {'0': port[0]}
+            elif not isinstance(port, dict) or set(port) != {'0'}:
+                raise ValueError(f'LSTM {self.name}: expected one {kind} encoding')
+        canonical = copy.deepcopy(expected)
         for suffix, original in zip(("weight_ih.weight", "weight_hh.weight", "bias"), self.inputs[1:4]):
             if original:
-                canonical["param_encodings"][f"{self.name}.{suffix}"] = payload["param_encodings"][original]
+                canonical["param_encodings"][f"{self.name}.{suffix}"] = expected["param_encodings"][original]
         if not self.module.load_quant_params_from_aimet_format(canonical, module_name=self.name, verbose=False):
             raise ValueError(f"LSTM {self.name}: missing internal encodings")
         self.module.use_quantization = True
-        self.module.set_quant_params_locked(not allow_overwrite)
-        expected = {"activation_encodings": {self.name: payload["activation_encodings"][self.name]},
-                    "param_encodings": {name: payload["param_encodings"][name] for name in self.parameter_names},
-                    "excluded_layers": []}
-        if self.export_encodings() != expected:
+        if _normalize_encoding_records(self.export_encodings()) != expected:
             raise ValueError(f"LSTM {self.name}: incomplete or inconsistent internal encodings")
+        self.module.set_quant_params_locked(not allow_overwrite)
