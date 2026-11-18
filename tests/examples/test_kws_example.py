@@ -41,23 +41,33 @@ class KwsExampleConfigurationTest(unittest.TestCase):
         with self.assertRaises(SystemExit):
             kws.parse_args(['--device', 'cpu'])
 
-    def test_output_directory_uses_cwd_and_respects_overrides(self):
-        with tempfile.TemporaryDirectory() as directory, patch.dict(os.environ, {}):
+    def test_defaults_and_cli_ignore_example_environment_variables(self):
+        with tempfile.TemporaryDirectory() as directory, patch.dict(os.environ, {
+            'RX_MET_SPEECH_COMMANDS_ROOT': '/ignored/data',
+            'RX_MET_KWS_OUTPUT_DIR': '/ignored/output',
+            'RX_MET_KWS_FP_MODEL': '/ignored/model.pth',
+        }):
             root = Path(directory)
             original_cwd = Path.cwd()
             try:
                 os.chdir(root)
-                os.environ.pop('RX_MET_KWS_OUTPUT_DIR', None)
                 namespace = runpy.run_path(kws.__file__, run_name='kws_output_test')
                 for rnn_type in ('gru', 'lstm'):
                     args = namespace['parse_args'](['--rnn_type', rnn_type])
                     self.assertEqual(args.output_dir / args.rnn_type,
                                      root / 'output/quick_start_kws' / rnn_type)
-                os.environ['RX_MET_KWS_OUTPUT_DIR'] = str(root / 'env-output')
-                namespace = runpy.run_path(kws.__file__, run_name='kws_output_test')
-                self.assertEqual(namespace['parse_args']([]).output_dir, root / 'env-output')
-                args = namespace['parse_args'](['--output-dir', str(root / 'cli-output')])
+                    self.assertEqual(args.data_dir, Path('/datasets/speech_commands_v0.02'))
+                    self.assertIsNone(args.fp_checkpoint)
+                args = namespace['parse_args']([
+                    '--data-dir', str(root / 'cli-data'),
+                    '--output-dir', str(root / 'cli-output'),
+                    '--fp-checkpoint', str(root / 'cli-model.pth'),
+                ])
+                self.assertEqual(args.data_dir, root / 'cli-data')
                 self.assertEqual(args.output_dir, root / 'cli-output')
+                self.assertEqual(args.fp_checkpoint, root / 'cli-model.pth')
+                with self.assertRaises(SystemExit):
+                    namespace['parse_args'](['--device', 'cpu', '--ptq-only'])
             finally:
                 os.chdir(original_cwd)
 
@@ -184,9 +194,9 @@ class KwsExampleWorkflowTest(unittest.TestCase):
                 with self.subTest(rnn_type=rnn_type), \
                      patch.object(kws, 'build_dataloaders', return_value=loaders), \
                      patch.object(kws, '_new_model', side_effect=new_model), \
-                     patch.dict('os.environ', {'RX_MET_KWS_FP_MODEL': str(Path(directory) / rnn_type / 'model_fp_kws.pth')}), \
                      contextlib.redirect_stdout(io.StringIO()):
-                    kws.main(['--rnn_type', rnn_type, '--output-dir', directory])
+                    kws.main(['--rnn_type', rnn_type, '--output-dir', directory,
+                              '--fp-checkpoint', str(Path(directory) / rnn_type / 'model_fp_kws.pth')])
                     root = Path(directory) / rnn_type
                     if timestamp_output:
                         record_path, = root.glob('*/run.json')

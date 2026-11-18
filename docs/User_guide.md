@@ -14,8 +14,8 @@ runtime 镜像提供第三方环境，项目代码由应用包安装后挂载。
 
 | 工作流 | 适用对象 | 底层引擎 | 入口 | 对应章节 |
 |--------|----------|----------|------|----------|
-| **PyTorch 模型量化** | 已有浮点模型、权重和校准数据 | `aimet_torch` | [自有模型接入教程](PyTorch_quantization.md)；KWS 为可运行实例 | [第 5.1 节](#51-完整流程总览) |
-| **ONNX 直量化 PTQ** | 已有 ONNX、无 PyTorch 训练图 | `aimet_onnx` | `examples/quick_start_onnx_ptq.py` | [第 5.4 节](#54-已有-onnx-模型的-ptq) |
+| **PyTorch 模型量化** | 已有浮点模型、权重和校准数据 | `aimet_torch` | [自有模型接入教程](PyTorch_quantization.md)；KWS 为可运行实例 | [第 4.1 节](#41-完整流程总览) |
+| **ONNX 直量化 PTQ** | 已有 ONNX、无 PyTorch 训练图 | `aimet_onnx` | `examples/quick_start_onnx_ptq.py` | [第 4.4 节](#44-已有-onnx-模型的-ptq) |
 
 选择原则：
 
@@ -48,7 +48,7 @@ CUDA 镜像已经包含对应版本的 CUDA 运行环境，变体由宿主机驱
 
 CPU runtime 安装 `onnxruntime`，CUDA runtime 安装 `onnxruntime-gpu`；QuantGRU 和
 QuantLSTM 来自挂载的应用安装目录。ONNX PTQ 示例默认要求 `CUDAExecutionProvider`，
-使用 CPU 时显式指定 `--device cpu` 或 `RX_MET_ONNX_PTQ_DEVICE=cpu`。
+使用 CPU 时显式指定 `--device cpu`。
 精确依赖及 GPU 架构以 [docker/variants.json](../docker/variants.json) 为准。
 `cu118` 的 ONNX LSTM PTQ 还受 bridge API 兼容条件限制，见
 [原生循环层运行时要求](ONNX_PTQ_COMPILER.md#gru--lstm-原生适配)。
@@ -63,7 +63,7 @@ QuantLSTM 来自挂载的应用安装目录。ONNX PTQ 示例默认要求 `CUDAE
 指定镜像归档。环境与应用包的对应关系见[公共环境](Shared_environment.md)。
 
 ```bash
-./install.sh --offline
+./install.sh
 ```
 
 安装器打印应用目录和公共环境版本标签。先在宿主机创建工作目录，并准备模型与数据目录。
@@ -102,29 +102,13 @@ CPU runtime 的 CUDA 版本打印为 `None`。runtime 提供第三方依赖，�
 
 ---
 
-## 4. 环境变量与路径配置
-
-| 变量 / 路径 | 作用 | 适用流程 |
-|-------------|------|----------|
-| `RX_MET_SPEECH_COMMANDS_ROOT` | Speech Commands 数据集根目录，默认 `/datasets/speech_commands_v0.02` | KWS 与 ONNX 默认示例 |
-| `RX_MET_KWS_OUTPUT_DIR` | KWS 输出根目录，默认 `./output/quick_start_kws`；ONNX 示例默认从中选择对应网络类型的最新成功完整运行 | KWS 与 ONNX 默认示例 |
-| `RX_MET_KWS_FP_MODEL` | 浮点检查点路径；`--ptq-only` 时必须由此变量或 `--fp-checkpoint` 提供 | KWS 示例 |
-| `RX_MET_ONNX_PTQ_MODEL` / `RX_MET_ONNX_PTQ_CALIB` | 覆盖模型与校准目录 | ONNX PTQ |
-| `RX_MET_ONNX_PTQ_VAL` | 可选验证目录；默认查找校准目录的平级 `val/`，不存在时复用校准样本作数值比较 | ONNX PTQ |
-| `RX_MET_ONNX_PTQ_OUTPUT_DIR` | 输出目录，默认当前运行目录下的 `output/onnx_ptq_quick_start` | ONNX PTQ |
-| `RX_MET_ONNX_PTQ_DEVICE` | `cuda`（默认）或显式设置为 `cpu` | ONNX PTQ |
-| 应用挂载中的示例目录 | `/opt/rx-met/examples` | 两者 |
-| 推荐输出目录 | volume 挂载的 `/workspace` | 两者 |
-
----
-
-## 5. 量化流程
+## 4. 量化流程
 
 环境可用后，按下面的任务选择入口。示例的数据准备和命令由
 [示例说明](../examples/README.md)维护；自有模型的接入步骤见
 [PyTorch 模型量化](PyTorch_quantization.md)。
 
-### 5.1 完整流程总览
+### 4.1 完整流程总览
 
 ```
 已有浮点模型与权重 → prepare_model → QuantizationSimModel + 混合精度位宽
@@ -142,7 +126,7 @@ KWS 和 ONNX 示例执行 Po2，以演示该能力及转换前后的精度比较
 按[自有模型接入教程](PyTorch_quantization.md)准备模型、数据和评估函数，
 再根据[配置参考](Quant_config.md)调整量化设置。
 
-### 5.2 运行示例脚本
+### 4.2 运行示例脚本
 
 在容器内将示例复制到可写工作目录；已按发布包 README 在宿主机复制过示例时，直接进入
 `/workspace`。以下路径与[示例说明](../examples/README.md)一致：
@@ -161,7 +145,7 @@ cd /workspace
 KWS 默认浮点训练和 QAT 各 1 epoch，用于学习流程，不能据此推断充分训练后的精度。
 示例验证重载输出，失败返回非零；产物位置和日志说明见[运行目录与日志](Runtime_outputs.md)。
 
-### 5.3 配置和一致性
+### 4.3 配置和一致性
 
 PyTorch 和 ONNX 采用两层配置。下表以 PyTorch 调用为例；完整字段、匹配优先级和校准后的
 修改限制见[PyTorch 配置参考](Quant_config.md)及 [ONNX PTQ 配置说明](ONNX_PTQ_COMPILER.md)。
@@ -181,7 +165,7 @@ PyTorch 和 ONNX 采用两层配置。下表以 PyTorch 调用为例；完整字
 部署时使用同次导出返回的 ONNX 和 `.json` 配套路径，严格校验成功后再进行精度验证；
 失败时已写出的文件仅用于排查。
 
-### 5.4 已有 ONNX 模型的 PTQ
+### 4.4 已有 ONNX 模型的 PTQ
 
 已有 ONNX 模型使用 `examples/quick_start_onnx_ptq.py`，无需先转换为 PyTorch。
 准备静态模型与代表性的 NPY/NPZ 校准样本，建议另备独立验证样本，按
@@ -208,11 +192,11 @@ ONNX 示例和 `run_onnx_ptq()` 执行可选 Po2 阶段的转换演示。导出�
 
 ---
 
-## 6. 常见问题（FAQ）
+## 5. 常见问题（FAQ）
 
 以下条目适用于当前应用包与其匹配的公共 runtime。
 
-### 6.1 镜像和运行环境
+### 5.1 镜像和运行环境
 
 | 现象 | 原因 | 处理 |
 | --- | --- | --- |
@@ -220,7 +204,7 @@ ONNX 示例和 `run_onnx_ptq()` 执行可选 Po2 阶段的转换演示。导出�
 | `libpymo` 或 QuantGRU 报 CUDA 动态库缺失 | 镜像归档损坏，或容器中的 Torch/CUDA 包被替换 | 执行 `python3 -m pip check`，使用应用包指定的公共 runtime 并保留其固定 Torch/CUDA 依赖 |
 | CUDA runtime 中 `torch.cuda.is_available()` 为 `False` | 容器缺少 GPU 映射，或宿主机驱动、Container Toolkit 异常 | 检查 `--gpus all`、宿主机 `nvidia-smi` 和 Container Toolkit，再确认镜像变体满足驱动要求；CPU runtime 返回 `False` 为正常情况 |
 
-### 6.2 PyTorch 量化和重载
+### 5.2 PyTorch 量化和重载
 
 | 现象 | 原因 | 处理 |
 | --- | --- | --- |
@@ -228,16 +212,16 @@ ONNX 示例和 `run_onnx_ptq()` 执行可选 Po2 阶段的转换演示。导出�
 | `load_state_dict` 报缺失或多余键 | 模型结构、准备方式或检查点类型不匹配 | KWS 检查点保存主权重；先用相同网络类型和准备方式严格加载，再创建 QuantSim 并加载 encodings。不要用 `strict=False` 隐藏结构差异 |
 | 报量化参数未初始化 | 校准未覆盖已启用量化器，或加载时名称未匹配 | 检查校准数据路径和前向覆盖范围，并核对模型结构与配置文件 |
 
-### 6.3 ONNX PTQ
+### 5.3 ONNX PTQ
 
 | 现象 | 原因 | 处理 |
 | --- | --- | --- |
-| 找不到 `CUDAExecutionProvider` | 选用了 CPU runtime，或 CUDA 运行环境不兼容 | CPU PTQ 使用 `--device cpu` 或 `RX_MET_ONNX_PTQ_DEVICE=cpu`；CUDA PTQ 检查匹配的 runtime 和宿主机驱动 |
+| 找不到 `CUDAExecutionProvider` | 选用了 CPU runtime，或 CUDA 运行环境不兼容 | CPU PTQ 使用 `--device cpu`；CUDA PTQ 检查匹配的 runtime 和宿主机驱动 |
 | 校准样本无法加载 | NPY/NPZ 的输入名、shape、dtype 或数值不符合模型要求 | 按 [ONNX 输入要求](ONNX_PTQ_COMPILER.md#量化自己的-onnx-模型)生成数据；多输入推荐每份样本保存一个以完整输入名为键的 NPZ |
 
 ---
 
-## 7. 卸载与回滚
+## 6. 卸载与回滚
 
 应用安装到独立版本目录。升级时挂载新目录并使用 manifest 指定的 runtime 启动新容器；
 回滚时恢复旧目录与其匹配的 runtime。保留仍被容器使用的版本目录。

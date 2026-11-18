@@ -20,11 +20,11 @@ Container Toolkit。按[平台与版本要求](docs/User_guide.md#2-支持平台
 选择 `cpu`、`cu118`、`cu126` 或 `cu130` 应用包及匹配的 runtime。
 精确环境定义见 [docker/variants.json](docker/variants.json)。
 
-离线安装可以复用本机已有的匹配 runtime；本机没有匹配镜像时，准备对应的 runtime 归档。
+安装器优先复用本机已有的匹配 runtime；离线使用且缺少匹配镜像时，准备对应的 runtime 归档。
 进入解压后的应用包目录执行：
 
 ```bash
-./install.sh --offline
+./install.sh
 ```
 
 安装器复用或加载 runtime，在容器中离线安装项目包，并打印应用目录和 Docker 启动命令。

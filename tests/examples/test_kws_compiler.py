@@ -198,7 +198,6 @@ class KwsCompilerGraphTest(unittest.TestCase):
              patch.object(kws, '_new_model', side_effect=self.model), \
              patch.object(kws, 'train_floating_point', wraps=kws.train_floating_point) as train, \
              patch.object(kws, 'qat_finetune', wraps=kws.qat_finetune) as qat:
-            os.environ.pop('RX_MET_KWS_FP_MODEL', None)
             kws.main(['--rnn_type', 'gru', '--output-dir', str(output_root)])
         train.assert_called_once()
         qat.assert_called_once()

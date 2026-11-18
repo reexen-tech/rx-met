@@ -135,15 +135,13 @@ for target in "${TARGETS[@]}"; do
             --mount "type=bind,src=$RX_MET_INSTALLED_DIR,dst=/opt/rx-met,readonly" \
         -e USER=rx-met-validator \
         -e LOGNAME=rx-met-validator \
-        -e "RX_MET_ONNX_PTQ_MODEL=/model/${model_name}" \
-        -e "RX_MET_ONNX_PTQ_CALIB=/datasets/calib" \
-        -e "RX_MET_ONNX_PTQ_OUTPUT_DIR=/output" \
-        -e "RX_MET_ONNX_PTQ_DEVICE=cuda" \
         -v "${model_dir}:/model:ro" \
         -v "${DATASET_DIR}:/datasets/calib:ro" \
         -v "${target_output}:/output" \
         "${image}" \
         python3 /opt/rx-met/examples/quick_start_onnx_ptq.py \
+        --model "/model/${model_name}" --calib-dir /datasets/calib \
+        --output-dir /output --device cuda \
         2>&1 | tee "${target_output}/verify.log"
 done
 

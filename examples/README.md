@@ -48,6 +48,9 @@ python3 examples/quick_start_kws.py --rnn_type lstm
 默认浮点训练和 QAT 各 1 epoch。每次任务保存在
 `./output/quick_start_kws/<gru|lstm>/<execution-id>/`，最终模型位于 `exports/`，
 供下文复用的浮点检查点为 `checkpoints/model_fp_kws.pth`。
+数据默认读取 `/datasets/speech_commands_v0.02`，可用 `--data-dir` 覆盖；
+`--output-dir` 可改变输出根目录，仍会追加 `gru/` 或 `lstm/`。
+完整流程中，`--fp-checkpoint` 可指定浮点检查点的保存与读取路径。
 
 完整浮点 MFCC 在分类网络外执行，导出 ONNX 输入为 `[1,49,20]` 特征，输出为 `[1,12]` logits。
 Attention 使用广播乘法、归约、指数和除法，Linear 使用等价的 1×1 Conv2d；
@@ -107,14 +110,15 @@ KWS 导出的 ONNX 是不含 Q/DQ 的浮点图，量化参数保存在外部 JSO
 python3 examples/quick_start_onnx_ptq.py
 ```
 
-默认使用 GRU，自动选择 `./output/quick_start_kws/gru/` 中最新成功的完整 KWS 运行，读取
-`exports/att_mh_rnn_kws.onnx`。若通过 `RX_MET_KWS_OUTPUT_DIR` 修改了 KWS 输出根目录，保持该变量一致。
+默认使用 GRU，自动选择当前运行目录的 `output/quick_start_kws/gru/` 中最新成功的完整 KWS 运行，读取
+`exports/att_mh_rnn_kws.onnx`。若通过 `--output-dir` 修改了 KWS 输出根目录，
+ONNX 示例需用 `--model` 指定其中的 ONNX 文件。
 LSTM 指定 `--rnn-type lstm`。CPU runtime 另加 `--device cpu`；准备 ONNX 的 KWS 完整训练使用 CUDA。
 LSTM ONNX PTQ 可直接使用 `cpu`、`cu126` 或 `cu130` 应用；当前 `cu118` 默认构建的
 LSTM bridge 与其 ONNX Runtime API 不匹配，需要先用匹配头文件重建算子 wheel。
 
-数据默认读取 `/datasets/speech_commands_v0.02`，可用 `RX_MET_SPEECH_COMMANDS_ROOT` 或
-`--data-dir` 覆盖。ONNX 示例分别从训练、验证划分中固定抽取每类 20 个未增强样本，
+数据默认读取 `/datasets/speech_commands_v0.02`，可用 `--data-dir` 覆盖。
+ONNX 示例分别从训练、验证划分中固定抽取每类 20 个未增强样本，
 使用与标准 KWS 示例相同的固定前端提取 `[1,49,20]` MFCC，并保存本次使用的特征和标签，
 无需 KWS 检查点。可用 `--samples-per-class` 调整数量。显式选择另一份标准 KWS ONNX 时：
 
@@ -155,7 +159,8 @@ NPY；多输入使用 NPZ，每个键与 ONNX 输入名完全一致，不得缺�
 `--config-file` 和 `--quant-config` 指定 JSON，字段说明见同目录的
 [config/README.md](config/README.md)。
 
-默认结果保存到 `./output/onnx_ptq_quick_start/<execution-id>/exports/`。部署时配套使用同次导出的
+默认结果保存到 `./output/onnx_ptq_quick_start/<execution-id>/exports/`，可用 `--output-dir` 改变输出根目录。
+部署时配套使用同次导出的
 ONNX 和 JSON；metadata 和 `outputs.npz` 保存各阶段的评估结果。
 日志比较 FP32、PTQ、Po2 和恢复后的输出。默认 KWS 示例以及提供
 分类验证标签的模型另报告 Top-1；其他模型只报告输出误差。

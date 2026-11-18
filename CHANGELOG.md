@@ -8,6 +8,7 @@
 
 ### Changed
 
+- KWS 和 ONNX PTQ 示例移除示例专属环境变量入口，路径和设备覆盖统一使用已有命令行参数；自定义 KWS 输出目录后，通过 ONNX 示例的 `--model` 指定模型。
 - ONNX PTQ 示例默认复用 KWS 已有的最终浮点 ONNX，自行从同一份 Speech Commands 提取 MFCC；移除 MobileNetV2 演示及独立准备脚本，KWS 示例流程不变。
 - GRU/LSTM 示例 JSON 不再展示初始 PO2 模式设置；新建算子默认使用 affine 校准，示例统一通过 `apply_power_of_2_workflow()` 显式开启 PO2。底层配置能力保持兼容。
 - 原生 GRU/LSTM 公共转换接口统一为 `enable_po2()`，GRU 使用 `use_po2_scale`，工作流统计使用 `quant_gru_po2_count` / `quant_lstm_po2_count`；原 POT2 名称保留兼容别名，已有量化参数文件格式不变。

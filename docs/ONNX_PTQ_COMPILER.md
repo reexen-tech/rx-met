@@ -29,8 +29,8 @@ Po2 是按目标后端要求选用的可选转换，PTQ 本身不要求 scale �
 - Linux x86_64，CPython 3.10（cpu/cu118/cu126）或 3.12（cu130）；
 - 按[用户使用指南](User_guide.md#3-加载并启动镜像)准备匹配的 rx-met 应用和 runtime，
   并进入容器。应用自带 AIMET ONNX 原生库，源码构建见[原生运行库说明](AIMET_ONNX_NATIVE.md)。
-- `quick_start_onnx_ptq.py` 默认选择 CUDA。CPU runtime 上指定 `--device cpu` 或
-  `RX_MET_ONNX_PTQ_DEVICE=cpu`。若模型包含 GRU/LSTM，另见[原生适配的运行时要求](#gru--lstm-原生适配)。
+- `quick_start_onnx_ptq.py` 默认选择 CUDA。CPU runtime 上指定 `--device cpu`。
+  若模型包含 GRU/LSTM，另见[原生适配的运行时要求](#gru--lstm-原生适配)。
 - 量化命令在可写目录执行。正式制品使用具有代表性的真实数据校准。
 
 库接口 `create_onnx_ptq_sim()` / `run_onnx_ptq()` 的 `providers` 默认是
@@ -70,7 +70,7 @@ NPZ，键必须与 ONNX 输入名完全一致，不得缺失或增加键。多�
 [量化配置参考](Quant_config.md)，默认配置见后文的配置说明。
 
 脚本默认查找校准目录旁的 `val/`，可用 `--validation-dir /datasets/my_model/val`
-或 `RX_MET_ONNX_PTQ_VAL` 指定其他目录。显式指定的目录必须存在且有效；默认目录不存在时，
+指定其他目录。显式指定的目录必须存在且有效；默认目录不存在时，
 脚本复用校准样本比较输出。验证目录使用与校准相同的文件格式。对分类模型，若在验证目录的
 上一级提供 `manifest.json`，用 `val_files`（文件名）与 `val_labels`（每个文件中的样本标签，按
 文件顺序排列）提供标签，脚本会用 `output[0]` 计算 Top-1；该输出必须为 `[batch, classes]`，
@@ -88,14 +88,14 @@ ONNX 示例默认复用 KWS 完整流程已有的最终浮点 ONNX，自己从 S
 数据集准备和运行命令由[示例说明](../examples/README.md#onnx-ptq复用-kws-的浮点-onnx)维护。
 KWS 与 ONNX 示例独立执行；KWS 的现有训练、校准与导出流程不变。
 
-默认从 `./output/quick_start_kws/gru/` 中选择最新成功的完整 KWS 运行，读取
-`exports/att_mh_rnn_kws.onnx`。可通过 `RX_MET_KWS_OUTPUT_DIR` 改变搜索根目录，
-用 `--rnn-type lstm` 选择 LSTM，或用 `--model` / `RX_MET_ONNX_PTQ_MODEL` 明确指定模型。
-数据默认读取 `RX_MET_SPEECH_COMMANDS_ROOT` 或 `/datasets/speech_commands_v0.02`，
-可用 `--data-dir` 覆盖。自动准备分别从训练、验证划分固定抽取每类 20 个未增强样本，
+默认从当前运行目录的 `output/quick_start_kws/gru/` 中选择最新成功的完整 KWS 运行，读取
+`exports/att_mh_rnn_kws.onnx`。用 `--rnn-type lstm` 选择 LSTM，或用 `--model` 明确指定模型。
+KWS 通过 `--output-dir` 改变输出根目录后，ONNX 示例需用 `--model` 指定其中的 ONNX 文件。
+数据默认读取 `/datasets/speech_commands_v0.02`，可用 `--data-dir` 覆盖。
+自动准备分别从训练、验证划分固定抽取每类 20 个未增强样本，
 使用标准 KWS 的固定浮点前端生成 `[1,49,20]` MFCC；`--samples-per-class` 可调整抽样数量。
 
-未提供 `--calib-dir` 且未设置 `RX_MET_ONNX_PTQ_CALIB` 时使用这条 KWS 数据路径，
+未提供 `--calib-dir` 时使用这条 KWS 数据路径，
 模型须满足标准输入 `input`、float32、
 `[1,49,20]`。其他模型或采用自定义前端的 KWS 模型，按上文显式传入已经处理好的
 `--calib-dir`，该路径不读取 Speech Commands，也不提取 MFCC。
@@ -104,7 +104,7 @@ KWS 与 ONNX 示例独立执行；KWS 的现有训练、校准与导出流程不
 示例与 `run_onnx_ptq` 的数据加载器要求模型输入具有静态的正整数维度；动态或缺失的
 输入维度会在校准前报错。导出时可保留中间张量的符号维度。
 默认输出根目录为当前运行目录下的 `output/onnx_ptq_quick_start/`，可用
-`RX_MET_ONNX_PTQ_OUTPUT_DIR` 覆盖。每次量化在该根目录下创建北京时间运行目录，
+`--output-dir` 覆盖。每次量化在该根目录下创建北京时间运行目录，
 格式为 `YYYYMMDD_HHMMSS_ffffff`，例如 `20261027_105308_820401`。
 产物写入其中的 `exports/`，日志和运行信息写入 `run.log`、`run.json`。
 自动准备的 MFCC 样本和标签保存在本次运行目录中。

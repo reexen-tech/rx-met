@@ -25,7 +25,7 @@ Power-of-2 按目标后端要求选用，本示例执行该步骤以演示转换
 使用其他模型时，通过 --model、--calib-dir 提供静态 ONNX 和预处理 NPY/NPZ。
 
 默认模型: ./output/quick_start_kws/gru/<最近成功运行>/exports/att_mh_rnn_kws.onnx
-默认数据: RX_MET_SPEECH_COMMANDS_ROOT 或 /datasets/speech_commands_v0.02
+默认数据: /datasets/speech_commands_v0.02；--data-dir 可覆盖
 默认验证: 自动抽取独立验证样本；显式校准目录则查找同级 val/
 默认输出: 当前运行目录下的 output/onnx_ptq_quick_start
 """
@@ -36,7 +36,6 @@ import contextlib
 import argparse
 import hashlib
 import json
-import os
 import random
 import sys
 import time
@@ -69,8 +68,6 @@ from aimet_common.run_context import execution
 # ============================================================================
 # 全局配置（命令行参数也可以覆盖模型、样本与设备）
 # ============================================================================
-_OUTPUT_ROOT = Path.cwd() / "output" / "onnx_ptq_quick_start"
-
 QUANT_SCHEME = "percentile"
 PERCENTILE_VALUE = 99.99
 PARAM_TYPE = "int8"
@@ -85,13 +82,8 @@ BIAS_BITWIDTH = 32
 # 与 examples/quick_start_kws.py 同一对 JSON：QuantSim 基础配置 + 混合精度。
 CONFIG_FILE = _HERE / "config" / "mrnn_quantsim_config_custom_mixed_precision_v2.json"
 BITWIDTH_CONFIG_FILE = _HERE / "config" / "quick_start_full_quant.json"
-OUTPUT_DIR = Path(
-    os.environ.get(
-        "RX_MET_ONNX_PTQ_OUTPUT_DIR",
-        str(_OUTPUT_ROOT),
-    )
-)
-DEVICE = os.environ.get("RX_MET_ONNX_PTQ_DEVICE", "cuda").strip().lower()
+OUTPUT_DIR = Path.cwd() / "output" / "onnx_ptq_quick_start"
+DEVICE = "cuda"
 CALIB_LIMIT = None
 
 
@@ -103,7 +95,7 @@ def choose_providers(device=None) -> tuple[str, ...]:
     if device == "cpu":
         return ("CPUExecutionProvider",)
     if device != "cuda":
-        raise ValueError("RX_MET_ONNX_PTQ_DEVICE 只能是 cuda 或 cpu")
+        raise ValueError("device 只能是 cuda 或 cpu")
     import onnxruntime as ort
 
     available = ort.get_available_providers()
@@ -187,7 +179,7 @@ def parse_args(argv=None):
     parser.add_argument("--rnn-type", choices=("gru", "lstm"), default="gru",
                         help="默认 KWS ONNX 的循环层类型")
     parser.add_argument("--data-dir", type=Path,
-                        default=Path(os.environ.get("RX_MET_SPEECH_COMMANDS_ROOT", "/datasets/speech_commands_v0.02")),
+                        default=Path("/datasets/speech_commands_v0.02"),
                         help="未提供校准目录时，自行从 Speech Commands 计算 MFCC")
     parser.add_argument("--samples-per-class", type=int, default=20)
     parser.add_argument("--calib-dir", type=Path, help="已预处理的 NPY/NPZ，提供后跳过音频预处理")
@@ -200,7 +192,7 @@ def parse_args(argv=None):
     parser.add_argument("--calib-limit", type=int, default=CALIB_LIMIT)
     parser.add_argument("--validation-limit", type=int)
     args = parser.parse_args(argv)
-    if args.validation_dir is not None and args.calib_dir is None and "RX_MET_ONNX_PTQ_CALIB" not in os.environ:
+    if args.validation_dir is not None and args.calib_dir is None:
         parser.error("--validation-dir 需要 --calib-dir")
     for name in ("samples_per_class", "calib_limit", "validation_limit"):
         value = getattr(args, name)
@@ -212,10 +204,7 @@ def parse_args(argv=None):
 def resolve_model_path(args) -> Path:
     if args.model is not None:
         return args.model
-    if "RX_MET_ONNX_PTQ_MODEL" in os.environ:
-        return Path(os.environ["RX_MET_ONNX_PTQ_MODEL"])
-    root = Path(os.environ.get("RX_MET_KWS_OUTPUT_DIR", str(Path.cwd() / "output" / "quick_start_kws")))
-    root = root / args.rnn_type
+    root = Path.cwd() / "output" / "quick_start_kws" / args.rnn_type
     candidates = list(root.glob("*/exports/att_mh_rnn_kws.onnx"))
     candidates += list(root.glob("exports/att_mh_rnn_kws.onnx"))
     successful = []
@@ -299,8 +288,6 @@ def _run_onnx_ptq(run, args=None) -> None:
     args = parse_args([]) if args is None else args
     model_path = resolve_model_path(args)
     calib_dir = args.calib_dir
-    if calib_dir is None and "RX_MET_ONNX_PTQ_CALIB" in os.environ:
-        calib_dir = Path(os.environ["RX_MET_ONNX_PTQ_CALIB"])
     filename_prefix = args.prefix or f"{model_path.stem}_ptq"
     run.note_inputs(model=model_path)
     providers = choose_providers(args.device)
@@ -337,8 +324,8 @@ def _run_onnx_ptq(run, args=None) -> None:
         original_model, input_shapes, feeds = load_onnx_ptq_inputs(
             model_path, calib_dir, args.calib_limit
         )
-        validation_dir = args.validation_dir or Path(os.environ.get("RX_MET_ONNX_PTQ_VAL", str(calib_dir.parent / "val")))
-        if validation_dir.is_dir() or args.validation_dir is not None or "RX_MET_ONNX_PTQ_VAL" in os.environ:
+        validation_dir = args.validation_dir or calib_dir.parent / "val"
+        if validation_dir.is_dir() or args.validation_dir is not None:
             evaluation_feeds, validation_labels = load_onnx_validation_inputs(original_model, validation_dir)
             evaluation_feeds = evaluation_feeds[:args.validation_limit]
             if validation_labels is not None:

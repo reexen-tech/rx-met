@@ -79,7 +79,8 @@ PyTorch 恢复示例通过 `load_quantizer_encodings()` 加载该 `.json`；ONNX
 源码运行在 Git 可用时记录提交和修改状态，发布包运行记录包内清单的构建信息。
 
 导出接口返回实际的 `exports/` 文件路径。加载时使用返回路径，示例产物位置见终端输出。
-显式指定的单个保存文件路径仍被尊重，例如阶段编码或 `RX_MET_KWS_FP_MODEL`。
+显式指定的单个保存文件路径仍被尊重，例如阶段编码或 KWS 的 `--fp-checkpoint`。
+完整 KWS 流程使用该参数指定浮点检查点的保存与读取路径；`--ptq-only` 使用它指定输入检查点。
 
 ## 默认位置
 
@@ -87,6 +88,7 @@ PyTorch 恢复示例通过 `load_quantizer_encodings()` 加载该 `.json`；ONNX
 - ONNX PTQ 示例：`./output/onnx_ptq_quick_start/<execution-id>/`。
 - 尚未知输出根目录的底层调用：`./output/<execution-id>/`，可用 `RX_MET_OUTPUT_DIR` 覆盖。
 
+两个示例均可用 `--output-dir` 覆盖输出根目录，KWS 仍会追加 `gru/` 或 `lstm/`。
 底层调用先产生的诊断日志会随第一次 RX 导出迁移到用户指定的根目录。
 每次创建运行记录时终端显示日志位置，迁移时显示最终位置。
 尚未指定根目录且当前目录不可写时，早期日志暂存在系统临时目录，导出时一并迁移；
