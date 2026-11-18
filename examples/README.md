@@ -6,10 +6,10 @@
 | --- | --- | --- |
 | KWS 浮点训练、PTQ、可选 Po2 演示、QAT、恢复 | CUDA | Speech Commands v0.02 |
 | KWS 只校准与 PTQ | CPU / CUDA | 同类型浮点检查点，以及 Speech Commands 或已保存的校准和验证波形 |
-| 已有 ONNX 的 PTQ | CPU / CUDA | 静态 ONNX 和预处理后的校准 NPY/NPZ；下面以 MobileNetV2 演示 |
+| 已有 ONNX 的 PTQ | CPU / CUDA | 默认使用 KWS 导出的浮点 ONNX 和同一份 Speech Commands；也可指定自己的静态 ONNX 和预处理样本 |
 
-Power-of-2（Po2）是按目标后端要求选择的可选转换。KWS 和 ONNX PTQ 示例均执行该步骤，
-以演示转换前后的精度比较；日志将其标为“可选”阶段，以下示例命令均会执行该演示。
+Power-of-2（Po2）是按目标后端要求选择的可选转换，不是 PTQ 的必要步骤。KWS 和 ONNX PTQ
+示例均执行该步骤，以演示转换前后的精度比较；日志将其标为“可选”阶段。
 
 在宿主机的应用包目录执行：
 
@@ -94,64 +94,68 @@ LSTM 将 `--rnn-type gru` 改为 `--rnn-type lstm`，并使用对应的浮点检
 metadata 记录检查点和实际波形数组的 SHA-256、设备和恢复误差。验证样本带标签时也记录 Top-1。
 `--calib-limit N` 和 `--validation-limit N` 可限制共享目录中按文件名排序的前 N 个样本。
 
-### 使用 KWS 的 ONNX 做直量化
+## ONNX PTQ：复用 KWS 的浮点 ONNX
 
-已有 clean ONNX 和对应的 MFCC 数据时，可在 CPU/CUDA 上复用同一份图和样本。
-这里的 `calib/` 和 `val/` 应包含 `[1,49,20]` 的 MFCC 特征，不能直接使用
-KWS PTQ 读入的 `[1,16000]` 波形。前处理使用浮点检查点中的 MFCC 参数；在源码仓库中，
-[CPU/GPU 对照脚本](#源码仓库中的-cpugpu-对照)会自动从固定波形生成这两份特征。
+两个示例独立运行。ONNX PTQ 默认读取 KWS 完整流程已有的最终 ONNX，并自行从同一份
+Speech Commands v0.02 抽样和提取 MFCC，无需额外下载模型、数据或执行准备脚本。
+KWS 导出的 ONNX 是不含 Q/DQ 的浮点图，量化参数保存在外部 JSON 中；即使经过 QAT，
+这份 ONNX 仍可作为新一轮 PTQ 的输入。本流程重新生成量化参数，不加载原来的量化 JSON。
 
-```bash
-python3 examples/quick_start_onnx_ptq.py --device cpu \
-  --model /path/to/exports/att_mh_rnn_kws_ptq.onnx \
-  --calib-dir /workspace/mfcc_kws/calib --validation-dir /workspace/mfcc_kws/val \
-  --prefix att_mh_rnn_kws_ptq --output-dir output/onnx_cpu
-```
-
-## ONNX PTQ：MobileNetV2
-
-### 1. 下载模型和数据（宿主机）
-
-```bash
-mkdir -p /path/to/models /path/to/datasets
-curl -fL --retry 3 \
-  -o /path/to/models/mobilenetv2-12.onnx \
-  https://huggingface.co/onnxmodelzoo/mobilenetv2-12/resolve/main/mobilenetv2-12.onnx
-curl -fL --retry 3 \
-  -o /path/to/datasets/imagenette2-320.parquet \
-  https://huggingface.co/datasets/johnowhitaker/imagenette2-320/resolve/main/data/train-00000-of-00001.parquet
-```
-
-### 2. 增加模型和数据挂载
-
-```bash
-  -v "/path/to/models:/models:ro" \
-  -v "/path/to/datasets:/datasets:ro" \
-```
-
-### 3. 预处理并量化（容器内，同一目录）
-
-先执行此演示专用的预处理，生成校准、验证数据及标签：
-
-```bash
-python3 examples/prepare_onnx_ptq_data.py \
-  --onnx /models/mobilenetv2-12.onnx \
-  --parquet /datasets/imagenette2-320.parquet
-```
-
-再运行量化，准备脚本也会打印这一步的命令：
+在运行过 KWS 的同一工作目录、使用同一数据挂载执行：
 
 ```bash
 python3 examples/quick_start_onnx_ptq.py
 ```
 
-上面的量化命令默认使用 CUDA；CPU runtime 改为
-`python3 examples/quick_start_onnx_ptq.py --device cpu`。
+默认使用 GRU，自动选择 `./output/quick_start_kws/gru/` 中最新成功的完整 KWS 运行，读取
+`exports/att_mh_rnn_kws.onnx`。若通过 `RX_MET_KWS_OUTPUT_DIR` 修改了 KWS 输出根目录，保持该变量一致。
+LSTM 指定 `--rnn-type lstm`。CPU runtime 另加 `--device cpu`；准备 ONNX 的 KWS 完整训练使用 CUDA。
 
-结果保存到 `./output/onnx_ptq_quick_start/<execution-id>/exports/`。部署时配套使用同次导出的
-`mobilenetv2_ptq.onnx` 和 `mobilenetv2_ptq.json`；metadata 和 `outputs.npz` 保存各阶段的评估结果。
-日志报告 FP32、PTQ、Po2 和恢复后的验证集 Top-1 精度。该指标使用预处理时抽出的独立样本，
-不是 ImageNet 官方验证集精度。
+数据默认读取 `/datasets/speech_commands_v0.02`，可用 `RX_MET_SPEECH_COMMANDS_ROOT` 或
+`--data-dir` 覆盖。ONNX 示例分别从训练、验证划分中固定抽取每类 20 个未增强样本，
+使用与标准 KWS 示例相同的固定前端提取 `[1,49,20]` MFCC，并保存本次使用的特征和标签，
+无需 KWS 检查点。可用 `--samples-per-class` 调整数量。显式选择另一份标准 KWS ONNX 时：
+
+```bash
+python3 examples/quick_start_onnx_ptq.py --device cpu \
+  --model /path/to/exports/att_mh_rnn_kws.onnx \
+  --data-dir /datasets/speech_commands_v0.02
+```
+
+Po2 按目标后端要求选用，本示例执行转换演示。导出和恢复接口同时支持 affine PTQ 和 Po2
+编码，不要求 scale 必须为 2 的幂。
+
+### 使用自己的模型和预处理样本
+
+通用流程通过 `--model` 和 `--calib-dir` 接收静态 ONNX 及匹配的 NPY/NPZ，
+此时不读取 Speech Commands，也不执行 MFCC。输入名称、shape 和 dtype
+必须与模型一致；使用 KWS ONNX 时，样本应为 `[1,49,20]` 特征，不能直接使用 `[1,16000]` 波形。
+
+```bash
+python3 examples/quick_start_onnx_ptq.py --device cpu \
+  --model /models/model.onnx \
+  --calib-dir /datasets/my_model/calib --validation-dir /datasets/my_model/val \
+  --prefix my_model --output-dir output/my_model
+```
+
+模型输入维度须为静态正整数，每份样本包含一次前向所需的全部输入，shape 包含模型声明的
+batch 维度，dtype 与模型声明一致，数组不能包含非有限值。单输入可将每份样本保存为一个
+NPY；多输入使用 NPZ，每个键与 ONNX 输入名完全一致，不得缺失或增加键。每份 NPZ
+保存一次完整前向的输入。文件名可自定，按文件名排序读取；同一目录中有 NPZ 时只读取 NPZ。
+
+验证目录默认使用校准目录旁的 `val/`，也可通过 `--validation-dir` 指定。显式指定的目录
+须存在且有效；默认 `val/` 不存在时复用校准样本作数值比较。分类模型使用 batch-1 样本，
+并在验证目录上一级的 `manifest.json` 中提供 `val_files` 和 `val_labels` 数组，按文件名
+与整数类别编号一一配对，可计算 `output[0]` 的 Top-1；该输出必须为 `[batch, classes]`，
+不会自动查找后续输出。未提供标签时
+只比较输出数值；正式精度评估应使用独立于校准数据的验证集。需要调整量化配置时，使用
+`--config-file` 和 `--quant-config` 指定 JSON，字段说明见同目录的
+[config/README.md](config/README.md)。
+
+默认结果保存到 `./output/onnx_ptq_quick_start/<execution-id>/exports/`。部署时配套使用同次导出的
+ONNX 和 JSON；metadata 和 `outputs.npz` 保存各阶段的评估结果。
+日志比较 FP32、PTQ、Po2 和恢复后的输出。默认 KWS 示例以及提供
+分类验证标签的模型另报告 Top-1；其他模型只报告输出误差。
 日志输出“量化流程完成”表示运行成功。
 
 `execution-id` 自动使用北京时间，格式为 `YYYYMMDD_HHMMSS_ffffff`，例如

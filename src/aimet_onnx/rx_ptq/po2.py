@@ -180,7 +180,8 @@ def align_onnx_bias_scale(sim: Any, *, bias_bitwidth: int = 32) -> Dict[str, Any
 
     This mirrors ``aimet_torch.utils_rx._align_conv_bias_scale`` plus the RX
     mixed-precision default ``bias_bitwidth=32``.  Official INT32 concretize is
-    not used; the scale still comes from the live Po2 input/weight encodings.
+    not used; the scale comes from the live input/weight encodings, whether
+    affine or Po2.
 
     Only biases temporarily disabled for calibration are re-enabled. All
     candidate grids are validated before any bias quantizer is modified.

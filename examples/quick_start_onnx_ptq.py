@@ -13,21 +13,20 @@ RX-MET ONNX PTQ 演示 — 标准用法
 
 ONNX 没有 PyTorch 权重可训，因此没有 QAT 微调；其余步骤与 quick_start_kws.py 对应。
 main() 只编排已有模块，不复制量化规则。
-Power-of-2 按目标后端要求选用，本示例执行该步骤并验证转换后的制品与恢复结果。
+Power-of-2 按目标后端要求选用，本示例执行该步骤以演示转换和精度比较。
 
 运行（先进入 examples/）：
 
     python quick_start_onnx_ptq.py
 
-本入口只读取用户准备好的静态 ONNX 和 NPY/NPZ 校准数据，不执行模型专属预处理。
-复现 MobileNetV2 + ImageNette 演示时，先单独运行 `prepare_onnx_ptq_data.py`，
-再按其打印的命令执行本入口。模型、校准目录和输出目录可分别用
-`RX_MET_ONNX_PTQ_MODEL`、`RX_MET_ONNX_PTQ_CALIB` 和
-`RX_MET_ONNX_PTQ_OUTPUT_DIR` 覆盖。
+默认复用最近一次成功的 KWS GRU 导出 ONNX，并自行从 Speech Commands v0.02
+抽取校准、验证样本和计算固定的浮点 MFCC；无需检查点或独立准备脚本。
+--rnn-type lstm 选择 LSTM 的默认产物。KWS 示例不需要为本入口改变运行方式。
+使用其他模型时，通过 --model、--calib-dir 提供静态 ONNX 和预处理 NPY/NPZ。
 
-默认模型: ./output/onnx_ptq_quick_start/models/mobilenetv2/mobilenetv2-12.onnx
-默认校准: ./output/onnx_ptq_quick_start/datasets/imagenette2-320/calib
-默认验证: 校准目录同级的 val/；RX_MET_ONNX_PTQ_VAL 可覆盖
+默认模型: ./output/quick_start_kws/gru/<最近成功运行>/exports/att_mh_rnn_kws.onnx
+默认数据: RX_MET_SPEECH_COMMANDS_ROOT 或 /datasets/speech_commands_v0.02
+默认验证: 自动抽取独立验证样本；显式校准目录则查找同级 val/
 默认输出: 当前运行目录下的 output/onnx_ptq_quick_start
 """
 
@@ -36,7 +35,9 @@ from __future__ import annotations
 import contextlib
 import argparse
 import hashlib
+import json
 import os
+import random
 import sys
 import time
 from pathlib import Path
@@ -68,17 +69,7 @@ from aimet_common.run_context import execution
 # ============================================================================
 # 全局配置（命令行参数也可以覆盖模型、样本与设备）
 # ============================================================================
-EXAMPLE = os.environ.get("RX_MET_ONNX_PTQ_EXAMPLE", "mobilenetv2")
-
-_PREPARED_ROOT = Path.cwd() / "output" / "onnx_ptq_quick_start"
-_DATA = Path(os.environ.get("RX_MET_ONNX_PTQ_ROOT", str(_PREPARED_ROOT / "datasets")))
-EXAMPLES = {
-    "mobilenetv2": {
-        "model": _PREPARED_ROOT / "models" / "mobilenetv2" / "mobilenetv2-12.onnx",
-        "calib_dir": _DATA / "imagenette2-320" / "calib",
-        "prefix": "mobilenetv2_ptq",
-    },
-}
+_OUTPUT_ROOT = Path.cwd() / "output" / "onnx_ptq_quick_start"
 
 QUANT_SCHEME = "percentile"
 PERCENTILE_VALUE = 99.99
@@ -97,7 +88,7 @@ BITWIDTH_CONFIG_FILE = _HERE / "config" / "quick_start_full_quant.json"
 OUTPUT_DIR = Path(
     os.environ.get(
         "RX_MET_ONNX_PTQ_OUTPUT_DIR",
-        str(_PREPARED_ROOT),
+        str(_OUTPUT_ROOT),
     )
 )
 DEVICE = os.environ.get("RX_MET_ONNX_PTQ_DEVICE", "cuda").strip().lower()
@@ -191,9 +182,15 @@ def print_stage_timings(timings: dict) -> None:
 # 主流程：与 quick_start_kws.py 对齐的步骤编号
 # ============================================================================
 def parse_args(argv=None):
-    parser = argparse.ArgumentParser(description="对静态 ONNX 执行 CPU/CUDA PTQ、Po2、导出和恢复。")
-    parser.add_argument("--model", type=Path)
-    parser.add_argument("--calib-dir", type=Path)
+    parser = argparse.ArgumentParser(description="对静态 ONNX 执行 CPU/CUDA PTQ、可选 Po2、导出和恢复。")
+    parser.add_argument("--model", type=Path, help="默认使用最近一次成功的 KWS 导出")
+    parser.add_argument("--rnn-type", choices=("gru", "lstm"), default="gru",
+                        help="默认 KWS ONNX 的循环层类型")
+    parser.add_argument("--data-dir", type=Path,
+                        default=Path(os.environ.get("RX_MET_SPEECH_COMMANDS_ROOT", "/datasets/speech_commands_v0.02")),
+                        help="未提供校准目录时，自行从 Speech Commands 计算 MFCC")
+    parser.add_argument("--samples-per-class", type=int, default=20)
+    parser.add_argument("--calib-dir", type=Path, help="已预处理的 NPY/NPZ，提供后跳过音频预处理")
     parser.add_argument("--validation-dir", type=Path)
     parser.add_argument("--device", choices=("cpu", "cuda"), default=DEVICE)
     parser.add_argument("--output-dir", type=Path, default=OUTPUT_DIR)
@@ -203,11 +200,93 @@ def parse_args(argv=None):
     parser.add_argument("--calib-limit", type=int, default=CALIB_LIMIT)
     parser.add_argument("--validation-limit", type=int)
     args = parser.parse_args(argv)
-    for name in ("calib_limit", "validation_limit"):
+    if args.validation_dir is not None and args.calib_dir is None and "RX_MET_ONNX_PTQ_CALIB" not in os.environ:
+        parser.error("--validation-dir 需要 --calib-dir")
+    for name in ("samples_per_class", "calib_limit", "validation_limit"):
         value = getattr(args, name)
         if value is not None and value < 1:
             parser.error(f"--{name.replace('_', '-')} 必须大于 0")
     return args
+
+
+def resolve_model_path(args) -> Path:
+    if args.model is not None:
+        return args.model
+    if "RX_MET_ONNX_PTQ_MODEL" in os.environ:
+        return Path(os.environ["RX_MET_ONNX_PTQ_MODEL"])
+    root = Path(os.environ.get("RX_MET_KWS_OUTPUT_DIR", str(Path.cwd() / "output" / "quick_start_kws")))
+    root = root / args.rnn_type
+    candidates = list(root.glob("*/exports/att_mh_rnn_kws.onnx"))
+    candidates += list(root.glob("exports/att_mh_rnn_kws.onnx"))
+    successful = []
+    for model in candidates:
+        record_path = model.parent.parent / "run.json"
+        if not record_path.is_file():
+            continue
+        try:
+            record = json.loads(record_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if record.get("status") == "success":
+            successful.append((record.get("started_at", ""), model.stat().st_mtime_ns, model))
+    if successful:
+        return max(successful, key=lambda item: item[:2])[2]
+    raise FileNotFoundError(
+        f"未找到 {root} 中成功运行的 KWS ONNX；请用 --model 指定已有 ONNX，"
+        "或先独立运行 quick_start_kws.py。"
+    )
+
+
+def prepare_kws_inputs(model_path, data_dir, output_dir, samples_per_class):
+    """Prepare this example's MFCC feeds without reading or changing a KWS run."""
+    import onnx
+    from aimet_onnx.rx_ptq import inspect_model_inputs, inspect_model_input_dtypes
+
+    model = onnx.load(str(model_path))
+    shapes = inspect_model_inputs(model)
+    dtypes = inspect_model_input_dtypes(model)
+    if shapes != {"input": [1, 49, 20]} or dtypes != {"input": np.dtype("float32")}:
+        raise ValueError("内置 Speech Commands 前处理只适用于 input: float32 [1,49,20]；其他模型请提供 --calib-dir")
+    # Share the fixed data protocol and frontend, without executing KWS training.
+    if str(_ROOT) not in sys.path:
+        sys.path.insert(0, str(_ROOT))
+    from examples import quick_start_kws as kws
+    import torch
+
+    frontend = kws.make_speech_features("cpu").eval()
+    output_dir.mkdir(parents=True, exist_ok=False)
+    manifest = {"labels": list(kws.LABELS), "seed": kws.SEED, "batch_size": 1,
+                "augmentation": False, "input_shape": [1, *kws.FEATURE_SHAPE],
+                "preprocessing": "kws_streaming mfcc_tf; fixed floating-point frontend"}
+    for split, folder in (("train", "calib"), ("val", "val")):
+        dataset = kws.SpeechCommandsKWS(str(data_dir), split=split)
+        dataset.train_mode = False
+        rng = random.Random(kws.SEED)
+        selected = []
+        for label in kws.LABELS:
+            indices = [index for index, (_, name) in enumerate(dataset.items) if name == label]
+            if len(indices) < samples_per_class:
+                raise ValueError(f"{split}/{label} 样本少于 {samples_per_class}")
+            selected.extend(rng.sample(indices, samples_per_class))
+        rng.shuffle(selected)
+        directory = output_dir / folder
+        directory.mkdir()
+        files, labels, sources = [], [], []
+        for start in range(0, len(selected), 32):
+            indices = selected[start:start + 32]
+            samples = [dataset[index] for index in indices]
+            with torch.no_grad():
+                features = frontend(torch.stack([waveform for waveform, _ in samples])).numpy()
+            for offset, (feature, (_, label), index) in enumerate(zip(features, samples, indices)):
+                filename = f"{start + offset:05d}.npz"
+                np.savez(directory / filename, input=feature[None].copy())
+                files.append(filename)
+                labels.append(int(label))
+                sources.append(str(dataset.items[index][0]))
+        manifest.update({f"{folder}_files": files, f"{folder}_labels": labels,
+                         f"{folder}_sources": sources, f"{folder}_split": split})
+    (output_dir / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+    return output_dir / "calib", output_dir / "val"
 
 
 def main(argv=None) -> None:
@@ -218,14 +297,12 @@ def main(argv=None) -> None:
 
 def _run_onnx_ptq(run, args=None) -> None:
     args = parse_args([]) if args is None else args
-    if EXAMPLE not in EXAMPLES:
-        raise KeyError(f"未知 EXAMPLE={EXAMPLE}，当前支持: {sorted(EXAMPLES)}")
-
-    spec = EXAMPLES[EXAMPLE]
-    model_path = args.model or Path(os.environ.get("RX_MET_ONNX_PTQ_MODEL", spec["model"]))
-    calib_dir = args.calib_dir or Path(os.environ.get("RX_MET_ONNX_PTQ_CALIB", spec["calib_dir"]))
-    filename_prefix = args.prefix or spec["prefix"]
-    run.note_inputs(model=model_path, calibration=calib_dir)
+    model_path = resolve_model_path(args)
+    calib_dir = args.calib_dir
+    if calib_dir is None and "RX_MET_ONNX_PTQ_CALIB" in os.environ:
+        calib_dir = Path(os.environ["RX_MET_ONNX_PTQ_CALIB"])
+    filename_prefix = args.prefix or f"{model_path.stem}_ptq"
+    run.note_inputs(model=model_path)
     providers = choose_providers(args.device)
     config_file = args.config_file
     bitwidth_config = args.quant_config
@@ -234,9 +311,8 @@ def _run_onnx_ptq(run, args=None) -> None:
     print("=" * 70)
     print("RX-MET ONNX PTQ 演示 — 标准用法（复用 RX 量化接口）")
     print("=" * 70)
-    print(f"example:    {EXAMPLE}")
     print(f"model:      {model_path}")
-    print(f"calib:      {calib_dir}")
+    print(f"calib:      {calib_dir or args.data_dir}")
     print(f"config:     {config_file}")
     print(f"bitwidth:   {bitwidth_config}")
     print(f"providers:  {providers}")
@@ -253,6 +329,11 @@ def _run_onnx_ptq(run, args=None) -> None:
     with stage("步骤 1: 加载数据和模型", timings):
         if not config_file.is_file():
             raise FileNotFoundError(f"量化配置不存在: {config_file}")
+        if calib_dir is None:
+            run.note_inputs(dataset=args.data_dir)
+            calib_dir, _ = prepare_kws_inputs(
+                model_path, args.data_dir, run.root / "data", args.samples_per_class)
+        run.note_inputs(calibration=calib_dir)
         original_model, input_shapes, feeds = load_onnx_ptq_inputs(
             model_path, calib_dir, args.calib_limit
         )
@@ -312,13 +393,13 @@ def _run_onnx_ptq(run, args=None) -> None:
             sim, preserve_shared_percentile=True) if ALIGN_BIAS_SCALE else []
         print(f"quantizer 数量: {len(sim.qc_quantize_op_dict)}")
         print(
-            f"延后至 Po2 对齐的 bias quantizer: {len(disabled_biases)}"
+            f"延后至校准后对齐的 bias quantizer: {len(disabled_biases)}"
         )
 
     # ------------------------------------------------------------------
     # 步骤 4: 校准 (PTQ)
     #   对应 aimet.nn.compute_encodings。
-    #   Percentile 按配置校准 bias；旧原生统计路径的 bias 延后到 Po2 对齐。
+    #   Percentile 按配置校准 bias；旧统计路径在校准后按实际 scale 对齐。
     # ------------------------------------------------------------------
     with stage("步骤 4: 校准 (PTQ)", timings):
         sim.compute_encodings(feeds)
@@ -419,7 +500,6 @@ def _run_onnx_ptq(run, args=None) -> None:
         run.exports,
         filename_prefix,
         {
-            "example": EXAMPLE,
             "device": args.device,
             "model": str(model_path),
             "input_shapes": input_shapes,

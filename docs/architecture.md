@@ -55,7 +55,7 @@ C++/CUDA 实现，QuantGRU / QuantLSTM 在 PyTorch 中替换原始循环层；ON
 | `quant_gru` / `quant_lstm` | `QuantGRU` / `QuantLSTM`、`GRU_config` / `LSTM_config`、量化参数导入导出 | CPU/CUDA 循环层、校准器、LUT、定点推理和 CUDA 反向传播 |
 | 构建与发布 | `scripts/environment/*.sh`、`scripts/release/*.sh` | 依赖锁、环境镜像、项目 wheel、验收和归档 |
 
-`aimet_onnx.rx_ptq` 根据 ONNX、配置和校准数据创建 QuantSim，完成校准、Power-of-2、bias 对齐、
+`aimet_onnx.rx_ptq` 根据 ONNX、配置和校准数据创建 QuantSim，完成校准、可选的 Power-of-2 和 bias 对齐、
 制品导出和恢复验证。发布入口根据所选 CPU/CUDA 变体查找环境、构建 wheel、组装应用包并执行离线安装自检。
 
 ## 4. PyTorch 量化流程
@@ -104,7 +104,11 @@ QuantGRU / QuantLSTM 与其他模块共享同一次 `compute_encodings` 前向�
 
 标准入口位于 [`examples/quick_start_onnx_ptq.py`](../examples/quick_start_onnx_ptq.py)，
 主要实现位于 [`src/aimet_onnx/rx_ptq`](../src/aimet_onnx/rx_ptq/)。
-下图描述当前示例及 `run_onnx_ptq()` 的执行路径，二者均演示 Po2；Po2 是否适用于实际部署由目标后端决定。
+示例默认复用 KWS 已有的最终浮点 ONNX，自行从同一份 Speech Commands 抽样并提取 MFCC；
+显式传入 `--model` 和 `--calib-dir` 时使用通用模型与预处理样本路径。
+KWS 的训练和导出流程不依赖 ONNX 示例。
+下图描述示例及 `run_onnx_ptq()` 的执行路径。Po2 按目标后端要求选用，当前入口执行该阶段
+以演示转换及其精度影响；导出和恢复接口支持一般 affine 编码，不强制要求 Po2。
 
 ```mermaid
 flowchart LR
@@ -248,7 +252,7 @@ flowchart LR
 | QuantLSTM | `operators/quant-lstm/tests/` | 浮点、量化、校准、CUDA 训练和导出行为 |
 | 应用安装目录 | `scripts/release/verify_bundle.sh` | 包版本、原生依赖、AIMET、QuantGRU / QuantLSTM；CPU PTQ 或显式启用的 GPU 冒烟流程 |
 | KWS 示例 | `scripts/release/verify_kws_example.sh` | PyTorch PTQ、Po2、QAT、导出和重载 |
-| ONNX PTQ 示例 | `scripts/release/verify_onnx_ptq_example.sh` | ONNX 校准、Po2、制品导出和重载 |
+| ONNX PTQ 示例 | `scripts/release/verify_onnx_ptq_example.sh` | ONNX 校准、Po2 转换演示、制品导出和重载 |
 | CPU/GPU 示例对照 | `scripts/validation/verify_examples_cpu_gpu.py` | 同一检查点、固定样本下的 Torch/ONNX PTQ 制品和逐阶段输出比较 |
 
 正式发布应完成静态验收和对应设备的示例验证；CUDA 变体还需目标 GPU 验收。

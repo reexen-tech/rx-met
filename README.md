@@ -37,7 +37,7 @@ CPU 的 KWS 示例需要已有浮点检查点及 `--device cpu --ptq-only`。
 | 要完成的任务 | 阅读入口 |
 | --- | --- |
 | 安装应用、选择设备、启动容器 | [用户使用指南](docs/User_guide.md) |
-| 运行 KWS / MobileNetV2 示例 | [示例与数据准备](examples/README.md) |
+| 运行 KWS / ONNX PTQ 示例 | [示例与数据准备](examples/README.md) |
 | 接入自己的 PyTorch 模型 | [PyTorch 模型量化](docs/PyTorch_quantization.md) |
 | 量化已有 ONNX 模型 | [ONNX PTQ 与编译器制品](docs/ONNX_PTQ_COMPILER.md) |
 | 调整位宽、校准与循环层设置 | [量化配置参考](docs/Quant_config.md) |

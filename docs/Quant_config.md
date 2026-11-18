@@ -367,8 +367,8 @@ with torch.no_grad(), aimet.nn.compute_encodings(sim.model):
 ```
 
 Power-of-2 是按目标后端要求选用的阶段。需要 Po2 时，在校准后把 scale 调整为
-2 的幂，并按部署要求对齐 bias scale；PTQ 和 QAT 本身不要求执行此转换。当前示例
-演示执行 Po2，以下为该阶段的调用片段：
+2 的幂，并按部署要求对齐 bias scale；PTQ 和 QAT 本身不要求执行此转换。KWS 和 ONNX
+示例均执行转换演示。以下为 PyTorch 侧该阶段的调用片段：
 
 ```python
 from aimet_torch.utils_rx import apply_power_of_2_workflow

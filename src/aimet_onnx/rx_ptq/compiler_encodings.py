@@ -367,6 +367,6 @@ class CompilerEncodingConverter:
                 name for name, adapter in native_recurrent(self.sim).items() if adapter.module.use_quantization
             ),
         }
-        payload = finalize_compiler_encodings(payload, require_po2=True)
+        payload = finalize_compiler_encodings(payload)
         validate_compiler_encoding_graph(self.original_model, payload)
         return payload, report

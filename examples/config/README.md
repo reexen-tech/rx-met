@@ -12,8 +12,8 @@ KWS 和 ONNX PTQ 示例默认使用本目录的两份 JSON。示例先按基础�
 KWS 的 `--rnn-type` 决定模型使用的循环算子。两个配置节可以同时放在完整 JSON 中，
 模型中的循环算子只读取各自的配置。可用 `--quant-config` 指定另一份位宽配置；改动量化参数后
 重新校准。新建 GRU / LSTM 默认使用 affine scale，本目录示例不设置初始 scale 模式。
-需要 PO2 时，统一在校准后调用 `apply_power_of_2_workflow()`；当前示例执行该转换演示，
-KWS 的 QAT 循环沿用转换后的固定参数。
+PO2 是按目标后端要求选用的可选转换，需要时在校准后调用 `apply_power_of_2_workflow()`。
+KWS 和 ONNX PTQ 示例均执行该转换演示，KWS 的 QAT 循环沿用转换后的固定参数。
 
 ## 普通层
 

@@ -17,7 +17,7 @@ def load_onnx_validation_inputs(model, directory, *, labels=None):
         manifest = json.loads(manifest_path.read_text(encoding='utf-8'))
         if 'val_files' in manifest:
             if 'val_labels' not in manifest:
-                raise ValueError('Validation labels are missing; rerun prepare_onnx_ptq_data.py')
+                raise ValueError('Validation manifest has val_files but is missing val_labels')
             files, targets = manifest['val_files'], manifest['val_labels']
             if len(files) != len(targets) or len(set(files)) != len(files):
                 raise ValueError('Validation manifest file/label counts are inconsistent')

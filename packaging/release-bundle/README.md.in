@@ -42,7 +42,7 @@ GPU 运行环境支持 sm_80/86/89/90，cu130 另支持 sm_120。当前产品包
 | --- | --- | --- |
 | KWS（GRU / LSTM，CUDA 完整流程） | 无需预先准备，示例会执行浮点训练 | 已解压的 `speech_commands_v0.02/`，包含 `yes/`、`no/`、`_background_noise_/` 等目录 |
 | KWS（CPU / CUDA PTQ） | 与所选 GRU / LSTM 对应的浮点检查点 `model_fp_kws.pth` | 同上，或复用固定的校准、验证样本 |
-| ONNX PTQ | `mobilenetv2-12.onnx` | `imagenette2-320.parquet` |
+| ONNX PTQ 默认示例 | 复用工作目录内已有的 KWS 完整流程 ONNX；也可通过 `--model` 指定 | 与 KWS 相同的 `speech_commands_v0.02/` |
 
 没有现成数据时，可按 [examples/README.md](examples/README.md) 准备公开示例输入。
 
@@ -111,19 +111,29 @@ CUDA 也支持此模式，将 `--device cpu` 改为 `--device cuda`。复用固�
 
 ### ONNX PTQ
 
-首次先预处理，再量化；两步保持在 `/workspace` 中执行：
+已有上文 KWS 完整流程的运行结果时，保持在 `/workspace` 中执行：
 
 ```bash
-# 数据预处理
-python3 /workspace/examples/prepare_onnx_ptq_data.py \
-  --onnx /models/mobilenetv2-12.onnx \
-  --parquet /datasets/imagenette2-320.parquet
-
-# 量化
 python3 /workspace/examples/quick_start_onnx_ptq.py --device "$RX_MET_EXAMPLE_DEVICE"
 ```
 
-后续输入不变时，可直接执行量化命令。
+默认从 `output/quick_start_kws/gru/` 中选择最新成功完整运行的
+`exports/att_mh_rnn_kws.onnx`，由 ONNX 示例自行从同一份 Speech Commands 抽样和提取 MFCC，
+不需要额外模型、数据集、准备脚本或 KWS 检查点。使用 LSTM 时追加 `--rnn-type lstm`。
+KWS 最终导出的是 clean 浮点 ONNX，本流程重新校准并生成一套量化参数，不读取原来的量化 JSON。
+Po2 是按目标后端要求选用的可选转换，本示例执行该步骤以演示精度比较；
+导出和恢复接口也支持非 Po2 编码，不要求 scale 必须为 2 的幂。
+
+CPU 用户可使用已有的 KWS ONNX，或量化自己的静态 ONNX 和预处理 NPY/NPZ：
+
+```bash
+python3 /workspace/examples/quick_start_onnx_ptq.py --device "$RX_MET_EXAMPLE_DEVICE" \
+  --model /models/model.onnx --calib-dir /datasets/my_model/calib \
+  --prefix my_model
+```
+
+传入 `--calib-dir` 后不执行 Speech Commands 前处理。数据格式、独立验证集及自定义模型说明见
+[examples/README.md](examples/README.md)。
 
 ### 查看结果和再次运行
 

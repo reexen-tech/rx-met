@@ -1,12 +1,12 @@
 # ONNX PTQ 编译器产物
 
-通过 `aimet_onnx` 可以直接校准已有 ONNX 模型、将量化 scale 对齐到 Power-of-2，
+通过 `aimet_onnx` 可以直接校准已有 ONNX 模型、按需将量化 scale 对齐到 Power-of-2，
 并导出供目标编译器配套使用的 clean ONNX 和 `<prefix>.json`。已有模型和预处理数据
-可直接按下文量化；初次体验可从 [MobileNetV2 示例](#mobilenetv2) 开始。
+可直接按下文量化；初次体验可从[复用 KWS ONNX](#复用-kws-onnx)开始。
 
-Po2 是按目标后端要求选用的转换，PTQ 本身不要求 scale 必须为 2 的幂。当前示例和
-`run_onnx_ptq()` 端到端接口均执行 Po2，恢复验证也要求 Po2 制品。示例日志将该转换
-标为“可选”阶段，用于说明实际项目应按部署要求选用。
+Po2 是按目标后端要求选用的可选转换，PTQ 本身不要求 scale 必须为 2 的幂。示例和
+`run_onnx_ptq()` 执行该步骤，以演示转换前后的精度比较；示例日志将其标为“可选”阶段。
+导出和恢复接口支持一般 affine 编码，不强制要求 Po2；Po2 工作流仍验证转换是否满足幂次约束。
 
 ## 术语
 
@@ -16,11 +16,11 @@ Po2 是按目标后端要求选用的转换，PTQ 本身不要求 scale 必须�
 - **编译器 encodings**：目标编译器直接读取的节点级量化参数，包含节点输入、输出和
   参数映射。公共格式由 `src/aimet_common/compiler_encodings.py` 实现，各框架适配器
   负责源量化网格及节点映射。
-- **数据清单**：示例准备脚本在 `manifest.json` 记录输入形状、抽样和前处理信息，
+- **数据清单**：ONNX 示例自动准备 KWS 数据时在 `manifest.json` 记录抽样和前处理信息，
   并将验证文件名与标签配对。使用自备数据校准时不要求提供该文件。
 - **Po2 scale**：通过 `cover_range` 规则选择并实际写入量化器的 `1/2^n` scale。
-- **Bias scale**：Conv、Gemm 和 MatMul 的 bias 使用 `Sb = Sx * Sw`，默认采用
-  INT32 位宽。
+- **Bias scale**：启用 bias 对齐时，Conv、Gemm 和 MatMul 的 bias 使用 `Sb = Sx * Sw`，
+  默认采用 INT32 位宽；bias 对齐不要求 scale 为 Po2。
 - **编译器覆盖率**：所有已启用的量化器都映射到编译器 encodings 的节点输入、
   节点输出或参数条目，每个 encoding 键都对应模型图中的对象。
 
@@ -73,23 +73,31 @@ NPZ，键必须与 ONNX 输入名完全一致，不得缺失或增加键。多�
 或 `RX_MET_ONNX_PTQ_VAL` 指定其他目录。显式指定的目录必须存在且有效；默认目录不存在时，
 脚本复用校准样本比较输出。验证目录使用与校准相同的文件格式。对分类模型，若在验证目录的
 上一级提供 `manifest.json`，用 `val_files`（文件名）与 `val_labels`（每个文件中的样本标签，按
-文件顺序排列）提供标签，脚本会用第一个 `[batch, classes]` 输出计算 Top-1；未提供标签时只做数值比较。
+文件顺序排列）提供标签，脚本会用 `output[0]` 计算 Top-1；该输出必须为 `[batch, classes]`，
+不会自动查找后续输出。未提供标签时只做数值比较。
 清单按文件名配对，每个文件对应一个标签，因此此方式适用于 batch-1 样本。
 正式精度评估应使用与校准数据分离的验证集及适合模型的任务指标。
 
 命令完成后使用终端返回的 ONNX、JSON 和 metadata 路径，按[输出](#输出)核对制品。
-仅需复现公开演示时，按下面的 MobileNetV2 数据准备步骤运行。
 
-## MobileNetV2
+## 复用 KWS ONNX
 
-通用量化入口只接收用户准备好的 ONNX 和 NPY/NPZ 校准数据，不执行模型专属预处理。
-公开模型、数据的下载与两步命令由[MobileNetV2 示例](../examples/README.md#onnx-ptqmobilenetv2)
-维护。模型目录 `/models`、数据目录 `/datasets` 保持只读，准备和量化在同一可写工作目录执行。
-准备脚本仅适用于这组公开模型和数据。它先验证输入，再将静态模型和 NPY 分别写入
-当前运行目录的 `output/onnx_ptq_quick_start/models/`、`datasets/`，保留原始文件。
-量化示例默认读取这些准备结果，两步在同一运行目录执行，无需设置输入路径变量。
-可选 `--out-root DIR` 指定另一可写根目录，并打印第二步所需的模型和校准路径。
-自有模型不需要此准备脚本；按[量化自己的 ONNX 模型](#量化自己的-onnx-模型)准备并指定输入即可。
+ONNX 示例默认复用 KWS 完整流程已有的最终浮点 ONNX，自己从 Speech Commands v0.02
+抽样并提取 MFCC，不需要运行独立准备脚本，也不需要 KWS 检查点或原来的量化 JSON。
+数据集准备和运行命令由[示例说明](../examples/README.md#onnx-ptq复用-kws-的浮点-onnx)维护。
+KWS 与 ONNX 示例独立执行；KWS 的现有训练、校准与导出流程不变。
+
+默认从 `./output/quick_start_kws/gru/` 中选择最新成功的完整 KWS 运行，读取
+`exports/att_mh_rnn_kws.onnx`。可通过 `RX_MET_KWS_OUTPUT_DIR` 改变搜索根目录，
+用 `--rnn-type lstm` 选择 LSTM，或用 `--model` / `RX_MET_ONNX_PTQ_MODEL` 明确指定模型。
+数据默认读取 `RX_MET_SPEECH_COMMANDS_ROOT` 或 `/datasets/speech_commands_v0.02`，
+可用 `--data-dir` 覆盖。自动准备分别从训练、验证划分固定抽取每类 20 个未增强样本，
+使用标准 KWS 的固定浮点前端生成 `[1,49,20]` MFCC；`--samples-per-class` 可调整抽样数量。
+
+未提供 `--calib-dir` 且未设置 `RX_MET_ONNX_PTQ_CALIB` 时使用这条 KWS 数据路径，
+模型须满足标准输入 `input`、float32、
+`[1,49,20]`。其他模型或采用自定义前端的 KWS 模型，按上文显式传入已经处理好的
+`--calib-dir`，该路径不读取 Speech Commands，也不提取 MFCC。
 
 输入名从 ONNX 图自动读取。多输入文件格式与命名规则见上文的输入要求。
 示例与 `run_onnx_ptq` 的数据加载器要求模型输入具有静态的正整数维度；动态或缺失的
@@ -98,11 +106,11 @@ NPZ，键必须与 ONNX 输入名完全一致，不得缺失或增加键。多�
 `RX_MET_ONNX_PTQ_OUTPUT_DIR` 覆盖。每次量化在该根目录下创建北京时间运行目录，
 格式为 `YYYYMMDD_HHMMSS_ffffff`，例如 `20261027_105308_820401`。
 产物写入其中的 `exports/`，日志和运行信息写入 `run.log`、`run.json`。
-准备好的 `models/`、`datasets/` 继续在根目录复用。
+自动准备的 MFCC 样本和标签保存在本次运行目录中。
 
 命令退出码为 0，日志输出“量化流程完成”及 metadata 路径，并生成下述配套文件，
-即表示标准示例完成。`<prefix>.meta.json` 中的 `coverage`、`all_power_of_2` 和
-`clean_onnx_vs_fp32` 用于进一步确认制品完整性和输出一致性。
+即表示标准示例完成。`<prefix>.meta.json` 中的 `coverage`、`clean_onnx_vs_fp32`
+和 `all_power_of_2` 用于进一步确认制品完整性、输出一致性及本示例演示的 Po2 转换结果。
 
 ## 输出
 
@@ -115,8 +123,8 @@ NPZ，键必须与 ONNX 输入名完全一致，不得缺失或增加键。多�
 - `<prefix>.json`：编译器的节点输入、输出和参数编码；
 - `<prefix>.aimet.encodings`：用于重载的 AIMET 原始编码；
 - `<prefix>.encodings`：底层 QuantSim 导出保留的 AIMET 原始编码；
-- `<prefix>.meta.json`：输入 shape、校准数量、覆盖率、Po2 检查及各阶段的输出比较；
-- `outputs.npz`：FP32、PTQ 和 Po2 阶段的评估输出，键名为 `<stage>_output<index>`。
+- `<prefix>.meta.json`：输入 shape、校准数量、覆盖率、所选转换及各阶段的输出比较；
+- `outputs.npz`：FP32、PTQ 和 Po2 阶段评估输出，键名为 `<stage>_output<index>`。
 
 导出时自动补全 `graph.value_info`。中间张量可以保留符号维度，标量使用零维 shape；
 无法推导 dtype、rank 或维度时会报错。重载检查使用磁盘中已有的标注。
@@ -228,7 +236,8 @@ python3 scripts/verify_compiler_artifacts.py \
   --encodings /path/to/model.json
 ```
 
-默认要求 Po2 和完整计算输入覆盖。已有 affine 产物使用 `--allow-affine`；
+独立验收脚本默认要求 Po2 和完整计算输入覆盖，与示例演示转换后的产物对应。
+验证一般 affine 产物时追加 `--allow-affine`。
 有意只验证已声明编码时使用 `--allow-partial`，其结果不表示完整量化覆盖。
 独立脚本没有 live 模型来源信息，遇到无法从最终图证明端口的虚拟容器会明确拒绝。
 它验证文件契约和图映射，不代替下游编译器执行验证。
@@ -257,9 +266,9 @@ ONNX 示例与 `run_onnx_ptq()` 默认使用以下两份配置，与 KWS 示例�
 示例的默认规则：
 
 - 在 `compute_encodings` 前设置 `percentile=99.99`。Torch 和 ONNX 共用 `aimet_common.percentile` 的 2048 桶动态直方图、样本计数和百分位取点；后续批次超出范围时扩容并合并历史统计。设为 100 时保留完整观测范围。
-- 激活和权重使用对称量化；Percentile PTQ 按 JSON2 的 `bias_bitwidth` 统计校准普通 bias，全零通道也保留有效网格；Po2 阶段再按 `Sb = Sx * Sw` 推导，默认位宽为 INT32。旧原生统计路径仍延后 bias 对齐，避免近零通道产生 `scale=0`。
+- 激活和权重使用对称量化；Percentile PTQ 按 JSON2 的 `bias_bitwidth` 统计校准普通 bias，全零通道也保留有效网格；Po2 演示阶段再按 `Sb = Sx * Sw` 对齐，默认位宽为 INT32。旧原生统计路径的 bias 延后至该阶段对齐，避免近零通道产生 `scale=0`。
 - 默认整数类型固定为 INT；可通过 JSON2 `*_signed=false` 选择 UINT。整数符号与 `*_symmetric` 独立，UINT 对称模式将负值截为零，不自动退回 INT。
-- Power-of-2 使用与 `src/aimet_torch/power_of_2_quantization.py` 相同的 `cover_range`（容差 2%）
+- 启用 Power-of-2 时，使用与 `src/aimet_torch/power_of_2_quantization.py` 相同的 `cover_range`（容差 2%）。
 - 权重默认 per-channel；Gemm 保持 per-channel；无 Conv+Relu supergroup
 
 JSON2 的显式激活位宽设置同时要求该有效量化点启用，与 Torch 的行为一致。

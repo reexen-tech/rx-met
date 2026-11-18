@@ -318,7 +318,7 @@ def verify_onnx_ptq_artifacts(
     validate_onnx_shapes(model)
     onnx.checker.check_model(str(artifacts["onnx"]), full_check=True)
     try:
-        saved_payload = load_compiler_encodings(artifacts["encodings"], require_po2=True)
+        saved_payload = load_compiler_encodings(artifacts["encodings"])
         validate_compiler_encoding_graph(model, saved_payload)
     except ValueError as error:
         raise RuntimeError(f"Saved compiler encodings failed strict validation: {error}") from error

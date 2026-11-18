@@ -104,11 +104,9 @@ CPU runtime 的 CUDA 版本打印为 `None`。runtime 提供第三方依赖，�
 
 | 变量 / 路径 | 作用 | 适用流程 |
 |-------------|------|----------|
-| `RX_MET_SPEECH_COMMANDS_ROOT` | Speech Commands 数据集根目录，默认 `/datasets/speech_commands_v0.02` | KWS 示例 |
-| `RX_MET_KWS_OUTPUT_DIR` | KWS 输出根目录，默认 `./output/quick_start_kws`，自动追加网络类型和运行 ID | KWS 示例 |
+| `RX_MET_SPEECH_COMMANDS_ROOT` | Speech Commands 数据集根目录，默认 `/datasets/speech_commands_v0.02` | KWS 与 ONNX 默认示例 |
+| `RX_MET_KWS_OUTPUT_DIR` | KWS 输出根目录，默认 `./output/quick_start_kws`；ONNX 示例默认从中选择对应网络类型的最新成功完整运行 | KWS 与 ONNX 默认示例 |
 | `RX_MET_KWS_FP_MODEL` | 浮点检查点路径；`--ptq-only` 时必须由此变量或 `--fp-checkpoint` 提供 | KWS 示例 |
-| `RX_MET_ONNX_PTQ_ROOT` | 校准数据根目录，默认 `./output/onnx_ptq_quick_start/datasets` | ONNX PTQ |
-| `RX_MET_ONNX_PTQ_EXAMPLE` | 示例名称，默认 `mobilenetv2` | ONNX PTQ |
 | `RX_MET_ONNX_PTQ_MODEL` / `RX_MET_ONNX_PTQ_CALIB` | 覆盖模型与校准目录 | ONNX PTQ |
 | `RX_MET_ONNX_PTQ_VAL` | 可选验证目录；默认查找校准目录的平级 `val/`，不存在时复用校准样本作数值比较 | ONNX PTQ |
 | `RX_MET_ONNX_PTQ_OUTPUT_DIR` | 输出目录，默认当前运行目录下的 `output/onnx_ptq_quick_start` | ONNX PTQ |
@@ -138,7 +136,7 @@ CPU runtime 的 CUDA 版本打印为 `None`。runtime 提供第三方依赖，�
 已有权重可直接进行 PTQ；浮点训练不是量化前必须重复执行的步骤。KWS 完整示例同时演示
 浮点训练与 QAT，CPU 模式使用已有检查点，只执行校准、PTQ、Po2、导出与恢复。
 Po2 是按目标后端要求选用的阶段，PTQ 或 QAT 本身不要求 scale 必须为 2 的幂。
-当前 KWS 和 ONNX 示例执行 Po2，以演示该能力及转换前后的精度比较，日志将其标为“可选”阶段。
+KWS 和 ONNX 示例执行 Po2，以演示该能力及转换前后的精度比较，日志将其标为“可选”阶段。
 按[自有模型接入教程](PyTorch_quantization.md)准备模型、数据和评估函数，
 再根据[配置参考](Quant_config.md)调整量化设置。
 
@@ -156,7 +154,7 @@ cd /workspace
 | --- | --- |
 | CUDA 上运行完整 KWS GRU/LSTM 流程 | [KWS 示例](../examples/README.md#kwsgru--lstm)，需要 Speech Commands v0.02 |
 | CPU/CUDA 上只做 KWS 校准与 PTQ | [固定检查点 PTQ](../examples/README.md#只校准和-ptqcpu--gpu)，需要同类型浮点检查点及数据 |
-| ONNX PTQ 公开演示 | [MobileNetV2 两步流程](../examples/README.md#onnx-ptqmobilenetv2)，先准备模型和校准样本，再量化 |
+| ONNX PTQ 演示 | [复用 KWS 的浮点 ONNX](../examples/README.md#onnx-ptq复用-kws-的浮点-onnx)，沿用同一份 Speech Commands，由 ONNX 示例自动抽样和提取 MFCC |
 
 KWS 默认浮点训练和 QAT 各 1 epoch，用于学习流程，不能据此推断充分训练后的精度。
 示例验证重载输出，失败返回非零；产物位置和日志说明见[运行目录与日志](Runtime_outputs.md)。
@@ -192,14 +190,16 @@ PyTorch 和 ONNX 采用两层配置。下表以 PyTorch 调用为例；完整字
   → QuantizationSimModel
   → set_percentile_value(99.99)
   → compute_encodings
-  → 示例演示：cover_range Po2 + Sb = Sx * Sw（按部署要求选用）
+  → 可选：cover_range Po2 + Sb = Sx * Sw（按部署要求选用，示例执行演示）
   → clean ONNX + compiler encodings
 ```
 
-CPU runtime 显式传入 `--device cpu`。公开 MobileNetV2 演示的下载、预处理和量化命令见
-[示例说明](../examples/README.md#onnx-ptqmobilenetv2)；通用入口不负责用户模型的预处理。
-当前 ONNX 示例和 `run_onnx_ptq()` 端到端接口均执行 Po2，并按 Po2 制品验证恢复结果；
-这条演示路径不表示所有 ONNX PTQ 任务都要求 Po2。
+CPU runtime 显式传入 `--device cpu`。默认示例复用 KWS 已有的最终浮点 ONNX，使用同一份
+Speech Commands，并自行完成固定抽样和 MFCC，不需要额外准备脚本或修改 KWS 流程。
+模型选择、数据路径和运行命令见[示例说明](../examples/README.md#onnx-ptq复用-kws-的浮点-onnx)。
+使用其他模型时，显式传入 `--model` 和已经完成模型前处理的 `--calib-dir`。
+ONNX 示例和 `run_onnx_ptq()` 执行可选 Po2 阶段的转换演示。导出和恢复接口也支持非 Po2
+编码，仍严格检查网格、覆盖率和恢复输出；执行演示不表示 PTQ 必须经过 Po2。
 
 当前 ONNX 流程适用于 PTQ；QAT 使用 PyTorch 流程。编译器 encodings 是 rx-met 的
 部署格式，必须与同次导出的 Clean ONNX 配套使用。

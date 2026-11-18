@@ -8,12 +8,14 @@
 
 ### Changed
 
+- ONNX PTQ 示例默认复用 KWS 已有的最终浮点 ONNX，自行从同一份 Speech Commands 提取 MFCC；移除 MobileNetV2 演示及独立准备脚本，KWS 示例流程不变。
 - GRU/LSTM 示例 JSON 不再展示初始 PO2 模式设置；新建算子默认使用 affine 校准，示例统一通过 `apply_power_of_2_workflow()` 显式开启 PO2。底层配置能力保持兼容。
 - 原生 GRU/LSTM 公共转换接口统一为 `enable_po2()`，GRU 使用 `use_po2_scale`，工作流统计使用 `quant_gru_po2_count` / `quant_lstm_po2_count`；原 POT2 名称保留兼容别名，已有量化参数文件格式不变。
 - 恢复 CUDA QuantGRU 的独立 FP32/INT32 carrier 计算路径，`quant_storage_dtype="float32"` 使用 SGEMM 与显式量化舍入，不再转调整数核心。两种路径统一由 `USE_REAL_ACTIVATION` 选择真实激活或 LUT；真实激活构建跳过全部 LUT 生成与参数初始化。通过 `RX_MET_USE_REAL_ACTIVATION=0/1` 同步构建共享库与 Python 扩展，默认关闭，切换需重新编译。CPU 当前仍使用整数核心。
 
 ### Fixed
 
+- ONNX 编译器编码导出与恢复允许非 Po2 量化网格，继续严格校验编码、图映射和恢复输出；普通 PTQ 无需先执行 Po2 转换。
 - ONNX JSON2 显式激活位宽可启用基础配置关闭的有效输入/输出量化点，模型 I/O 默认规则不再覆盖显式禁用；共享图输入的普通分支使用独立端口网格，最终禁用和排除层状态随原始编码保存并恢复。
 - InstanceNorm 维度别名按实际 ONNX 节点输入 rank 筛选，支持同一配置同时包含 1d/2d/3d，以及导出时插入 Unsqueeze 的无 batch 输入；未知 rank 的冲突仍明确拒绝。
 - ONNX LSTM 兼容已有旧编码中缺少 `n` 和单元素 input/output 列表的表示，在加载前验证已有字段并保留实际网格；损坏请求不改变已有量化参数或锁状态。

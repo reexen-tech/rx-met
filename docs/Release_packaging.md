@@ -83,7 +83,7 @@ Torch 版本更新时须重新编译这三个 wheel，不能沿用旧版本环�
 ./scripts/release/verify_kws_example.sh --install-prefix .release/installed-validation \
   --dataset-dir /path/to/speech_commands_v0.02 cu126
 ./scripts/release/verify_onnx_ptq_example.sh --install-prefix .release/installed-validation \
-  --model /path/to/mobilenetv2-12.onnx --dataset-dir /path/to/calibration-samples cu126
+  --model /path/to/att_mh_rnn_kws.onnx --dataset-dir /path/to/mfcc-calibration-samples cu126
 ```
 
 ONNX 验证入口读取与模型匹配的 `.npy` / `.npz` 校准样本目录。模型与样本准备、CPU 固定检查点
