@@ -11,9 +11,8 @@ KWS 和 ONNX PTQ 示例默认使用本目录的两份 JSON。示例先按基础�
 
 KWS 的 `--rnn-type` 决定模型使用的循环算子。两个配置节可以同时放在完整 JSON 中，
 模型中的循环算子只读取各自的配置。可用 `--quant-config` 指定另一份位宽配置；改动量化参数后
-重新校准。新建 GRU / LSTM 默认使用 affine scale，本目录示例不设置初始 scale 模式。
-PO2 是按目标后端要求选用的可选转换，需要时在校准后调用 `apply_power_of_2_workflow()`。
-KWS 和 ONNX PTQ 示例均执行该转换演示，KWS 的 QAT 循环沿用转换后的固定参数。
+重新校准。Po2 是按目标后端要求选用的可选转换；KWS 和 ONNX PTQ 示例均执行该转换演示，
+KWS 的 QAT 循环沿用转换后的固定参数。
 
 ## 普通层
 
@@ -27,7 +26,7 @@ KWS 和 ONNX PTQ 示例均执行该转换演示，KWS 的 QAT 循环沿用转换
 控制未匹配普通层，单条规则的 `disable_quantization` 控制该规则匹配的层。
 
 按 MatMul 名称设置 `"input_bitwidths": [8, 8]` 可将左右操作数设为 8 位，
-`[8, null]` 只覆盖左侧；该名称规则优先于默认激活 16 位配置。Torch 和 ONNX
+`[8, null]` 只覆盖左侧；该名称规则优先于 `default_bitwidth` 中的默认激活位宽。Torch 和 ONNX
 均支持，ONNX 会为已有上游输出及共享模型输入的 MatMul 分支保留独立输入网格。
 规范化为 Linear 后，原 MatMul 的右输入配置映射到权重，显式 `weight_*` 设置优先。
 

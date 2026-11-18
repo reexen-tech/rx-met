@@ -8,7 +8,8 @@
 
 ## 步骤 1：安装
 
-宿主机需要 Linux x86_64、Docker，以及 Bash、gzip、flock 等常用工具。
+宿主机需要 Linux x86_64、可通过 Unix socket 访问的本机 Docker daemon，以及
+Bash、GNU coreutils、GNU findutils、gzip、flock 等常用工具。
 CUDA 运行环境还需要 NVIDIA Container Toolkit 和兼容的 NVIDIA 驱动；CPU 运行环境无需 GPU。
 无需在宿主机安装 Python 或 CUDA Toolkit。
 
@@ -145,8 +146,8 @@ python3 /workspace/examples/quick_start_onnx_ptq.py --device "$RX_MET_EXAMPLE_DE
 | KWS GRU / LSTM | `$HOME/rx-met-user/output/quick_start_kws/<gru或lstm>/<execution-id>/` |
 | ONNX PTQ | `$HOME/rx-met-user/output/onnx_ptq_quick_start/<execution-id>/` |
 
-每次任务目录分别在 `exports/`、`checkpoints/`、`config/` 中保存导出制品、检查点和配置快照，
-`run.log` 和 `run.json` 记录本次执行。ONNX 必须与同次导出的 JSON 量化参数配套使用。详细说明见
+每次任务的导出制品保存在 `exports/`，配置快照保存在 `config/`；KWS 检查点保存在
+`checkpoints/`。`run.log` 和 `run.json` 记录本次执行。ONNX 必须与同次导出的 JSON 量化参数配套使用。详细说明见
 [examples/README.md](examples/README.md)，量化配置说明见
 [examples/config/README.md](examples/config/README.md)。
 

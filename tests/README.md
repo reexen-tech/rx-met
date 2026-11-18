@@ -89,14 +89,17 @@ python3 scripts/validation/verify_kws_ptq_roundtrip.py \
 差异会如实记录并返回 1；`--report-only` 只改变退出策略，不把差异标为通过。
 已有输出目录拒绝覆盖。两轮产物、校准网格或浮点累加不同，不应仅凭最终精度相近认定逐值一致。
 
-KWS 专用产物检查可单独执行：
+KWS GRU 的 ADA200 Po2 产物检查可单独执行：
 
 ```bash
 python3 -m tests.support.kws_artifacts \
   --onnx /path/to/model.onnx --encodings /path/to/model.json
 ```
 
-这只检查已整理的静态图和编码规则，不代替编译或设备推理。
+该检查针对两个双向 GRU、外置 MFCC、四头注意力和 INT32 乘积 bias scale 的部署图，
+不适用于 LSTM 或一般 affine 编码。其他模型使用
+[通用制品验收](../docs/ONNX_PTQ_COMPILER.md#编码格式与验收)。
+两种检查都不代替编译或设备推理。
 发布镜像中的真实数据验收继续使用 `scripts/release/verify_*_example.sh`。
 
 ## 整理与维护

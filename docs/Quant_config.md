@@ -345,7 +345,7 @@ per-channel；未列出的量化点保留默认值。用户可直接修改配置
 原生字段、默认值和配置变更后的校准状态见
 [LSTM 配置参考](../operators/quant-lstm/docs/configuration.md)。
 已校准后改变配置需先显式 `reset_calibration()`；相同配置可重复应用。
-新建 GRU / LSTM 默认使用 affine scale，示例 JSON 不指定初始 scale 模式。
+新建 GRU / LSTM 默认使用 affine scale。
 需要 PO2 时，在校准后统一调用 `apply_power_of_2_workflow()`。
 两种循环层通过同一次校准前向收集统计，PO2 和参数锁的框架调用关系见
 [循环算子接入](QuantLSTM_integration.md)。

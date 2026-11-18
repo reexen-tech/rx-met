@@ -52,7 +52,7 @@ C++/CUDA 实现，QuantGRU / QuantLSTM 在 PyTorch 中替换原始循环层；ON
 | `aimet_torch` | `QuantizationSimModel`、混合精度工具、QAT 工具、`export_onnx_json()` | PyTorch 图准备、量化器管理、QuantGRU / QuantLSTM 协作和导出后处理 |
 | `aimet_onnx` | ONNX QuantSim、`run_onnx_ptq()`、`CompilerEncodingConverter` | ONNX Runtime 会话、校准、Po2 对齐和节点级 encoding 映射 |
 | `native` | 安装到 `aimet_common` 的 Python 扩展和 ONNX Runtime custom op | AIMET C++/CUDA 量化内核与 Python binding |
-| `quant_gru` / `quant_lstm` | `QuantGRU` / `QuantLSTM`、`GRU_config` / `LSTM_config`、量化参数导入导出 | CPU/CUDA 循环层、校准器、LUT、定点推理和 CUDA 反向传播 |
+| `quant_gru` / `quant_lstm` | `QuantGRU` / `QuantLSTM`、`GRU_config` / `LSTM_config`、量化参数导入导出 | CPU/CUDA 循环层、校准器、激活实现、量化前向和 CUDA 反向传播 |
 | 构建与发布 | `scripts/environment/*.sh`、`scripts/release/*.sh` | 依赖锁、环境镜像、项目 wheel、验收和归档 |
 
 `aimet_onnx.rx_ptq` 根据 ONNX、配置和校准数据创建 QuantSim，完成校准、可选的 Power-of-2 和 bias 对齐、
@@ -152,6 +152,11 @@ QuantGRU 位于 [`operators/quant-gru`](../operators/quant-gru/)，通过
 - CPU/CUDA 浮点、校准和 PTQ 前向，以及 CUDA 训练与 QAT。CPU 原生前向使用 `eval()`。
 - MinMax、SQNR 和 Percentile 校准。
 - per-tensor、per-gate 和 per-channel 权重、偏置量化。
+
+QuantGRU 的 CUDA `quant_storage_dtype` 选择独立的 FP32 或 INT32 载体计算路径；CPU
+目前仍使用整数核心。激活采用真实函数还是 PWL 由构建开关 `USE_REAL_ACTIVATION` 决定，
+与载体选择分开。执行边界与替代旧共享前向方案的理由见
+[GRU 独立 carrier 决策](adr/0007-gru-independent-carriers-and-activation.md)。
 
 `apply_mixed_precision_bitwidth()` 识别循环层实例，并把混合精度 JSON 中的
 `GRU_config` / `LSTM_config` 交给对应算子。Python 接口调用原生扩展，扩展再
@@ -276,7 +281,11 @@ flowchart LR
 - [ADR 0002：输出使用真实 Power-of-2 scale 的编译器 encodings](./adr/0002-compiler-native-encodings-and-po2.md)
 - [独立 runtime 与应用 bundle](./adr/0003-runtime-and-application-bundles.md)
 - [统一编译器编码处理与导出入口名称](./adr/0003-shared-compiler-encodings.md)
-- [GRU carrier 共用整数目标前向](./adr/0005-gru-shared-integer-forward.md)
+- [ONNX 全连接的单一输出量化边界](./adr/0004-onnx-linear-quantization-boundary.md)
+- [GRU carrier 共用整数目标前向（已被 0007 替代）](./adr/0005-gru-shared-integer-forward.md)
 - [FX 展开模块的参数量化归属](./adr/0006-fx-parameter-quantization.md)
+- [GRU 独立 carrier 与统一激活开关](./adr/0007-gru-independent-carriers-and-activation.md)
+- [ONNX 输入与复合表达式的量化域归属](./adr/0008-onnx-quantization-domain-ownership.md)
+- [显式量化配置与旧编码的有效状态](./adr/0009-explicit-quantization-overrides.md)
 
 新增模块或改变公开接口时，应同步更新本文档。非显然的设计取舍通过新 ADR 记录。

@@ -45,9 +45,8 @@
 新建 QuantGRU 默认关闭量化，使用 affine scale。
 配置文件省略全局字段时，对应属性沿用实例当前值。
 
-同目录完整 JSON 设置 `disable_quantization=false`，不设置初始 scale 模式。
-rx-met 示例统一在校准后调用 `apply_power_of_2_workflow()` 开启 PO2；独立模块可调用
-`enable_po2()`。PO2 默认采用 `CoverRange` 策略和 2% 容差。
+同目录完整 JSON 设置 `disable_quantization=false`。校准后转换 Po2 的调用方式和
+时机见[模块 README](../../README.md#量化流程)。
 
 ## 算子配置字段
 
@@ -170,9 +169,13 @@ print(config.get("scale"), config.get("zero_point"))
 | --- | --- | --- |
 | `calibration_method` | `"minmax"` | MinMax 范围统计；`"sqnr"` 使用直方图误差搜索；`"percentile"` 使用百分位裁剪 |
 | `percentile_value` | `100.0` | Percentile 校准百分位 |
-| `quant_storage_dtype` | `"float32"` | 反向缓存中的量化码以 float32 保存；`"int32"` 保留 int32 缓存，两者使用同一整数/LUT 前向 |
+| `quant_storage_dtype` | `"float32"` | CUDA 下选择 FP32 量化码、SGEMM 和浮点重缩放；`"int32"` 选择整数矩阵乘与重缩放。CPU 下两者均使用整数核心，仅返回的量化码缓存类型不同 |
 | `calibrating` | `False` | 收集校准数据 |
 | `export_mode` | `False` | ONNX 图导出 |
+
+CUDA 两种 carrier 的量化激活均由构建开关 `USE_REAL_ACTIVATION` 选择 LUT 或真实
+sigmoid/tanh，独立于 `quant_storage_dtype`。构建方式和载体精度限制见
+[模块 README](../../README.md#环境与安装)。
 
 ## 错误与验证
 

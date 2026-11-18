@@ -82,10 +82,10 @@ model.encoder.rnn = replace_recurrent_layer(model.encoder.rnn)
    `GRU_config` / `LSTM_config`；配置结构与默认值见[量化配置](Quant_config.md)和
    [示例配置](../examples/config/README.md)。
 4. 使用同一次 `compute_encodings` 前向校准整模型。量化方案和 Percentile 值传入
-   原生收集器，已锁定参数跳过收集，异常时恢复校准标志。
+   原生收集器，已锁定参数跳过收集，异常时恢复校准标志。新建原生循环层默认使用
+   affine 网格。
 5. 如需在校准后统一转换到 Po2，调用 `apply_power_of_2_workflow()`，在冻结参数和 QAT 前完成转换。
    该入口分别处理普通量化器与原生循环层；模型只有循环层时仍执行并验证原生 Po2。
-   示例 JSON 不设置初始 scale 模式，新建原生循环层默认按 affine 校准，PO2 由此入口统一转换。
 6. CPU 路径直接评估和导出；CUDA 路径可冻结量化参数后执行 QAT，沿用已校准网格。
 7. 配套保存主权重和编码，重建模型后比较相同输入的输出及任务指标。
 

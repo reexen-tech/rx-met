@@ -146,9 +146,7 @@ print("PTQ:", evaluate(sim.model))
 ## 4. 按部署要求执行 Power-of-2
 
 Po2 是可选阶段；目标要求 Po2 scale 时，在校准后、参数冻结前转换，并重新评估。
-以下用 `do_po2` 控制校准后的整模型转换；不要求这一步时设为 `False`。本模板使用的
-示例 JSON 不设置初始 scale 模式，新建 GRU / LSTM 默认从 affine 网格开始校准，
-需要 PO2 时统一通过此处的 `apply_power_of_2_workflow()` 转换。
+以下用 `do_po2` 控制校准后的整模型转换；不要求这一步时设为 `False`。
 
 ```python
 do_po2 = True

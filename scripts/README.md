@@ -18,7 +18,7 @@
 ## 模型制品验收
 
 `verify_compiler_artifacts.py` 只读检查 ONNX、schema v4 编码、张量维度和图映射，
-默认要求 Po2 和完整计算输入覆盖：
+默认要求 Po2 和完整计算输入覆盖。使用已安装 NumPy 和 ONNX 的 Python 环境，从仓库根目录执行：
 
 ```bash
 python3 scripts/verify_compiler_artifacts.py \

@@ -9,7 +9,7 @@
 
 ## 运行环境
 
-宿主机需要 Linux x86_64、Docker 和 Bash、gzip、flock、sha256sum 等常用工具。CPU 环境无需 NVIDIA GPU；CUDA 环境需要 NVIDIA Container Toolkit，并满足下表的 GPU 架构和驱动要求。Python 和 CUDA 由容器提供。
+宿主机需要 Linux x86_64、可通过 Unix socket 访问的本机 Docker daemon，以及 Bash、GNU coreutils、GNU findutils、gzip、flock 等常用工具。CPU 环境无需 NVIDIA GPU；CUDA 环境需要 NVIDIA Container Toolkit，并满足下表的 GPU 架构和驱动要求。Python 和 CUDA 由容器提供。
 
 | 运行环境 | Python | CUDA | 最低 NVIDIA 驱动 | GPU 架构 | 产品归档 |
 | --- | --- | --- | --- | --- | --- |
@@ -17,7 +17,8 @@
 
 ## 安装
 
-配套 runtime 环境包位于产品目录平级的 `@ENV_DIRECTORY@/`，安装脚本自动匹配。已加载的兼容运行环境可直接复用。
+已加载的兼容 runtime 可直接复用。首次离线安装时，将配套环境目录 `@ENV_DIRECTORY@/`
+与本产品目录平级放置，安装脚本会自动匹配所需归档。
 
 安装示例：
 

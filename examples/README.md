@@ -110,6 +110,8 @@ python3 examples/quick_start_onnx_ptq.py
 默认使用 GRU，自动选择 `./output/quick_start_kws/gru/` 中最新成功的完整 KWS 运行，读取
 `exports/att_mh_rnn_kws.onnx`。若通过 `RX_MET_KWS_OUTPUT_DIR` 修改了 KWS 输出根目录，保持该变量一致。
 LSTM 指定 `--rnn-type lstm`。CPU runtime 另加 `--device cpu`；准备 ONNX 的 KWS 完整训练使用 CUDA。
+LSTM ONNX PTQ 可直接使用 `cpu`、`cu126` 或 `cu130` 应用；当前 `cu118` 默认构建的
+LSTM bridge 与其 ONNX Runtime API 不匹配，需要先用匹配头文件重建算子 wheel。
 
 数据默认读取 `/datasets/speech_commands_v0.02`，可用 `RX_MET_SPEECH_COMMANDS_ROOT` 或
 `--data-dir` 覆盖。ONNX 示例分别从训练、验证划分中固定抽取每类 20 个未增强样本，
@@ -146,7 +148,8 @@ NPY；多输入使用 NPZ，每个键与 ONNX 输入名完全一致，不得缺�
 验证目录默认使用校准目录旁的 `val/`，也可通过 `--validation-dir` 指定。显式指定的目录
 须存在且有效；默认 `val/` 不存在时复用校准样本作数值比较。分类模型使用 batch-1 样本，
 并在验证目录上一级的 `manifest.json` 中提供 `val_files` 和 `val_labels` 数组，按文件名
-与整数类别编号一一配对，可计算 `output[0]` 的 Top-1；该输出必须为 `[batch, classes]`，
+与整数类别编号一一配对；每份前向须保存为单输入 NPY 或完整输入 NPZ。
+脚本可计算 `output[0]` 的 Top-1；该输出必须为 `[batch, classes]`，
 不会自动查找后续输出。未提供标签时
 只比较输出数值；正式精度评估应使用独立于校准数据的验证集。需要调整量化配置时，使用
 `--config-file` 和 `--quant-config` 指定 JSON，字段说明见同目录的

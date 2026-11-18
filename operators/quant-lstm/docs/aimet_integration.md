@@ -43,8 +43,8 @@ QuantGRU 同名的公共方法。安装 AIMET 时可选用其运行日志；独�
 
 未提供 `LSTM_config` 时不改变模块设置。`quant_config` 采用原生 sparse override
 格式，相同配置可重复加载；改变已校准配置前必须显式 `reset_calibration()`。
-该操作同时清除锁。新建实例默认使用 affine scale，示例 JSON 不设置初始 scale 模式；
-rx-met 在校准后统一通过 `apply_power_of_2_workflow()` 选择 PO2 转换。
+该操作同时清除锁。需要 Po2 时，在共享校准后、参数锁定和 QAT 前调用
+rx-met 的 `apply_power_of_2_workflow()`；原生配置默认值见[配置与校准](configuration.md)。
 QAT 沿用已校准参数，不应在每个训练迭代重新进入校准上下文。
 
 以下片段接续已加载浮点权重的 `module`；`restored` 是相同结构、设备和 FP32 dtype

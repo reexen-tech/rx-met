@@ -36,7 +36,8 @@ BSD-3-Clause 许可证保存在 `native/LICENSE`。
 源码构建支持 Linux x86_64 上的 CPython 3.10、3.11 和 3.12。构建依赖包括 C++17
 编译器、CMake 3.19 或更新版本、Ninja、Eigen3、pybind11、所用 Python 的开发头文件，
 以及匹配版本的 ONNX Runtime 头文件；
-CUDA 构建还需要 CUDA Toolkit。发行 wheel 使用的 Python 版本由
+CUDA 构建还需要匹配目标环境的 CUDA Toolkit，以及编译器可找到的 cuDNN 头文件。
+发行 wheel 使用的 Python 版本由
 [`docker/variants.json`](../docker/variants.json) 定义。
 
 ## 构建与冒烟测试
@@ -49,6 +50,8 @@ PyTorch、NumPy、ONNX 和 ONNX Runtime。对应变体的完整依赖见
 
 命令使用默认安装目录 `src/aimet_common`，供冒烟测试从源码树加载新库。如果通过
 `RX_MET_PYTHON` 选择了其他解释器，用同一解释器运行 `smoke_onnx_runtime.py`。
+以下命令默认使用仓库内的 ORT 1.23.2 头文件，运行环境的 ORT 版本须与之匹配；
+cu118 和 cu130 分别使用 1.20.1 和 1.27.0，需按下文指定对应头文件目录。
 
 CPU：
 
@@ -71,8 +74,7 @@ python3 native/tests/smoke_onnx_runtime.py \
 测试成功时输出 `AIMET ONNX native smoke passed`，并列出 provider、自定义算子域和加载的库。
 该测试使用一个小型 MatMul + Relu 模型，检查原生库导入、校准及有限的推理输出。
 
-直接运行 `build_aimet_native.sh` 默认使用仓库内已归档的 1.23.2 头文件；上述构建依赖已
-安装时，无需下载 ORT 源码即可离线构建。这要求当前运行环境使用匹配版本的 ONNX Runtime。其他版本通过
+上述构建依赖已安装时，无需下载 ORT 源码即可使用仓库内头文件离线构建。其他版本通过
 `RX_MET_ONNXRUNTIME_ROOT` 指定头文件目录，并用 `RX_MET_ONNXRUNTIME_VERSION`
 要求该目录的版本。例如，已有 cu118 依赖的环境可使用：
 

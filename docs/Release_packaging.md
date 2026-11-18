@@ -10,6 +10,8 @@ Linux x86_64 构建宿主机需有 Python 3（3.10 或更新版本）、Docker �
 NVIDIA 驱动及 Container Toolkit。接收方运行安装器需要本机 Docker daemon、Bash、
 GNU coreutils、GNU findutils、`flock` 和加载归档时使用的 `gzip`，宿主机无需 Python；
 下载 runtime 时还需 `curl`。远程 Docker context 不支持安装器所需的本机路径挂载。
+宿主 Python 需能导入 `packaging`，可复用 pip 内置副本；Python 3.10 的 TOML 解析还会使用
+pip 内置的 `tomli`。
 产品 `VERSION` 与公共环境版本独立；环境定义、版本及兼容镜像复用规则以
 [公共环境](Shared_environment.md#版本与复用)为准。
 

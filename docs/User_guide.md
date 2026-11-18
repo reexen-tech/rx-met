@@ -50,6 +50,8 @@ CPU runtime 安装 `onnxruntime`，CUDA runtime 安装 `onnxruntime-gpu`；Quant
 QuantLSTM 来自挂载的应用安装目录。ONNX PTQ 示例默认要求 `CUDAExecutionProvider`，
 使用 CPU 时显式指定 `--device cpu` 或 `RX_MET_ONNX_PTQ_DEVICE=cpu`。
 精确依赖及 GPU 架构以 [docker/variants.json](../docker/variants.json) 为准。
+`cu118` 的 ONNX LSTM PTQ 还受 bridge API 兼容条件限制，见
+[原生循环层运行时要求](ONNX_PTQ_COMPILER.md#gru--lstm-原生适配)。
 
 ---
 
@@ -111,7 +113,7 @@ CPU runtime 的 CUDA 版本打印为 `None`。runtime 提供第三方依赖，�
 | `RX_MET_ONNX_PTQ_VAL` | 可选验证目录；默认查找校准目录的平级 `val/`，不存在时复用校准样本作数值比较 | ONNX PTQ |
 | `RX_MET_ONNX_PTQ_OUTPUT_DIR` | 输出目录，默认当前运行目录下的 `output/onnx_ptq_quick_start` | ONNX PTQ |
 | `RX_MET_ONNX_PTQ_DEVICE` | `cuda`（默认）或显式设置为 `cpu` | ONNX PTQ |
-| 镜像内示例目录 | `/opt/rx-met/examples` | 两者 |
+| 应用挂载中的示例目录 | `/opt/rx-met/examples` | 两者 |
 | 推荐输出目录 | volume 挂载的 `/workspace` | 两者 |
 
 ---

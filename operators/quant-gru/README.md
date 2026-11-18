@@ -120,9 +120,8 @@ gru.finalize_calibration()
 gru.use_quantization = True
 ```
 
-独立模块默认使用 affine scale，示例 JSON 不设置初始 scale 模式。
-rx-met 在校准后统一通过 `apply_power_of_2_workflow()` 开启 PO2；独立模块可调用
-`gru.enable_po2()`。PO2 默认取整策略为 `CoverRange`，容差为 2%。
+独立模块默认使用 affine scale。如需 Po2，在校准后、参数锁定和 QAT 前调用
+`gru.enable_po2()`；默认取整策略为 `CoverRange`，容差为 2%。
 JSON 字段、默认值和加载时机见[配置说明](pytorch/config/README.md)。
 
 输入和循环 bias 采用带训练余量的独立网格，普通层的 INT32 乘积 scale 对齐不会
