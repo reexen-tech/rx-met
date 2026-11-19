@@ -238,7 +238,7 @@ sha256sum -c 'rx-met-v<VERSION>-cu126-linux-amd64.tar.gz.sha256'
 | `quant-lstm` | `quant_lstm-` |
 
 wheel 格式将发行包名中的连字符转为下划线，各字段之间使用连字符，例如
-`quant_gru-1.1.1+cpu-cp310-cp310-linux_x86_64.whl`。Python 导入继续使用
+`quant_gru-<VERSION>+cpu-cp310-cp310-linux_x86_64.whl`，其中 `<VERSION>` 为产品版本。Python 导入继续使用
 `quant_gru`、`quant_lstm` 等模块名。
 
 发布校验同时检查包内发行名和标准 wheel 文件名。修改命名声明后，通过正常构建重新
