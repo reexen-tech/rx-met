@@ -3,17 +3,25 @@
 本文档说明 rx-met 的公开开发、验证和提交要求。完整运行环境以固定 runtime 与匹配的应用包为准；
 本地开发构建和测试本次修改涉及的模块。
 
+使用现成应用包阅读[用户使用指南](docs/User_guide.md)。维护者先按
+[公共环境](docs/Shared_environment.md)准备编译与运行依赖，再按
+[应用包发布](docs/Release_packaging.md)构建、验收和交付。
+
 ## 开发环境
 
-- Python 支持范围为 3.10 至 3.12，精确定义见 `pyproject.toml`。
-- 原生 AIMET、QuantGRU 和 QuantLSTM 构建要求 Linux x86_64、C++17、CMake、Ninja 及对应的
-  ONNX Runtime 或 CUDA 工具链。
+- 项目 wheel 支持 Linux x86_64 上的 CPython 3.10 至 3.12，具体变体使用的版本见
+  [`docker/variants.json`](docker/variants.json)。
+- 本地构建原生扩展时，按 [AIMET](docs/AIMET_ONNX_NATIVE.md)、
+  [QuantGRU](operators/quant-gru/README.md)、[QuantLSTM](operators/quant-lstm/docs/installation.md)
+  的说明准备 C++、Python 和 ORT 构建依赖；编译 CUDA 变体还需匹配的 CUDA 工具链。
 - 完整 GPU 验证要求 NVIDIA Driver、NVIDIA Container Toolkit 和与目标变体兼容的
   GPU。
 - 依赖配置和文档修改可以在没有 GPU 的环境中检查。
 
-项目使用 PEP 517 构建入口。wheel 构建命令为 `python3 -m pip wheel .`，完整发布
-构建通过发布脚本执行。
+项目使用 PEP 517 构建入口。本地构建 rx-met wheel 前，先按
+[AIMET 原生构建说明](docs/AIMET_ONNX_NATIVE.md) 生成当前 Python ABI 对应的原生库，
+再执行 `python3 -m pip wheel . --no-deps`。wheel 构建会检查原生库是否齐全，
+不会自动编译缺失的 AIMET 库；完整发布构建通过发布脚本完成三个项目 wheel 的编译和组装。
 
 ## 修改范围
 
@@ -73,12 +81,11 @@ python3 -m tests common release
 
 ## 公共环境与应用包
 
-CPU/GPU 环境使用 rx-quant-env `202610`，环境定义与脚本由本仓库维护，通过环境版本标签复用兼容镜像。
-环境版本是配置中的固定 `YYYYMM` 字符串，重复或跨月构建、产品更新不自动改版。
-构建来源摘要和镜像 ID 用于追踪，兼容性由环境元数据和实际依赖验证。
-ORT 离线构建材料保存在 `docker/environment/third_party/`；业务原生源码按产品职责维护。
-基础镜像、依赖、ABI 或工具链定义变化时，将环境版本更新为调整当月；目录和脚本调整不使已有环境失效。
+公共环境和产品使用独立版本。环境定义修改、镜像兼容性及复用规则统一见
+[公共环境的版本与复用](docs/Shared_environment.md#版本与复用)，头文件来源见
+[构建材料](docs/Shared_environment.md#构建材料)。业务原生源码按产品职责维护。
 发布相关修改需验证安装器、环境类型检查、归档完整性和当前版本日志，并执行真实离线安装与只读挂载验收。
+完整构建、验收和交付顺序见[应用包发布](docs/Release_packaging.md)。
 
 ## 提交说明
 

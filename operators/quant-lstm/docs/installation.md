@@ -19,7 +19,9 @@ CPU-only C++ package 不要求 CUDA Toolkit 或 PyTorch。CPU Python 模块需�
 PyTorch，不要求 CUDA Toolkit；通过 `RX_MET_ENABLE_CUDA=0` 选择 CPU extension。
 CUDA wheel 不会自动转换为 CPU wheel。
 
-Ubuntu 可以使用系统包提供 CMake、编译器和 `nlohmann_json`：
+Ubuntu 可以使用系统包提供编译工具和头文件；安装后确认 CMake 和
+`nlohmann_json` 满足上表的最低版本要求。若系统源版本较低，使用提供所需版本的
+开发环境。CMake 也会尝试从所选 Python 解释器中的 `nlohmann_json` 包查找头文件。
 
 ```bash
 sudo apt-get update
@@ -32,18 +34,25 @@ CUDA Toolkit、驱动和 CUDA-enabled PyTorch 需要按照目标 GPU 和 PyTorch
 
 ## 2. 安装 PyTorch CUDA 模块
 
-Python package 支持普通环境安装和 wheel 安装。以下构建命令均从仓库根目录执行，
+Python package 支持普通环境安装和 wheel 安装。本文构建命令均从算子根目录执行
+（rx-met 中为 `operators/quant-lstm/`），
 原生核心默认从 `build/` 目录链接 `libquant_lstm.a`，可通过
 `RX_MET_QUANT_LSTM_BUILD_DIR` 指定其他构建目录。
 
-新构建目录默认启用 CUDA，关闭测试和示例；单配置生成器默认使用 `Release`。
+以下 Python 构建命令使用单配置 CMake 生成器。新构建目录默认启用 CUDA、
+关闭测试和示例，并使用 `Release`。
 普通安装无需显式指定这些开关。需要开发构建时可传入
 `-DCMAKE_BUILD_TYPE=Debug`、`-DQUANT_LSTM_BUILD_TESTS=ON` 或
 `-DQUANT_LSTM_BUILD_EXAMPLES=ON`；仓库验证脚本会显式开启所需目标。
-多配置生成器使用 `cmake --build build --config Release` 选择构建类型。
+如果使用多配置生成器，构建时用 `--config Release` 选择配置，并将
+`RX_MET_QUANT_LSTM_BUILD_DIR` 指向实际包含 `libquant_lstm.a` 的目录。
 
 已有构建目录保留 CMake 缓存中的设置；需要恢复当前默认值时，使用
 `cmake --fresh -S . -B build` 重新配置。
+
+CUDA 构建默认使用 `CMAKE_CUDA_ARCHITECTURES=native`，需要构建环境能检测到目标 GPU。
+在无 GPU 的构建机或需要分发到其他 GPU 架构时，配置 CMake 时显式传入
+`-DCMAKE_CUDA_ARCHITECTURES=<目标架构列表>`，并确认目标架构受所用 CUDA Toolkit 支持。
 
 ```bash
 python3 -m venv .venv
@@ -89,20 +98,25 @@ wheel 绑定构建时的 Python ABI、平台、PyTorch C++ ABI 和 CUDA 依赖�
 
 ### CPU Python 模块
 
-先安装 CPU PyTorch，从算子仓库根目录执行：
+在装有 `pip`、`setuptools`、`wheel` 和 CPU PyTorch 的 Python 环境中，
+从算子根目录执行：
 
 ```bash
 cmake -S . -B build_cpu -DQUANT_LSTM_ENABLE_CUDA=OFF
 cmake --build build_cpu --parallel 2
 RX_MET_ENABLE_CUDA=0 RX_MET_QUANT_LSTM_BUILD_DIR="$PWD/build_cpu" \
-  python -m pip wheel ./pytorch --no-build-isolation --no-deps --wheel-dir dist
+  python -m pip install ./pytorch --no-build-isolation --no-deps
 ```
 
-安装生成的 CPU wheel 后，模块、输入和状态保持在 CPU，调用 `eval()` 执行校准和 PTQ。
+如需只生成 wheel，保留两个环境变量，将 `pip install` 改为
+`pip wheel --wheel-dir dist-cpu`。安装后，模块、输入和状态保持在 CPU，
+调用 `eval()` 执行校准和 PTQ。
 普通前向无需额外关闭梯度，推荐使用 `torch.no_grad()` 或 `torch.inference_mode()`
 减少推理开销。CPU 不提供训练 checkpoint、反向传播或 QAT；实际跨算子的反向传播会明确报错。
 构建 rx-met 发布包时使用 `cpu` 变体，三个
 wheel 的版本与 CPU PyTorch / ONNX Runtime 锁文件配套。
+
+### 验证 CUDA 安装
 
 在可访问 CUDA GPU 的环境执行验证：
 
@@ -132,7 +146,8 @@ extension、CUDA Runtime 和 native FP32 forward 已正确加载。该检查使�
 python -m pip uninstall quant-lstm
 ```
 
-项目尚未发布 PyPI package。wheel 需要按照本节命令从源码构建。
+单独使用 QuantLSTM 时可以按照本节命令构建 wheel。通过 rx-met 应用包安装时，
+应用包已提供配套 wheel。
 
 ### 2.1 升级已有安装
 
@@ -147,7 +162,8 @@ python -m pip install ./pytorch --force-reinstall --no-deps --no-build-isolation
 
 重新生成分发 wheel 时使用上文的 `pip wheel` 命令，并在兼容环境中安装新制品。
 rx-met 中的副本由工具包发布流程构建；同步源码后也应更新配套算子 wheel 或镜像。
-升级后可从本仓库根目录执行接口回归，验证校准 binding、Po2 转换和编码回读：
+升级后可从算子根目录执行接口回归，验证校准 binding、Po2 转换和编码回读。
+完整测试需要 CUDA 模块、可见 GPU 和 `onnx`：
 
 ```bash
 (cd pytorch && python -m unittest -v tests.test_aimet_interface)
@@ -159,6 +175,16 @@ rx-met 中的副本由工具包发布流程构建；同步源码后也应更新�
 `docker/environment/third_party/onnxruntime/include`。独立仓库构建时，通过
 `QUANT_LSTM_ONNXRUNTIME_INCLUDE` 指向包含 `onnxruntime_cxx_api.h` 的目录后重建
 wheel。未提供头文件时不构建 bridge；普通 PyTorch 执行和标准 ONNX 导出不依赖它。
+
+bridge 注册时请求构建头文件中的 `ORT_API_VERSION`，运行时必须支持该 API。
+仓库默认头文件为 ORT 1.23.2（API 23）。目标运行时只支持较低的 API 时，
+需要设置 `QUANT_LSTM_ONNXRUNTIME_INCLUDE` 并重建 wheel；
+`RX_MET_ONNXRUNTIME_ROOT` 不会切换本算子的头文件。rx-met 的 cu118 默认构建链
+未传入此覆盖项，使用 ORT 1.20.1（API 20）执行 ONNX LSTM PTQ 时会注册失败。
+在 cu118 builder 中重建 LSTM wheel 时，设置
+`QUANT_LSTM_ONNXRUNTIME_INCLUDE=/opt/rx-quant-env/onnxruntime/include`，
+使用已准备好的匹配头文件。rx-met 的版本锁文件和各环境变体见
+[共享环境说明](../../../docs/Shared_environment.md)。
 
 ## 3. 安装 CUDA C++ package
 
@@ -235,7 +261,7 @@ cmake --install build-cpu-install
 tools/run_cpu_only_package_check.sh
 ```
 
-该脚本会配置独立构建树、运行 CTest、安装到临时 prefix、构建外部
+该脚本会配置独立构建树、运行 CTest、安装到构建树内的独立 prefix、构建外部
 `find_package()` consumer，并确认 consumer 没有链接 CUDA 动态库。
 
 ## 5. 使用 Docker 构建环境

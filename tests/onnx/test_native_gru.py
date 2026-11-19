@@ -45,6 +45,19 @@ class NativeOnnxGruTest(unittest.TestCase):
         sim.compute_encodings([feed, {name: value * 1.5 for name, value in feed.items()}])
         apply_power_of_2_workflow(sim, verbose=False)
 
+    def test_affine_calibration_exports_and_restores_without_po2(self):
+        model, feed = graph()
+        sim = self.sim(model, feed)
+        apply_onnx_mixed_precision_bitwidth(sim, str(CONFIG / "quick_start_full_quant.json"), verbose=False)
+        sim.compute_encodings([feed, {name: value * 1.5 for name, value in feed.items()}])
+        expected = sim.session.run(None, feed)
+        artifacts = pipeline.export_onnx_json(sim, model, self.path / "affine", "gru")
+        payload = json.loads(artifacts["encodings"].read_text())
+        scales = payload["param_encodings"]["custom_W"]["scale"]
+        self.assertTrue(any(not float(np.log2(scale)).is_integer() for scale in scales))
+        pipeline.verify_onnx_ptq_artifacts(artifacts, feed, expected,
+            config_file=str(CONFIG / "mrnn_quantsim_config_custom_mixed_precision_v2.json"), providers=PROVIDERS)
+
     def test_cpu_provider_requires_cpu_wheel(self):
         model, feed = graph()
         with self.assertRaisesRegex(RuntimeError, "CPU QuantGRU wheel"):

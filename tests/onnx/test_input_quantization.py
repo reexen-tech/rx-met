@@ -51,6 +51,46 @@ class OnnxOperandPrecisionTest(unittest.TestCase):
                         "producer": {"output_bitwidth": 16}, "consumer": {"input_bitwidth": 8}}})
                 self.assertEqual(original, {name: q.bitwidth for name, q in sim.qc_quantize_op_dict.items()})
 
+    def test_shared_matmul_input_returned_as_output_keeps_independent_grids(self):
+        sim, model, feed = self.fixture.model([
+            helper.make_node('MatMul', ['x', 'x'], ['y'], name='matmul'),
+        ], {'x': [2, 2]}, {'x': [2, 2], 'y': [2, 2]})
+        self.fixture.apply_config(sim, {'layer_name_config': {'matmul': {
+            'input_bitwidths': [8, 16], 'output_bitwidth': 16}}})
+        sim.qc_quantize_op_dict['x'].set_bitwidth(16)
+        op = sim.connected_graph.get_all_ops()['matmul']
+        self.assertEqual(input_quantizer(sim, op, 0).bitwidth, 8)
+        self.assertEqual(input_quantizer(sim, op, 1).bitwidth, 16)
+        self.assertTrue(sim.qc_quantize_op_dict['x'].enabled)
+        with compute_encodings(sim):
+            sim.session.run(None, feed)
+        actual = sim.session.run(None, feed)
+        left = input_quantizer(sim, op, 0).quantize_dequantize(feed['x'])
+        right = input_quantizer(sim, op, 1).quantize_dequantize(feed['x'])
+        expected = sim.qc_quantize_op_dict['y'].quantize_dequantize(left @ right)
+        np.testing.assert_array_equal(actual[0], sim.qc_quantize_op_dict['x'].quantize_dequantize(feed['x']))
+        np.testing.assert_array_equal(actual[1], expected)
+        apply_power_of_2_workflow(sim, align_bias_scale=False, verbose=False)
+        actual = sim.session.run(None, feed)
+        artifacts = pipeline.export_onnx_json(sim, model, self.path / 'input-output', 'model')
+        report = pipeline.verify_onnx_ptq_artifacts(artifacts, feed, actual,
+            config_file=str(self.fixture.config), quant_scheme='tf')
+        self.assertTrue(all(item['max_abs'] == 0 for item in report))
+
+    def test_matmul_input_override_preserves_pool_output_grid(self):
+        sim, _, _ = self.fixture.model([
+            helper.make_node('MaxPool', ['x'], ['pooled'], name='pool', kernel_shape=[2, 2]),
+            helper.make_node('MatMul', ['pooled', 'w'], ['y'], name='matmul'),
+        ], {'x': [1, 1, 2, 4]}, {'y': [1, 1, 1, 2]},
+            {'w': np.ones((3, 2), dtype=np.float32)})
+        self.fixture.apply_config(sim, {'layer_name_config': {
+            'pool': {'output_bitwidth': 16},
+            'matmul': {'input_bitwidths': [8, 8]},
+        }})
+        self.assertEqual(sim.qc_quantize_op_dict['pooled'].bitwidth, 16)
+        op = sim.connected_graph.get_all_ops()['matmul']
+        self.assertEqual(input_quantizer(sim, op, 0).bitwidth, 8)
+
     def test_matmul_constant_uses_input_precision_and_per_tensor_grid(self):
         sim, model = self.fixture.sim(bias=False)
         self.fixture.apply_config(sim, {"layer_type_config": {"QuantizedMatMul": {

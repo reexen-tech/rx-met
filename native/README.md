@@ -17,11 +17,11 @@ tag，对应 commit `0e679b705818df7f408971e34693b8098f0971a9`。
 - `LICENSE` 保留上游 AIMET 许可证。
 
 构建结果会安装到 `src/aimet_common/`，包括 `_libpymo`、
-`libquant_info` 和 `libaimet_onnxrt_ops.so`。统一构建入口为：
+`libquant_info` 和 `libaimet_onnxrt_ops.so`。准备好编译依赖后，在仓库根目录执行以下命令构建 CPU 版本：
 
 ```bash
 ./scripts/build_aimet_native.sh
 ```
 
-本目录按 rx-met 的运行职责维护。完整来源、ABI 和验证说明见
+编译依赖、CUDA 构建选项、ABI 和验证说明见
 [`docs/AIMET_ONNX_NATIVE.md`](../docs/AIMET_ONNX_NATIVE.md)。

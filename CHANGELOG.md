@@ -6,6 +6,30 @@
 
 ## [Unreleased]
 
+## [1.1.2] - 2026-11-19
+
+### Changed
+
+- KWS 和 ONNX PTQ 示例移除示例专属环境变量入口，路径和设备覆盖统一使用已有命令行参数；自定义 KWS 输出目录后，通过 ONNX 示例的 `--model` 指定模型。
+- ONNX PTQ 示例默认复用 KWS 已有的最终浮点 ONNX，自行从同一份 Speech Commands 提取 MFCC；移除 MobileNetV2 演示及独立准备脚本，KWS 示例流程不变。
+- GRU/LSTM 示例 JSON 不再展示初始 PO2 模式设置；新建算子默认使用 affine 校准，示例统一通过 `apply_power_of_2_workflow()` 显式开启 PO2。底层配置能力保持兼容。
+- 原生 GRU/LSTM 公共转换接口统一为 `enable_po2()`，GRU 使用 `use_po2_scale`，工作流统计使用 `quant_gru_po2_count` / `quant_lstm_po2_count`；原 POT2 名称保留兼容别名，已有量化参数文件格式不变。
+- 恢复 CUDA QuantGRU 的独立 FP32/INT32 carrier 计算路径，`quant_storage_dtype="float32"` 使用 SGEMM 与显式量化舍入，不再转调整数核心。两种路径统一由 `USE_REAL_ACTIVATION` 选择真实激活或 LUT；真实激活构建跳过全部 LUT 生成与参数初始化。通过 `RX_MET_USE_REAL_ACTIVATION=0/1` 同步构建共享库与 Python 扩展，默认关闭，切换需重新编译。CPU 当前仍使用整数核心。
+
+### Fixed
+
+- ONNX 分步 PTQ 的编译器编码导出与恢复允许 affine（非 Po2）量化网格，保留实际 scale，继续严格校验编码、图映射和恢复输出，无需先执行 Po2 转换。
+- ONNX JSON2 显式激活位宽可启用基础配置关闭的有效输入/输出量化点，模型 I/O 默认规则不再覆盖显式禁用；共享图输入的普通分支使用独立端口网格，最终禁用和排除层状态随原始编码保存并恢复。
+- InstanceNorm 维度别名按实际 ONNX 节点输入 rank 筛选，支持同一配置同时包含 1d/2d/3d，以及导出时插入 Unsqueeze 的无 batch 输入；未知 rank 的冲突仍明确拒绝。
+- ONNX LSTM 兼容已有旧编码中缺少 `n` 和单元素 input/output 列表的表示，在加载前验证已有字段并保留实际网格；损坏请求不改变已有量化参数或锁状态。
+- ONNX 原生 GRU/LSTM 与普通分支共享输入时，普通消费者使用独立端口网格，保留原生输入域及真正的上游输出量化；覆盖纯数据移动、返回原输入及编码重载。
+- ONNX 识别完整 FP32 erf/tanh GELU 展开式中的数学字面量端口，避免常量被额外量化；普通标量和张量参数继续按原规则处理。共享字面量在两个用途需要不同值时，编译器导出明确拒绝，避免全局参数网格覆盖数学端口。
+- ONNX eval Conv→BatchNorm 使用与 Torch 一致的中间边界及 BN 参数豁免，保留原 Conv 参数量化域；不能保留的显式内部配置与未折叠量化组的旧编译器导出明确拒绝，须先在浮点模型中折叠 BN 后重新校准。
+- 修复 ONNX MatMul 输入混合精度与 PyTorch 不一致：名称规则按原始输入端口应用 `input_bitwidths`，包括常量操作数，支持 `[8, 16]`、`[8, 8]` 等配置覆盖全局激活 16 位，同时保留上游输出及其他 MatMul 分支的独立网格；未选中的 Linear 类型规则不再影响右操作数，规范化前的 MatMul 输入配置映射到对应权重，并保持导出与恢复一致。
+- ONNX PTQ 在校准前将安全的静态 FP32 `MatMul + bias Add` 全连接规范为 `Gemm`，高维输入使用前后 `Reshape`，与 PyTorch Linear 保持单次最终输出量化。保存原节点配置映射，修正终端输出位宽与 bias 编码，并分别检查浮点改图误差、导出和重载一致性。
+- QuantGRU 的 FP32/INT32 量化边界统一为先对 `x / scale` 做最近偶数舍入，再加 `zero_point`，修正奇数零点下半格输入的量化码与截断 mask 差异。
+- 修复 QuantGRU 浮点量化码转 INT32 前未饱和，以及 FP32 上界向整数范围外舍入的问题；越界输入在转换前截断并正确记录 STE mask。
+
 ## [1.1.1] - 2026-10-30
 
 ### Added

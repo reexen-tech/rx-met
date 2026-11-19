@@ -32,7 +32,7 @@ sequence_lens、peephole、反向单独运行、自定义激活、clip 和耦合
 第 9.4 节，在反量化后的 q 上求值。CUDA FP32 激活与 CPU 激活在舍入半格附近可能
 相差一个量化级，因此逐位核验使用独立 PyTorch CUDA 激活函数。
 
-覆盖 INT8/INT16、混合位宽、signed/unsigned、三种参数粒度、affine/POT2、两种布局、
+覆盖 INT8/INT16、混合位宽、signed/unsigned、三种参数粒度、affine/PO2、两种布局、
 饱和输入、有无 bias，以及多次前向后反向、非连续 tensor、分段状态和非默认 stream。
 这些数值测试不能代替 Speech Commands 的训练质量门禁。
 
@@ -40,7 +40,7 @@ AIMET/rx-met 接入方法与编码约定见 [循环算子集成接口](../docs/a
 
 ### 已校准参数的 Po2 转换
 
-`enable_pot2()` 同时更新 scale、非对称 zero point 和由整数范围派生的
+`enable_po2()` 同时更新 scale、非对称 zero point 和由整数范围派生的
 `real_min` / `real_max`。校准后转换使用内存中保留的校准下界，并按最近偶数取整、
 限制 zero point 在该位宽的整数范围内；深拷贝保留这些校准信息。
 从文件加载的 encoding 不包含原始校准统计，转换时使用其当前量化网格的下界。

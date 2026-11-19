@@ -4,7 +4,7 @@ RX-MET 量化演示 — kws_streaming att_mh_rnn + QuantGRU / QuantLSTM
 流程用法：
     FP 训练 → prepare_model → QuantizationSimModel + 混合精度位宽
         → compute_encodings 校准 (PTQ)
-        → apply_power_of_2_workflow (NPU 友好的 Po2 量化)
+        → 可选：apply_power_of_2_workflow (按目标后端要求选择 Po2 量化)
         → freeze_quantizer_parameters + QAT 微调
         → state_dict + ONNX + .json 编码文件三件套保存
         → 重建 sim → load_state_dict → load_quantizer_encodings → 精度对比
@@ -26,14 +26,15 @@ RX-MET 量化演示 — kws_streaming att_mh_rnn + QuantGRU / QuantLSTM
 
 运行（先进入 examples/）：
 
-    export RX_MET_SPEECH_COMMANDS_ROOT=/datasets/speech_commands_v0.02
     python quick_start_kws.py --rnn_type gru
     python quick_start_kws.py --rnn_type lstm
 
+数据集路径可用 --data-dir 指定，默认 /datasets/speech_commands_v0.02。
 两种模式共用 config/quick_start_full_quant.json，分别读取 GRU_config / LSTM_config。
 默认输出到运行目录的 output/quick_start_kws/，再分到 gru/ 或 lstm/ 下。
 默认各训练 1 epoch，用于学习流程；
 精度取决于训练轮数和配置，不代表上游论文成绩。完整说明见同目录 README.md。
+Power-of-2 是按目标后端要求选择的可选步骤，本示例执行该步骤以演示转换和精度比较。
 """
 
 from __future__ import annotations
@@ -89,9 +90,7 @@ from quant_lstm import QuantLSTM
 SEED = 42
 DEVICE = torch.device("cuda")
 
-DATA_ROOT = os.environ.get(
-    "RX_MET_SPEECH_COMMANDS_ROOT", "/datasets/speech_commands_v0.02"
-)
+DATA_ROOT = "/datasets/speech_commands_v0.02"
 
 # 12 类：_silence_ / _unknown_ + 10 个 wanted words
 WANTED_WORDS = ("yes", "no", "up", "down", "left", "right", "on", "off", "stop", "go")
@@ -143,11 +142,7 @@ MAX_CALIB_BATCHES = 100
 
 CONFIG_FILE = _HERE / "config" / "mrnn_quantsim_config_custom_mixed_precision_v2.json"
 BITWIDTH_CONFIG_FILE = _HERE / "config" / "quick_start_full_quant.json"
-OUTPUT_DIR = Path(
-    os.environ.get(
-        "RX_MET_KWS_OUTPUT_DIR", str(Path.cwd() / "output" / "quick_start_kws")
-    )
-)
+OUTPUT_DIR = Path.cwd() / "output" / "quick_start_kws"
 
 
 # ============================================================================
@@ -1018,16 +1013,16 @@ def parse_args(argv=None):
     parser.add_argument("--rnn_type", "--rnn-type", choices=("gru", "lstm"), default="gru",
                         help="循环算子类型（默认 gru）；其余量化步骤相同")
     parser.add_argument("--data-dir", type=Path, default=Path(DATA_ROOT),
-                        help="Speech Commands v0.02 目录；默认读取 RX_MET_SPEECH_COMMANDS_ROOT")
+                        help="Speech Commands v0.02 目录（默认 /datasets/speech_commands_v0.02）")
     parser.add_argument("--output-dir", type=Path, default=OUTPUT_DIR,
-                        help="输出根目录；自动追加 gru/ 或 lstm/，默认读取 RX_MET_KWS_OUTPUT_DIR")
+                        help="输出根目录；默认当前目录下的 output/quick_start_kws，自动追加 gru/ 或 lstm/")
     parser.add_argument("--quant-config", type=Path, default=BITWIDTH_CONFIG_FILE,
                         help="完整的量化配置 JSON；编辑其中的 GRU_config 或 LSTM_config")
     parser.add_argument("--device", choices=("cpu", "cuda"), default="cuda")
     parser.add_argument("--ptq-only", action="store_true",
                         help="加载浮点检查点，执行校准、Po2、导出和恢复；不训练")
     parser.add_argument("--fp-checkpoint", type=Path,
-                        default=Path(os.environ["RX_MET_KWS_FP_MODEL"]) if "RX_MET_KWS_FP_MODEL" in os.environ else None)
+                        help="PTQ 输入的浮点检查点；完整训练时指定浮点检查点的保存路径")
     parser.add_argument("--calib-dir", type=Path, help="复用 batch-1 的 input NPY/NPZ 样本")
     parser.add_argument("--validation-dir", type=Path)
     parser.add_argument("--export-feeds-dir", type=Path,
@@ -1039,7 +1034,7 @@ def parse_args(argv=None):
     if args.device == "cpu" and not args.ptq_only:
         parser.error("CPU 仅支持 --ptq-only；浮点训练和 QAT 请使用 CUDA")
     if args.ptq_only and args.fp_checkpoint is None:
-        parser.error("--ptq-only 需要 --fp-checkpoint 或 RX_MET_KWS_FP_MODEL")
+        parser.error("--ptq-only 需要 --fp-checkpoint")
     if args.validation_dir is not None and args.calib_dir is None:
         parser.error("--validation-dir 需要 --calib-dir")
     for name in ("samples_per_class", "calib_limit", "validation_limit"):
@@ -1147,6 +1142,7 @@ def _run_kws_ptq(args, run):
         for feed in tqdm(feeds, desc="PTQ calibration"):
             sim.model(torch.from_numpy(feed["input"]).to(DEVICE))
     stage_outputs["ptq"] = outputs(sim.model)
+    print("Power-of-2 量化（可选）：按目标后端要求选用；本示例执行转换演示。")
     apply_power_of_2_workflow(sim.model, align_bias_scale=True, verbose=True)
     stage_outputs["po2"] = outputs(sim.model)
     checkpoint = run.checkpoints / "att_mh_rnn_kws_ptq.pth"
@@ -1275,7 +1271,8 @@ def _run_kws(args, run):
         ptq_accuracy = evaluate(sim.model, loaders["test"], DEVICE)
         print(f"PTQ 量化精度: {ptq_accuracy * 100:.2f}%")
 
-    with stage("步骤 5: Power-of-2 量化", timings):
+    with stage("步骤 5: Power-of-2 量化（可选）", timings):
+        print("按目标后端要求选用 Power-of-2；本示例执行转换演示。")
         apply_power_of_2_workflow(
             sim.model,
             align_bias_scale=True,

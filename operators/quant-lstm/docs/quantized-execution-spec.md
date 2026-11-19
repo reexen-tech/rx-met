@@ -6,13 +6,16 @@
 
 ## 1. 适用范围
 
-生产路径是 CUDA FP32 载体量化前向：量化值经过 Round/Clamp 并位于整数网格，
+CUDA 量化前向采用 FP32 载体：量化值经过 Round/Clamp 并位于整数网格，
 但用 `float` 保存，Linear 使用 cuBLAS SGEMM。
 
 同时实现两套 CPU reference：
 
 - CPU 标量 FP 载体 reference：作为 CUDA FP 主路径的数值规范。
 - CPU int32 载体 reference：GEMM、rescale 和融合状态更新使用整数算术；首版激活边界反量化后调用原始 sigmoid/tanh，再量化回 int32 网格。
+
+CPU Python wheel 复用 FP 载体 reference，支持 `eval()` 下的校准与 PTQ；
+浮点训练和 QAT 使用 CUDA。CPU Python 运行边界见[第 9.3 节](#93-cpu-reference-与-python-wheel)。
 
 CPU int32 reference 不是端到端纯整数实现。三个 sigmoid 和两个 tanh 的整数 PWL
 LUT 尚未实现；未来实现必须使用独立 `cpu_int32_lut` execution model、Golden 和
@@ -134,7 +137,8 @@ Z = 0
 adjusted_range = [-qmax*S, qmax*S]
 ```
 
-`adjusted_range` 是校准诊断区间，始终从最终 FP32 standard scale 对称重建，即使原始
+上述公式是非 bias 量化点的对称 MinMax 规则；bias 使用第 5.5 节的训练余量规则。
+`adjusted_range` 是该规则的校准诊断区间，从最终 FP32 standard scale 对称重建，即使原始
 观测范围是非零常量；POT2 CoverRange 使用此区间，不直接使用退化的原始 `[v,v]`。
 运行时整数范围为 INT8 `[-128,127]`、INT16 `[-32768,32767]`，允许最小负值；
 导出可表示范围为 `[(qmin-Z)*S,(qmax-Z)*S]`，与校准诊断区间分开。
@@ -186,6 +190,25 @@ S_min = min(2^-23, 0.01/N)
 
 Fallback 固定且不可配置。报告必须逐校准组记录原始/调整范围、`S_min` 和是否触发。
 
+### 5.5 Bias 校准与训练余量
+
+`bias_ih` 和 `bias_hh` 按各自的参数粒度，从原始观测范围计算：
+
+```text
+extent = max(abs(r_min), abs(r_max))
+S_bias = max(2 * extent, 0.01) / qmax
+Z_bias = 0
+```
+
+这为非零 bias 保留约两倍幅值，并为全零 bias 保留至少 `0.01` 的正端实数范围。
+SQNR 和 Percentile 不裁剪 bias 的观测范围；三种校准方法均使用上述规则。
+Affine 将 `S_bias` 转为 FP32 standard scale；POT2 使用
+`2^ceil(log2(S_bias))`，不经过第 6.2 节的近幂次容差分支。Bias 的调整后诊断范围为
+`[qmin*S_bias, qmax*S_bias]`，整数范围仍遵守完整 signed 范围。
+
+该余量只在生成新校准参数时加入。加载原生或公共 encoding、固定参数 QAT 和普通
+量化前向均使用已有网格，不重复扩展 scale，也不把 bias 改为输入与权重的乘积 scale。
+
 ## 6. Standard Scale 与执行编码
 
 ### 6.1 Affine
@@ -194,7 +217,8 @@ Affine 校准得到的连续 FP32 scale 是唯一 standard scale。外部导入�
 
 ### 6.2 POT2
 
-POT2 固定使用 `CoverRange` 和 `tolerance=0.02`，不提供 JSON 策略字段：
+除第 5.5 节的 bias 外，原生 POT2 校准固定使用 `CoverRange` 和 `tolerance=0.02`，
+不提供 JSON 策略字段：
 
 ```text
 real_range = abs(r_max-r_min)
@@ -234,8 +258,8 @@ Setup 阶段统一生成 `NumericSafetyReport`：
 - int32 reference 的 int64/`__int128` 乘加、左移或累加无法证明安全时 fail fast；
   FP 路径独立检查浮点中间结果有限性，不要求整数 reference 的溢出证明成立。
 - FP32 整数运算上界小于 `2^24` 时标记 `exact_integer_range`。
-- 超过 `2^24` 但仍有限时标记 `precision_risk`，必须通过严格指标。
-- `require_exact_accumulation=true` 时，超过 `2^24` 直接失败。
+- 达到或超过 `2^24` 但仍有限时标记 `precision_risk`，必须通过严格指标。
+- `require_exact_accumulation=true` 时，达到或超过 `2^24` 直接失败。
 - 可能产生 Inf/NaN 时无条件失败。
 
 除真实量化边界外，不允许中间隐藏 Clamp、饱和或 wrap。
@@ -336,7 +360,8 @@ Cell 默认复用 Q31，在其不可表示的范围使用尾数和指数。它�
 - 调用方可提供持久 buffer 和非零 generation key，缓存量化 W/R/bias 与 weight sums；master 参数内容变化时必须更换 key，key 为 0 时保持逐调用量化。
 - 缓存命中不得改变量化点、融合公式、checkpoint 或输出；持久缓存字节数与临时 workspace 分别报告。
 - host 签名与 hit 判定属于 setup，不计入 CUDA event 的 quantize/core/dequantize 设备计时范围。
-### 9.3 CPU int32 载体 reference
+
+### 9.3 CPU reference 与 Python wheel
 
 GEMM/普通乘积使用 int64，Cell Q31 合并使用 `__int128`。普通 rescale 执行整数 multiplier+shift/POT2 shift。首版真实激活桥接包含浮点函数，因此只冻结整数算术与融合公式，不代表完整硬件 LUT 语义。
 
@@ -371,7 +396,10 @@ Canonical Golden JSON 按 `primitive/cell/recurrent` 分类，一个文件一个
 
 Golden 使用显式 `dtype/shape/data`、row-major 一维 data。Standard scale 使用最短可往返 FP32 的规范十进制字符串；逻辑整数使用 JSON integer。权威 JSON、schema、生成器、阈值和测试配置入库；生成 fixture、测试数据、日志及精度/性能报告不入库。
 
-基础测试先运行，随后才运行严格测试。严格测试使用入库的 `strict_matrix_v1.json`，采用约束 pairwise 和强制定向 case；覆盖检查器只验证，不生成或改写矩阵。
+基础测试先运行，随后才运行严格测试。CPU 严格测试使用入库的
+`strict_matrix_v1.json`；CUDA 使用保留这些 CPU case 并扩展 CUDA case 的
+`strict_matrix_v2.json`。矩阵采用约束 pairwise 和强制定向 case；覆盖检查器只验证，
+不生成或改写矩阵。
 
 所有正确性测试至少报告 `output/h_n/c_n` 的 MAE、MSE 和余弦相似度。余弦使用
 FP64 L2 norm 和 `epsilon=1e-12`，非退化张量必须 `>=0.999`。门禁为：
@@ -382,7 +410,10 @@ FP64 L2 norm 和 `epsilon=1e-12`，非退化张量必须 `>=0.999`。门禁为�
 | INT8 | `<1e-3` | `<0.05` | `>=0.999` |
 | INT16 | `<1e-4` | `<0.015` | `>=0.999` |
 
-混合位宽只要存在 8-bit 真实量化点就使用 INT8 profile，否则使用 INT16 profile。阈值只能依据固定数据报告人工审核修改，测试不得自动更新。
+上述固定矩阵覆盖 8/16 位及其混合配置；在这一范围内，混合配置只要存在 8-bit
+真实量化点就使用 INT8 profile，否则使用 INT16 profile。其他合法位宽不自动继承
+这些模型精度结论，需要针对目标配置和代表性数据评估。阈值只能依据固定数据报告
+人工审核修改，测试不得自动更新。
 
 ## 11. 性能验收
 

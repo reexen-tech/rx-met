@@ -9,6 +9,8 @@
 | `README.md` | 本目录的维护、授权和审核规则 |
 | `release-bundle/install.sh.in` | 唯一用户安装入口模板，打包时内嵌镜像身份和自检代码 |
 | `release-bundle/README.md.in` | 安装、数据准备、Docker 挂载和示例运行说明模板 |
+| `product/README.md.in` | 产品交付目录说明模板，按现有归档列出可选变体及安装步骤 |
+| `environment/README.md.in` | 公共环境目录说明模板，说明镜像归档、可选辅助文件、校验和加载方式 |
 
 发布包的 `CHANGELOG.md` 从仓库根目录提取当前版本内容。公共 runtime 可由本地镜像、
 平级的公共环境目录 或配置的固定 HTTPS 地址提供。构建流程见

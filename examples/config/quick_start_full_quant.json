@@ -268,8 +268,7 @@
   "GRU_config": {
     "default_config": {
       "disable_quantization": false,
-      "use_pot2_scale": true,
-      "comment": "启用 QuantGRU 量化开关; 使用 POT2 scale 编码开关"
+      "comment": "启用 QuantGRU 量化；首次 PTQ 使用默认 affine scale，PO2 转换由公共 workflow 控制。"
     },
     "operator_config": {
       "input": {
@@ -367,7 +366,6 @@
     "use_quantization": true,
     "quant_config": {
       "schema_version": 1,
-      "scale_mode": "affine",
       "operators": {
         "cell_state": {
           "bitwidth": 16,
@@ -407,7 +405,7 @@
         }
       }
     },
-    "comment": "LSTM 专用配置。首次 PTQ 使用 affine scale，第 5 步统一转换为 Po2；QAT 固定量化参数。"
+    "comment": "LSTM 专用配置。首次 PTQ 使用 affine scale，示例第 5 步演示可选的 Po2 转换；QAT 固定量化参数。"
   },
 
   "default_config": {

@@ -6,6 +6,7 @@ import numpy as np
 import onnx
 from aimet_onnx.rx_ptq import pipeline
 from aimet_onnx.rx_ptq.po2 import apply_power_of_2_workflow
+from aimet_onnx.rx_ptq.input_quantization import input_quantizer
 
 from tests.support import onnx as fixtures
 from tests.support.onnx import make_graph
@@ -31,6 +32,44 @@ class OnnxArtifactsTest(unittest.TestCase):
             with self.subTest(matmul_add=matmul_add, mixed=mixed):
                 artifacts, expected = self.fixture.artifacts(matmul_add=matmul_add, mixed=mixed)
                 report = self.fixture.verify(artifacts, expected)
+                self.assertTrue(all(item['max_abs'] == 0 for item in report))
+
+    def test_matmul_input_precision_survives_export_and_reload(self):
+        fixture = fixtures.OnnxGraphFixture(self)
+        for normalized_linear in (False, True):
+            with self.subTest(normalized_linear=normalized_linear):
+                nodes = [
+                    onnx.helper.make_node('Relu', ['x'], ['before'], name='producer'),
+                    onnx.helper.make_node('MatMul', ['before', 'w'],
+                        ['product' if normalized_linear else 'y'], name='matmul'),
+                ]
+                constants = {'w': np.array([[.02, -.01], [-.03, .02],
+                                           [.01, -.02], [-.01, .03]], dtype=np.float32)}
+                if normalized_linear:
+                    constants['b'] = np.array([.01, -.02], dtype=np.float32)
+                    nodes.append(onnx.helper.make_node('Add', ['product', 'b'], ['y'], name='add'))
+                sim, model, feed = fixture.model(nodes, {'x': [1, 4]}, {'y': [1, 2]}, constants)
+                fixture.apply_config(sim, {
+                    'default_bitwidth': {'weight': 16, 'output': 16},
+                    'layer_name_config': {
+                        'producer': {'output_bitwidth': 16},
+                        'matmul': {'input_bitwidths': [8, 8], 'output_bitwidth': 16},
+                    },
+                })
+                sim.compute_encodings([feed, {'x': feed['x'] * 1.5}])
+                apply_power_of_2_workflow(sim, align_bias_scale=normalized_linear, verbose=False)
+                op = sim.connected_graph.get_all_ops()['matmul']
+                self.assertEqual(input_quantizer(sim, op, 0).bitwidth, 8)
+                expected = sim.session.run(None, feed)
+                artifacts = pipeline.export_onnx_json(sim, model,
+                    fixture.path / f'export-{normalized_linear}', 'model')
+                payload = json.loads(artifacts['encodings'].read_text())
+                activations = payload['activation_encodings']
+                self.assertEqual(activations['producer']['output']['0']['bitwidth'], 16)
+                self.assertEqual(activations['matmul']['input']['0']['bitwidth'], 8)
+                self.assertEqual(payload['param_encodings']['w']['bitwidth'], 8)
+                report = pipeline.verify_onnx_ptq_artifacts(artifacts, feed, expected,
+                    config_file=str(fixture.config), quant_scheme='tf')
                 self.assertTrue(all(item['max_abs'] == 0 for item in report))
 
     def test_pipeline_records_actual_quantized_reload_validation(self):

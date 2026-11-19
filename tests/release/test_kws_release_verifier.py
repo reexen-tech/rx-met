@@ -34,6 +34,10 @@ class KwsReleaseVerifierTest(unittest.TestCase):
                         'zero_point': 0, 'real_min': -1, 'real_max': 1 - 2 ** (1 - bits)}
 
             def example(*args, **kwargs):
+                self.assertEqual(sys.argv, [
+                    '/opt/rx-met/examples/quick_start_kws.py', '--rnn_type', kind,
+                    '--data-dir', '/datasets/speech_commands', '--output-dir', '/output',
+                ])
                 execution = root / kind / 'current'
                 exports = execution / 'exports'
                 exports.mkdir(parents=True)

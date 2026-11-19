@@ -14,15 +14,17 @@ import onnx
 
 from aimet_common.compiler_artifacts import load_compiler_encodings
 from aimet_common.compiler_graph_validation import validate_compiler_encoding_graph
-from aimet_common.evaluation import classification_accuracy, compare_outputs
+from aimet_common.evaluation import classification_accuracy, compare_output_batches, compare_outputs
 from aimet_common.run_context import (
     get_run, logged_export, logged_operation, logged_workflow, metadata_output, note_output,
 )
 from aimet_common.onnx_shapes import save_onnx_with_shapes, validate_onnx_shapes
 from .calibration import inspect_model_input_dtypes, inspect_model_inputs, iter_calibration_feeds
 from .compiler_encodings import CompilerEncodingConverter
+from .conv_bn import apply_conv_bn_boundaries
 from .evaluation import evaluate_onnx_dataset, load_onnx_validation_inputs
-from .mixed_precision import apply_onnx_mixed_precision_bitwidth
+from .mixed_precision import apply_onnx_mixed_precision_bitwidth, validate_linear_quantizer_config
+from .linear import linear_groups, normalize_linear_graph, validate_legacy_linear_boundaries
 from .po2 import apply_power_of_2_workflow, disable_onnx_bias_quantizers
 from .execution import ptq_execution_providers
 from .validation import validate_quantizer_state
@@ -44,10 +46,72 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _check_linear_float_equivalence(reference, actual, *, atol=1e-6, rtol=1e-5):
+    report = compare_output_batches(reference, actual)
+    for batch_index, (expected, values) in enumerate(zip(reference, actual)):
+        for output_index, (left, right) in enumerate(zip(expected, values)):
+            if not np.allclose(right, left, atol=atol, rtol=rtol):
+                raise RuntimeError(
+                    f"Linear normalization changed FP32 output {output_index} in batch {batch_index}: "
+                    f"{report[output_index]} (atol={atol}, rtol={rtol})"
+                )
+    for output_index, item in enumerate(report):
+        item['max_rel'] = max(
+            float(np.max(np.abs(np.asarray(values[output_index], dtype=np.float64)
+                                - np.asarray(expected[output_index], dtype=np.float64))
+                         / np.maximum(np.abs(expected[output_index]), 1e-12)))
+            for expected, values in zip(reference, actual)
+        )
+    return report
+
+
+def _float_session(model, providers):
+    import onnxruntime as ort
+    return ort.InferenceSession(model.SerializeToString(), providers=ptq_execution_providers(providers))
+
+
+def _enforce_linear_boundaries(sim, model):
+    groups = getattr(sim, '_rx_linear_groups', {})
+    initialized = getattr(sim, '_rx_linear_boundary_owners', set())
+    graph_outputs = {value.name for value in model.graph.output}
+    added = False
+    for name, group in groups.items():
+        if group['gemm_output'] == group['output']:
+            continue
+        terminal = sim.qc_quantize_op_dict.get(group['output'])
+        template = sim.qc_quantize_op_dict.get(group['gemm_output'])
+        if terminal is None:
+            sim._insert_quantizer(group['output'], is_param=False)
+            sim.activation_names.append(group['output'])
+            terminal = sim.qc_quantize_op_dict[group['output']]
+            added = True
+        if name not in initialized and template is not None:
+            terminal.set_bitwidth(template.bitwidth)
+            terminal.use_strict_symmetric = False
+            terminal.signed = template.signed
+            terminal.use_symmetric_encodings = template.use_symmetric_encodings
+            terminal.use_strict_symmetric = template.use_strict_symmetric
+            terminal.use_unsigned_symmetric = template.use_unsigned_symmetric
+            terminal.data_type = template.data_type
+            terminal.enabled = template.enabled or group['output'] in graph_outputs
+        initialized.add(name)
+        # Reshapes carry the existing input/output grids; they add no rounding.
+        for tensor in (group['gemm_input'], group['gemm_output']):
+            if tensor not in (group['input'], group['output']):
+                quantizer = sim.qc_quantize_op_dict.get(tensor)
+                if quantizer is not None:
+                    quantizer.enabled = False
+    sim._rx_linear_boundary_owners = initialized
+    return added
+
+
 def force_model_io_quantizers(sim: Any, model: onnx.ModelProto) -> None:
-    """Ensure quantizable floating graph inputs/outputs have enabled quantizers."""
+    """Establish default model I/O grids without overriding explicit exclusions."""
+    model = getattr(sim, '_rx_normalized_model', model)
     input_names = {value_info.name for value_info in model.graph.input}
     output_names = {value_info.name for value_info in model.graph.output}
+    conv_bn_outputs = {group['bn_output']
+                       for group in getattr(sim, '_rx_conv_bn_groups', {}).values()}
     missing = []
     added = False
     for name in sorted(input_names | output_names):
@@ -58,7 +122,11 @@ def force_model_io_quantizers(sim: Any, model: onnx.ModelProto) -> None:
         if (name in getattr(sim, "_rx_native_io", ())
                 or name in getattr(sim, "_rx_input_owned_io", ())):
             continue
+        if name in conv_bn_outputs and getattr(sim, '_rx_conv_bn_initialized', False):
+            continue
         quantizer = sim.qc_quantize_op_dict.get(name)
+        if quantizer is not None and id(quantizer) in getattr(sim, '_rx_explicit_disabled_quantizers', ()):
+            continue
         if quantizer is None:
             if name not in sim.connected_graph.get_all_products():
                 missing.append(name)
@@ -79,7 +147,7 @@ def force_model_io_quantizers(sim: Any, model: onnx.ModelProto) -> None:
         raise RuntimeError(
             "配置没有为模型输入/输出创建 quantizer: " + ", ".join(missing)
         )
-    if added:
+    if _enforce_linear_boundaries(sim, model) or added:
         sim._rebuild_session()
 
 
@@ -124,12 +192,20 @@ def create_onnx_ptq_sim(
     """Create QuantSim, force IO quantizers, then set RX percentile."""
     from .input_quantization import InputQuantizationSim
 
+    normalized_model = normalize_linear_graph(original_model)
+    groups = linear_groups(normalized_model)
+    validate_linear_quantizer_config(normalized_model, config_file)
+    normalization_report = []
+    if groups:
+        reference = _float_session(original_model, providers).run(None, dummy_input)
+        actual = _float_session(normalized_model, providers).run(None, dummy_input)
+        normalization_report = _check_linear_float_equivalence([reference], [actual])
     sim_type = InputQuantizationSim
-    if any(node.op_type in ("GRU", "LSTM") and not node.domain for node in original_model.graph.node):
+    if any(node.op_type in ("GRU", "LSTM") and not node.domain for node in normalized_model.graph.node):
         from .recurrent import NativeRecurrentSim
         sim_type = NativeRecurrentSim
     sim = sim_type(
-        copy.deepcopy(original_model),
+        copy.deepcopy(normalized_model),
         param_type=param_type,
         activation_type=activation_type,
         quant_scheme=quant_scheme,
@@ -138,7 +214,12 @@ def create_onnx_ptq_sim(
         path=None if work_dir is None else str(work_dir),
         dummy_input=dummy_input,
     )
-    force_model_io_quantizers(sim, original_model)
+    sim._rx_normalized_model = normalized_model
+    sim._rx_linear_groups = groups
+    sim._rx_linear_normalization_report = normalization_report
+    force_model_io_quantizers(sim, normalized_model)
+    if apply_conv_bn_boundaries(sim, normalized_model, config_file=config_file):
+        sim._rebuild_session()
     if quant_scheme == "percentile":
         setter = getattr(sim, "set_percentile_value", None)
         if setter is None:
@@ -187,6 +268,8 @@ def export_onnx_json(
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
+    original_model = getattr(sim, '_rx_normalized_model', original_model)
+    validate_legacy_linear_boundaries(original_model)
     payload, coverage = CompilerEncodingConverter(sim, original_model).convert()
     raw_encodings_path = output_dir / f"{filename_prefix}.aimet.encodings"
     sim._export_encodings(str(raw_encodings_path))
@@ -235,7 +318,7 @@ def verify_onnx_ptq_artifacts(
     validate_onnx_shapes(model)
     onnx.checker.check_model(str(artifacts["onnx"]), full_check=True)
     try:
-        saved_payload = load_compiler_encodings(artifacts["encodings"], require_po2=True)
+        saved_payload = load_compiler_encodings(artifacts["encodings"])
         validate_compiler_encoding_graph(model, saved_payload)
     except ValueError as error:
         raise RuntimeError(f"Saved compiler encodings failed strict validation: {error}") from error
@@ -371,13 +454,32 @@ def run_onnx_ptq(
         providers=providers,
         work_dir=get_run().work / "aimet",
     )
+    normalized_model = sim._rx_normalized_model
+    groups = linear_groups(normalized_model)
+    normalized_reference_batches = reference_batches
+    normalization = {'groups': list(groups.values()), 'atol': 1e-6, 'rtol': 1e-5}
+    if groups:
+        normalized_session = _float_session(normalized_model, providers)
+        calibration_reference = reference_batches
+        if evaluation_feeds is not feeds:
+            calibration_reference, _ = evaluate_onnx_dataset(model_path, feeds, providers=providers)
+        normalized_calibration, _ = evaluate_onnx_dataset(normalized_session, feeds, providers=providers)
+        normalization['calibration'] = _check_linear_float_equivalence(
+            calibration_reference, normalized_calibration)
+        if evaluation_feeds is feeds:
+            normalized_reference_batches = normalized_calibration
+        else:
+            normalized_reference_batches, _ = evaluate_onnx_dataset(
+                normalized_session, evaluation_feeds, providers=providers)
+        normalization['evaluation'] = _check_linear_float_equivalence(
+            reference_batches, normalized_reference_batches)
     if bitwidth_config_file is None:
         bitwidth_config_file = str(DEFAULT_BITWIDTH_CONFIG)
     if bitwidth_config_file:
         apply_onnx_mixed_precision_bitwidth(
             sim, bitwidth_config_file, verbose=False
         )
-        force_model_io_quantizers(sim, original_model)
+        force_model_io_quantizers(sim, normalized_model)
     if align_bias_scale:
         disable_onnx_bias_quantizers(sim, preserve_shared_percentile=True)
     sim.compute_encodings(feeds)
@@ -403,8 +505,13 @@ def run_onnx_ptq(
         artifacts["onnx"], evaluation_feeds, reference=reference_batches, providers=providers
     )
     clean_report = clean_evaluation["comparison"]
-    if any(item["max_abs"] > 0 for item in clean_report):
-        raise RuntimeError("Exported clean ONNX differs from the original floating-point model")
+    clean_normalized_report = clean_report
+    if groups:
+        _, clean_normalized_evaluation = evaluate_onnx_dataset(
+            artifacts['onnx'], evaluation_feeds, reference=normalized_reference_batches, providers=providers)
+        clean_normalized_report = clean_normalized_evaluation['comparison']
+    if any(item["max_abs"] > 0 for item in clean_normalized_report):
+        raise RuntimeError("Exported clean ONNX differs from the normalized floating-point model")
     reload_report = verify_onnx_ptq_artifacts(
         artifacts, evaluation_feeds[0], quantized_batches[0], config_file=config_file,
         param_type=param_type, activation_type=activation_type, quant_scheme=quant_scheme,
@@ -443,6 +550,8 @@ def run_onnx_ptq(
             "onnx_shapes": artifacts["onnx_shapes"],
             "sim_vs_fp32": sim_report,
             "clean_onnx_vs_fp32": clean_report,
+            "linear_normalization": normalization,
+            "clean_onnx_vs_normalized_fp32": clean_normalized_report,
             "restored_quantized_vs_pre_export": reload_report,
             "raw_aimet_encodings": str(artifacts["aimet_encodings"]),
             "compiler_encodings": str(artifacts["encodings"]),

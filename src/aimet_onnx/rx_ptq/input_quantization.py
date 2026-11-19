@@ -14,6 +14,8 @@ from aimet_onnx.qc_quantize_op import QcQuantizeOp
 from aimet_onnx.quantsim import QuantizationSimModel
 from aimet_onnx.utils import save_model_with_external_weights
 
+from .linear import linear_groups
+
 
 def input_quantizer(sim, op, index):
     """Resolve the grid actually used at an original ONNX input port."""
@@ -29,6 +31,9 @@ def input_quantizer(sim, op, index):
     if index >= len(names) or not names[index]:
         return None
     name = names[index]
+    group = getattr(sim, '_rx_linear_groups', {}).get(op.name)
+    if group is not None and index == 0:
+        name = group['input']
     quantizer = sim.qc_quantize_op_dict.get(name)
     if quantizer is not None:
         return quantizer
@@ -39,16 +44,18 @@ def input_quantizer(sim, op, index):
 
 
 class InputQuantizationSim(QuantizationSimModel):
-    """Adapt native outputs and variadic inputs without changing the clean graph.
+    """Adapt consumer input grids without changing the clean graph.
 
     Generic QuantSim propagates input grids upstream through data movement.
     Native recurrent outputs already own their quantization, and Concat has a
     separate shared input grid in Torch. These boundaries require port-local
-    QDQ. A graph input feeding Concat is represented by its consumer grids.
+    QDQ. MatMul inputs also need independent grids to preserve producer output
+    precision. Shared graph inputs use consumer grids instead of a common QDQ.
     """
 
     def __init__(self, model, **kwargs):
         self._rx_original_onnx = copy.deepcopy(model)
+        self._rx_linear_groups = linear_groups(model)
         self._rx_input_quantizers = {}
         self._rx_input_owned_io = set()
         super().__init__(model, **kwargs)
@@ -67,10 +74,44 @@ class InputQuantizationSim(QuantizationSimModel):
                 name = producers[name].input[0]
             return name
 
-        local_inputs = {origin(name) for node in original_nodes if node.op_type == "Concat"
-                        for name in node.input if self._is_quantizable_dtype(name)} & graph_inputs
-        if local_inputs & {value.name for value in self._rx_original_onnx.graph.output}:
-            raise NotImplementedError("A Concat input also exposed as a graph output requires an Identity output node")
+        matrix_nodes = {node.name for node in original_nodes
+                        if node.op_type == "MatMul" or node.name in self._rx_linear_groups}
+        consumers = {}
+        for node in original_nodes:
+            if is_grid_preserving_op(node.op_type):
+                continue
+            for index, name in enumerate(node.input):
+                if name and not self._input_roles.is_control_port(node.name, index):
+                    consumers.setdefault(origin(name), set()).add((node.name, index))
+        local_inputs = {origin(name) for node in original_nodes
+                        for name in node.input if self._is_quantizable_dtype(name)
+                        and (node.op_type == "Concat"
+                             or len(consumers.get(origin(name), ())) > 1)} & graph_inputs
+        native_ports = {name for adapter in getattr(self, "_rx_native_recurrent", {}).values()
+                        for name in (adapter.inputs[0], *adapter.inputs[5:]) if name}
+        native_sources = {origin(name) for name in native_ports}
+        native_inputs = native_sources & graph_inputs
+        local_inputs.update(native_inputs)
+        # Only the native input path bypasses shared grids, not other producers.
+        native_carriers = set(native_inputs)
+        for name in native_ports:
+            if origin(name) not in native_inputs:
+                continue
+            while name in producers and is_grid_preserving_op(producers[name].op_type):
+                native_carriers.add(name)
+                name = producers[name].input[0]
+        exposed_inputs = (local_inputs | native_carriers) & {
+            value.name for value in self._rx_original_onnx.graph.output
+        }
+        self._rx_input_owned_io.update(native_carriers - exposed_inputs)
+        # An input returned by the model keeps its output QDQ. Other branches
+        # read the original input before applying their own port grids.
+        raw_inputs = {name + "_updated": name for name in exposed_inputs}
+        for runtime in runtime_nodes.values():
+            if runtime.op_type != "QcQuantizeOp":
+                for index, name in enumerate(runtime.input):
+                    if name in raw_inputs:
+                        runtime.input[index] = raw_inputs[name]
         pending = []
         for node in original_nodes:
             if not is_compute_op(node.op_type) or node.name in getattr(self, "_rx_native_recurrent", {}):
@@ -82,9 +123,16 @@ class InputQuantizationSim(QuantizationSimModel):
                 if not name or name in self.param_names or not self._is_quantizable_dtype(name):
                     continue
                 source = origin(name)
-                if source not in native_outputs | local_inputs and node.op_type != "Concat":
+                own_grid = self.qc_quantize_op_dict.get(name)
+                matrix_input = node.name in matrix_nodes and (source in producers or (
+                    name in producers and own_grid is not None and own_grid.enabled))
+                if (source not in native_outputs | local_inputs | native_sources and node.op_type != "Concat"
+                        and not matrix_input):
                     continue
                 template = self._get_enabled_quantizer(name)
+                if template is None and source in native_sources:
+                    # Native ownership can disable the propagated input grid.
+                    template = self.qc_quantize_op_dict.get(name) or self.qc_quantize_op_dict.get(source)
                 if template is None:
                     continue  # Preserve JSON1 exclusions and disabled input grids.
                 identity = hashlib.sha256(node.name.encode("utf-8")).hexdigest()[:16]
@@ -106,7 +154,7 @@ class InputQuantizationSim(QuantizationSimModel):
                     if node.op_type == "Concat":
                         shared = quantizer
                 self._rx_input_quantizers[node.name, index] = alias
-                if source in local_inputs:
+                if source in local_inputs and source not in exposed_inputs:
                     self._rx_input_owned_io.add(source)
                 self.qc_quantize_op_dict[alias] = quantizer
                 self.activation_names.append(alias)

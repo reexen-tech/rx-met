@@ -1,11 +1,10 @@
 {
   "description": "GRU 量化位宽配置文件",
-  "comment": "位宽: 1-32; is_symmetric: true(zp=0) / false(zp≠0); is_unsigned: true(UINT) / false(INT)",
+  "comment": "位宽: 1-32; is_symmetric: true(zp=0) / false(按范围计算zp，可为0); is_unsigned: true(UINT) / false(INT)",
 
   "GRU_config": {
     "default_config": {
-      "disable_quantization": false,
-      "use_pot2_scale": false
+      "disable_quantization": false
     },
     "operator_config": {
       "input": {

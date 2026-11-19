@@ -4,12 +4,14 @@ from collections import defaultdict
 import copy
 import hashlib
 
+from .math_scalar_constants import identify_math_scalar_constants
+
 
 _TRANSPARENT_OPS = frozenset({"Identity", "Cast", "Reshape", "Transpose", "Squeeze", "Unsqueeze", "Flatten"})
 
 
 class QuantizationInputRoles:
-    """Protect standard Clip bounds, including transparent shared branches.
+    """Protect control values and canonical mathematical literal ports.
 
     Numeric producer inputs keep their ordinary quantization. Transparent views used
     as bounds read the pre-QDQ source, without changing data consumers.
@@ -21,7 +23,9 @@ class QuantizationInputRoles:
         self._bounds = {(node.name, index): name for node in model.graph.node
                         if node.op_type == "Clip" and not node.domain
                         for index, name in enumerate(node.input) if index in (1, 2) and name}
-        self.control_ports = set(self._bounds)
+        self.math_scalar_ports = identify_math_scalar_constants(model)
+        self._raw_ports = {**self._bounds, **self.math_scalar_ports}
+        self.control_ports = set(self._raw_ports)
         self.control_only = set()
         consumers = defaultdict(set)
         for node in model.graph.node:
@@ -29,7 +33,7 @@ class QuantizationInputRoles:
                 if name:
                     consumers[name].add((node.name, index))
         outputs = {item.name for item in model.graph.output}
-        pending = list(self._bounds.values())
+        pending = list(self._raw_ports.values())
         while pending:
             name = pending.pop()
             if name in self.control_only or name in outputs or not consumers[name] <= self.control_ports:
@@ -48,7 +52,7 @@ class QuantizationInputRoles:
         return self._inputs.get(node_name)
 
     def prepare_runtime_model(self, model):
-        if not self._bounds:
+        if not self._raw_ports:
             return
         runtime = {node.name: node for node in model.graph.node}
         occupied = {node.name for node in model.graph.node}
@@ -81,6 +85,6 @@ class QuantizationInputRoles:
             raw_values[name] = output
             return output
 
-        for (node_name, index), source in self._bounds.items():
+        for (node_name, index), source in self._raw_ports.items():
             runtime[node_name].input[index] = raw_value(source)
         model.graph.node.extend(clones)

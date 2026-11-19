@@ -143,15 +143,15 @@ class ForwardPassQuant {
 // ============================================================================
 
 /**
- * @brief 真实激活/浮点算术参考实现（非公共 QAT 目标前向）
+ * @brief FP32 载体的独立量化 GRU 前向实现
  *
  * 与 ForwardPassQuant 的区别：
  *   - 所有量化值使用 float 存储（值仍是定点整数）
  *   - 使用 cuBLAS SGEMM + 单独的 bias/rescale kernel
- *   - 只使用 real_sigmoid/real_tanh，不用 LUT
+ *   - USE_REAL_ACTIVATION 选择真实激活，否则使用分段线性 LUT
  *
  * 适用场景：
- *   - 调试旧浮点算术；公共 quantGRUForwardFP 已复用整数/LUT 核心
+ *   - quant_storage_dtype="float32" 的量化前向和 QAT
  *   - 调试和验证量化精度
  */
 class ForwardPassQuantFP {

@@ -224,7 +224,7 @@ class LSTMAimetIntegration:
         finally:
             self.calibrating = previous
 
-    def enable_pot2(self, method="cover_range", tolerance=0.02):
+    def enable_po2(self, method="cover_range", tolerance=0.02):
         """Convert calibrated grids and let the native loader re-audit all rescalings."""
         if method not in {"round", "cover_range"}:
             raise ValueError("method must be round or cover_range")
@@ -284,6 +284,10 @@ class LSTMAimetIntegration:
         document["model_info"]["use_pot2_scale"] = True
         document["execution_metadata"]["standard_scale_mode"] = "pot2"
         self.load_quant_params(document)
+
+    def enable_pot2(self, method="cover_range", tolerance=0.02):
+        """Compatibility alias for enable_po2()."""
+        return self.enable_po2(method=method, tolerance=tolerance)
 
     @logged_operation
     def export_quant_params_to_aimet_format(

@@ -6,7 +6,7 @@
 
 ## 配置层次
 
-`GRU_config.default_config` 控制量化开关和 scale 模式，
+`GRU_config.default_config` 在本示例中控制量化开关，
 `GRU_config.operator_config` 控制各算子的位宽、对称性和粒度。
 
 以下片段展示配置结构，完整配置以同目录 JSON 为准：
@@ -15,8 +15,7 @@
 {
   "GRU_config": {
     "default_config": {
-      "disable_quantization": false,
-      "use_pot2_scale": false
+      "disable_quantization": false
     },
     "operator_config": {
       "input": {
@@ -42,14 +41,12 @@
 | 字段 | 配置值与行为 |
 | --- | --- |
 | `disable_quantization` | `false` 设置 `use_quantization=True`，`true` 设置 `use_quantization=False` |
-| `use_pot2_scale` | `false` 使用 affine scale，`true` 使用 Power-of-2 scale |
 
-新建 QuantGRU 的 `use_quantization` 和 `use_pot2_scale` 均为 `False`。
+新建 QuantGRU 默认关闭量化，使用 affine scale。
 配置文件省略全局字段时，对应属性沿用实例当前值。
 
-同目录完整 JSON 设置 `disable_quantization=false`、`use_pot2_scale=false`。
-需要 Po2 scale 的配置设置 `use_pot2_scale=true`。Po2 模式采用默认
-`CoverRange` 策略和 2% 容差。
+同目录完整 JSON 设置 `disable_quantization=false`。校准后转换 Po2 的调用方式和
+时机见[模块 README](../../README.md#量化流程)。
 
 ## 算子配置字段
 
@@ -108,9 +105,13 @@
 实数与量化整数的关系为：
 
 ```text
-q = clamp(round(x / scale + zero_point), qmin, qmax)
+q = clamp(round(x / scale) + zero_point, qmin, qmax)
 x_hat = scale * (q - zero_point)
 ```
+
+公共整数前向先对 `x / scale` 舍入，再加零点；`round` 使用 round half to even，
+例如 `1.5 -> 2`、`2.5 -> 2`。逐位对齐时使用执行后端的有效 scale；输入输出网格
+可通过 `get_io_quant_meta()` 查询。
 
 affine 模式保存连续 scale，定点执行时将缩放比编码为乘子和移位。Po2 模式的 scale
 为 `2^-n`，按默认 `CoverRange` 规则生成。
@@ -147,7 +148,9 @@ gru.finalize_calibration()
 `set_all_bitwidth(bitwidth, is_symmetric=True)` 设置统一位宽和激活对称性，权重、
 偏置保持对称。已有标定参数可通过 `adjust_quant_config()` 显式设置
 `bitwidth`、`is_symmetric`、`scale` 和 `zero_point`。修改位宽后，调用方负责
-提供配套 scale 或重新标定，并验证输出变化。
+提供配套 scale 或重新标定，并验证输出变化。权重和偏置的 `scale` 必须传入与当前
+逐通道数组等长的列表，不能传标量广播。该方法不自动重新校准；双向模型的直接 scale
+修改只作用于正向参数，调整整个双向模型时应重新校准两方向。
 
 `get_quant_config()` 返回当前位宽和对称性。标定完成后，结果还包含可用的
 `scale` 和 `zero_point`。权重、偏置 scale 以逐通道数组表示：
@@ -166,9 +169,13 @@ print(config.get("scale"), config.get("zero_point"))
 | --- | --- | --- |
 | `calibration_method` | `"minmax"` | MinMax 范围统计；`"sqnr"` 使用直方图误差搜索；`"percentile"` 使用百分位裁剪 |
 | `percentile_value` | `100.0` | Percentile 校准百分位 |
-| `quant_storage_dtype` | `"float32"` | 量化值以 float32 存储；`"int32"` 进入整数存储路径 |
+| `quant_storage_dtype` | `"float32"` | CUDA 下选择 FP32 量化码、SGEMM 和浮点重缩放；`"int32"` 选择整数矩阵乘与重缩放。CPU 下两者均使用整数核心，仅返回的量化码缓存类型不同 |
 | `calibrating` | `False` | 收集校准数据 |
 | `export_mode` | `False` | ONNX 图导出 |
+
+CUDA 两种 carrier 的量化激活均由构建开关 `USE_REAL_ACTIVATION` 选择 LUT 或真实
+sigmoid/tanh，独立于 `quant_storage_dtype`。构建方式和载体精度限制见
+[模块 README](../../README.md#环境与安装)。
 
 ## 错误与验证
 

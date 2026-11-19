@@ -41,7 +41,7 @@ def assert_rx_encoding(test, record):
 
 
 class ConfigurationTest(unittest.TestCase):
-    def test_stage_config_and_pot2_before_calibration(self):
+    def test_stage_config_and_po2_before_calibration(self):
         module = QuantLSTM(4, 2)
         config = {'LSTM_config': {'use_quantization': True,
                   'quant_config': {'schema_version': 1, 'operators': {
@@ -52,8 +52,10 @@ class ConfigurationTest(unittest.TestCase):
             module.load_bitwidth_config(path)
         self.assertTrue(module.use_quantization)
         self.assertEqual(module.get_quant_config('weight_ih')['bitwidth'], 16)
-        module.enable_pot2()
+        self.assertEqual(module.get_quant_config()['scale_mode'], 'affine')
+        module.enable_po2()
         self.assertEqual(module.get_quant_config()['scale_mode'], 'pot2')
+        self.assertEqual(module.get_quant_config('weight_ih')['bitwidth'], 16)
         with self.assertRaises(ValueError):
             module.load_bitwidth_config({'LSTM_config': {'use_quantization': 'true'}})
 
@@ -89,6 +91,31 @@ class NativeAimetInterfaceTest(unittest.TestCase):
     def setUp(self):
         torch.manual_seed(29)
         self.x = torch.randn(2, 5, 4, device='cuda')
+
+    def test_po2_and_legacy_pot2_convert_identical_calibrated_grids(self):
+        for bidirectional in (False, True):
+            module = QuantLSTM(4, 2, batch_first=True,
+                              bidirectional=bidirectional).cuda()
+            with module.calibration_context():
+                module(self.x)
+            for method, tolerance in (('round', 0), ('cover_range', 0.02)):
+                with self.subTest(bidirectional=bidirectional, method=method):
+                    current, legacy = copy.deepcopy(module), copy.deepcopy(module)
+                    current.enable_po2(method=method, tolerance=tolerance)
+                    legacy.enable_pot2(method=method, tolerance=tolerance)
+                    document = current.export_quant_params()
+                    self.assertEqual(document, legacy.export_quant_params())
+                    self.assertTrue(document['model_info']['use_pot2_scale'])
+                    self.assertEqual(document['execution_metadata']['standard_scale_mode'], 'pot2')
+                    for field in ('operators', 'operators_reverse'):
+                        for encoding in document.get(field, {}).values():
+                            scales = encoding['scale']
+                            scales = scales if isinstance(scales, list) else [scales]
+                            self.assertTrue(all(math.frexp(scale)[0] == 0.5 for scale in scales))
+                    current.enable_po2(method=method, tolerance=tolerance)
+                    legacy.enable_pot2(method=method, tolerance=tolerance)
+                    self.assertEqual(current.export_quant_params(), document)
+                    self.assertEqual(legacy.export_quant_params(), document)
 
     def test_export_roundtrip_gate_order_and_direction(self):
         module = QuantLSTM(4, 2, batch_first=True, bidirectional=True,

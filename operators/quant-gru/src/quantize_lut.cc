@@ -5,6 +5,15 @@
 #include <limits>
 #include <vector>
 
+bool quant_gru_uses_real_activation() {
+#ifdef USE_REAL_ACTIVATION
+    return true;
+#else
+    return false;
+#endif
+}
+
+#ifndef USE_REAL_ACTIVATION
 void generate_piecewise_linear_lut_to_params(GRUQuantParams &params) {
     const auto &config = params.bitwidth_config_;
     // 直接使用单一权威 scale（仿射=连续校准值，POT2=2^-shift），无需 fixed/shift 往返
@@ -358,3 +367,4 @@ SigmoidLUT generate_tanh_lut(int8_t shift_bits_x, int32_t zp_x, int8_t shift_bit
                              int32_t zp_y, QuantBitWidth input_bw, QuantBitWidth output_bw) {
     return generate_tanh_lut(exp2_scale(shift_bits_x), zp_x, exp2_scale(shift_bits_y), zp_y, input_bw, output_bw);
 }
+#endif  // USE_REAL_ACTIVATION

@@ -34,12 +34,10 @@
 //   - 优点：快速，纯整数运算
 //   - 缺点：QAT 时前向（LUT）与反向（真实导数）不一致
 //
-// 使用方法：
-//   - QAT 训练时：在 CMakeLists.txt 或编译命令中添加 -DUSE_REAL_ACTIVATION
-//   - 推理部署时：不定义此宏，使用 LUT
+// 使用方法：通过 RX_MET_USE_REAL_ACTIVATION=1 构建共享库和 Python 扩展。
+// 此宏必须在包含参数类型之前由编译选项定义，训练和推理使用相同配置。
 //
 // ============================================================================
-// #define USE_REAL_ACTIVATION  // 取消注释以启用真实激活函数
 
 #include "cuda_compat.h"
 #include "inline_ops.h"
@@ -55,6 +53,7 @@
 #include <stdexcept>
 #include <string>
 #include <tuple>
+#include <type_traits>
 #include <vector>
 
 // CUDA 编译时使用内置 min/max（有 __device__ 修饰）
@@ -78,7 +77,10 @@ using std::max;
  *
  * @param params GRU 量化参数，会被修改以存储生成的 LUT
  */
+#ifndef USE_REAL_ACTIVATION
 void generate_piecewise_linear_lut_to_params(GRUQuantParams &params);
+#endif
+bool quant_gru_uses_real_activation();
 
 // ============================================================================
 // CPU/GPU 共用基础运算函数
@@ -125,6 +127,19 @@ __host__ __device__ __forceinline__ float round_f(float x) {
 __host__ __device__ __forceinline__ double round_d(double x) {
     return rint(x);
 }
+
+namespace quant_gru_detail {
+
+// Keep zero-point translation outside rounding, including exact half-grid inputs.
+template <typename CodeT>
+__host__ __device__ __forceinline__ CodeT round_and_add_zero_point(
+    float value, float scale, CodeT zero_point) {
+    static_assert(std::is_floating_point<CodeT>::value,
+                  "Quantized codes must remain floating point until saturation");
+    return static_cast<CodeT>(round_f(value / scale)) + zero_point;
+}
+
+}  // namespace quant_gru_detail
 
 /**
  * @brief 浮点数舍入到 int32_t（银行家舍入）
@@ -243,7 +258,7 @@ __host__ __device__ __forceinline__ float applyRescale(float x, FloatRescale r) 
 /**
  * @brief 按任意位宽饱和截断
  *
- * 适用于位宽在运行时确定的场景，支持 1-31 位任意位宽。
+ * 适用于位宽在运行时确定的场景，范围由 QuantBitWidth 决定。
  *
  * @param val 输入值
  * @param bw 目标位宽配置
@@ -260,6 +275,20 @@ int32_t clamp_by_bitwidth(int32_t val, QuantBitWidth bw, uint8_t* keep_gradient 
         *keep_gradient = (val < lo || val > hi) ? 0 : 1;
     }
     return max(lo, min(val, hi));
+}
+
+template <bool Training = false, typename CodeT,
+          std::enable_if_t<std::is_floating_point<CodeT>::value, int> = 0>
+__host__ __device__ __forceinline__ int32_t clamp_by_bitwidth(
+    CodeT value, QuantBitWidth bw, uint8_t* keep_gradient = nullptr) {
+    const double code = static_cast<double>(value);
+    const int32_t lo = bw.qmin();
+    const int32_t hi = bw.qmax();
+    if constexpr (Training) {
+        *keep_gradient = (code < lo || code > hi) ? 0 : 1;
+    }
+    // Saturate before converting: an out-of-range floating-to-integer cast is undefined.
+    return code < lo ? lo : (code > hi ? hi : static_cast<int32_t>(code));
 }
 
 // ============================================================================
@@ -305,6 +334,13 @@ __host__ __device__ __forceinline__
 float clamp_f(float val, QuantBitWidth bw, uint8_t* keep_gradient = nullptr) {
     float lo = static_cast<float>(bw.qmin());
     float hi = static_cast<float>(bw.qmax());
+    // Rounded FP32 endpoints must stay inside the integer quantization domain.
+    if (static_cast<double>(lo) < static_cast<double>(bw.qmin())) {
+        lo = nextafterf(lo, INFINITY);
+    }
+    if (static_cast<double>(hi) > static_cast<double>(bw.qmax())) {
+        hi = nextafterf(hi, -INFINITY);
+    }
     if constexpr (Training) {
         // 计算梯度保持标志：被 clamp 时 keep_gradient=0（Backward 时梯度置零），未被 clamp 时 keep_gradient=1（Backward 时梯度保持）
         // 这样 Backward 时可直接使用 static_cast<T>(keep_gradient)，无需减法操作
@@ -317,10 +353,38 @@ float clamp_f(float val, QuantBitWidth bw, uint8_t* keep_gradient = nullptr) {
 #endif
 }
 
+// Effective scales use float (for example, 1.0f); integer arguments retain shift semantics.
+template <bool Training = false, typename ScaleT,
+          std::enable_if_t<std::is_same<ScaleT, float>::value, int> = 0>
+__host__ __device__ __forceinline__ int32_t quantize(
+    float value, ScaleT scale, int32_t zero_point, QuantBitWidth bw,
+    uint8_t* keep_gradient = nullptr) {
+    const double code = quant_gru_detail::round_and_add_zero_point(
+        value, scale, static_cast<double>(zero_point));
+    return clamp_by_bitwidth<Training>(code, bw, keep_gradient);
+}
+
+template <bool Training = false, typename ScaleT, typename ZeroPointT,
+          std::enable_if_t<std::is_same<ScaleT, float>::value, int> = 0>
+__host__ __device__ __forceinline__ float quantize_f(
+    float value, ScaleT scale, ZeroPointT zero_point, QuantBitWidth bw,
+    uint8_t* keep_gradient = nullptr) {
+    const float code = quant_gru_detail::round_and_add_zero_point(
+        value, scale, static_cast<float>(zero_point));
+    return clamp_f<Training>(code, bw, keep_gradient);
+}
+
+template <bool Training = false, typename ScaleT,
+          std::enable_if_t<std::is_same<ScaleT, float>::value, int> = 0>
+__host__ __device__ __forceinline__ float quantize_f(
+    float value, ScaleT scale, QuantBitWidth bw, uint8_t* keep_gradient = nullptr) {
+    return quantize_f<Training>(value, scale, 0.0f, bw, keep_gradient);
+}
+
 /**
  * @brief 浮点版量化（输出 float 存储的定点值）
  * 
- * q = clamp(round(src / scale + zp), qmin, qmax)
+ * q = clamp(round(src / scale) + zp, qmin, qmax)
  * 
  * @tparam Training 是否训练模式（决定是否使用 mask）
  * @param src 浮点输入
@@ -333,9 +397,7 @@ float clamp_f(float val, QuantBitWidth bw, uint8_t* keep_gradient = nullptr) {
 template <bool Training = false>
 __host__ __device__ __forceinline__ float quantize_f(float src, int8_t exp2_inv, int32_t zp,
                                                       QuantBitWidth bw, uint8_t* keep_gradient = nullptr) {
-    float scale = exp2_scale(exp2_inv);
-    float q = round_f(src / scale + static_cast<float>(zp));
-    return clamp_f<Training>(q, bw, keep_gradient);
+    return quantize_f<Training>(src, exp2_scale(exp2_inv), zp, bw, keep_gradient);
 }
 
 /**
@@ -346,9 +408,7 @@ __host__ __device__ __forceinline__ float quantize_f(float src, int8_t exp2_inv,
 template <bool Training = false>
 __host__ __device__ __forceinline__ float quantize_f(float src, int8_t exp2_inv, QuantBitWidth bw,
                                                       uint8_t* keep_gradient = nullptr) {
-    float scale = exp2_scale(exp2_inv);
-    float q = round_f(src / scale);
-    return clamp_f<Training>(q, bw, keep_gradient);
+    return quantize_f<Training>(src, exp2_scale(exp2_inv), 0.0f, bw, keep_gradient);
 }
 
 
@@ -365,7 +425,7 @@ __host__ __device__ __forceinline__ float dequantize_f(float q, int8_t exp2_inv,
 /**
  * @brief 单值量化（任意位宽版本，CPU/GPU 共用）
  *
- * q = clamp(round(src / scale + zp), qmin, qmax)
+ * q = clamp(round(src / scale) + zp, qmin, qmax)
  *
  * @tparam Training 是否训练模式（决定是否使用 mask）
  * @param src 浮点输入
@@ -379,8 +439,7 @@ __host__ __device__ __forceinline__ float dequantize_f(float q, int8_t exp2_inv,
 template <bool Training = false>
 __host__ __device__ __forceinline__ int32_t quantize(float src, int8_t exp2_inv, int32_t zp,
                                                       QuantBitWidth bw, uint8_t* keep_gradient = nullptr) {
-    float q = round_f(src / exp2_scale(exp2_inv)) + static_cast<float>(zp);
-    return clamp_by_bitwidth<Training>(static_cast<int32_t>(q), bw, keep_gradient);
+    return quantize<Training>(src, exp2_scale(exp2_inv), zp, bw, keep_gradient);
 }
 
 // ============================================================================
@@ -401,22 +460,19 @@ __host__ __device__ __forceinline__ float dequantize_f(float q, FixedPointScale 
 template <bool Training = false>
 __host__ __device__ __forceinline__ float quantize_f(float src, FixedPointScale fs, int32_t zp,
                                                       QuantBitWidth bw, uint8_t* keep_gradient = nullptr) {
-    float q = round_f(src / decode_scale(fs) + static_cast<float>(zp));
-    return clamp_f<Training>(q, bw, keep_gradient);
+    return quantize_f<Training>(src, decode_scale(fs), zp, bw, keep_gradient);
 }
 
 template <bool Training = false>
 __host__ __device__ __forceinline__ float quantize_f(float src, FixedPointScale fs, QuantBitWidth bw,
                                                       uint8_t* keep_gradient = nullptr) {
-    float q = round_f(src / decode_scale(fs));
-    return clamp_f<Training>(q, bw, keep_gradient);
+    return quantize_f<Training>(src, decode_scale(fs), 0.0f, bw, keep_gradient);
 }
 
 template <bool Training = false>
 __host__ __device__ __forceinline__ int32_t quantize(float src, FixedPointScale fs, int32_t zp,
                                                       QuantBitWidth bw, uint8_t* keep_gradient = nullptr) {
-    float q = round_f(src / decode_scale(fs)) + static_cast<float>(zp);
-    return clamp_by_bitwidth<Training>(static_cast<int32_t>(q), bw, keep_gradient);
+    return quantize<Training>(src, decode_scale(fs), zp, bw, keep_gradient);
 }
 
 
@@ -502,37 +558,30 @@ __host__ __device__ __forceinline__ int32_t piecewise_linear(int32_t q_x, const 
 // 激活函数 sigmoid<T>/tanh<T> 定义在 inline_ops.h 中
 
 /**
- * @brief 真实 Sigmoid 函数（反量化 → sigmoid → 量化）
+ * @brief 真实 Sigmoid：使用实际 scale 反量化，再计算激活并量化。
  *
- * 计算流程：
- *   1. 反量化：x_float = dequantize(q_x, shift_x, zp_x)
- *   2. Sigmoid：y_float = sigmoid<float>(x_float)
- *   3. 量化：  q_y = quantize(y_float, shift_y, zp_y, out_bw)
- * 
- * @tparam Training 是否训练模式（决定是否使用 mask）
- * @param keep_gradient 训练模式时保存梯度保持标志，推理模式时可为 nullptr
- *                      0=被clamp（Backward 时梯度置零），1=未被clamp（Backward 时梯度保持）
+ * @tparam Training 是否记录输出截断 mask
  */
 template <bool Training = false>
 __host__ __device__ __forceinline__ int32_t real_sigmoid(int32_t q_x,
-                                                          int8_t shift_x, int32_t zp_x,
-                                                          int8_t shift_y, int32_t zp_y,
+                                                          float scale_x, int32_t zp_x,
+                                                          float scale_y, int32_t zp_y,
                                                           QuantBitWidth pre_bw,
                                                           QuantBitWidth out_bw,
                                                           uint8_t* keep_gradient = nullptr) {
     int32_t q_x_clamped = clamp_by_bitwidth<false>(q_x, pre_bw);
-    float x_float = dequantize(q_x_clamped, shift_x, zp_x);
+    float x_float = static_cast<float>(static_cast<int64_t>(q_x_clamped) - zp_x) * scale_x;
     float y_float = sigmoid<float>(x_float);
-    return quantize<Training>(y_float, shift_y, zp_y, out_bw, keep_gradient);
+    return quantize<Training>(y_float, scale_y, zp_y, out_bw, keep_gradient);
 }
 
 /**
  * @brief 真实 Tanh 函数（反量化 → tanh → 量化）
  *
  * 计算流程：
- *   1. 反量化：x_float = dequantize(q_x, shift_x, zp_x)
+ *   1. 反量化：x_float = (q_x - zp_x) * scale_x
  *   2. Tanh：  y_float = tanh<float>(x_float)
- *   3. 量化：  q_y = quantize(y_float, shift_y, zp_y, out_bw)
+ *   3. 量化：  q_y = clamp(round(y_float / scale_y) + zp_y, out_bw)
  * 
  * @tparam Training 是否训练模式（决定是否使用 mask）
  * @param keep_gradient 训练模式时保存梯度保持标志，推理模式时可为 nullptr
@@ -540,15 +589,15 @@ __host__ __device__ __forceinline__ int32_t real_sigmoid(int32_t q_x,
  */
 template <bool Training = false>
 __host__ __device__ __forceinline__ int32_t real_tanh(int32_t q_x,
-                                                       int8_t shift_x, int32_t zp_x,
-                                                       int8_t shift_y, int32_t zp_y,
+                                                       float scale_x, int32_t zp_x,
+                                                       float scale_y, int32_t zp_y,
                                                        QuantBitWidth pre_bw,
                                                        QuantBitWidth out_bw,
                                                        uint8_t* keep_gradient = nullptr) {
     int32_t q_x_clamped = clamp_by_bitwidth<false>(q_x, pre_bw);
-    float x_float = dequantize(q_x_clamped, shift_x, zp_x);
+    float x_float = static_cast<float>(static_cast<int64_t>(q_x_clamped) - zp_x) * scale_x;
     float y_float = tanh<float>(x_float);
-    return quantize<Training>(y_float, shift_y, zp_y, out_bw, keep_gradient);
+    return quantize<Training>(y_float, scale_y, zp_y, out_bw, keep_gradient);
 }
 
 
@@ -578,8 +627,7 @@ float real_sigmoid_f(float q_x, float scale_x, float zp_x,
                      uint8_t* keep_gradient = nullptr) {
     float x_fp = (q_x - zp_x) * scale_x;
     float y_fp = sigmoid<float>(x_fp);
-    float q_y = round_f(y_fp / scale_y + zp_y);
-    return clamp_f<Training>(q_y, out_bw, keep_gradient);
+    return quantize_f<Training>(y_fp, scale_y, zp_y, out_bw, keep_gradient);
 }
 
 /**
@@ -602,8 +650,7 @@ float real_tanh_f(float q_x, float scale_x, float zp_x,
                   uint8_t* keep_gradient = nullptr) {
     float x_fp = (q_x - zp_x) * scale_x;
     float y_fp = tanh<float>(x_fp);
-    float q_y = round_f(y_fp / scale_y + zp_y);
-    return clamp_f<Training>(q_y, out_bw, keep_gradient);
+    return quantize_f<Training>(y_fp, scale_y, zp_y, out_bw, keep_gradient);
 }
 
 // ============================================================================
@@ -650,7 +697,9 @@ int32_t computeUpdateGate(int32_t weight_ih_linear, int32_t weight_hh_linear, co
     const int32_t update_gate_input = ih_shifted + hh_shifted + params.zp_update_gate_input_;
 
     const auto &bw_cfg = params.bitwidth_config_;
+#ifndef USE_REAL_ACTIVATION
     const auto &lut = params.sigmoid_update_gate_lut_;
+#endif
     
     // 使用 if constexpr 避免运行时分支
     if constexpr (Training) {
@@ -658,11 +707,10 @@ int32_t computeUpdateGate(int32_t weight_ih_linear, int32_t weight_hh_linear, co
         const int32_t clamped_input = clamp_by_bitwidth<true>(update_gate_input, bw_cfg.update_gate_input_, input_keep_gradient);
         
 #ifdef USE_REAL_ACTIVATION
-        // 使用截断后的输入计算激活函数
-        float x_float = dequantize(clamped_input, lut.shift_bits_x, lut.zp_x);
-        float y_float = sigmoid<float>(x_float);
-        const int32_t update_gate = quantize<true>(y_float, lut.shift_bits_y, lut.zp_y, 
-                                                    bw_cfg.update_gate_output_, output_keep_gradient);
+        const int32_t update_gate = real_sigmoid<true>(clamped_input,
+            params.scale_update_gate_input_, params.zp_update_gate_input_,
+            params.scale_update_gate_output_, params.zp_update_gate_output_,
+            bw_cfg.update_gate_input_, bw_cfg.update_gate_output_, output_keep_gradient);
 #else
         // 非 real activation 时，使用分段线性
         int32_t result = piecewise_linear_raw(clamped_input, lut);
@@ -672,8 +720,8 @@ int32_t computeUpdateGate(int32_t weight_ih_linear, int32_t weight_hh_linear, co
     } else {
 #ifdef USE_REAL_ACTIVATION
         const int32_t update_gate = real_sigmoid(update_gate_input, 
-                                                  lut.shift_bits_x, lut.zp_x,
-                                                  lut.shift_bits_y, lut.zp_y,
+                                                  params.scale_update_gate_input_, params.zp_update_gate_input_,
+                                                  params.scale_update_gate_output_, params.zp_update_gate_output_,
                                                   bw_cfg.update_gate_input_, bw_cfg.update_gate_output_);
 #else
         const int32_t update_gate = piecewise_linear(update_gate_input, lut, bw_cfg.update_gate_input_, bw_cfg.update_gate_output_);
@@ -732,7 +780,9 @@ int32_t computeResetGate(int32_t weight_ih_linear, int32_t weight_hh_linear, con
     const int32_t reset_gate_input = ih_shifted + hh_shifted + params.zp_reset_gate_input_;
 
     const auto &bw_cfg = params.bitwidth_config_;
+#ifndef USE_REAL_ACTIVATION
     const auto &lut = params.sigmoid_reset_gate_lut_;
+#endif
     
     // 使用 if constexpr 避免运行时分支
     if constexpr (Training) {
@@ -740,10 +790,10 @@ int32_t computeResetGate(int32_t weight_ih_linear, int32_t weight_hh_linear, con
         const int32_t clamped_input = clamp_by_bitwidth<true>(reset_gate_input, bw_cfg.reset_gate_input_, input_keep_gradient);
         
 #ifdef USE_REAL_ACTIVATION
-        float x_float = dequantize(clamped_input, lut.shift_bits_x, lut.zp_x);
-        float y_float = sigmoid<float>(x_float);
-        const int32_t reset_gate = quantize<true>(y_float, lut.shift_bits_y, lut.zp_y,
-                                                   bw_cfg.reset_gate_output_, output_keep_gradient);
+        const int32_t reset_gate = real_sigmoid<true>(clamped_input,
+            params.scale_reset_gate_input_, params.zp_reset_gate_input_,
+            params.scale_reset_gate_output_, params.zp_reset_gate_output_,
+            bw_cfg.reset_gate_input_, bw_cfg.reset_gate_output_, output_keep_gradient);
 #else
         int32_t result = piecewise_linear_raw(clamped_input, lut);
         const int32_t reset_gate = clamp_by_bitwidth<true>(result, bw_cfg.reset_gate_output_, output_keep_gradient);
@@ -752,8 +802,8 @@ int32_t computeResetGate(int32_t weight_ih_linear, int32_t weight_hh_linear, con
     } else {
 #ifdef USE_REAL_ACTIVATION
         const int32_t reset_gate = real_sigmoid(reset_gate_input,
-                                                 lut.shift_bits_x, lut.zp_x,
-                                                 lut.shift_bits_y, lut.zp_y,
+                                                 params.scale_reset_gate_input_, params.zp_reset_gate_input_,
+                                                 params.scale_reset_gate_output_, params.zp_reset_gate_output_,
                                                  bw_cfg.reset_gate_input_, bw_cfg.reset_gate_output_);
 #else
         const int32_t reset_gate = piecewise_linear(reset_gate_input, lut, bw_cfg.reset_gate_input_, bw_cfg.reset_gate_output_);
@@ -826,7 +876,9 @@ int32_t computeNewGate(int32_t weight_ih_linear, int32_t weight_hh_linear, int32
     const int32_t new_gate_input = ih_shifted + rh_shifted + params.zp_new_gate_input_;
 
     const auto &bw_cfg = params.bitwidth_config_;
+#ifndef USE_REAL_ACTIVATION
     const auto &lut = params.tanh_new_gate_lut_;
+#endif
     
     // 使用 if constexpr 避免运行时分支
     if constexpr (Training) {
@@ -834,10 +886,10 @@ int32_t computeNewGate(int32_t weight_ih_linear, int32_t weight_hh_linear, int32
         const int32_t clamped_input = clamp_by_bitwidth<true>(new_gate_input, bw_cfg.new_gate_input_, input_keep_gradient);
         
 #ifdef USE_REAL_ACTIVATION
-        float x_float = dequantize(clamped_input, lut.shift_bits_x, lut.zp_x);
-        float y_float = tanh<float>(x_float);
-        const int32_t new_gate = quantize<true>(y_float, lut.shift_bits_y, lut.zp_y,
-                                                 bw_cfg.new_gate_output_, output_keep_gradient);
+        const int32_t new_gate = real_tanh<true>(clamped_input,
+            params.scale_new_gate_input_, params.zp_new_gate_input_,
+            params.scale_new_gate_output_, params.zp_new_gate_output_,
+            bw_cfg.new_gate_input_, bw_cfg.new_gate_output_, output_keep_gradient);
 #else
         int32_t result = piecewise_linear_raw(clamped_input, lut);
         const int32_t new_gate = clamp_by_bitwidth<true>(result, bw_cfg.new_gate_output_, output_keep_gradient);
@@ -846,8 +898,8 @@ int32_t computeNewGate(int32_t weight_ih_linear, int32_t weight_hh_linear, int32
     } else {
 #ifdef USE_REAL_ACTIVATION
         const int32_t new_gate = real_tanh(new_gate_input,
-                                            lut.shift_bits_x, lut.zp_x,
-                                            lut.shift_bits_y, lut.zp_y,
+                                            params.scale_new_gate_input_, params.zp_new_gate_input_,
+                                            params.scale_new_gate_output_, params.zp_new_gate_output_,
                                             bw_cfg.new_gate_input_, bw_cfg.new_gate_output_);
 #else
         const int32_t new_gate = piecewise_linear(new_gate_input, lut, bw_cfg.new_gate_input_, bw_cfg.new_gate_output_);

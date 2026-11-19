@@ -1,4 +1,4 @@
-"""Check CPU/GPU bundle verification commands without a Docker daemon."""
+"""Check release verification commands without a Docker daemon."""
 
 import json
 import os
@@ -64,8 +64,8 @@ else:
         }
         (path / "manifest.json").write_text(json.dumps(manifest))
 
-    def verify(self, *arguments):
-        result = subprocess.run([str(ROOT / "scripts/release/verify_bundle.sh"), *arguments],
+    def verify(self, *arguments, script="verify_bundle.sh"):
+        result = subprocess.run([str(ROOT / "scripts/release" / script), *arguments],
                                 env=self.env, input="", text=True, capture_output=True)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         return [json.loads(line) for line in self.log.read_text().splitlines()]
@@ -91,6 +91,31 @@ else:
             self.assertEqual(command[command.index("--gpus") + 1], "device=2")
             self.assertIn("VERIFY_GPU=1", command)
             self.assertIn("EXPECTED_CUDA=12.6", command)
+
+    def test_onnx_example_passes_inputs_and_output_through_cli(self):
+        self.installed("cu126")
+        model = self.root / "models" / "sample model.onnx"
+        model.parent.mkdir()
+        model.write_bytes(b"model")
+        calibration = self.root / "calibration samples"
+        calibration.mkdir()
+        (calibration / "sample.npy").write_bytes(b"sample")
+        output = self.root / "onnx output"
+        commands = self.verify(
+            "--model", str(model), "--dataset-dir", str(calibration),
+            "--output-dir", str(output), "--gpu-device", "2", "cu126",
+            script="verify_onnx_ptq_example.sh",
+        )
+        run, = [command for command in commands if command[0] == "run"]
+        self.assertEqual(run[run.index("python3") + 1:], [
+            "/opt/rx-met/examples/quick_start_onnx_ptq.py",
+            "--model", "/model/sample model.onnx", "--calib-dir", "/datasets/calib",
+            "--output-dir", "/output", "--device", "cuda",
+        ])
+        self.assertIn("--read-only", run)
+        self.assertIn(str(calibration) + ":/datasets/calib:ro", run)
+        self.assertIn(str(output / "cu126") + ":/output", run)
+        self.assertEqual(run[run.index("--gpus") + 1], "device=2")
 
 
 if __name__ == "__main__":

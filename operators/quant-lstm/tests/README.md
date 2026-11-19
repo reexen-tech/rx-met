@@ -17,8 +17,14 @@
 
 ## 按改动范围验证
 
-以下命令从仓库根目录执行。开发环境与 Docker 用法见
+以下命令从算子根目录执行（rx-met 中为 `operators/quant-lstm/`）。开发环境与 Docker 用法见
 [安装指南](../docs/installation.md)。提交前至少运行与改动范围对应的验证：
+
+CPU CTest 的 Python 契约检查需要 `jsonschema` 和 `referencing`；CUDA 端到端脚本
+另需 CUDA-enabled PyTorch、`onnx` 和 `onnxruntime`，并在启动时检查这些依赖及
+GPU 可用性。格式检查需要 `clang-format`。追加 CUDA profiling 时还需要
+`compute-sanitizer`、`nsys` 和 `nvidia-smi`。这些是相应验证流程的依赖，不是普通
+算子安装的额外要求。
 
 ```bash
 # C++ 格式

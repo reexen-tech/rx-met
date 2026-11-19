@@ -3,6 +3,18 @@ cmake_minimum_required(VERSION 3.18)
 project(quant-gru LANGUAGES CXX)
 
 option(RX_MET_ENABLE_CUDA "Build the CUDA GRU backend" ON)
+if(NOT DEFINED USE_REAL_ACTIVATION AND DEFINED ENV{RX_MET_USE_REAL_ACTIVATION})
+    if("$ENV{RX_MET_USE_REAL_ACTIVATION}" STREQUAL "1")
+        set(USE_REAL_ACTIVATION ON CACHE BOOL
+            "Use standard sigmoid/tanh instead of activation LUTs")
+    elseif("$ENV{RX_MET_USE_REAL_ACTIVATION}" STREQUAL "0")
+        set(USE_REAL_ACTIVATION OFF CACHE BOOL
+            "Use standard sigmoid/tanh instead of activation LUTs")
+    else()
+        message(FATAL_ERROR "RX_MET_USE_REAL_ACTIVATION must be 0 or 1")
+    endif()
+endif()
+option(USE_REAL_ACTIVATION "Use standard sigmoid/tanh instead of activation LUTs" OFF)
 if(DEFINED ENV{RX_MET_ENABLE_CUDA} AND "$ENV{RX_MET_ENABLE_CUDA}" STREQUAL "0")
     set(RX_MET_ENABLE_CUDA OFF)
 endif()
@@ -10,7 +22,8 @@ if(NOT RX_MET_ENABLE_CUDA)
     add_library(gru_quant_shared SHARED
         src/gru_host.cc src/gru_forward_cpu.cc src/gru_forward_cpu_quant.cc src/quantize_lut.cc)
     target_compile_features(gru_quant_shared PUBLIC cxx_std_17)
-    target_compile_definitions(gru_quant_shared PUBLIC RX_MET_CPU_ONLY=1)
+    target_compile_definitions(gru_quant_shared PUBLIC RX_MET_CPU_ONLY=1
+        $<$<BOOL:${USE_REAL_ACTIVATION}>:USE_REAL_ACTIVATION>)
     target_include_directories(gru_quant_shared PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
     set_target_properties(gru_quant_shared PROPERTIES POSITION_INDEPENDENT_CODE ON)
     find_package(OpenMP REQUIRED)
@@ -61,6 +74,8 @@ find_package(OpenMP REQUIRED)
 # ------------------------------
 #add_library(gru_quant_static STATIC ${SRC_FILES})
 add_library(gru_quant_shared SHARED ${SRC_FILES})
+target_compile_definitions(gru_quant_shared PUBLIC
+    $<$<BOOL:${USE_REAL_ACTIVATION}>:USE_REAL_ACTIVATION>)
 
 # 输出目录
 #set_target_properties(gru_quant_static PROPERTIES

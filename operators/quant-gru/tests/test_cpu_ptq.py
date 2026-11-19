@@ -57,7 +57,7 @@ def test_cpu_ptq_integer_carrier_and_encoding_roundtrip(method, bits, pot2, tmp_
         x_meta = meta["input"]
         lower = 0 if x_meta["is_unsigned"] else -(1 << (bits - 1))
         upper = (1 << bits) - 1 if x_meta["is_unsigned"] else (1 << (bits - 1)) - 1
-        codes = torch.round(x / x_meta["scale"] + x_meta["zp"]).clamp(lower, upper).to(torch.int32)
+        codes = (torch.round(x / x_meta["scale"]) + x_meta["zp"]).clamp(lower, upper).to(torch.int32)
         output_q, state_q = model.forward_quantized(codes)
         y_meta = meta["output"]
         for actual_q, reference in zip((output_q, state_q), integer):

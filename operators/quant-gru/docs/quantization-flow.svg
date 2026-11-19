@@ -1,4 +1,4 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="960" height="920" viewBox="0 0 960 920">
+<svg xmlns="http://www.w3.org/2000/svg" width="960" height="1000" viewBox="0 0 960 1000">
   <defs>
     <marker id="arrow" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto">
       <path d="M0,0 L0,6 L9,3 z" fill="#334155"/>
@@ -17,7 +17,7 @@
     </style>
   </defs>
 
-  <rect width="960" height="920" fill="#ffffff"/>
+  <rect width="960" height="1000" fill="#ffffff"/>
   <text x="480" y="40" text-anchor="middle" class="title">QuantGRU 量化前向数据流</text>
 
   <rect x="560" y="70" width="160" height="48" class="box state"/>
@@ -55,46 +55,50 @@
 
   <rect x="600" y="350" width="190" height="52" class="box multiply"/>
   <text x="695" y="382" text-anchor="middle" class="label">r × b_n</text>
-  <path d="M280 376 L600 376" class="edge"/>
+  <path d="M280 376 L350 376 L350 425 L570 425 L570 376 L600 376" class="edge"/>
   <path d="M210 206 L210 230 L810 230 L810 376 L790 376" class="edge"/>
 
   <rect x="590" y="455" width="210" height="52" class="box align"/>
   <text x="695" y="486" text-anchor="middle" class="label">对齐并相加: n_pre</text>
   <path d="M695 402 L695 455" class="edge"/>
-  <path d="M640 206 L640 455" class="edge"/>
+  <path d="M700 206 L850 206 L850 481 L800 481" class="edge"/>
 
   <rect x="625" y="550" width="140" height="52" class="box activation"/>
   <text x="695" y="582" text-anchor="middle" class="label">tanh → n</text>
   <path d="M695 507 L695 550" class="edge"/>
 
-  <rect x="110" y="650" width="200" height="52" class="box multiply"/>
-  <text x="210" y="682" text-anchor="middle" class="label">z × h_(t-1)</text>
-  <path d="M480 402 L480 620 L270 620 L270 650" class="edge"/>
-  <path d="M210 118 L80 118 L80 676 L110 676" class="edge"/>
+  <rect x="110" y="720" width="200" height="52" class="box multiply"/>
+  <text x="210" y="752" text-anchor="middle" class="label">z × h_(t-1)</text>
+  <path d="M410 376 L380 376 L380 690 L270 690 L270 720" class="edge"/>
+  <path d="M210 118 L80 118 L80 746 L110 746" class="edge"/>
 
   <rect x="390" y="530" width="180" height="52" class="box align"/>
   <text x="480" y="562" text-anchor="middle" class="label">1 - z</text>
   <path d="M480 402 L480 530" class="edge"/>
 
-  <rect x="520" y="650" width="200" height="52" class="box multiply"/>
-  <text x="620" y="682" text-anchor="middle" class="label">(1 - z) × n</text>
-  <path d="M480 582 L480 625 L570 625 L570 650" class="edge"/>
-  <path d="M695 602 L695 625 L670 625 L670 650" class="edge"/>
+  <rect x="590" y="625" width="210" height="52" class="box align"/>
+  <text x="695" y="657" text-anchor="middle" class="label">n 对齐到 h 网格</text>
+  <path d="M695 602 L695 625" class="edge"/>
 
-  <rect x="315" y="760" width="240" height="58" class="box state"/>
-  <text x="435" y="787" text-anchor="middle" class="label">对齐并相加: h_t</text>
-  <text x="435" y="807" text-anchor="middle" class="small">输出并作为下一时间步隐藏状态</text>
-  <path d="M210 702 L210 735 L380 735 L380 760" class="edge"/>
-  <path d="M620 702 L620 735 L490 735 L490 760" class="edge"/>
+  <rect x="520" y="720" width="240" height="52" class="box multiply"/>
+  <text x="640" y="752" text-anchor="middle" class="label">(1 - z) × n_aligned</text>
+  <path d="M480 582 L480 695 L570 695 L570 720" class="edge"/>
+  <path d="M695 677 L695 695 L710 695 L710 720" class="edge"/>
 
-  <rect x="80" y="855" width="28" height="20" class="box linear"/>
-  <text x="120" y="870" class="small">线性变换</text>
-  <rect x="235" y="855" width="28" height="20" class="box align"/>
-  <text x="275" y="870" class="small">网格对齐/加法</text>
-  <rect x="430" y="855" width="28" height="20" class="box activation"/>
-  <text x="470" y="870" class="small">激活</text>
-  <rect x="555" y="855" width="28" height="20" class="box multiply"/>
-  <text x="595" y="870" class="small">乘法</text>
-  <rect x="680" y="855" width="28" height="20" class="box state"/>
-  <text x="720" y="870" class="small">输入/状态</text>
+  <rect x="315" y="830" width="270" height="58" class="box state"/>
+  <text x="450" y="857" text-anchor="middle" class="label">合并乘积后重缩放: h_t</text>
+  <text x="450" y="877" text-anchor="middle" class="small">输出并作为下一时间步隐藏状态</text>
+  <path d="M210 772 L210 805 L380 805 L380 830" class="edge"/>
+  <path d="M640 772 L640 805 L520 805 L520 830" class="edge"/>
+
+  <rect x="80" y="935" width="28" height="20" class="box linear"/>
+  <text x="120" y="950" class="small">线性变换</text>
+  <rect x="235" y="935" width="28" height="20" class="box align"/>
+  <text x="275" y="950" class="small">网格对齐/加法</text>
+  <rect x="430" y="935" width="28" height="20" class="box activation"/>
+  <text x="470" y="950" class="small">激活</text>
+  <rect x="555" y="935" width="28" height="20" class="box multiply"/>
+  <text x="595" y="950" class="small">乘法</text>
+  <rect x="680" y="935" width="28" height="20" class="box state"/>
+  <text x="720" y="950" class="small">输入/状态</text>
 </svg>

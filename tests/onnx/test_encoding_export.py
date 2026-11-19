@@ -179,6 +179,30 @@ class ExportEntryPointTest(unittest.TestCase):
             self.assertFalse(any(node.op_type == 'QcQuantizeOp' for node in clean.graph.node))
             validate_compiler_encodings(encoded, require_po2=True)
 
+    def test_affine_onnx_sim_exports_and_restores_without_po2(self):
+        with tempfile.TemporaryDirectory(prefix='onnx-affine-export-') as temporary:
+            path = Path(temporary)
+            config = path / 'config.json'
+            config.write_text(json.dumps({
+                'defaults': {'ops': {'is_output_quantized': 'True', 'is_symmetric': 'True'},
+                             'params': {'is_quantized': 'True', 'is_symmetric': 'True'},
+                             'per_channel_quantization': 'True', 'strict_symmetric': 'False'},
+                'params': {}, 'op_type': {}, 'supergroups': [], 'model_input': {}, 'model_output': {}}))
+            model = graph()
+            feed = {'x': np.array([[-1.3, 2.1]], dtype=np.float32)}
+            sim = pipeline.create_onnx_ptq_sim(model, feed, config_file=str(config),
+                                               quant_scheme='tf', work_dir=path / 'sim')
+            sim.compute_encodings(lambda session: session.run(None, feed))
+            expected = sim.session.run(None, feed)
+            result = pipeline.export_onnx_json(sim, model, path / 'export', 'affine')
+            encoded = json.loads(result['encodings'].read_text())
+            validate_compiler_encodings(encoded)
+            scales = encoded['param_encodings']['w']['scale']
+            self.assertTrue(any(not float(np.log2(scale)).is_integer() for scale in scales))
+            report = pipeline.verify_onnx_ptq_artifacts(
+                result, feed, expected, config_file=str(config), quant_scheme='tf')
+            self.assertTrue(all(item['max_abs'] == 0 for item in report))
+
 
 if __name__ == "__main__":
     unittest.main()

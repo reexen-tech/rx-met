@@ -1,5 +1,3 @@
-// Non-target real-activation reference. Public quantGRUForwardFP uses the
-// shared integer/LUT core; this implementation is retained for low-level studies.
 // ============================================================================
 // gru_forward_gpu_quant_fp.cu - 浮点存储版量化 GRU 前向传播 CUDA 实现
 // ============================================================================
@@ -18,7 +16,7 @@
 // 与 gru_forward_gpu_quant.cu 的区别:
 //   - 所有量化值使用 float 存储（值仍是定点整数）
 //   - 使用 cuBLAS SGEMM + 单独的 bias/rescale kernel
-//   - 只使用 real_sigmoid/real_tanh，不用 LUT
+//   - USE_REAL_ACTIVATION 控制真实激活与 LUT，与 INT32 路径独立使用相同开关
 //   - shift 预处理为除数，避免运行时位移
 //
 // ============================================================================
@@ -88,6 +86,27 @@ __device__ __forceinline__ float mul_round_new(float x, float inv_divisor) {
 }
 
 // 注：clamp_f, real_sigmoid_f, real_tanh_f 已移至 quantize_ops_helper.h
+
+#ifndef USE_REAL_ACTIVATION
+template <bool Training>
+__device__ __forceinline__ float piecewiseLinearFP(float q_x, const SigmoidLUT &lut,
+                                                   QuantBitWidth output_bw,
+                                                   uint8_t *keep_gradient) {
+    int segment = NUM_SEGMENTS - 1;
+    for (int i = 0; i < NUM_SEGMENTS; ++i) {
+        if (q_x < static_cast<float>(lut.segments[i].threshold)) {
+            segment = i;
+            break;
+        }
+    }
+    const SegmentParams &p = lut.segments[segment];
+    const float product = static_cast<float>(p.q_b) *
+                          (q_x - static_cast<float>(lut.zp_x));
+    const float scaled = ldexpf(product, -static_cast<int>(p.n_BX_total));
+    const float value = round_f(scaled) + static_cast<float>(p.term_c_precomputed);
+    return clamp_f<Training>(value, output_bw, keep_gradient);
+}
+#endif
 
 // ============================================================================
 // 2. 门计算函数
@@ -179,12 +198,16 @@ __device__ __forceinline__ float computeUpdateGateFP(float weight_ih_linear, flo
         input, bitwidth_config.update_gate_input_,
         input_keep_gradient);
 
-    // 调用模板版本的 real_sigmoid_f，内部根据 Training 决定是否使用 mask
+#ifdef USE_REAL_ACTIVATION
     return real_sigmoid_f<Training>(
         clamped_input, p.scale_update_gate_input_, p.zp_update_gate_input_,
         p.scale_update_gate_output_, p.zp_update_gate_output_,
         bitwidth_config.update_gate_output_,
         output_keep_gradient);
+#else
+    return piecewiseLinearFP<Training>(clamped_input, p.sigmoid_update_gate_lut_,
+        bitwidth_config.update_gate_output_, output_keep_gradient);
+#endif
 }
 
 /**
@@ -222,12 +245,16 @@ __device__ __forceinline__ float computeResetGateFP(float weight_ih_linear, floa
         input, bitwidth_config.reset_gate_input_,
         input_keep_gradient);
 
-    // 调用模板版本的 real_sigmoid_f，内部根据 Training 决定是否使用 mask
+#ifdef USE_REAL_ACTIVATION
     return real_sigmoid_f<Training>(
         clamped_input, p.scale_reset_gate_input_, p.zp_reset_gate_input_,
         p.scale_reset_gate_output_, p.zp_reset_gate_output_,
         bitwidth_config.reset_gate_output_,
         output_keep_gradient);
+#else
+    return piecewiseLinearFP<Training>(clamped_input, p.sigmoid_reset_gate_lut_,
+        bitwidth_config.reset_gate_output_, output_keep_gradient);
+#endif
 }
 
 /**
@@ -274,12 +301,16 @@ __device__ __forceinline__ float computeNewGateFP(float weight_ih_linear, float 
         input, bitwidth_config.new_gate_input_,
         input_keep_gradient);
 
-    // 调用模板版本的 real_tanh_f，内部根据 Training 决定是否使用 mask
+#ifdef USE_REAL_ACTIVATION
     return real_tanh_f<Training>(
         clamped_input, p.scale_new_gate_input_, p.zp_new_gate_input_,
         p.scale_new_gate_output_, p.zp_new_gate_output_,
         bitwidth_config.new_gate_output_,
         output_keep_gradient);
+#else
+    return piecewiseLinearFP<Training>(clamped_input, p.tanh_new_gate_lut_,
+        bitwidth_config.new_gate_output_, output_keep_gradient);
+#endif
 }
 
 /**
@@ -883,13 +914,22 @@ void ForwardPassQuantFP::setRescaleParam(const GRUQuantParams &src) {
     g.inv_div_new_gate_output_to_h_ =
         inv_rescale_ratio(src.new_gate_output_.scale, src.h_.scale);
 
-    // 激活函数 scale = 2^(-shift)
-    g.scale_update_gate_input_ = src.update_gate_input_.scale;
-    g.scale_update_gate_output_ = src.update_gate_output_.scale;
-    g.scale_reset_gate_input_ = src.reset_gate_input_.scale;
-    g.scale_reset_gate_output_ = src.reset_gate_output_.scale;
-    g.scale_new_gate_input_ = src.new_gate_input_.scale;
-    g.scale_new_gate_output_ = src.new_gate_output_.scale;
+#ifdef USE_REAL_ACTIVATION
+    const bool use_pot2 = src.bitwidth_config_.usePOT2_;
+    auto effective_scale = [use_pot2](const QuantParam &param) {
+        return decodeMShift(toFixedScale(param, use_pot2));
+    };
+    g.scale_update_gate_input_ = effective_scale(src.update_gate_input_);
+    g.scale_update_gate_output_ = effective_scale(src.update_gate_output_);
+    g.scale_reset_gate_input_ = effective_scale(src.reset_gate_input_);
+    g.scale_reset_gate_output_ = effective_scale(src.reset_gate_output_);
+    g.scale_new_gate_input_ = effective_scale(src.new_gate_input_);
+    g.scale_new_gate_output_ = effective_scale(src.new_gate_output_);
+#else
+    g.sigmoid_update_gate_lut_ = src.sigmoid_update_gate_lut_;
+    g.sigmoid_reset_gate_lut_ = src.sigmoid_reset_gate_lut_;
+    g.tanh_new_gate_lut_ = src.tanh_new_gate_lut_;
+#endif
 
     // 存储位宽配置（单独存储，作为 kernel 参数传递）
     bitwidth_config_ = src.bitwidth_config_;
@@ -1180,10 +1220,7 @@ void ForwardPassQuantFP::Run(int steps, const float *W, const float *R, const fl
                              float zoneout_prob, const float *zoneout_mask,
                              uint8_t *weight_ih_linear_mask, uint8_t *weight_hh_linear_mask,
                              uint8_t *gate_input_mask, uint8_t *gate_output_mask, uint8_t *h_mask) {
-    // 量化模式：禁用 TensorCore 以提高精度（与浮点模式保持一致）
-    // TensorCore 使用 TF32 精度，可能导致精度问题
-    const blas<void>::enable_tensor_cores scoped0(data_->blas_handle);  // 注释掉以禁用
-    // TensorCore
+    const blas<void>::enable_tensor_cores scoped0(data_->blas_handle);
     const blas<void>::set_pointer_mode scoped1(data_->blas_handle);
 
     const int batch_size = data_->batch_size;

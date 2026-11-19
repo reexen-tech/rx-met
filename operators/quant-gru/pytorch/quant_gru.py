@@ -1130,6 +1130,8 @@ class QuantGRU(nn.Module):
         dropout: 暂不支持，必须为 0
         bidirectional: 是否双向（默认 False）
         use_quantization: 是否启用量化（默认 False）
+        use_po2_scale: 是否使用 Power-of-2 scale（默认 False）
+        use_pot2_scale: use_po2_scale 的兼容别名
     
     Attributes:
         use_quantization (bool): 量化开关
@@ -1164,8 +1166,10 @@ class QuantGRU(nn.Module):
             dropout: float = 0.0,
             bidirectional: bool = False,
             use_quantization: bool = False,
-            use_pot2_scale: bool = False,
+            use_po2_scale: Optional[bool] = None,
             quant_storage_dtype: str = "float32",
+            *,
+            use_pot2_scale: Optional[bool] = None,
     ):
         super(QuantGRU, self).__init__()
 
@@ -1187,7 +1191,12 @@ class QuantGRU(nn.Module):
         self.dropout = dropout
         self.bidirectional = bidirectional
         self.use_quantization = use_quantization
-        self._use_pot2_scale = bool(use_pot2_scale)
+        if (use_po2_scale is not None and use_pot2_scale is not None
+                and bool(use_po2_scale) != bool(use_pot2_scale)):
+            raise ValueError("use_po2_scale and use_pot2_scale conflict")
+        self._use_pot2_scale = bool(
+            use_po2_scale if use_po2_scale is not None else use_pot2_scale
+        )
         self.num_directions = 2 if bidirectional else 1
 
         # 量化值存储类型：
@@ -1454,10 +1463,15 @@ class QuantGRU(nn.Module):
 
         # 读取全局配置
         default_config = gru_config.get('default_config', {})
+        if ('use_po2_scale' in default_config and 'use_pot2_scale' in default_config
+                and bool(default_config['use_po2_scale']) != bool(default_config['use_pot2_scale'])):
+            raise ValueError("use_po2_scale and use_pot2_scale conflict")
         if 'disable_quantization' in default_config:
             self.use_quantization = not default_config['disable_quantization']
-        if 'use_pot2_scale' in default_config:
-            self.use_pot2_scale = bool(default_config['use_pot2_scale'])
+        if 'use_po2_scale' in default_config or 'use_pot2_scale' in default_config:
+            self.use_po2_scale = bool(default_config.get(
+                'use_po2_scale', default_config.get('use_pot2_scale', False)
+            ))
 
         # 直接将配置写入 C++ 对象
         op_config = gru_config.get('operator_config', {})
@@ -1662,13 +1676,17 @@ class QuantGRU(nn.Module):
         finally:
             self.calibrating = previous
 
-    def enable_pot2(self, method="cover_range", tolerance=0.02):
-        """Select GRU's native POT2 encoding; it owns scale derivation."""
-        if self.use_pot2_scale:
+    def enable_po2(self, method="cover_range", tolerance=0.02):
+        """Select GRU's native PO2 encoding; it owns scale derivation."""
+        if self.use_po2_scale:
             return
         if self._quant_params_locked:
             raise RuntimeError("QuantGRU encodings are locked; cannot change scale mode")
-        self.use_pot2_scale = True
+        self.use_po2_scale = True
+
+    def enable_pot2(self, method="cover_range", tolerance=0.02):
+        """Compatibility alias for enable_po2()."""
+        return self.enable_po2(method=method, tolerance=tolerance)
 
     def is_calibrated(self) -> bool:
         """检查是否已完成校准"""
@@ -1705,7 +1723,7 @@ class QuantGRU(nn.Module):
     @logged_operation
     def finalize_calibration(self, verbose: bool = False):
         """
-        完成校准，计算量化参数并初始化 LUT
+        完成校准并计算量化参数；LUT 构建模式下同时初始化查找表
         
         Args:
             verbose: 是否打印校准信息
@@ -1834,21 +1852,23 @@ class QuantGRU(nn.Module):
         return self._get_config_attr(op_name, '_unsigned_', _VALID_UNSIGNED_ATTRS, False)
 
     @property
-    def use_pot2_scale(self) -> bool:
-        """是否使用 POT2 scale 编码；False 时使用 affine/M+shift 编码。"""
+    def use_po2_scale(self) -> bool:
+        """是否使用 PO2 scale 编码；False 时使用 affine/M+shift 编码。"""
         if hasattr(self, '_bitwidth_config') and self._bitwidth_config is not None:
             return bool(self._bitwidth_config.usePOT2_)
         return bool(getattr(self, '_use_pot2_scale', False))
 
-    @use_pot2_scale.setter
-    def use_pot2_scale(self, value: bool):
+    @use_po2_scale.setter
+    def use_po2_scale(self, value: bool):
         self._use_pot2_scale = bool(value)
         if hasattr(self, '_bitwidth_config') and self._bitwidth_config is not None:
             self._bitwidth_config.usePOT2_ = self._use_pot2_scale
             if self.quant_params is not None:
                 self.quant_params.bitwidth_config_ = self._bitwidth_config
-            # use_pot2_scale 切换会改变目标 scale 语义，需要重新校准
+            # Scale 模式切换会改变目标 scale 语义，需要重新校准
             self._quant_params_dirty = True
+
+    use_pot2_scale = use_po2_scale
 
     def _resolve_onnx_module_name(self) -> str:
         """解析 ONNX 导出时用于可读命名的模块名称。"""
@@ -2243,7 +2263,7 @@ class QuantGRU(nn.Module):
         )
 
         # 前向方向
-        # LUT 现在存储在 quant_params 中，通过 setRescaleParam 复制到前向传播的 rescale 参数
+        # LUT builds pass gate tables through quant_params; real activation builds omit them.
         output_forward, h_n_forward = GRUFunction.apply(
             input, self.weight_ih_l0, self.weight_hh_l0,
             self.bias_ih_l0 if self.bias else None,
@@ -2253,7 +2273,7 @@ class QuantGRU(nn.Module):
         # 反向方向(双向时)
         output_reverse, h_n_reverse = None, None
         if self.bidirectional:
-            # LUT 存储在 quant_params_reverse 中
+            # Each direction owns its quantization grids and optional LUT parameters.
             output_reverse, h_n_reverse = GRUFunction.apply(
                 input.flip(0), self.weight_ih_l0_reverse, self.weight_hh_l0_reverse,
                 self.bias_ih_l0_reverse if self.bias else None,
@@ -4609,7 +4629,7 @@ def _load_quant_params_impl(
     # 设置位宽配置到量化参数中（pybind11 值复制语义，这里是复制而非引用）
     gru.quant_params.bitwidth_config_ = gru._bitwidth_config
     
-    # 注意：LUT 会在 forward 时通过 to_cpp() 自动生成，无需在此显式调用
+    # LUT builds regenerate tables in to_cpp(); real activation builds skip that step.
     
     # 加载反向参数（双向）
     # 设计说明：正向和反向共用同一个 _bitwidth_config，这是有意为之：

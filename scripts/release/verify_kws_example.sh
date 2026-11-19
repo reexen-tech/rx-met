@@ -132,8 +132,6 @@ for target in "${TARGETS[@]}"; do
             --mount "type=bind,src=$RX_MET_INSTALLED_DIR,dst=/opt/rx-met,readonly" \
             -e USER=rx-met-validator \
             -e LOGNAME=rx-met-validator \
-            -e "RX_MET_SPEECH_COMMANDS_ROOT=/datasets/speech_commands" \
-            -e "RX_MET_KWS_OUTPUT_DIR=/output" \
             -v "${DATASET_DIR}:/datasets/speech_commands:ro" \
             -v "${target_output}:/output" \
             "${image}" \
@@ -150,7 +148,8 @@ rnn_type = sys.argv[1]
 entry = "/opt/rx-met/examples/quick_start_kws.py"
 root = Path("/output") / rnn_type
 previous_records = set(root.glob("*/run.json"))
-sys.argv = [entry, "--rnn_type", rnn_type]
+sys.argv = [entry, "--rnn_type", rnn_type,
+            "--data-dir", "/datasets/speech_commands", "--output-dir", "/output"]
 runpy.run_path(entry, run_name="__main__")
 record_path, = set(root.glob("*/run.json")) - previous_records
 execution = record_path.parent

@@ -180,7 +180,8 @@ def align_onnx_bias_scale(sim: Any, *, bias_bitwidth: int = 32) -> Dict[str, Any
 
     This mirrors ``aimet_torch.utils_rx._align_conv_bias_scale`` plus the RX
     mixed-precision default ``bias_bitwidth=32``.  Official INT32 concretize is
-    not used; the scale still comes from the live Po2 input/weight encodings.
+    not used; the scale comes from the live input/weight encodings, whether
+    affine or Po2.
 
     Only biases temporarily disabled for calibration are re-enabled. All
     candidate grids are validated before any bias quantizer is modified.
@@ -199,6 +200,7 @@ def align_onnx_bias_scale(sim: Any, *, bias_bitwidth: int = 32) -> Dict[str, Any
     validate_bias_bitwidth(bias_bitwidth)
     temporarily_disabled = set(getattr(sim, "_rx_calibration_bias_quantizers", ()))
     pending = []
+    shared_biases = {}
     for op in sim.connected_graph.get_all_ops().values():
         if op.type not in _ANALYTIC_BIAS_OPS:
             continue
@@ -266,6 +268,15 @@ def align_onnx_bias_scale(sim: Any, *, bias_bitwidth: int = 32) -> Dict[str, Any
             raise ValueError(f"{bias.name}: per-tensor bias cannot represent output-channel weight scales")
         if bias_quantizer.is_encoding_frozen():
             raise ValueError(f"{bias.name}: bias quantizer is frozen")
+        signature = (tuple(item['scale'] for item in aligned), per_channel)
+        previous = shared_biases.get(id(bias_quantizer))
+        if previous is not None:
+            old_signature, old_op = previous
+            if old_signature != signature:
+                raise ValueError(f'Shared bias {bias.name} requires conflicting accumulator '
+                                 f'scales for {old_op} and {op.name}')
+            continue
+        shared_biases[id(bias_quantizer)] = (signature, op.name)
         pending.append((bias, op, bias_quantizer, aligned, old_scales, per_channel))
 
     for bias, op, bias_quantizer, aligned, old_scales, per_channel in pending:
@@ -309,7 +320,10 @@ def align_sim_encodings_to_po2(
     validate_quantizer_state(sim, allow_pending_bias=True)
     for adapter in getattr(sim, "_rx_native_recurrent", {}).values():
         if adapter.module.use_quantization:
-            adapter.module.enable_pot2(method=method, tolerance=tolerance)
+            enable_po2 = getattr(adapter.module, "enable_po2", None)
+            if enable_po2 is None:
+                enable_po2 = adapter.module.enable_pot2
+            enable_po2(method=method, tolerance=tolerance)
     temporarily_disabled = set(getattr(sim, "_rx_calibration_bias_quantizers", ()))
     if temporarily_disabled and not align_bias_scale:
         raise RuntimeError("Temporarily disabled bias quantizers require bias-scale alignment")
