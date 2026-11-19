@@ -64,13 +64,6 @@ cp -a examples "$HOME/rx-met-user/"
 并提前在宿主机创建这些目录。
 
 ```bash
-gpu_args=()
-example_device=cpu
-if [[ @VARIANT@ != cpu ]]; then
-  gpu_args=(--gpus device=0)
-  example_device=cuda
-fi
-
 docker run --rm -it --pull=never --shm-size=2g \
   --user "$(id -u):$(id -g)" \
   -e HOME=/tmp \
@@ -122,8 +115,6 @@ python3 /workspace/examples/quick_start_onnx_ptq.py --device "$RX_MET_EXAMPLE_DE
 `exports/att_mh_rnn_kws.onnx`，由 ONNX 示例自行从同一份 Speech Commands 抽样和提取 MFCC，
 不需要额外模型、数据集、准备脚本或 KWS 检查点。使用 LSTM 时追加 `--rnn-type lstm`。
 KWS 最终导出的是 clean 浮点 ONNX，本流程重新校准并生成一套量化参数，不读取原来的量化 JSON。
-Po2 是按目标后端要求选用的可选转换，本示例执行该步骤以演示精度比较；
-导出和恢复接口也支持非 Po2 编码，不要求 scale 必须为 2 的幂。
 
 CPU 用户可使用已有的 KWS ONNX，或量化自己的静态 ONNX 和预处理 NPY/NPZ：
 
@@ -151,5 +142,4 @@ python3 /workspace/examples/quick_start_onnx_ptq.py --device "$RX_MET_EXAMPLE_DE
 [examples/README.md](examples/README.md)，量化配置说明见
 [examples/config/README.md](examples/config/README.md)。
 
-退出后容器自动删除，工作目录中的
-配置和结果仍保留。
+退出后容器自动删除，工作目录中的配置和结果会保留。
