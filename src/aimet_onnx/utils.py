@@ -40,6 +40,7 @@ import copy
 import itertools
 import platform
 import tempfile
+import weakref
 from pathlib import Path
 from typing import Dict, Iterable, List, Union, Tuple, Callable, Optional
 from contextlib import contextmanager
@@ -50,7 +51,6 @@ import torch
 import onnx
 from onnx import helper, numpy_helper
 from onnxruntime import SessionOptions, InferenceSession
-import shutil
 
 from aimet_common import libquant_info
 from aimet_common.utils import AimetLogger, compute_psnr, deprecated
@@ -620,9 +620,10 @@ class OrtInferenceSession(InferenceSession):
         """
 
         self.model_dir: Optional[str] = None
-
         if path is None:
-            self.model_dir = tempfile.mkdtemp()
+            directory = tempfile.TemporaryDirectory()
+            weakref.finalize(self, directory.cleanup)
+            self.model_dir = directory.name
             path = self.model_dir
 
         model_path = os.path.join(path, "model.onnx")
@@ -638,17 +639,6 @@ class OrtInferenceSession(InferenceSession):
             sess_options=session_options,
             providers=providers,
         )
-
-    def __del__(self):
-        if self.model_dir is None:
-            return
-
-        try:
-            shutil.rmtree(self.model_dir)
-        except Exception as e:  # pylint: disable=broad-except
-            logger.warning(
-                "Error while cleaning up temp dir at %s: %s", self.model_dir, e
-            )
 
 
 @deprecated("Use `aimet_onnx.utils.OrtInferenceSession` instead")

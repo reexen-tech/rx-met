@@ -411,6 +411,33 @@ def apply_power_of_2_workflow(sim_model, method: str = "cover_range", tolerance:
 # 量化器参数冻结相关函数
 # ============================================================================
 
+def _batchnorm_modules(model):
+    """Find BatchNorm owners, including modules inlined by prepare_model."""
+    from torch import fx, nn
+    from aimet_torch.quantizable_batchnorm import QuantizableBatchNorm2d
+
+    bn_types = (nn.modules.batchnorm._BatchNorm, QuantizableBatchNorm2d)
+    owners = {module for module in model.modules() if isinstance(module, bn_types)}
+    for traced in model.modules():
+        if not isinstance(traced, fx.GraphModule):
+            continue
+        # FX replaces inlined owners with plain Modules. The node scope keeps
+        # their original type and path, even after QuantSim inserts quantizers.
+        modules = dict(traced.named_modules())
+        for node in traced.graph.nodes:
+            for path, cls in node.meta.get('nn_module_stack', {}).values():
+                owner = modules.get(path)
+                if type(owner) is nn.Module and isinstance(cls, type) and issubclass(cls, bn_types):
+                    owners.add(owner)
+    return owners
+
+
+def _bn_affine_parameters(bn_modules):
+    return {param for module in bn_modules
+            for name, param in module.named_parameters(recurse=False)
+            if name in ('weight', 'bias')}
+
+
 @logged_operation
 def freeze_quantizer_parameters(sim_model, verbose: bool = True, freeze_bn_affine: bool = True) -> Dict[str, Any]:
     """
@@ -427,52 +454,35 @@ def freeze_quantizer_parameters(sim_model, verbose: bool = True, freeze_bn_affin
     Returns:
         结果字典，包含：
         - trainable_params: 可训练参数名称列表
-        - frozen_params: 冻结参数名称列表
+        - frozen_params: 本次调用新冻结的参数名称列表
         - frozen_quantizer_params: 冻结的量化器参数列表
         - frozen_bn_params: 冻结的 BN affine 参数列表
         - trainable_count: 可训练参数数量
         - frozen_count: 冻结参数数量
     """
+    from aimet_torch.v2.quantization.base import QuantizerBase
+
+    quantizer_params = {p for module in sim_model.modules() if isinstance(module, QuantizerBase)
+                        for p in module.parameters()}
+    bn_affine_params = _bn_affine_parameters(_batchnorm_modules(sim_model)) if freeze_bn_affine else set()
+
     trainable_params = []
     frozen_params = []
     frozen_quantizer_params = []
     frozen_bn_params = []
     
-    # 常见 BN 模块名称模式
-    bn_name_patterns = ['_bn', 'bn_', 'pre_bn', 'rnn2d_bn', 'batchnorm', 'batch_norm']
-    
     for name, param in sim_model.named_parameters():
-        if param.requires_grad:
-            should_freeze = False
-            freeze_reason = None
-            
-            # 检查是否是量化器参数
-            if 'quantizer' in name and any(kw in name for kw in ['min', 'max', 'scale', 'offset', 'encoding']):
-                should_freeze = True
-                freeze_reason = 'quantizer'
-            
-            # 检查是否是 BatchNorm 的 affine 参数（weight 或 bias）
-            if freeze_bn_affine and not should_freeze:
-                # 检查参数名称是否包含 BN 模块名称模式
-                name_lower = name.lower()
-                is_bn_param = (any(pattern in name_lower for pattern in bn_name_patterns)
-                               or 'bn' in name_lower.split('.'))
-                # 检查是否是 weight 或 bias 参数
-                is_affine_param = name.endswith('.weight') or name.endswith('.bias')
-                
-                if is_bn_param and is_affine_param:
-                    should_freeze = True
-                    freeze_reason = 'bn_affine'
-            
-            if should_freeze:
-                param.requires_grad = False
-                frozen_params.append(name)
-                if freeze_reason == 'quantizer':
-                    frozen_quantizer_params.append(name)
-                elif freeze_reason == 'bn_affine':
-                    frozen_bn_params.append(name)
-            else:
-                trainable_params.append(name)
+        if not param.requires_grad:
+            continue
+        if param in quantizer_params:
+            frozen_quantizer_params.append(name)
+        elif param in bn_affine_params:
+            frozen_bn_params.append(name)
+        else:
+            trainable_params.append(name)
+            continue
+        param.requires_grad = False
+        frozen_params.append(name)
     
     with log_details(verbose):
         print(f"冻结量化器参数:         {len(frozen_quantizer_params)} 个")
@@ -504,9 +514,9 @@ def set_train_mode_freeze_bn(model, verbose: bool = False) -> int:
     避免量化后的统计信息与浮点模型差异过大
     
     支持的 BatchNorm 类型：
-    - nn.BatchNorm1d, nn.BatchNorm2d, nn.BatchNorm3d (标准 PyTorch BN)
+    - 标准 PyTorch BatchNorm 及其子类
     - QuantizableBatchNorm2d (自定义可量化 BN)
-    - prepare_model 展开后的 BN（通过模块名称识别，如 pre_bn, rnn2d_bn）
+    - prepare_model 展开后仍保留 FX 类型信息的 BN
     
     Args:
         model: PyTorch 模型或 AIMET QuantizationSimModel.model
@@ -515,50 +525,11 @@ def set_train_mode_freeze_bn(model, verbose: bool = False) -> int:
     Returns:
         冻结的 BatchNorm 层数量
     """
-    import torch.nn as nn
-    
-    # 动态导入自定义 BatchNorm（避免循环导入）
-    try:
-        from aimet_torch.quantizable_batchnorm import QuantizableBatchNorm2d
-        custom_bn_types = (QuantizableBatchNorm2d,)
-    except ImportError:
-        custom_bn_types = ()
-    
-    # 设置整个模型为训练模式
     model.train()
-    
-    # 策略 1: 通过类型识别标准 BN（适用于未展开的 BN）
-    bn_count = 0
-    bn_types = (nn.BatchNorm1d, nn.BatchNorm2d, nn.BatchNorm3d) + custom_bn_types
-    frozen_modules = set()  # 记录已冻结的模块，避免重复计数
-    
-    for module in model.modules():
-        if isinstance(module, bn_types) and module not in frozen_modules:
-            module.eval()
-            frozen_modules.add(module)
-            bn_count += 1
-    
-    # 策略 2: 通过名称识别展开后的 BN（适用于 prepare_model 后）
-    # 常见 BN 模块名称模式（以 _bn 或 bn_ 结尾/开头的模块）
-    bn_name_patterns = ['_bn', 'bn_', 'pre_bn', 'rnn2d_bn', 'batchnorm']
-    
-    for name, module in model.named_modules():
-        # 检查模块名称是否匹配 BN 模式
-        name_lower = name.lower()
-        is_bn_by_name = (any(pattern in name_lower for pattern in bn_name_patterns)
-                               or 'bn' in name_lower.split('.'))
-        
-        if is_bn_by_name and module not in frozen_modules:
-            # 将该模块及其所有子模块设置为 eval 模式
-            module.eval()
-            frozen_modules.add(module)
-            bn_count += 1
-            
-            # 如果有子模块，也冻结它们
-            for child in module.modules():
-                if child != module and child not in frozen_modules:
-                    child.eval()
-                    frozen_modules.add(child)
+    bn_modules = _batchnorm_modules(model)
+    for module in bn_modules:
+        module.eval()
+    bn_count = len(bn_modules)
     
     with log_details(verbose):
         print(f"✅ 模型设置为训练模式，{bn_count} 个 BatchNorm 层保持评估模式")
@@ -1155,56 +1126,24 @@ def check_bn_params_status(model, verbose: bool = True) -> Dict[str, Any]:
     
     Returns:
         结果字典，包含：
-        - bn_modules: BatchNorm 模块数量
+        - bn_modules: BatchNorm 模块的名称和对象列表
+        - bn_module_count: BatchNorm 模块数量
         - trainable_affine_params: 可训练的 affine 参数列表
         - frozen_affine_params: 冻结的 affine 参数列表
         - total_affine_params: affine 参数总数
     """
-    import torch.nn as nn
-    
-    # 常见 BN 模块名称模式
-    bn_name_patterns = ['_bn', 'bn_', 'pre_bn', 'rnn2d_bn', 'batchnorm', 'batch_norm']
-    
+    owners = _batchnorm_modules(model)
+    bn_modules = [(name, module) for name, module in model.named_modules() if module in owners]
+    affine_params = _bn_affine_parameters(owners)
     trainable_affine_params = []
     frozen_affine_params = []
-    bn_modules = []
-    
-    # 策略 1: 通过类型识别 BatchNorm 模块
-    try:
-        from aimet_torch.quantizable_batchnorm import QuantizableBatchNorm2d
-        custom_bn_types = (QuantizableBatchNorm2d,)
-    except ImportError:
-        custom_bn_types = ()
-    
-    bn_types = (nn.BatchNorm1d, nn.BatchNorm2d, nn.BatchNorm3d) + custom_bn_types
-    
-    for name, module in model.named_modules():
-        if isinstance(module, bn_types):
-            bn_modules.append((name, module))
-    
-    # 策略 2: 检查参数状态
     for name, param in model.named_parameters():
-        # 检查是否是 affine 参数
-        is_affine_param = name.endswith('.weight') or name.endswith('.bias')
-        if not is_affine_param:
+        if param not in affine_params:
             continue
-        
-        # 检查是否属于 BatchNorm
-        name_lower = name.lower()
-        is_bn_param = (any(pattern in name_lower for pattern in bn_name_patterns)
-                               or 'bn' in name_lower.split('.'))
-        
-        # 检查是否在识别的 BN 模块中
-        for bn_name, bn_module in bn_modules:
-            if name.startswith(bn_name + '.'):
-                is_bn_param = True
-                break
-        
-        if is_bn_param:
-            if param.requires_grad:
-                trainable_affine_params.append(name)
-            else:
-                frozen_affine_params.append(name)
+        if param.requires_grad:
+            trainable_affine_params.append(name)
+        else:
+            frozen_affine_params.append(name)
     
     with log_details(verbose):
         print("\n" + "="*70)

@@ -49,8 +49,12 @@ class NativeQdqAlignmentTest(unittest.TestCase):
             if not symmetric:
                 reference.offset.fill_(offset)
         reference.requires_grad_(False)
+        actual_torch = reference(torch.from_numpy(values)).detach().numpy()
         if expected is None:
-            expected = reference(torch.from_numpy(values)).detach().numpy()
+            expected = actual_torch
+        else:
+            np.testing.assert_allclose(actual_torch, expected, rtol=0, atol=0, equal_nan=True,
+                                       err_msg='Torch QDQ')
         np.testing.assert_allclose(native.quantize_dequantize(values), expected,
                                    rtol=0, atol=0, equal_nan=True)
 
@@ -112,11 +116,14 @@ class NativeQdqAlignmentTest(unittest.TestCase):
                     self.compare((codes * scale).reshape(1, -1), bits, [scale],
                                  symmetric=symmetric, offset=None if symmetric else -13)
 
-    def test_decimal_scale_uses_the_same_float32_reciprocal(self):
+    def test_decimal_scale_uses_the_correctly_rounded_float32_quotient(self):
         codes = np.arange(-63, 64, dtype=np.float32) + .5
-        for scale in (1. / 32767, .013007, .027019):
+        for scale in (1. / 32767, .013007, .027019, .02):
             with self.subTest(scale=scale):
-                self.compare((codes * np.float32(scale)).reshape(1, -1), 16, [scale])
+                delta = np.float32(scale)
+                values = np.append(codes * delta, np.float32(2.17)).reshape(1, -1)
+                expected = np.clip(np.rint(values / delta), -32768, 32767) * delta
+                self.compare(values, 16, [scale], expected=expected)
 
     def test_nan_is_preserved_and_infinity_saturates(self):
         for bits in (8, 16, 32):

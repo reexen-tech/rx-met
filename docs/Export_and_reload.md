@@ -211,6 +211,9 @@ fresh_sim.model.eval()
 检查加载统计及对应的量化器，并比较恢复前后的输出。
 `allow_overwrite=False` 禁止后续校准覆盖已加载的量化网格。
 
+普通激活编码按模块的输入或输出端口恢复。一个端口下的多条通道记录共同描述该端口的量化网格，
+通道数须与目标量化器的形状相容。旧文件中带额外端口包装的记录也可加载。
+
 阶段文件加载以保存的 `qmin/qmax/symmetric/scale/offset` 为准，包括 Po2 后与初始
 配置不同的 bias 位宽。普通 affine 量化器通过 scale/offset 参数化精确恢复，不从
 实数 min/max 反推网格；目标量化器形状必须匹配，非法 scale、offset 或不一致范围

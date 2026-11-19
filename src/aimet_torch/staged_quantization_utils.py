@@ -161,6 +161,7 @@ def load_quantizer_encodings(
     with open(load_path, 'r', encoding='utf-8') as f:
         encodings_dict = json.load(f)
 
+    source_schema = encodings_dict.get('schema_version', 3)
     if 'activation_encodings' in encodings_dict or 'param_encodings' in encodings_dict:
         from aimet_common.compiler_encodings import normalize_compiler_encodings
         encodings_dict = normalize_compiler_encodings(encodings_dict)
@@ -223,45 +224,34 @@ def load_quantizer_encodings(
                 continue
             if not _matches_layer_types(module, layer_types, exclude_layer_types):
                 continue
-            # input / output: 支持 list、index dict（{"0": {...}}）与旧版扁平 dict
-            if hasattr(module, 'input_quantizers'):
-                for idx, item in _iter_io_encoding_items(enc.get("input")):
-                    if idx >= len(module.input_quantizers):
+            for kind in ('input', 'output'):
+                quantizers = getattr(module, f'{kind}_quantizers', None)
+                if quantizers is None:
+                    continue
+                ports = enc.get(kind)
+                if ports is not None and not isinstance(ports, (dict, list)):
+                    raise ValueError(f'activation_encodings.{mod_name}.{kind}: expected activation ports')
+                for idx, item in _iter_io_encoding_items(ports):
+                    if idx >= len(quantizers) or quantizers[idx] is None or item is None:
                         continue
-                    q = module.input_quantizers[idx]
-                    # 标量输入槽在导出时以 None 占位、量化器亦为 None：跳过而非中断，
-                    # 否则会连带漏加载其后非标量那一路的量化器（按位对应被破坏）。
-                    if q is None or item is None or not isinstance(item, dict):
+                    q = quantizers[idx]
+                    path = f'activation_encodings.{mod_name}.{kind}.{idx}'
+                    item = _activation_port_record(item, source_schema, path)
+                    if item is None:
                         continue
-                    rmin = item.get("real_min")
-                    rmax = item.get("real_max")
-                    if rmin is not None and rmax is not None:
-                        if _apply_aimet_encoding_to_quantizer(q, rmin, rmax, device, item, verbose):
-                            _set_quantizer_allow_overwrite(q, allow_overwrite)
-                            loaded_count += 1
-                            loaded_types.add(type(module).__name__)
-                        else:
-                            skipped_count += 1
-                            if not skip_if_not_found:
-                                raise ValueError(f"输入量化器 encoding 加载失败: {mod_name}[{idx}]")
-            if hasattr(module, 'output_quantizers'):
-                for idx, item in _iter_io_encoding_items(enc.get("output")):
-                    if idx >= len(module.output_quantizers):
-                        continue
-                    q = module.output_quantizers[idx]
-                    if q is None or item is None or not isinstance(item, dict):
-                        continue
-                    rmin = item.get("real_min")
-                    rmax = item.get("real_max")
-                    if rmin is not None and rmax is not None:
-                        if _apply_aimet_encoding_to_quantizer(q, rmin, rmax, device, item, verbose):
-                            _set_quantizer_allow_overwrite(q, allow_overwrite)
-                            loaded_count += 1
-                            loaded_types.add(type(module).__name__)
-                        else:
-                            skipped_count += 1
-                            if not skip_if_not_found:
-                                raise ValueError(f"输出量化器 encoding 加载失败: {mod_name}[{idx}]")
+                    try:
+                        loaded = _apply_aimet_encoding_to_quantizer(
+                            q, item['real_min'], item['real_max'], device, item, verbose)
+                    except (ValueError, RuntimeError, TypeError) as exc:
+                        raise ValueError(f'{path}: {exc}') from exc
+                    if loaded:
+                        _set_quantizer_allow_overwrite(q, allow_overwrite)
+                        loaded_count += 1
+                        loaded_types.add(type(module).__name__)
+                    else:
+                        skipped_count += 1
+                        if not skip_if_not_found:
+                            raise ValueError(f'{path}: failed to restore quantizer')
         # 2) 非 GRU 的 param_encodings：通用解析 key 为 "module_name.param_name"（与 param_quantizers 匹配）
         for key, enc in param_enc.items():
             if not isinstance(enc, dict):
@@ -523,6 +513,28 @@ def _iter_io_encoding_items(enc):
     yield 0, enc
 
 
+def _activation_port_record(item, source_schema, path):
+    """Decode one ordinary port after compiler field and zero-point normalization."""
+    if source_schema < 4 and isinstance(item, dict) and item.keys() == {'0'}:
+        item = item['0']
+    elif source_schema < 4 and isinstance(item, list):
+        # save_encodings_to_json stores all channel records under one port.
+        from aimet_common.compiler_encodings import compact_encoding_records
+        if not item or any(not isinstance(ch, dict) or 'scale' not in ch for ch in item):
+            raise ValueError(f'{path}: expected a list of channel encoding records')
+        item = compact_encoding_records(item)
+        for field in ('bitwidth', 'dtype', 'is_symmetric', 'enc_type', 'qmin', 'qmax'):
+            if isinstance(item.get(field), list):
+                raise ValueError(f'{path}: channel records disagree on {field}')
+    if not isinstance(item, dict):
+        raise ValueError(f'{path}: expected an activation encoding record')
+    if item.get('real_min') is None or item.get('real_max') is None:
+        if 'bitwidth' in item and item.get('dtype') == f"FLOAT{item['bitwidth']}":
+            return None
+        raise ValueError(f'{path}: expected real_min and real_max for this port')
+    return item
+
+
 def _parse_param_encodings_key(key: str, module_map: dict):
     """
     通用解析 param_encodings 的 key，得到 (module_name, param_name) 或 None。
@@ -661,38 +673,38 @@ def _apply_aimet_encoding_to_quantizer(
         return False
     if real_min is None or real_max is None:
         return False
+    if enc_entry is not None and 'zero_point' in enc_entry:
+        from aimet_common.quantization_grid import IntegerGrid
+        grid = IntegerGrid.from_compiler_record(enc_entry)
+        symmetric = enc_entry.get('is_symmetric', quantizer.symmetric)
+        if isinstance(symmetric, str):
+            symmetric = symmetric == 'True'  # Normalized by normalize_compiler_encodings.
+        try:
+            quantizer.set_integer_grid(grid, symmetric=symmetric)
+        except (ValueError, TypeError, RuntimeError) as exc:
+            raise ValueError(f'Cannot restore compiler integer grid: {exc}') from exc
+        return True
+
+    min_t = torch.as_tensor(real_min, dtype=torch.float32, device=device)
+    max_t = torch.as_tensor(real_max, dtype=torch.float32, device=device)
+    if hasattr(quantizer, 'min') and isinstance(quantizer.min, torch.Tensor):
+        min_t = _align_tensor_to_shape(min_t, quantizer.min.shape)
+        max_t = _align_tensor_to_shape(max_t, quantizer.max.shape)
+        if min_t.shape != quantizer.min.shape or max_t.shape != quantizer.max.shape:
+            raise ValueError('Encoding range does not match the quantizer shape')
+    if (not torch.isfinite(min_t).all() or not torch.isfinite(max_t).all()
+            or not (min_t <= max_t).all()):
+        raise ValueError('Encoding range must be finite with real_min <= real_max')
     if enc_entry is not None:
         ok, msg = _adapt_quantizer_to_encoding(enc_entry, quantizer, verbose)
         if not ok:
-            if 'zero_point' in enc_entry:
-                raise ValueError(f'Cannot restore compiler integer grid: {msg}')
             with log_details(verbose):
                 print(f"  ⚠️ 跳过（无法按 encoding 调整量化器）: {msg}")
             return False
-    min_t = torch.tensor(real_min, dtype=torch.float32)
-    max_t = torch.tensor(real_max, dtype=torch.float32)
-    if device is not None:
-        min_t = min_t.to(device)
-        max_t = max_t.to(device)
     try:
-        # 对齐输入形状到 quantizer 参数形状，覆盖常见 [] -> [1] 场景
-        if hasattr(quantizer, 'min') and isinstance(quantizer.min, torch.Tensor):
-            q_min_shape = quantizer.min.shape
-            min_t = _align_tensor_to_shape(min_t, q_min_shape)
-
-        if hasattr(quantizer, 'max') and isinstance(quantizer.max, torch.Tensor):
-            q_max_shape = quantizer.max.shape
-            max_t = _align_tensor_to_shape(max_t, q_max_shape)
-
         quantizer.set_range(min_t, max_t)
-        if enc_entry is not None and 'zero_point' in enc_entry:
-            from aimet_common.quantization_grid import IntegerGrid
-            grid = IntegerGrid.from_compiler_record(enc_entry)
-            quantizer.set_integer_grid(grid, symmetric=quantizer.symmetric)
         return True
     except Exception as e:
-        if enc_entry is not None and 'zero_point' in enc_entry:
-            raise ValueError(f'Cannot restore compiler integer grid: {e}') from e
         with log_details(verbose):
             print(f"  ⚠️ set_range 失败: {e}")
         return False

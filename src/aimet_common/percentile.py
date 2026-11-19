@@ -66,15 +66,6 @@ def _is_expandable(shape, target):
     )
 
 
-def _reduce_range(tensor, shape):
-    padded = (1,) * (tensor.ndim - len(shape)) + tuple(shape)
-    axes = tuple(axis for axis, size in enumerate(padded) if size == 1)
-    if not axes:
-        return tensor.reshape(shape), tensor.reshape(shape)
-    return (tensor.amin(dim=axes, keepdim=True).reshape(shape),
-            tensor.amax(dim=axes, keepdim=True).reshape(shape))
-
-
 class HistogramObserver:
     """
     Observer for Histogram based calibration techniques (percentile, MSE)
@@ -132,19 +123,12 @@ class HistogramObserver:
             bin_edges = self._create_bin_edges(
                 min_val=hist_min, max_val=hist_max, device=input_tensor.device
             )
-            histogram = torch.histc(
-                hist_input.to(torch.float),
-                bins=self.num_bins,
-                min=bin_edges[0],
-                max=bin_edges[-1],
-            )
-
-            # clip inf values to hist_min and hist_max and adjust for any fp errors
-            histogram[0] += torch.sum(hist_input < bin_edges[0])
-            histogram[-1] += torch.sum(hist_input > bin_edges[-1])
+            histogram = self._count_bins(hist_input, bin_edges)
 
             hist_stats.append(Histogram(histogram, bin_edges, hist_min, hist_max))
 
+        if not torch.stack([stat.min for stat in hist_stats]).isfinite().all():
+            raise RuntimeError("A histogram needs at least one finite observation per channel")
         return hist_stats
 
     def _get_min_max(
@@ -156,19 +140,36 @@ class HistogramObserver:
         return min, max
 
     def _create_bin_edges(self, min_val, max_val, device):
-        # Adjust min/max values to be in line with PyTorch's torch.histc implementation
+        # Narrow intervals far from zero can have several bins per float32 ULP.
+        min_val, max_val = min_val.double(), max_val.double()
+        # histc expands a constant by 0.5; large constants need a representable width per bin.
+        half_width = (min_val.abs() * torch.finfo(torch.float64).eps * self.num_bins).clamp_min(0.5)
         min_val, max_val = (
-            torch.where(min_val == max_val, min_val - 0.5, min_val).float(),
-            torch.where(min_val == max_val, max_val + 0.5, max_val).float(),
+            torch.where(min_val == max_val, min_val - half_width, min_val),
+            torch.where(min_val == max_val, max_val + half_width, max_val),
         )
 
         step = (max_val - min_val) / self.num_bins
-        return torch.arange(0, self.num_bins + 1, device=device) * step + min_val
+        edges = torch.arange(self.num_bins + 1, dtype=torch.float64, device=device) * step + min_val
+        edges[-1] = max_val
+        return edges
 
-    def _get_bin_num(self, bin_width, curr_min, data):
-        bin_tensor = torch.full(data.shape, self.num_bins - 1, device=data.device)
-        index_tensor = (data - curr_min) / bin_width
-        return torch.minimum(index_tensor.to(torch.int32), bin_tensor)
+    def _count_bins(self, values, edges):
+        # Interior edges belong to the bin on their right; saturate both tails.
+        boundaries = edges[1:-1]
+        if values.is_floating_point() and values.dtype != boundaries.dtype:
+            # Round edges upwards so comparison in the input dtype is exact.
+            rounded = boundaries.to(values.dtype)
+            boundaries = torch.where(rounded.double() < boundaries,
+                                     torch.nextafter(rounded, torch.full_like(rounded, torch.inf)), rounded)
+        counts = torch.zeros(self.num_bins + 1, dtype=torch.int64, device=values.device)
+        one = counts.new_ones(())
+        for chunk in values.reshape(-1).split(1 << 20):
+            indices = torch.bucketize(chunk.contiguous(), boundaries, right=True)
+            # A spare bin ignores NaNs without compacting the input on the host.
+            indices.masked_fill_(chunk.isnan(), self.num_bins)
+            counts.scatter_add_(0, indices, one.expand_as(indices))
+        return counts[:-1]
 
     # pylint: disable=arguments-differ
     # pylint: disable=too-many-locals
@@ -178,7 +179,8 @@ class HistogramObserver:
             self.stats = new_stats_list
 
             # Compute histogram range limit based on the first input and the growth limit factor
-            input0_min, input0_max = _reduce_range(input_tensor, self.shape)
+            input0_min = torch.stack([stat.min for stat in new_stats_list]).double()
+            input0_max = torch.stack([stat.max for stat in new_stats_list]).double()
 
             input0_range = input0_max - input0_min
 
@@ -210,72 +212,36 @@ class HistogramObserver:
             curr_input = hist_inputs[index]
             left_limit, right_limit = self._histogram_range_limit[index]
 
-            updated_min = new_stats.min.clamp(left_limit, curr_stats.bin_edges[0])
-            updated_max = new_stats.max.clamp(curr_stats.bin_edges[-1], right_limit)
+            updated_min = torch.minimum(new_stats.min.clamp(min=left_limit), curr_stats.bin_edges[0])
+            updated_max = torch.maximum(new_stats.max.clamp(max=right_limit), curr_stats.bin_edges[-1])
 
             # if the current histogram can capture new_stats within in its range
             if updated_min == curr_stats.bin_edges[0] and updated_max == curr_stats.bin_edges[-1]:
                 histogram_updates = curr_stats.histogram
+                expanded_bin_edges = curr_stats.bin_edges
             else:
-                dest_bin_width = (updated_max - updated_min) / self.num_bins
-                src_bin_width = curr_stats.bin_edges[1] - curr_stats.bin_edges[0]
-
-                histogram_updates = torch.zeros(
-                    self.num_bins, device=input_tensor.device
-                )
-
+                expanded_bin_edges = self._create_bin_edges(updated_min, updated_max, input_tensor.device)
+                histogram_updates = torch.zeros_like(curr_stats.histogram)
                 src_bin_start = curr_stats.bin_edges[:-1]
-                dest_bin_index = self._get_bin_num(
-                    dest_bin_width, updated_min, src_bin_start
+                dest_bin_index = torch.bucketize(
+                    src_bin_start, expanded_bin_edges[1:-1], right=True
                 )
-                dest_bin_end = updated_min + dest_bin_width * (dest_bin_index + 1)
+                # A wider destination grid overlaps each old bin in at most two places.
+                width = curr_stats.bin_edges.diff()
+                fraction = ((expanded_bin_edges[dest_bin_index + 1] - src_bin_start) / width).clamp(0, 1)
+                left_count = (fraction * curr_stats.histogram).round().to(histogram_updates.dtype)
+                histogram_updates.index_add_(0, dest_bin_index, left_count)
+                next_bin = (dest_bin_index + 1).clamp(max=self.num_bins - 1)
+                histogram_updates.index_add_(0, next_bin, curr_stats.histogram - left_count)
 
-                # split curr_hist if values in source bin cannot neatly fold into dest bin
-                split_hist_value = torch.round(
-                    ((dest_bin_end - src_bin_start) / src_bin_width)
-                    * curr_stats.histogram
-                )
-                dest_bin_updates = torch.minimum(split_hist_value, curr_stats.histogram)
-
-                # update appropriate bin with either the full or split curr_hist value
-                histogram_updates.index_add_(
-                    dim=0, index=dest_bin_index, source=dest_bin_updates
-                )
-
-                # if curr_hist is split, update other bin that the remaining values fall into
-                other_bins = (
-                    (dest_bin_updates < curr_stats.histogram).nonzero().flatten()
-                )
-                other_bin_index = self._get_bin_num(
-                    dest_bin_width, updated_min, src_bin_start + dest_bin_width
-                )
-                other_bin_updates = curr_stats.histogram - dest_bin_updates
-                histogram_updates.index_add_(
-                    dim=0,
-                    index=other_bin_index[other_bins],
-                    source=other_bin_updates[other_bins],
-                )
-
-            # create histogram given input tensor and full range
-            expanded_histogram = torch.histc(
-                curr_input.to(torch.float),
-                bins=self.num_bins,
-                min=updated_min,
-                max=updated_max,
-            )
-            expanded_histogram += histogram_updates.to(expanded_histogram.device)
-
-            # clip inf values to hist_min and hist_max
-            expanded_histogram[0] += torch.sum(curr_input < updated_min)
-            expanded_histogram[-1] += torch.sum(curr_input > updated_max)
-
-            expanded_bin_edges = self._create_bin_edges(
-                min_val=updated_min,
-                max_val=updated_max,
-                device=expanded_histogram.device,
-            )
+            if torch.equal(new_stats.bin_edges, expanded_bin_edges):
+                batch_counts = new_stats.histogram
+            else:
+                batch_counts = self._count_bins(curr_input, expanded_bin_edges)
+            expanded_histogram = histogram_updates + batch_counts
             self.stats[index] = Histogram(
-                expanded_histogram, expanded_bin_edges, updated_min, updated_max
+                expanded_histogram, expanded_bin_edges,
+                updated_min.to(new_stats.min.dtype), updated_max.to(new_stats.max.dtype)
             )
 
     def reset_stats(self):
@@ -342,19 +308,17 @@ def percentile_ranges(stats, shape, num_steps, is_symmetric, percentile):
     encoding_max_list = []
 
     for list_elem in stats:
-        cum_sum = torch.cumsum(list_elem.histogram, dim=0)
+        cum_sum = torch.cumsum(list_elem.histogram, dim=0, dtype=torch.float64)
         # trim percentile value from min and max
         max_index = torch.searchsorted(cum_sum, cum_sum[-1] * percentile / 100)
         min_index = torch.searchsorted(
             cum_sum, cum_sum[-1] * (1 - percentile / 100)
         )
 
-        if percentile == 100:
-            min_index = 0
-            max_index = -1
-
-        curr_min = list_elem.bin_edges[min_index]
-        curr_max = list_elem.bin_edges[max_index]
+        # The retained interval spans both percentile bins, including their far edges.
+        left, right = (0, -1) if percentile == 100 else (min_index, max_index + 1)
+        curr_min = list_elem.bin_edges[left].to(list_elem.min.dtype)
+        curr_max = list_elem.bin_edges[right].to(list_elem.max.dtype)
         # adjust min/max
         updated_min, updated_max = adjust_min_max(
             curr_min, curr_max, num_steps, is_symmetric

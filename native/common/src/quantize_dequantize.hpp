@@ -12,21 +12,21 @@
 namespace DlQuantization
 {
 
-RX_MET_QDQ_HOST_DEVICE inline float qdqReciprocal(float scale)
+RX_MET_QDQ_HOST_DEVICE inline float qdqDivide(float value, float scale)
 {
 #ifdef __CUDA_ARCH__
-    return __fdiv_rn(1.0f, scale);
+    return __fdiv_rn(value, scale);
 #else
-    return 1.0f / scale;
+    return value / scale;
 #endif
 }
 
-RX_MET_QDQ_HOST_DEVICE inline double qdqReciprocal(double scale)
+RX_MET_QDQ_HOST_DEVICE inline double qdqDivide(double value, double scale)
 {
 #ifdef __CUDA_ARCH__
-    return __ddiv_rn(1.0, scale);
+    return __ddiv_rn(value, scale);
 #else
-    return 1.0 / scale;
+    return value / scale;
 #endif
 }
 
@@ -39,8 +39,9 @@ RX_MET_QDQ_HOST_DEVICE inline T stableQuantizeDequantize(T value, T minimum, T m
     if (value != value)
         return value;
     const T clipped = fmax(fmin(value, maximum), minimum);
-    // Match Torch's rounded reciprocal even when CUDA enables fast math.
-    const T scaled = clipped * qdqReciprocal(scale);
+    // Round the quotient once, including when CUDA is compiled with fast math.
+    // A separately rounded reciprocal can move values across a half-code tie.
+    const T scaled = qdqDivide(clipped, scale);
     const T rounded = stochastic ? floor(scaled + noise) : nearbyint(scaled);
     return rounded * scale;
 }

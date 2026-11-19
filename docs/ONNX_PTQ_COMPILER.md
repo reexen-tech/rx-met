@@ -312,8 +312,9 @@ QuantGRU/QuantLSTM 自身的校准接口。
 原生 CPU/CUDA QDQ 共用居中整数网格计算，nearest 使用 ties-to-even。
 INT32 不经过 float32 的 `2^31` 平移，避免小整数码丢失。该行为由原生库实现，
 从旧版源码安装升级时须同步重建原生库；匹配的应用包已经包含原生库。
-该内核规则不改变 scale、offset/zero_point 或保存格式。非 Po2 scale 使用正确舍入的
-倒数乘法；最小范围保护仅在公共 Percentile 模块按目标整数域应用一次。
+原生 QDQ 与 Torch 显式量化共用除法约定：先将 `value / scale` 舍入到计算精度，再取最近偶数码。
+旧版先对 `1 / scale` 舍入再乘，非 Po2 网格的半格附近可能相差一个码。两版的
+scale、offset/zero_point 和保存格式相同。最小范围保护在公共 Percentile 模块按目标整数域应用一次。
 CUDA provider 默认设置 `use_tf32=0`，使校准、评价和恢复使用完整 FP32 矩阵计算；
 显式传入的 provider 选项保持优先。
 

@@ -8,6 +8,8 @@
 #ifdef RX_MET_CPU_ONLY
 #include "gru_host.h"
 #else
+#include <c10/cuda/CUDAGuard.h>
+#include <c10/cuda/CUDAStream.h>
 #include "gru_interface.h"
 #include "calibration_gpu.cuh"
 #endif
@@ -784,13 +786,33 @@ std::tuple<torch::Tensor, torch::Tensor> forward_calibrate_wrapper(
 // =====================================================================
 // backward_quant_wrapper: 量化反向传播（使用保存的量化值）
 // =====================================================================
-// 输入: W_q, R_q, bw_q, br_q, x_q 是前向传播保存的量化值
-// 函数会直接反量化这些值，然后进行反向传播
+// Allocate the GEMM layout directly, including for singleton transposes that
+// are already contiguous and would otherwise alias the saved codes.
+static torch::Tensor dequantize_transposed_weight(
+    const torch::Tensor &codes, const ChannelQuantParam &params, bool use_pot2) {
+    auto weight = codes.t().to(torch::kFloat32, false, true, at::MemoryFormat::Contiguous);
+    auto scale = [use_pot2](const QuantParam &q) { return decode_scale(toFixedScale(q, use_pot2)); };
+    if (params.granularity == OperatorQuantConfig::PER_TENSOR) {
+        weight.mul_(scale(params.tensor()));
+    } else if (params.granularity == OperatorQuantConfig::PER_GATE) {
+        for (int gate = 0; gate < 3; ++gate) {
+            weight.narrow(0, gate * params.hidden, params.hidden).mul_(scale(params.gate(gate)));
+        }
+    } else {
+        std::vector<float> scales;
+        scales.reserve(params.size());
+        for (const auto &q : params.channels) scales.push_back(scale(q));
+        weight.mul_(torch::tensor(scales, weight.options()).view({-1, 1}));
+    }
+    return weight;
+}
+
+template <at::ScalarType Storage>
 std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor>
-backward_quant_float_storage_wrapper(
+backward_quant_wrapper(
     int time_steps, int batch_size, int input_size, int hidden_size,
-    torch::Tensor &W_q, torch::Tensor &R_q, torch::Tensor &bw_q,
-    torch::Tensor &br_q, torch::Tensor &x_q,
+    const torch::Tensor &W_q, const torch::Tensor &R_q, const torch::Tensor &bw_q,
+    const torch::Tensor &br_q, const torch::Tensor &x_q,
     const torch::Tensor &dh_new,
     const torch::Tensor &h,
     const torch::Tensor &v,
@@ -809,11 +831,11 @@ backward_quant_float_storage_wrapper(
     const torch::Tensor &h_mask) {
 
     // 检查输入张量的类型和设备
-    TORCH_CHECK(W_q.is_cuda() && W_q.dtype() == torch::kFloat32, "W_q must be CUDA float32 tensor");
-    TORCH_CHECK(R_q.is_cuda() && R_q.dtype() == torch::kFloat32, "R_q must be CUDA float32 tensor");
-    TORCH_CHECK(bw_q.is_cuda() && bw_q.dtype() == torch::kFloat32, "bw_q must be CUDA float32 tensor");
-    TORCH_CHECK(br_q.is_cuda() && br_q.dtype() == torch::kFloat32, "br_q must be CUDA float32 tensor");
-    TORCH_CHECK(x_q.is_cuda() && x_q.dtype() == torch::kFloat32, "x_q must be CUDA float32 tensor");
+    TORCH_CHECK(W_q.is_cuda() && W_q.scalar_type() == Storage, "W_q must be a CUDA ", Storage, " tensor");
+    TORCH_CHECK(R_q.is_cuda() && R_q.scalar_type() == Storage, "R_q must be a CUDA ", Storage, " tensor");
+    TORCH_CHECK(bw_q.is_cuda() && bw_q.scalar_type() == Storage, "bw_q must be a CUDA ", Storage, " tensor");
+    TORCH_CHECK(br_q.is_cuda() && br_q.scalar_type() == Storage, "br_q must be a CUDA ", Storage, " tensor");
+    TORCH_CHECK(x_q.is_cuda() && x_q.scalar_type() == Storage, "x_q must be a CUDA ", Storage, " tensor");
     TORCH_CHECK(dh_new.is_cuda() && dh_new.dtype() == torch::kFloat32,
                 "dh_new must be CUDA float32 tensor");
     TORCH_CHECK(h.is_cuda() && h.dtype() == torch::kFloat32, "h must be CUDA float32 tensor");
@@ -841,33 +863,12 @@ backward_quant_float_storage_wrapper(
     // 转换量化参数
     GRUQuantParams cpp_params = quant_params.to_cpp();
 
-    // 原地反量化（直接修改保存的量化值）
-    // 注意：这些量化值是从 forward 保存的中间变量，在 backward 中只使用一次
-    // backward 完成后这些 Tensor 会被 PyTorch 自动释放，不需要保护原始数据
-    // 使用统一接口，内部根据 granularity 自动选择 per-tensor、per-gate 或 per-channel 反量化
-    dequantizeGRUWeights(
-        W_q.data_ptr<float>(), R_q.data_ptr<float>(),
-        bw_q.data_ptr<float>(), br_q.data_ptr<float>(),
-        input_size, hidden_size, cpp_params);
-    
-    const std::size_t x_size = time_steps * batch_size * input_size;
-    dev::dequantificationFPInplace(x_q.data_ptr<float>(), x_size,
-                                   toFixedScale(cpp_params.x_, cpp_params.bitwidth_config_.usePOT2_),
-                                   cpp_params.x_.zero_point);
-
-    // 同步 CUDA 操作
-    cudaDeviceSynchronize();
-    cudaError_t err = cudaGetLastError();
-    if (err != cudaSuccess) {
-        const char *err_str = cudaGetErrorString(err);
-        fprintf(stderr, "CUDA error in backward_quant_wrapper dequant: %s\n", err_str);
-        throw std::runtime_error(std::string("CUDA error in backward_quant_wrapper dequant: ") + err_str);
-    }
-
-    // 转置操作（使用反量化后的值）
-    torch::Tensor x_t = x_q.permute({2, 0, 1}).contiguous();  // [T,B,I] -> [I,T,B]
-    torch::Tensor W_t = W_q.t().contiguous();  // [C, H*3] -> [H*3, C]
-    torch::Tensor R_t = R_q.t().contiguous();  // [H, H*3] -> [H*3, H]
+    const c10::cuda::CUDAGuard guard(W_q.device());
+    const bool use_pot2 = cpp_params.bitwidth_config_.usePOT2_;
+    auto W_t = dequantize_transposed_weight(W_q, cpp_params.W_, use_pot2);
+    auto R_t = dequantize_transposed_weight(R_q, cpp_params.R_, use_pot2);
+    auto x_t = x_q.permute({2, 0, 1}).to(torch::kFloat32, false, true, at::MemoryFormat::Contiguous);
+    x_t.sub_(static_cast<float>(cpp_params.x_.zero_point)).mul_(decode_scale(toFixedScale(cpp_params.x_, use_pot2)));
 
     // 确保 cublas handle 已初始化
     if (g_blas_handle == nullptr) {
@@ -890,11 +891,13 @@ backward_quant_float_storage_wrapper(
         return t.numel() > 0 ? t.data_ptr<uint8_t>() : nullptr;
     };
 
-    // 调用 C++ 量化反向接口（使用反量化后的转置值）
+    // The native backward owns its CUDA streams and completes before returning.
+    // Make the transposes, upstream gradients and zeroed outputs visible to them.
+    c10::cuda::getCurrentCUDAStream().synchronize();
     quantGRUBackward(time_steps, batch_size, input_size, hidden_size,
                      W_t.data_ptr<float>(),  // [H*3, C] - 转置后的 W（已反量化）
                      R_t.data_ptr<float>(),  // [H*3, H] - 转置后的 R（已反量化）
-                     bw_q.data_ptr<float>(), br_q.data_ptr<float>(),  // 已反量化
+                     nullptr, nullptr,  // bias gradients use the gate derivatives and masks only
                      x_t.data_ptr<float>(),  // [I, T, B] - 转置后的 x（已反量化）
                      dh_new.data_ptr<float>(), h.data_ptr<float>(), v.data_ptr<float>(),
                      g_blas_handle,
@@ -917,55 +920,6 @@ backward_quant_float_storage_wrapper(
                      get_mask_ptr(h_mask));
 
     return std::make_tuple(dx, dW, dR, dbw, dbr, dh);
-}
-
-// =====================================================================
-// backward_quant_int_storage_wrapper: 量化反向传播（int32 存储）
-// =====================================================================
-// 输入 W_q/R_q/bw_q/br_q/x_q 为 forward 保存的 int32 量化值。
-// 先转换为 float32 q 值，然后复用 float 存储版的反量化 + 反向逻辑。
-std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor>
-backward_quant_int_storage_wrapper(
-    int time_steps, int batch_size, int input_size, int hidden_size,
-    torch::Tensor &W_q, torch::Tensor &R_q, torch::Tensor &bw_q,
-    torch::Tensor &br_q, torch::Tensor &x_q,
-    const torch::Tensor &dh_new,
-    const torch::Tensor &h,
-    const torch::Tensor &v,
-    const GRUQuantParamsPy &quant_params,
-    // QAT masks（仅在训练模式时有效）
-    const torch::Tensor &x_mask,
-    const torch::Tensor &h0_mask,
-    const torch::Tensor &W_mask,
-    const torch::Tensor &R_mask,
-    const torch::Tensor &bw_mask,
-    const torch::Tensor &br_mask,
-    const torch::Tensor &weight_ih_linear_mask,
-    const torch::Tensor &weight_hh_linear_mask,
-    const torch::Tensor &gate_input_mask,
-    const torch::Tensor &gate_output_mask,
-    const torch::Tensor &h_mask) {
-
-    TORCH_CHECK(W_q.is_cuda() && W_q.dtype() == torch::kInt32, "W_q must be CUDA int32 tensor");
-    TORCH_CHECK(R_q.is_cuda() && R_q.dtype() == torch::kInt32, "R_q must be CUDA int32 tensor");
-    TORCH_CHECK(bw_q.is_cuda() && bw_q.dtype() == torch::kInt32, "bw_q must be CUDA int32 tensor");
-    TORCH_CHECK(br_q.is_cuda() && br_q.dtype() == torch::kInt32, "br_q must be CUDA int32 tensor");
-    TORCH_CHECK(x_q.is_cuda() && x_q.dtype() == torch::kInt32, "x_q must be CUDA int32 tensor");
-
-    // int32 量化值 -> float32 量化值（内容仍是定点整数，dtype 转 float）
-    // 后续 float 存储版会对这些 buffer 原地反量化，因此必须是独立可写副本。
-    torch::Tensor W_q_f = W_q.to(torch::kFloat32);
-    torch::Tensor R_q_f = R_q.to(torch::kFloat32);
-    torch::Tensor bw_q_f = bw_q.to(torch::kFloat32);
-    torch::Tensor br_q_f = br_q.to(torch::kFloat32);
-    torch::Tensor x_q_f = x_q.to(torch::kFloat32);
-
-    return backward_quant_float_storage_wrapper(
-        time_steps, batch_size, input_size, hidden_size,
-        W_q_f, R_q_f, bw_q_f, br_q_f, x_q_f,
-        dh_new, h, v, quant_params,
-        x_mask, h0_mask, W_mask, R_mask, bw_mask, br_mask,
-        weight_ih_linear_mask, weight_hh_linear_mask, gate_input_mask, gate_output_mask, h_mask);
 }
 
 // =====================================================================
@@ -1701,7 +1655,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     // backward_quant_float_storage: 量化反向传播（量化值 float32 存储）
     // =====================================================================
 #ifndef RX_MET_CPU_ONLY
-    m.def("backward_quant_float_storage", &backward_quant_float_storage_wrapper,
+    m.def("backward_quant_float_storage", &backward_quant_wrapper<torch::kFloat32>,
           "GRU quantized backward pass with float32-storage quantized values.\n"
           "\n"
           "Args:\n"
@@ -1734,7 +1688,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     // =====================================================================
     // backward_quant_int_storage: 量化反向传播（量化值 int32 存储）
     // =====================================================================
-    m.def("backward_quant_int_storage", &backward_quant_int_storage_wrapper,
+    m.def("backward_quant_int_storage", &backward_quant_wrapper<torch::kInt32>,
           "GRU quantized backward pass with int32-storage quantized values.\n"
           "Converts int32 quantized values to float32 then reuses float-storage backward.\n"
           "\n"

@@ -306,8 +306,8 @@ class AffineEncoding(EncodingBase, _GridMixin):
         # Cast types of the inputs to plain torch.Tensor for faster execution.
         return quantize(
             input.as_subclass(torch.Tensor),
-            scale.to(input.dtype).as_subclass(torch.Tensor),
-            offset.to(input.dtype).as_subclass(torch.Tensor),
+            scale.as_subclass(torch.Tensor),
+            offset.as_subclass(torch.Tensor),
             qmin,
             qmax,
             block_size=block_size,
@@ -327,8 +327,8 @@ class AffineEncoding(EncodingBase, _GridMixin):
         # Cast types of the inputs to plain torch.Tensor for faster execution.
         return dequantize(
             input.as_subclass(torch.Tensor),
-            scale.to(input.dtype).as_subclass(torch.Tensor),
-            offset.to(input.dtype).as_subclass(torch.Tensor),
+            scale.as_subclass(torch.Tensor),
+            offset.as_subclass(torch.Tensor),
             block_size=block_size,
         )
 

@@ -40,11 +40,9 @@ import functools
 from packaging import version
 from typing import Callable, Optional, List, Tuple
 import torch
-import torch.ao.quantization.fx._decomposed
 from aimet_torch.v2.utils import (
     _is_expandable,
     _ContextManager,
-    _torch_compiler_is_exporting,
 )
 import aimet_torch.v2.experimental.onnx._export as _onnx
 
@@ -61,25 +59,12 @@ else:
     _compile = lambda fn: fn
 
 
-def _is_value_representable(dtype: torch.dtype, value: int):
-    """
-    Return whether an integer value can be represented with the given dtype
-    """
-    dtype_repr = torch.tensor(value, dtype=dtype)
-    return dtype_repr.isfinite() and dtype_repr.long() == value
-
-
 @functools.lru_cache(None)
 def _is_grid_representable(dtype: torch.dtype, qmin: int, qmax: int):
-    """
-    Return whether a range of integers can be represented with the given dtype
-    """
-    return (
-        _is_value_representable(dtype, qmax)
-        and _is_value_representable(dtype, qmax - 1)
-        and _is_value_representable(dtype, qmin + 1)
-        and _is_value_representable(dtype, qmin)
-    )
+    # Adjacent integers are exactly representable through 2**precision.
+    # Use dtype metadata so torch.export does not need to guard a tensor value.
+    limit = 2 / torch.finfo(dtype).eps
+    return max(abs(qmin), abs(qmin + 1), abs(qmax - 1), abs(qmax)) <= limit
 
 
 def _is_numerically_stable(dtype: torch.dtype, qmin: int, qmax: int):
@@ -168,7 +153,8 @@ def quantize(
     """
     _validate_arguments(tensor, scale, qmin, qmax, block_size)
 
-    output_dtype = internal_dtype = tensor.dtype
+    output_dtype = tensor.dtype
+    internal_dtype = torch.promote_types(output_dtype, scale.dtype)
 
     if not _is_grid_representable(tensor.dtype, qmin, qmax):
         msg = f"{tensor.dtype} is unable to represent quantized output of range [{qmin}, {qmax}]."
@@ -190,9 +176,6 @@ def quantize(
         .to(output_dtype)
         .view(orig_tensor_shape)
     )
-
-
-_ALLOW_FAST_FORWARD = True  # temporary flag for debugging
 
 
 @_onnx.register_symbolic(_onnx.quantize_dequantize_symbolic)
@@ -218,45 +201,10 @@ def quantize_dequantize(
     """
     _validate_arguments(tensor, scale, qmin, qmax, block_size)
 
-    _fast_forward = _ALLOW_FAST_FORWARD
-
-    # torch.fake_quantize doesn't support blockwise quantization
-    _fast_forward &= block_size is None
-
-    # torch.fake_quantize doesn't support JIT tracing
-    _fast_forward &= not torch.jit.is_tracing()
-
-    # torch.fake_quantize doesn't compute gradients for scale/offset
-    _fast_forward &= (not scale.requires_grad and not offset.requires_grad) or (
-        not torch.is_grad_enabled()
-    )
-
-    # if user explicitly designated specific rounding function, honor it strictly
-    _fast_forward &= _round_fn == torch.round and _round_fn_inplace == torch.round_
-
-    # if user explicitly designated specific rounding function, honor it strictly
-    _fast_forward &= zero_point_shift == 0.0
-
-    if _fast_forward:
-        ret = _torch_fake_quantize(tensor, scale, offset, qmin, qmax)
-
-        if ret is not None:
-            # PyTorch 快速 fake-quant 会把 NaN 转成最小整数码，掩盖上游算子的非法值；
-            # 通用浮点 QDQ 路径则保留 NaN。保持两条路径一致，便于训练及时发现异常。
-            # 只恢复 NaN，有限值、Inf 饱和和原有 clamp STE 均不改变，也不移动 QDQ。
-            # 快速内核返回独立输出，在其上原地处理可保留 stride；重新分配连续张量
-            # 会改变 RDFT 等转置权重的布局，进而改变后续矩阵计算的舍入和训练轨迹。
-            return ret.masked_fill_(torch.isnan(tensor), float("nan"))
-
-    if _torch_compiler_is_exporting():
-        raise RuntimeError
-
-    output_dtype = internal_dtype = tensor.dtype
-
-    # Skip numerical stability check during torch.export.export
-    # as if-else statements in these util functions lead to graph break
-    # although those checks are irrelevant for the sake of export
-
+    # Q and QDQ use the same floating-point division and clamp before narrowing.
+    # PyTorch fake_quantize instead rounds a reciprocal product on some backends.
+    output_dtype = tensor.dtype
+    internal_dtype = torch.promote_types(output_dtype, scale.dtype)
     if not _is_numerically_stable(internal_dtype, qmin, qmax):
         internal_dtype = torch.float32
         if not _is_numerically_stable(internal_dtype, qmin, qmax):
@@ -284,177 +232,6 @@ def quantize_dequantize(
     return qdq_tensor.to(output_dtype).view(orig_tensor_shape)
 
 
-def _torch_fake_quantize(
-    tensor: torch.Tensor,
-    scale: torch.Tensor,
-    offset: torch.Tensor,
-    qmin: int,
-    qmax: int,
-) -> Optional[torch.Tensor]:
-    scale_internal_dtype = None if scale.dtype == torch.float32 else torch.float32
-    tensor_internal_dtype = tensor.dtype
-    output_dtype = tensor.dtype
-
-    if _torch_version < (2, 6, 0) and tensor_internal_dtype == torch.bfloat16:
-        # torch.fake_quantize only supports bfloat16 in >=2.6.0
-        tensor_internal_dtype = torch.float32
-
-    if output_dtype == tensor_internal_dtype:
-        output_dtype = None
-
-    if tensor_internal_dtype == tensor.dtype:
-        tensor_internal_dtype = None
-
-    is_per_tensor = scale.numel() == offset.numel() == 1
-
-    if is_per_tensor:
-        tensor = tensor.to(tensor_internal_dtype)
-        scale = scale.to(scale_internal_dtype)
-        zp = -offset.to(torch.int32)
-        return _call_torch_fake_quantize_per_tensor(
-            tensor,
-            scale.view(()) if scale.dim() > 0 else scale,
-            zp.view(()) if zp.dim() > 0 else zp,
-            qmin,
-            qmax,
-        ).to(output_dtype)
-
-    scale_shape = tuple((*(1 for _ in range(tensor.dim() - scale.dim())), *scale.shape))
-    if scale_shape != scale.shape:
-        scale = scale.view(*scale_shape)
-    offset_shape = tuple(
-        (*(1 for _ in range(tensor.dim() - offset.dim())), *offset.shape)
-    )
-    if offset_shape != offset.shape:
-        offset = offset.view(*offset_shape)
-
-    is_per_channel = scale.shape == offset.shape and all(
-        scale_dim in (1, tensor_dim)
-        for scale_dim, tensor_dim in zip(scale.shape, tensor.shape)
-    )
-
-    if is_per_channel:
-        axes = [axis for axis, scale_dim in enumerate(scale.shape) if scale_dim != 1]
-        assert axes
-
-        if len(axes) == 1:
-            (axis,) = axes
-            try:
-                tensor = tensor.to(tensor_internal_dtype)
-                scale = scale.to(scale_internal_dtype)
-                zp = -offset.to(torch.int32)
-                return _call_torch_fake_quantize_per_channel(
-                    tensor,
-                    scale.flatten() if scale.dim() > 1 else scale,
-                    zp.flatten() if zp.dim() > 1 else zp,
-                    axis,
-                    qmin,
-                    qmax,
-                ).to(output_dtype)
-            except RuntimeError:
-                # NOTE: torch.fake_quantize_per_channel_affine throws runtime error
-                # if zero_point is not in [qmin, qmax]. In practice, this error will
-                # almost never occur because per-channel quantization always uses zero_point=0
-                return None
-
-    return None
-
-
-@functools.lru_cache
-def _get_dtype(qmin: int, qmax: int) -> torch.dtype:
-    for bitwidth in (1, 2, 3, 4, 5, 6, 7, 8, 16, 32):
-        if 0 <= qmin < qmax < 2**bitwidth:
-            try:
-                return getattr(torch, f"uint{bitwidth}")
-            except AttributeError:
-                pass
-
-        if -(2 ** (bitwidth - 1)) <= qmin < qmax < 2 ** (bitwidth - 1):
-            try:
-                return getattr(torch, f"int{bitwidth}")
-            except AttributeError:
-                pass
-
-    raise RuntimeError(
-        f"qmin={qmin}, qmax={qmax} isn't representable "
-        "with any integer dtypes available in pytorch"
-    )
-
-
-def _call_torch_fake_quantize_per_tensor(
-    input: torch.Tensor,  # pylint: disable=redefined-builtin
-    scale: torch.Tensor,
-    zero_point: torch.Tensor,
-    qmin: int,
-    qmax: int,
-) -> torch.Tensor:
-    if _torch_compiler_is_exporting():
-        dtype = _get_dtype(qmin, qmax)
-        input_q = torch.ops.quantized_decomposed.quantize_per_tensor(
-            input,
-            scale.item(),
-            zero_point.item(),
-            qmin,
-            qmax,
-            dtype,
-        )
-        return torch.ops.quantized_decomposed.dequantize_per_tensor(
-            input_q,
-            scale.item(),
-            zero_point.item(),
-            qmin,
-            qmax,
-            dtype,
-        )
-
-    return torch.fake_quantize_per_tensor_affine(
-        input,
-        scale,
-        zero_point,
-        qmin,
-        qmax,
-    )
-
-
-def _call_torch_fake_quantize_per_channel(
-    input: torch.Tensor,  # pylint: disable=redefined-builtin
-    scale: torch.Tensor,
-    zero_point: torch.Tensor,
-    axis: int,
-    qmin: int,
-    qmax: int,
-) -> torch.Tensor:
-    if _torch_compiler_is_exporting():
-        dtype = _get_dtype(qmin, qmax)
-        input_q = torch.ops.quantized_decomposed.quantize_per_channel(
-            input,
-            scale,
-            zero_point,
-            axis,
-            qmin,
-            qmax,
-            dtype,
-        )
-        return torch.ops.quantized_decomposed.dequantize_per_channel(
-            input_q,
-            scale,
-            zero_point,
-            axis,
-            qmin,
-            qmax,
-            dtype,
-        )
-
-    return torch.fake_quantize_per_channel_affine(
-        input,
-        scale,
-        zero_point,
-        axis,
-        qmin,
-        qmax,
-    )
-
-
 @_onnx.register_symbolic(_onnx.dequantize_symbolic)
 def dequantize(
     tensor: torch.Tensor,
@@ -473,7 +250,8 @@ def dequantize(
     """
     _validate_arguments(tensor, scale, block_size=block_size)
 
-    output_dtype = internal_dtype = tensor.dtype
+    output_dtype = tensor.dtype
+    internal_dtype = torch.promote_types(output_dtype, scale.dtype)
 
     orig_tensor_shape = tensor.shape
     tensor = reshape_tensor_for_blocks(tensor, scale.shape, block_size)
@@ -481,7 +259,7 @@ def dequantize(
     offset = offset.view(get_encoding_shape_with_blocks(offset.shape, block_size))
     return (
         DequantizeFunc.apply(
-            tensor, scale.to(internal_dtype), offset.to(internal_dtype)
+            tensor.to(internal_dtype), scale.to(internal_dtype), offset.to(internal_dtype)
         )
         .to(output_dtype)
         .view(orig_tensor_shape)

@@ -61,6 +61,14 @@ sim.set_percentile_value(99.99)
 `set_percentile_value()` 调整校准百分位。重建 QuantSim 时，模型预处理参数、基础配置、
 默认位宽和量化方案必须与首次创建时一致。
 
+百分位校准按直方图桶累计样本数，保留区间使用入选桶的外侧边界。重新校准时，
+临界桶及大样本计数的数值修正可能改变 scale。加载原有 encoding 时仍使用文件中的整数网格。
+
+PyTorch 普通 affine 量化在冻结参数、训练和 `torch.export` 路径下都先除以 scale，
+再舍入和截断。FP16/BF16 输入在量化计算中保留网格精度，输出按接口约定恢复相应 dtype。
+直接处理 `torch.export` ATen 图的程序应识别除法、舍入和截断等运算；标准 ONNX Q/DQ
+导出仍使用 `QuantizeLinear` 和 `DequantizeLinear`。
+
 ## 混合精度配置
 
 混合精度配置由 `apply_mixed_precision_bitwidth()` 读取：

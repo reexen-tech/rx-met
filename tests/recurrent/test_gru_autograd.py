@@ -90,6 +90,48 @@ class GruClampChainRuleTest(unittest.TestCase):
 
 
 @unittest.skipUnless(torch.cuda.is_available(), 'CUDA is required')
+class GruRetainedGraphTest(unittest.TestCase):
+    def check_retained_graph(self, carrier):
+        with tempfile.TemporaryDirectory() as directory:
+            model, _ = fixed_model(directory)
+        if carrier is None:
+            model.use_quantization = False
+        else:
+            model.quant_storage_dtype = carrier
+
+        # A single batch element avoids nondeterministic atomic bias reductions.
+        x = torch.tensor([[[.5]], [[.375]]], device='cuda', requires_grad=True)
+        h0 = torch.tensor([[[.25]]], device='cuda', requires_grad=True)
+        leaves = (x, h0, *model.parameters())
+        names = ('input', 'h0', *dict(model.named_parameters()))
+        upstream = (torch.tensor([[[.75]], [[-.25]]], device='cuda'),
+                    torch.tensor([[[.5]]], device='cuda'))
+        expected = torch.autograd.grad(model(x, h0), leaves, upstream)
+
+        outputs = model(x, h0)
+        saved = outputs[0].grad_fn.saved_tensors
+        before = [tensor.detach().clone() for tensor in saved]
+        for visit in (1, 2):
+            gradients = torch.autograd.grad(outputs, leaves, upstream, retain_graph=True)
+            with self.subTest(visit=visit, check='saved tensors'):
+                changed = [i for i, (old, new) in enumerate(zip(before, saved))
+                           if not torch.equal(old, new)]
+                self.assertEqual(changed, [])
+            for name, actual, fresh in zip(names, gradients, expected):
+                with self.subTest(visit=visit, gradient=name):
+                    torch.testing.assert_close(actual, fresh, rtol=0, atol=0)
+
+    def test_quantized_float32(self):
+        self.check_retained_graph('float32')
+
+    def test_quantized_int32(self):
+        self.check_retained_graph('int32')
+
+    def test_floating(self):
+        self.check_retained_graph(None)
+
+
+@unittest.skipUnless(torch.cuda.is_available(), 'CUDA is required')
 class GruEvalBackwardTest(unittest.TestCase):
     def backward(self, model, value, h0):
         model.zero_grad(set_to_none=True)

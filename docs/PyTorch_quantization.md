@@ -193,6 +193,8 @@ if do_qat:
 ```
 
 每轮训练开始重新调用 `set_train_mode_freeze_bn()`；评估会将模型切回 eval。
+`freeze_bn_affine=True` 会冻结实际 BatchNorm 的 `weight` 和 `bias`，包括 `Sequential`
+中的 BN。`set_train_mode_freeze_bn()` 控制 BN 统计量的训练模式。这两个选项的作用独立。
 QAT 沿用已校准的固定量化网格，不在每个训练 batch 重新校准。
 CPU runtime 支持本教程的校准与 PTQ 路径，不支持浮点训练或 QAT。
 

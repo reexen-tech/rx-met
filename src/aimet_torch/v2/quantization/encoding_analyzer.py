@@ -562,16 +562,10 @@ class _LpNormEncodingAnalyzer(EncodingAnalyzer[_Histogram]):
             num_steps (int): Number of quantization steps, i.e., (2 ** bitwidth) - 1
             gamma (float): Fudge factor to trade off between saturation cost and quantization cost. When gamma=1.0, this approximates the MSE of the quantization function
         """
-        tensor_kwargs = {"device": test_deltas.device, "dtype": test_deltas.dtype}
         hists = torch.stack([stat.histogram for stat in stats])
         bin_edges = torch.stack([stat.bin_edges for stat in stats])
-        hist_delta = bin_edges[:, 1] - bin_edges[:, 0]
-        # hist_midpoints is shape (hists, num_bins)
-        hist_offsets = (
-            hist_delta[:, None]
-            * torch.arange(0, bin_edges.shape[1] - 1, **tensor_kwargs)[None, :]
-        )
-        hist_midpoints = (bin_edges[:, 0] + hist_delta / 2)[:, None] + hist_offsets
+        # Keep the candidate-by-bin working set in the candidate dtype.
+        hist_midpoints = ((bin_edges[:, 1:] + bin_edges[:, :-1]) * 0.5).to(test_deltas.dtype)
         # hists_midpoints_qdq is shape (hists, num_deltas, num_offsets, num_bins)
         test_offsets_bcast = test_offsets[:, :, :, None]
         test_deltas_bcast = test_deltas[:, :, :, None]
