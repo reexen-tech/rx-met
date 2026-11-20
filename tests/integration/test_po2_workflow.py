@@ -22,7 +22,7 @@ from aimet_torch.native_recurrent import named_native_recurrent
 from aimet_torch.power_of_2_quantization import named_generic_quantizers, verify_model_power_of_2
 from aimet_torch.rx_export.export_onnx_json import export_onnx_json
 from aimet_torch.staged_quantization_utils import load_quantizer_encodings
-from aimet_torch.utils_rx import apply_mixed_precision_bitwidth, apply_power_of_2_workflow
+from aimet_torch.utils_rx import align_bias_scale, apply_mixed_precision_bitwidth, apply_power_of_2_workflow
 from aimet_torch.v2.nn import compute_encodings
 from aimet_torch.v2.quantization.base import QuantizerBase
 from aimet_torch.v2.quantsim import QuantizationSimModel
@@ -523,6 +523,30 @@ class BiasAlignmentRangeTest(unittest.TestCase):
             # regression isolates bias alignment rather than Po2 output clipping.
             sim.model(x + 1.0)
         return sim,x,expected
+
+    def test_affine_bias_alignment_preserves_other_quantizer_grids(self):
+        for convolution in (False, True):
+            with self.subTest(convolution=convolution):
+                sim, _, _ = self.calibrated(convolution)
+                layer = sim.model.layer
+                bias = layer.param_quantizers['bias']
+                previous = {
+                    name: quantizer.get_scale().detach().clone()
+                    for name, quantizer in named_generic_quantizers(sim.model)
+                    if quantizer is not bias
+                }
+                self.assertTrue(any(
+                    torch.any(torch.frexp(scale)[0] != .5).item()
+                    for scale in previous.values()
+                ))
+                report = align_bias_scale(sim.model, bias_bitwidth=32, verbose=False)
+                self.assertEqual(report['modified_conv'], 1)
+                self.assertEqual(layer.param_quantizers['bias'].bitwidth, 32)
+                target = layer.input_quantizers[0].get_scale().reshape(()) * layer.param_quantizers['weight'].get_scale().reshape(-1)
+                torch.testing.assert_close(layer.param_quantizers['bias'].get_scale().reshape(-1), target, rtol=0, atol=0)
+                current = dict(named_generic_quantizers(sim.model))
+                for name, scale in previous.items():
+                    torch.testing.assert_close(current[name].get_scale(), scale, rtol=0, atol=0)
 
     def test_requested_bias32_preserves_representable_bias(self):
         for convolution in [False,True]:

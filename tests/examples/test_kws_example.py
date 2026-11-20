@@ -26,6 +26,12 @@ from tests.support.encodings import (
 
 
 class KwsExampleConfigurationTest(unittest.TestCase):
+    def test_accuracy_summary_omits_skipped_po2(self):
+        with contextlib.redirect_stdout(io.StringIO()) as output:
+            kws.print_accuracy_summary(.7, .6, None, .65, .65)
+        self.assertNotIn('Power-of-2', output.getvalue())
+        self.assertIn('60.00%', output.getvalue())
+
     def test_ptq_only_accepts_shared_checkpoint_and_cpu_feeds(self):
         args = kws.parse_args([
             '--device', 'cpu', '--ptq-only', '--fp-checkpoint', '/models/gru.pth',

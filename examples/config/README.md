@@ -1,7 +1,7 @@
 # 示例量化配置
 
 KWS 和 ONNX PTQ 示例默认使用本目录的两份 JSON。示例先按基础配置创建
-`QuantizationSimModel`，再应用位宽配置，最后进行校准。运行方法见[示例说明](../README.md)，
+`QuantizationSimModel`，再应用位宽配置，校准后独立对齐普通层 bias，再评估 PTQ。运行方法见[示例说明](../README.md)，
 下文的普通层匹配优先级适用于 KWS 使用的 PyTorch 路径。
 
 | 文件 | 用途 |
@@ -11,8 +11,11 @@ KWS 和 ONNX PTQ 示例默认使用本目录的两份 JSON。示例先按基础�
 
 KWS 的 `--rnn-type` 决定模型使用的循环算子。两个配置节可以同时放在完整 JSON 中，
 模型中的循环算子只读取各自的配置。可用 `--quant-config` 指定另一份位宽配置；改动量化参数后
-重新校准。Po2 是按目标后端要求选用的可选转换；KWS 和 ONNX PTQ 示例均执行该转换演示，
-KWS 的 QAT 循环沿用转换后的固定参数。
+重新校准。普通 Conv/Linear（ONNX 的 Conv/ConvTranspose/Gemm/MatMul）中已启用的 bias
+在校准后按 INT32、`Sb = Sx * Sw` 对齐，标准示例的最终 bias 位宽由该步骤确定。
+Po2 是可选转换；示例默认演示转换，随后按新 scale 重新对齐普通 bias。
+整块注释 Po2 调用后，仍可导出和恢复 affine PTQ；KWS 的 QAT 沿用最终选定的固定网格。
+这不改变 `GRU_config` / `LSTM_config` 控制的内部 bias 位宽与独立网格。
 
 ## 普通层
 

@@ -40,6 +40,7 @@ import aimet_torch.v2 as aimet
 from aimet_torch import model_preparer
 from aimet_torch.v2 import quantsim
 from aimet_torch.utils_rx import (
+    align_bias_scale,
     apply_mixed_precision_bitwidth,
     apply_power_of_2_workflow,
     freeze_quantizer_parameters,
@@ -135,10 +136,13 @@ with torch.no_grad(), aimet.nn.compute_encodings(sim.model):
     for inputs, _ in calibration_loader:
         sim.model(inputs.to(device))
 
+align_bias_scale(sim.model, bias_bitwidth=32, verbose=True)
 print("PTQ:", evaluate(sim.model))
 ```
 
 同一次前向校准普通层与原生 QuantGRU/QuantLSTM 内部量化点。
+校准后，`align_bias_scale()` 将已校准普通 Conv/Linear 的 bias 设为 INT32，
+使用 `Sb = Sx * Sw`，再评估 PTQ；该步骤独立于 Po2。
 只被某些输入触发的分支也需要校准覆盖；启用但未校准的量化点可能在导出时被拒绝。
 修改位宽、对称性、前处理或图结构后，应重新校准并评估；原生算子的配置重置限制见
 [循环算子接入](QuantLSTM_integration.md#使用与配置)。
@@ -153,17 +157,18 @@ do_po2 = True
 if do_po2:
     po2_report = apply_power_of_2_workflow(
         sim.model,
-        align_bias_scale=True,
-        bias_bitwidth=32,
+        align_bias_scale=False,
         verbose=True,
     )
+    align_bias_scale(sim.model, bias_bitwidth=32, verbose=True)
     print("Po2:", evaluate(sim.model))
 ```
 
-这里显式为普通 Conv/Linear 启用 INT32 bias 乘积 scale 对齐；参数默认值和适用范围见
-[校准和 Power-of-2](Quant_config.md#校准和-power-of-2)。原生 GRU/LSTM 使用自己的
-bias 编码与重缩放规则，不能把普通层的对齐设置理解为自动改变循环层内部 bias。
-Po2 和 bias 对齐可能改变精度，需要按目标后端要求和任务指标决定是否接受。
+Po2 改变输入和权重 scale 后，再独立调用 `align_bias_scale()` 更新普通层的乘积 bias scale，
+然后评估。设 `do_po2 = False` 时，沿用第 3 节已经对齐的 affine PTQ 网格，后续 QAT、
+导出和恢复顺序相同。参数范围与检查规则见[校准和 Power-of-2](Quant_config.md#校准和-power-of-2)。
+原生 GRU/LSTM 使用自己的 bias 编码与重缩放规则，普通层的对齐不改变循环层内部 bias。
+应分别记录 PTQ 和实际执行的 Po2 阶段精度，再决定是否需要 QAT。
 
 ## 5. 可选：CUDA QAT
 

@@ -84,7 +84,12 @@ metadata 和重载验证见 [ONNX PTQ 编译器制品](ONNX_PTQ_COMPILER.md)。
 
 ## 导出前提与校验
 
-PyTorch 导出前应完成模型准备、配置、校准及所需的 Po2/QAT，并将 `sim.model`
+标准流程在校准后先对齐普通层 bias，再评估 PTQ；若执行 Po2，转换后重新对齐并评估，
+之后才进行可选 QAT 和保存。PyTorch 使用 `align_bias_scale()`，ONNX 使用
+`align_onnx_bias_scale()`；默认以 INT32、`Sb = Sx * Sw` 对齐，不改变原生 GRU/LSTM 的独立 bias 网格。
+省略 Po2 不影响合法 affine 编码的导出与恢复。
+
+PyTorch 导出前应完成模型准备、配置、校准、bias 对齐及所需的 Po2/QAT，并将 `sim.model`
 切换到 CPU 和 eval 模式。QuantGRU 当前要求 `bias=True` 才能导出，关闭量化也不豁免；
 QuantLSTM 支持 `bias=False`。无 bias GRU 的接入选择见[循环层约束](QuantLSTM_integration.md#使用与配置)。
 导出器在图后处理和循环算子编码合并后校验最终 ONNX
@@ -198,6 +203,8 @@ fresh_sim.model.eval()
 
 比较保存前和恢复后的同批输入输出及任务指标，记录容差和设备。KWS 按
 `atol=1e-5`、`rtol=1e-4` 比较输出，并对比测试精度；这些阈值不是所有模型的精度保证。
+KWS `--ptq-only` 与 ONNX 示例均以实际保存前的最终量化输出为基准，跳过 Po2 时比较 affine PTQ，
+执行 Po2 时比较转换并重新对齐 bias 后的结果。输出归档只记录实际执行的阶段。
 名称错位通常来自模型准备、配置或默认位宽差异。固定编码后再创建训练 optimizer，
 需要继续 QAT 时按 [QAT 冻结要求](Quant_config.md#qat-和重新加载)设置量化器和 BatchNorm。
 
@@ -214,8 +221,8 @@ fresh_sim.model.eval()
 普通激活编码按模块的输入或输出端口恢复。一个端口下的多条通道记录共同描述该端口的量化网格，
 通道数须与目标量化器的形状相容。旧文件中带额外端口包装的记录也可加载。
 
-阶段文件加载以保存的 `qmin/qmax/symmetric/scale/offset` 为准，包括 Po2 后与初始
-配置不同的 bias 位宽。普通 affine 量化器通过 scale/offset 参数化精确恢复，不从
+阶段文件加载以保存的 `qmin/qmax/symmetric/scale/offset` 为准，包括独立 bias 对齐后与初始
+配置不同的位宽，以及所选的 Po2 网格。普通 affine 量化器通过 scale/offset 参数化精确恢复，不从
 实数 min/max 反推网格；目标量化器形状必须匹配，非法 scale、offset 或不一致范围
 会抛出 `ValueError`。加载后再冻结量化器参数或创建训练 optimizer。
 

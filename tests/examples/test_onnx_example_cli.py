@@ -1,6 +1,7 @@
 """The direct ONNX example can consume a KWS PTQ export and shared feeds."""
 
 from pathlib import Path
+import ast
 import json
 import os
 import runpy
@@ -15,9 +16,54 @@ import onnx
 from onnx import helper
 
 from examples import quick_start_onnx_ptq as example
+from tests.support import onnx as fixtures
 
 
 class OnnxExampleCliTest(unittest.TestCase):
+    def test_removing_entire_po2_stage_preserves_affine_bias_export_and_reload(self):
+        fixture = fixtures.OnnxFixture(self)
+        root = fixture.path
+        model_path = root / "linear.onnx"
+        onnx.save(fixtures.make_graph(), model_path)
+        calibration = root / "calib"
+        calibration.mkdir()
+        for index, offset in enumerate((0.0, 1.0)):
+            np.save(calibration / f"{index}.npy", fixture.feed["x"] + offset)
+        mixed = root / "mixed.json"
+        mixed.write_text("{}")
+        source = Path(example.__file__).read_text(encoding="utf-8")
+        tree = ast.parse(source)
+        stage, = [node for node in ast.walk(tree) if isinstance(node, ast.With)
+                  and isinstance(node.items[0].context_expr, ast.Call)
+                  and node.items[0].context_expr.args
+                  and isinstance(node.items[0].context_expr.args[0], ast.Constant)
+                  and str(node.items[0].context_expr.args[0].value).startswith("步骤 5:")]
+        lines = source.splitlines(keepends=True)
+        del lines[stage.lineno - 1:stage.end_lineno]
+        source = "".join(lines)
+        command = (f"exec(compile({source!r}, {example.__file__!r}, 'exec'), "
+                   f"{{'__name__': '__main__', '__file__': {example.__file__!r}}})")
+        result = subprocess.run([
+            sys.executable, "-c", command, "--device", "cpu", "--model", str(model_path),
+            "--calib-dir", str(calibration), "--output-dir", str(root / "output"),
+            "--prefix", "affine", "--config-file", str(fixture.config), "--quant-config", str(mixed),
+        ], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        archive, = (root / "output").glob("*/exports/outputs.npz")
+        with np.load(archive) as outputs:
+            self.assertEqual(set(outputs.files), {"fp32_output0", "ptq_output0"})
+        metadata = json.loads((archive.parent / "affine.meta.json").read_text())
+        self.assertEqual(set(metadata["evaluation"]), {"fp32", "ptq"})
+        self.assertNotIn("po2_vs_fp32", metadata)
+        self.assertNotIn("all_power_of_2", metadata)
+        self.assertEqual(metadata["bias_align"]["modified"], 1)
+        self.assertTrue(all(item["max_abs"] == 0 for item in metadata["restored_quantized_vs_pre_export"]))
+        payload = json.loads((archive.parent / "affine.json").read_text())
+        bias, weight = (payload["param_encodings"][name] for name in ("b", "w"))
+        self.assertEqual(bias["bitwidth"], 32)
+        input_scale = payload["activation_encodings"]["fc"]["input"]["0"]["scale"]
+        np.testing.assert_array_equal(bias["scale"], np.asarray(weight["scale"]) * input_scale)
+
     def test_scalar_onnx_outputs_are_archived_per_sample(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

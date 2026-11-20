@@ -19,7 +19,7 @@ from aimet_common import run_context as runtime
 from aimet_common.compiler_encodings import validate_compiler_encodings
 from aimet_torch.rx_export.export_onnx_json import export_onnx_json
 from aimet_torch.staged_quantization_utils import load_quantizer_encodings
-from aimet_torch.utils_rx import apply_mixed_precision_bitwidth, apply_power_of_2_workflow
+from aimet_torch.utils_rx import align_bias_scale, apply_mixed_precision_bitwidth, apply_power_of_2_workflow
 from aimet_torch.v2.nn import compute_encodings
 from aimet_torch.v2.quantization.base import QuantizerBase
 from aimet_torch.v2.quantsim import QuantizationSimModel
@@ -82,6 +82,7 @@ class KwsCompilerGraphTest(unittest.TestCase):
             with compute_encodings(sim.model):
                 sim.model(inputs)
                 sim.model(inputs.flip(1) * .7)
+            align_bias_scale(sim.model, bias_bitwidth=32, verbose=False)
         return sim, inputs
 
     def test_cli_keeps_original_outputs_and_accepts_legacy_checkpoint(self):
@@ -237,7 +238,8 @@ class KwsCompilerGraphTest(unittest.TestCase):
 
     def test_four_head_graph_calibrates_exports_and_restores(self):
         sim, inputs = self.sim(calibrate=True)
-        report = apply_power_of_2_workflow(sim.model, align_bias_scale=True, verbose=False)
+        report = apply_power_of_2_workflow(sim.model, align_bias_scale=False, verbose=False)
+        align_bias_scale(sim.model, bias_bitwidth=32, verbose=False)
         self.assertTrue(report['all_power_of_2'])
         self.assertEqual(report['verification']['native']['module_count'], 2)
         expected = sim.model(inputs).detach().clone()

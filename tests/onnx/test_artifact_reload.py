@@ -79,16 +79,56 @@ class OnnxArtifactsTest(unittest.TestCase):
         calibration_dir.mkdir()
         np.save(calibration_dir / 'sample0.npy', self.feed['x'])
         np.save(calibration_dir / 'sample1.npy', self.feed['x'] + 1.0)
-        for align_bias in (False, True):
-            with self.subTest(align_bias=align_bias):
+        for enable_po2 in (False, True):
+            with self.subTest(enable_po2=enable_po2):
                 result = pipeline.run_onnx_ptq(model_path=model_path, calibration_dir=calibration_dir,
-                    output_dir=self.path / f'pipeline-{align_bias}', filename_prefix='model',
+                    output_dir=self.path / f'pipeline-{enable_po2}', filename_prefix='model',
                     config_file=str(self.config), bitwidth_config_file='', quant_scheme='tf',
-                    align_bias_scale=align_bias)
+                    enable_po2=enable_po2)
                 metadata = json.loads(result['metadata'].read_text())
                 self.assertTrue(all(item['max_abs'] == 0 for item in
                     metadata['restored_quantized_vs_pre_export']))
                 self.assertIn('b', metadata['coverage']['enabled_quantizer_names'])
+                self.assertEqual(metadata['bias_align']['modified'], 1)
+                self.assertEqual('po2' in metadata['evaluation'], enable_po2)
+                self.assertEqual('all_power_of_2' in metadata, enable_po2)
+                if enable_po2:
+                    self.assertEqual(metadata['po2_bias_align']['modified'], 1)
+                    self.assertTrue(metadata['all_power_of_2'])
+                payload = json.loads(result['encodings'].read_text())
+                bias, weight = (payload['param_encodings'][name] for name in ('b', 'w'))
+                self.assertEqual(bias['bitwidth'], 32)
+                sx = payload['activation_encodings']['fc']['input']['0']['scale']
+                np.testing.assert_array_equal(bias['scale'], np.asarray(weight['scale']) * sx)
+
+    def test_pipeline_requires_bias_alignment_before_loading_model(self):
+        with self.assertRaisesRegex(ValueError, 'requires align_bias_scale=True'):
+            pipeline.run_onnx_ptq(model_path=self.path / 'missing.onnx',
+                calibration_dir=self.path / 'missing-calib', output_dir=self.path / 'rejected',
+                filename_prefix='model', align_bias_scale=False, enable_po2=False)
+
+    def test_pipeline_preserves_explicitly_disabled_bias_with_or_without_po2(self):
+        config = json.loads(self.config.read_text())
+        config['params']['bias'] = {'is_quantized': 'False'}
+        self.config.write_text(json.dumps(config))
+        model_path = self.path / 'disabled-bias.onnx'
+        onnx.save(make_graph(), model_path)
+        calibration_dir = self.path / 'disabled-calib'
+        calibration_dir.mkdir()
+        np.save(calibration_dir / 'sample.npy', self.feed['x'])
+        for enable_po2 in (False, True):
+            with self.subTest(enable_po2=enable_po2):
+                result = pipeline.run_onnx_ptq(model_path=model_path, calibration_dir=calibration_dir,
+                    output_dir=self.path / f'disabled-bias-{enable_po2}', filename_prefix='model',
+                    config_file=str(self.config), bitwidth_config_file='', quant_scheme='tf',
+                    enable_po2=enable_po2)
+                payload = json.loads(result['encodings'].read_text())
+                self.assertNotIn('b', payload['param_encodings'])
+                metadata = json.loads(result['metadata'].read_text())
+                self.assertEqual(metadata['bias_align']['modified'], 0)
+                self.assertNotIn('b', metadata['coverage']['enabled_quantizer_names'])
+                self.assertTrue(all(item['max_abs'] == 0 for item in
+                    metadata['restored_quantized_vs_pre_export']))
 
     def test_missing_native_encoding_is_rejected(self):
         artifacts, expected = self.fixture.artifacts()

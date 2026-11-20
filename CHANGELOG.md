@@ -6,6 +6,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- 普通层 bias 对齐独立于 Po2，标准 PTQ 在校准后及 Po2 转换后对齐为 INT32 乘积 scale 再评估；`run_onnx_ptq()` 新增 `enable_po2=False` 的 affine 路径，原 `align_bias_scale=False` 请求改为及早报错。
+
 ### Fixed
 
 - PyTorch QAT 冻结接口按量化器和 BatchNorm 的真实归属选择参数及训练模式，支持数字层名和保留原 BN 类型信息的 FX 图。

@@ -181,7 +181,8 @@ def align_onnx_bias_scale(sim: Any, *, bias_bitwidth: int = 32) -> Dict[str, Any
     This mirrors ``aimet_torch.utils_rx._align_conv_bias_scale`` plus the RX
     mixed-precision default ``bias_bitwidth=32``.  Official INT32 concretize is
     not used; the scale comes from the live input/weight encodings, whether
-    affine or Po2.
+    affine or Po2. Run this after calibration and again after changing input or
+    weight scales, before evaluating or exporting the quantized model.
 
     Only biases temporarily disabled for calibration are re-enabled. All
     candidate grids are validated before any bias quantizer is modified.
@@ -408,7 +409,11 @@ def apply_power_of_2_workflow(
     verbose: bool = True,
     bias_bitwidth: int = 32,
 ) -> Dict[str, Any]:
-    """ONNX 侧与 ``aimet_torch.utils_rx.apply_power_of_2_workflow`` 对齐的入口。"""
+    """Convert ONNX encodings to Po2, retaining optional legacy bias alignment.
+
+    Standard PTQ calls ``align_onnx_bias_scale`` independently before and after
+    this conversion, with ``align_bias_scale=False`` here.
+    """
     report = align_sim_encodings_to_po2(
         sim,
         method=method,

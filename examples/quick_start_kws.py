@@ -4,6 +4,7 @@ RX-MET 量化演示 — kws_streaming att_mh_rnn + QuantGRU / QuantLSTM
 流程用法：
     FP 训练 → prepare_model → QuantizationSimModel + 混合精度位宽
         → compute_encodings 校准 (PTQ)
+        → align_bias_scale (32 位 bias，Sb = Sx * Sw)
         → 可选：apply_power_of_2_workflow (按目标后端要求选择 Po2 量化)
         → freeze_quantizer_parameters + QAT 微调
         → state_dict + ONNX + .json 编码文件三件套保存
@@ -72,6 +73,7 @@ from aimet_torch.quantizable_batchnorm import QuantizableBatchNorm2d
 from aimet_torch.rx_export.export_onnx_json import export_onnx_json
 from aimet_torch.staged_quantization_utils import load_quantizer_encodings
 from aimet_torch.utils_rx import (
+    align_bias_scale,
     apply_mixed_precision_bitwidth,
     apply_power_of_2_workflow,
     freeze_quantizer_parameters,
@@ -912,7 +914,8 @@ def print_accuracy_summary(fp_acc, ptq_acc, po2_acc, qat_acc, reload_acc):
     print("=" * 70)
     print(f"  浮点模型精度:           {fp_acc * 100:.2f}%")
     print(f"  PTQ 量化精度:           {ptq_acc * 100:.2f}%")
-    print(f"  Power-of-2 量化精度:    {po2_acc * 100:.2f}%")
+    if po2_acc is not None:
+        print(f"  Power-of-2 量化精度:    {po2_acc * 100:.2f}%")
     print(f"  QAT 微调后精度:         {qat_acc * 100:.2f}%")
     print(
         f"  重新加载后精度:         {reload_acc * 100:.2f}%  "
@@ -1020,7 +1023,7 @@ def parse_args(argv=None):
                         help="完整的量化配置 JSON；编辑其中的 GRU_config 或 LSTM_config")
     parser.add_argument("--device", choices=("cpu", "cuda"), default="cuda")
     parser.add_argument("--ptq-only", action="store_true",
-                        help="加载浮点检查点，执行校准、Po2、导出和恢复；不训练")
+                        help="加载浮点检查点，执行校准、可选 Po2、导出和恢复；不训练")
     parser.add_argument("--fp-checkpoint", type=Path,
                         help="PTQ 输入的浮点检查点；完整训练时指定浮点检查点的保存路径")
     parser.add_argument("--calib-dir", type=Path, help="复用 batch-1 的 input NPY/NPZ 样本")
@@ -1141,10 +1144,14 @@ def _run_kws_ptq(args, run):
     with torch.no_grad(), aimet.nn.compute_encodings(sim.model):
         for feed in tqdm(feeds, desc="PTQ calibration"):
             sim.model(torch.from_numpy(feed["input"]).to(DEVICE))
+    align_bias_scale(sim.model, bias_bitwidth=32, verbose=True)
     stage_outputs["ptq"] = outputs(sim.model)
-    print("Power-of-2 量化（可选）：按目标后端要求选用；本示例执行转换演示。")
-    apply_power_of_2_workflow(sim.model, align_bias_scale=True, verbose=True)
-    stage_outputs["po2"] = outputs(sim.model)
+    po2_report = None
+    with stage("Power-of-2 量化（可选）", {}):
+        po2_report = apply_power_of_2_workflow(sim.model, align_bias_scale=False, verbose=True)
+        align_bias_scale(sim.model, bias_bitwidth=32, verbose=True)
+        stage_outputs["po2"] = outputs(sim.model)
+    expected_output = outputs(sim.model)
     checkpoint = run.checkpoints / "att_mh_rnn_kws_ptq.pth"
     save_checkpoint(sim.get_original_model(sim.model, qdq_weights=False), checkpoint, args.rnn_type,
                     speech_features=frontend)
@@ -1163,7 +1170,7 @@ def _run_kws_ptq(args, run):
     stage_outputs["restored"] = outputs(restored.model)
     np.savez(run.exports / "outputs.npz", **{f"{name}_output0": value for name, value in stage_outputs.items()
                                            if name != "restored"})
-    restore_delta = float(np.abs(stage_outputs["restored"] - stage_outputs["po2"]).max())
+    restore_delta = float(np.abs(stage_outputs["restored"] - expected_output).max())
     metadata = {
         "mode": "ptq-only", "device": str(DEVICE), "rnn_type": args.rnn_type,
         "fp_checkpoint": str(args.fp_checkpoint.resolve()),
@@ -1175,11 +1182,13 @@ def _run_kws_ptq(args, run):
         "restore_max_abs": restore_delta, "restore_atol": 1e-5, "restore_rtol": 1e-4,
         "onnx": str(onnx_path), "encodings": str(enc_path),
     }
+    if po2_report is not None:
+        metadata["all_power_of_2"] = po2_report["all_power_of_2"]
     if labels is not None:
         metadata["accuracy"] = {name: classification_accuracy([[array]], labels)
                                 for name, array in stage_outputs.items()}
     (run.exports / "att_mh_rnn_kws_ptq.metadata.json").write_text(json.dumps(metadata, indent=2) + "\n")
-    np.testing.assert_allclose(stage_outputs["restored"], stage_outputs["po2"], atol=1e-5, rtol=1e-4)
+    np.testing.assert_allclose(stage_outputs["restored"], expected_output, atol=1e-5, rtol=1e-4)
     print(f"PTQ-only 完成；恢复误差: {restore_delta:.6g}")
     print("最终产物请配套使用 .onnx 模型和 .json 量化参数：")
     print(f"ONNX 模型 (.onnx): {onnx_path}")
@@ -1268,16 +1277,19 @@ def _run_kws(args, run):
                     break
                 sim.model(x.to(DEVICE))
 
+        align_bias_scale(sim.model, bias_bitwidth=32, verbose=True)
         ptq_accuracy = evaluate(sim.model, loaders["test"], DEVICE)
         print(f"PTQ 量化精度: {ptq_accuracy * 100:.2f}%")
 
+    po2_accuracy = None
     with stage("步骤 5: Power-of-2 量化（可选）", timings):
         print("按目标后端要求选用 Power-of-2；本示例执行转换演示。")
         apply_power_of_2_workflow(
             sim.model,
-            align_bias_scale=True,
+            align_bias_scale=False,
             verbose=True,
         )
+        align_bias_scale(sim.model, bias_bitwidth=32, verbose=True)
         po2_accuracy = evaluate(sim.model, loaders["test"], DEVICE)
         print(f"Power-of-2 量化精度: {po2_accuracy * 100:.2f}%")
 

@@ -83,8 +83,10 @@ model.encoder.rnn = replace_recurrent_layer(model.encoder.rnn)
    [示例配置](../examples/config/README.md)。
 4. 使用同一次 `compute_encodings` 前向校准整模型。量化方案和 Percentile 值传入
    原生收集器，已锁定参数跳过收集，异常时恢复校准标志。新建原生循环层默认使用
-   affine 网格。
-5. 如需在校准后统一转换到 Po2，调用 `apply_power_of_2_workflow()`，在冻结参数和 QAT 前完成转换。
+   affine 网格。随后调用 `align_bias_scale(sim.model, bias_bitwidth=32)`，对齐普通层 bias 后评估 PTQ；
+   原生循环层内部 bias 继续使用自身网格和累加域重缩放。
+5. 如需统一转换到 Po2，调用 `apply_power_of_2_workflow(..., align_bias_scale=False)`，
+   再独立对齐普通 bias 并评估，在冻结参数和 QAT 前完成。
    该入口分别处理普通量化器与原生循环层；模型只有循环层时仍执行并验证原生 Po2。
 6. CPU 路径直接评估和导出；CUDA 路径可冻结量化参数后执行 QAT，沿用已校准网格。
 7. 配套保存主权重和编码，重建模型后比较相同输入的输出及任务指标。
@@ -171,12 +173,11 @@ QuantLSTM 的 `load_quant_config()`、`percentile_value`、量化参数锁和安
 | bias 编码 scale | 对齐后为 `Sx * Sw` | 根据 bias 自身范围独立计算 `Sb` |
 | bias 量化位宽 | 对齐后默认有符号 32 位，可显式指定并检查范围 | 由算子配置控制的有符号 2–32 位；当前 KWS 示例两种 RNN 均配置为 8 位 |
 | 加入累加器前 | 同一 scale，可直接相加 | 先将 bias 从 `Sb` 重缩放到 `Sacc` |
-| PO2 工作流 | 启用 bias 对齐时执行乘积 scale 和 bias 位宽对齐 | 调用算子自身的 `enable_po2()`，不自动改为 INT32 或乘积 bias scale |
+| 校准后与 Po2 转换后 | 独立调用 bias 对齐，再评估；Po2 本身可省略 | bias 始终重缩放到对应分支累加域；Po2 调用算子自身的 `enable_po2()`，不改为 INT32 或乘积 bias scale |
 
-普通层在统计 PTQ 阶段仍可按配置校准 bias；上表的乘积 scale 指启用
-`align_bias_scale=True` 后的对齐结果，不能泛化为所有阶段始终使用乘积 scale。
-PyTorch 工作流的 `align_bias_scale` 默认关闭，ONNX 工作流默认开启；启用对齐后
-`bias_bitwidth` 默认值为 32，当前 KWS 示例显式开启对齐。
+标准流程在校准后独立调用 `align_bias_scale()`（Torch）或 `align_onnx_bias_scale()`（ONNX），
+默认将普通层 bias 对齐为 INT32、`Sb = Sx * Sw`，之后才评估 PTQ；执行 Po2 后再次对齐。
+低层 Po2 接口保留 `align_bias_scale=True` 的兼容方式，标准流程传入 `False`，由独立 helper 完成对齐。
 PyTorch 的该对齐覆盖 Conv/Linear，ONNX 的对应路径覆盖带 bias 的
 Conv/ConvTranspose/Gemm/MatMul，不覆盖原生 GRU/LSTM 内部 bias。
 
@@ -191,8 +192,11 @@ bias_acc_ih[c] = Rescale(q_bias_ih[c], Sb_ih[c] -> Sacc_ih[c])
 linear_ih = Rescale(acc_ih + bias_acc_ih, Sacc_ih -> Slinear_ih)
 ```
 
-循环分支同样先把 `bias_hh` 转换到 `Sacc_hh`。实际重缩放使用算子定义的
-M+shift 或 Po2 编码。bias 编码位宽、物理存储载体和累加器宽度是不同概念；
+循环分支同样先把 `bias_hh` 转换到 `Sacc_hh`。进入累加器前的重缩放按具体计算路径使用
+尺度比值乘法、M+shift 或 Po2 移位，因此独立 bias scale 不表示 bias 未与相加域对齐。
+CUDA 回归中的等值 bias 网格样例验证了：独立网格经重缩放后，输出和最终状态与乘积网格一致，
+编码导出与重载保留结果。这不表示任意两组网格的量化误差相同。
+bias 编码位宽、物理存储载体和累加器宽度是不同概念；
 用 int32/FP32 容器保存低位宽整数码不会增加其量化精度。独立低位宽 bias
 可能先丢失信息，随后重缩放到更宽的累加域不能恢复这些信息。
 

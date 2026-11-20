@@ -261,8 +261,8 @@ assert sqrt.input_quantizers[0].bitwidth == 32
 
 **4. 校准及可选的 Po2 转换后检查最终网格和实际数值。**
 
-按[PyTorch 接入流程](PyTorch_quantization.md#3-校准并评估-ptq)重新校准；目标需要
-Po2 时，再完成转换。此时量化器已初始化，可以查看实际 scale：
+按[PyTorch 接入流程](PyTorch_quantization.md#3-校准并评估-ptq)重新校准并对齐普通层 bias；
+目标需要 Po2 时，再完成转换和 bias 重新对齐。此时量化器已初始化，可以查看实际 scale：
 
 ```python
 for name, side in (
@@ -365,6 +365,7 @@ per-channel；未列出的量化点保留默认值。用户可直接修改配置
 ```python
 import torch
 import aimet_torch.v2 as aimet
+from aimet_torch.utils_rx import align_bias_scale
 
 sim.model.eval()
 with torch.no_grad(), aimet.nn.compute_encodings(sim.model):
@@ -372,21 +373,32 @@ with torch.no_grad(), aimet.nn.compute_encodings(sim.model):
         if index >= 100:
             break
         sim.model(inputs.to(device))
+
+align_bias_scale(sim.model, bias_bitwidth=32, verbose=True)
 ```
 
-Power-of-2 是按目标后端要求选用的阶段。需要 Po2 时，在校准后把 scale 调整为
-2 的幂，并按部署要求对齐 bias scale；PTQ 和 QAT 本身不要求执行此转换。KWS 和 ONNX
-示例均执行转换演示。以下为 PyTorch 侧该阶段的调用片段：
+普通层 bias 对齐独立于 Power-of-2：校准后先以 INT32、`Sb = Sx * Sw` 对齐，再评估 PTQ。
+`align_bias_scale()` 接收 PyTorch 的 `sim.model`；传入 ONNX QuantSim 时分发到
+`align_onnx_bias_scale()`。它只调整普通层 bias，不改变其他量化网格。
+
+Power-of-2 是按目标后端要求选用的阶段，PTQ 和 QAT 本身不要求执行此转换。
+需要 Po2 时，在上述对齐后把 scale 调整为 2 的幂，再按新的输入、权重 scale 重新对齐 bias，
+然后评估。KWS 和 ONNX 示例保留独立的可选转换块；以下为 PyTorch 侧调用片段：
 
 ```python
 from aimet_torch.utils_rx import apply_power_of_2_workflow
 
 apply_power_of_2_workflow(
     sim.model,
-    align_bias_scale=True,
+    align_bias_scale=False,
     verbose=True,
 )
+align_bias_scale(sim.model, bias_bitwidth=32, verbose=True)
 ```
+
+不需要 Po2 时省略上面整段，保留校准后的 bias 对齐，直接进入评估、可选 QAT 和导出。
+底层 `apply_power_of_2_workflow(..., align_bias_scale=True, bias_bitwidth=32)` 保留原有的
+合并调用方式；标准流程使用独立 helper，使 bias 对齐不依赖可选的 Po2 阶段。
 
 `apply_power_of_2_workflow()` 默认使用 `cover_range`。对普通量化器，若实数网格跨度
 `abs(rmax - rmin)` 与最近的 2 的幂的相对差小于默认 2%，scale 取最接近的 2 的幂；
@@ -395,7 +407,8 @@ apply_power_of_2_workflow(
 PyTorch 工作流分别处理普通 AIMET 量化器与原生 QuantGRU/QuantLSTM。模型只有原生
 循环层时，普通量化器列表可以为空，仍会执行原生 Po2，并同步、验证实际生效的编码。
 校准缺失、非法 scale 或算子参数锁阻止转换时会抛出异常；FX 图中明确为非 Tensor
-常量的输入槽不要求校准。可选 bias 对齐完成后再验证普通量化器，最后生成比较报告。
+常量的输入槽不要求校准。Po2 工作流验证普通量化器和原生编码并生成比较报告；
+标准流程随后独立对齐普通 bias，再评估或导出。
 
 返回值保留原有统计字段，并增加 `verification`：`generic` 记录普通量化器数量，
 `native` 记录原生模块数量和编码验证结果。各分支的 `status` 为 `verified` 或
@@ -404,7 +417,7 @@ PyTorch 工作流分别处理普通 AIMET 量化器与原生 QuantGRU/QuantLSTM�
 
 ### Conv/Linear bias 对齐的范围检查
 
-`apply_power_of_2_workflow(..., align_bias_scale=True, bias_bitwidth=32)` 在 PyTorch 中
+`align_bias_scale(sim.model, bias_bitwidth=32)` 在 PyTorch 中
 实际将已校准 Conv/Linear 的 bias 量化器设为指定的有符号位宽（默认 32），并使用精确的
 `Sb = Sx * Sw`。对齐前逐通道检查当前 bias 的整数码是否可表示。显式请求 16 位但范围
 不足、32 位仍溢出、scale 小于量化器下限或通道布局不兼容时抛出 `ValueError`，不再静默
@@ -430,7 +443,8 @@ freeze_quantizer_parameters(sim.model, freeze_bn_affine=True)
 set_train_mode_freeze_bn(sim.model)
 ```
 
-冻结和创建训练 optimizer 应在校准、所选的 Po2 转换或编码恢复完成后执行。CPU 只支持校准
+冻结和创建训练 optimizer 应在校准、bias 对齐及所选的 Po2 转换与重新对齐后执行；
+恢复已有编码时，在编码加载完成后执行。CPU 只支持校准
 和 PTQ；浮点训练与 QAT 使用 CUDA。
 
 恢复顺序取决于权重的保存形式。KWS 保存的是主权重，先严格加载到对应模型，再创建
@@ -451,6 +465,7 @@ QuantSim、应用相同配置并加载编码；完整 QuantSim `state_dict` 则�
 - 基础配置在创建 QuantSim 时加载，混合精度配置在校准前应用。
 - 百分位参数在 `compute_encodings` 前设置。
 - 校准数据与部署输入的名称、形状、类型和分布一致。
+- 普通层 bias 在校准后对齐到乘积 scale，再评估 PTQ；执行 Po2 后重新对齐再评估。
 - QuantGRU / QuantLSTM 配置在校准前加载，并使用共享校准过程。
 - QAT 前冻结量化参数和 BatchNorm。
 - 重建模型使用与训练侧相同的模型预处理和量化配置。

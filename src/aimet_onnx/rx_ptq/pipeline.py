@@ -25,7 +25,7 @@ from .conv_bn import apply_conv_bn_boundaries
 from .evaluation import evaluate_onnx_dataset, load_onnx_validation_inputs
 from .mixed_precision import apply_onnx_mixed_precision_bitwidth, validate_linear_quantizer_config
 from .linear import linear_groups, normalize_linear_graph, validate_legacy_linear_boundaries
-from .po2 import apply_power_of_2_workflow, disable_onnx_bias_quantizers
+from .po2 import align_onnx_bias_scale, apply_power_of_2_workflow, disable_onnx_bias_quantizers
 from .execution import ptq_execution_providers
 from .validation import validate_quantizer_state
 
@@ -417,6 +417,7 @@ def run_onnx_ptq(
     percentile_value: float = 99.99,
     po2_method: str = "cover_range",
     po2_tolerance: float = 0.02,
+    enable_po2: bool = True,
     align_bias_scale: bool = True,
     bias_bitwidth: int = 32,
     providers: Sequence[str] = ("CPUExecutionProvider",),
@@ -424,7 +425,13 @@ def run_onnx_ptq(
     validation_dir: str | Path | None = None,
     validation_labels: Sequence[int] | None = None,
 ) -> Dict[str, Path]:
-    """Run PTQ and emit clean ONNX plus compiler-native encodings."""
+    """Run PTQ with accumulator bias alignment and optional Po2 conversion.
+
+    ``align_bias_scale`` remains for call compatibility; the standard workflow
+    requires it to be true. Use ``enable_po2=False`` to export affine encodings.
+    """
+    if not align_bias_scale:
+        raise ValueError("run_onnx_ptq requires align_bias_scale=True for accumulator bias alignment")
     providers = ptq_execution_providers(providers)
     model_path = Path(model_path).resolve()
     output_dir = Path(output_dir).resolve()
@@ -480,24 +487,40 @@ def run_onnx_ptq(
             sim, bitwidth_config_file, verbose=False
         )
         force_model_io_quantizers(sim, normalized_model)
-    if align_bias_scale:
-        disable_onnx_bias_quantizers(sim, preserve_shared_percentile=True)
+    disable_onnx_bias_quantizers(sim, preserve_shared_percentile=True)
     sim.compute_encodings(feeds)
+    bias_report = align_onnx_bias_scale(sim, bias_bitwidth=bias_bitwidth)
     _, ptq_evaluation = evaluate_onnx_dataset(
         sim, evaluation_feeds, reference=reference_batches, labels=validation_labels, providers=providers
     )
-    po2_report = apply_power_of_2_workflow(
-        sim,
-        method=po2_method,
-        tolerance=po2_tolerance,
-        align_bias_scale=align_bias_scale,
-        verbose=False,
-        bias_bitwidth=bias_bitwidth,
-    )
-    quantized_batches, po2_evaluation = evaluate_onnx_dataset(
+    evaluations = {"fp32": fp32_evaluation, "ptq": ptq_evaluation}
+    po2_report = None
+    po2_metadata = {}
+    if enable_po2:
+        po2_report = apply_power_of_2_workflow(
+            sim,
+            method=po2_method,
+            tolerance=po2_tolerance,
+            align_bias_scale=False,
+            verbose=False,
+        )
+        po2_bias_report = align_onnx_bias_scale(sim, bias_bitwidth=bias_bitwidth)
+        _, po2_evaluation = evaluate_onnx_dataset(
+            sim, evaluation_feeds, reference=reference_batches, labels=validation_labels, providers=providers
+        )
+        evaluations["po2"] = po2_evaluation
+        po2_metadata = {
+            "po2_method": po2_method,
+            "po2_tolerance": po2_tolerance,
+            "po2_changes": po2_report["po2_changes"],
+            "po2_bias_align": po2_bias_report,
+            "all_power_of_2": po2_report["all_power_of_2"],
+            "not_power_of_2": po2_report["not_power_of_2"],
+        }
+    quantized_batches, final_evaluation = evaluate_onnx_dataset(
         sim, evaluation_feeds, reference=reference_batches, labels=validation_labels, providers=providers
     )
-    sim_report = po2_evaluation["comparison"]
+    sim_report = final_evaluation["comparison"]
     artifacts = export_onnx_json(
         sim, original_model, output_dir, filename_prefix
     )
@@ -530,7 +553,7 @@ def run_onnx_ptq(
             "calibration_count": len(feeds),
             "evaluation_source": "validation" if validation_dir is not None else "calibration",
             "validation_dir": str(Path(validation_dir).resolve()) if validation_dir is not None else None,
-            "evaluation": {"fp32": fp32_evaluation, "ptq": ptq_evaluation, "po2": po2_evaluation},
+            "evaluation": evaluations,
             "config_file": str(config_file),
             "bitwidth_config_file": str(bitwidth_config_file) if bitwidth_config_file else None,
             "param_type": param_type,
@@ -538,14 +561,11 @@ def run_onnx_ptq(
             "quant_scheme": quant_scheme,
             "percentile_value": percentile_value if quant_scheme == "percentile" else None,
             "providers": list(providers),
-            "po2_method": po2_method,
-            "po2_tolerance": po2_tolerance,
+            "enable_po2": enable_po2,
             "align_bias_scale": align_bias_scale,
             "bias_bitwidth": bias_bitwidth,
-            "po2_changes": po2_report["po2_changes"],
-            "bias_align": po2_report["bias_align"],
-            "all_power_of_2": po2_report["all_power_of_2"],
-            "not_power_of_2": po2_report["not_power_of_2"],
+            "bias_align": bias_report,
+            **po2_metadata,
             "coverage": artifacts["coverage"],
             "onnx_shapes": artifacts["onnx_shapes"],
             "sim_vs_fp32": sim_report,

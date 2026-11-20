@@ -9,7 +9,10 @@
 | 已有 ONNX 的 PTQ | CPU / CUDA | 默认使用 KWS 导出的浮点 ONNX 和同一份 Speech Commands；也可指定自己的静态 ONNX 和预处理样本 |
 
 Power-of-2（Po2）是按目标后端要求选择的可选转换，不是 PTQ 的必要步骤。KWS 和 ONNX PTQ
-示例均执行该步骤，以演示转换前后的精度比较；日志将其标为“可选”阶段。
+示例先在校准后将普通层 bias 按 INT32、`Sb = Sx * Sw` 对齐，再评估 PTQ。
+示例默认保留 Po2 转换演示，转换后重新对齐 bias 再评估；不需要 Po2 时，可在所运行的
+脚本中整块注释标为“Power-of-2 量化（可选）”的调用块，后续导出和恢复仍正常执行。
+原生 GRU/LSTM 保留独立的 bias 网格，通过重缩放加入累加域。
 
 在宿主机的应用包目录执行：
 
@@ -91,10 +94,11 @@ python3 examples/quick_start_kws.py --rnn-type gru --device cpu --ptq-only \
 
 LSTM 将 `--rnn-type gru` 改为 `--rnn-type lstm`，并使用对应的浮点检查点。
 
-此模式执行 FP 评估、校准、可选步骤 Po2 的演示、导出和恢复，不执行浮点训练或 QAT。产物为
+此模式执行 FP 评估、校准、bias 对齐与 PTQ 评估、可选 Po2 演示、导出和恢复，不执行浮点训练或 QAT。产物为
 `att_mh_rnn_kws_ptq.onnx`（不含 Q/DQ）、`att_mh_rnn_kws_ptq.json`、
 `outputs.npz` 和 metadata，PTQ 权重保存在 `checkpoints/att_mh_rnn_kws_ptq.pth`。
 metadata 记录检查点和实际波形数组的 SHA-256、设备和恢复误差。验证样本带标签时也记录 Top-1。
+恢复比较以导出前的最终量化输出为基准；跳过 Po2 时不写入该阶段的输出或评估记录。
 `--calib-limit N` 和 `--validation-limit N` 可限制共享目录中按文件名排序的前 N 个样本。
 
 ## ONNX PTQ：复用 KWS 的浮点 ONNX
@@ -128,8 +132,8 @@ python3 examples/quick_start_onnx_ptq.py --device cpu \
   --data-dir /datasets/speech_commands_v0.02
 ```
 
-Po2 按目标后端要求选用，本示例执行转换演示。导出和恢复接口同时支持 affine PTQ 和 Po2
-编码，不要求 scale 必须为 2 的幂。
+Po2 按目标后端要求选用，本示例默认执行转换演示。整块注释该阶段后，保留已完成 bias 对齐的
+affine PTQ 网格并继续导出和恢复；导出接口不要求 scale 必须为 2 的幂。
 
 ### 使用自己的模型和预处理样本
 
@@ -162,7 +166,8 @@ NPY；多输入使用 NPZ，每个键与 ONNX 输入名完全一致，不得缺�
 默认结果保存到 `./output/onnx_ptq_quick_start/<execution-id>/exports/`，可用 `--output-dir` 改变输出根目录。
 部署时配套使用同次导出的
 ONNX 和 JSON；metadata 和 `outputs.npz` 保存各阶段的评估结果。
-日志比较 FP32、PTQ、Po2 和恢复后的输出。默认 KWS 示例以及提供
+日志比较 FP32、PTQ、实际执行的 Po2 阶段和恢复后的输出，metadata 与 `outputs.npz` 只记录
+实际执行的评估阶段。默认 KWS 示例以及提供
 分类验证标签的模型另报告 Top-1；其他模型只报告输出误差。
 日志输出“量化流程完成”表示运行成功。
 

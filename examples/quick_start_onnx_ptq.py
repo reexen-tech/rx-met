@@ -7,7 +7,8 @@ RX-MET ONNX PTQ 演示 — 标准用法
         → create_onnx_ptq_sim（JSON 1 + IO quantizer + percentile）
         → apply_mixed_precision_bitwidth（JSON 2，与 quick_start_kws.py 同一份）
         → sim.compute_encodings 校准 (PTQ)
-        → 可选：apply_power_of_2_workflow（RX cover_range + Sb=Sx*Sw，算法在 aimet_common）
+        → align_onnx_bias_scale（普通层 bias 按 Sb=Sx*Sw 对齐）
+        → 可选：apply_power_of_2_workflow + bias 重新对齐
         → export_onnx_json（clean ONNX + compiler encodings）
         → 重建 QuantSim，恢复 encodings，对比保存前的量化输出
 
@@ -50,6 +51,7 @@ if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
 from aimet_onnx.rx_ptq import (
+    align_onnx_bias_scale,
     apply_mixed_precision_bitwidth,
     apply_power_of_2_workflow,
     create_onnx_ptq_sim,
@@ -59,6 +61,7 @@ from aimet_onnx.rx_ptq import (
     force_model_io_quantizers,
     load_onnx_ptq_inputs,
     load_onnx_validation_inputs,
+    run_onnx_feed,
     verify_onnx_ptq_artifacts,
     write_onnx_ptq_metadata,
 )
@@ -76,7 +79,6 @@ ACTIVATION_TYPE = "int8"
 # 与 Torch quick_start / train_qat 同一套 RX 契约。
 PO2_METHOD = "cover_range"
 PO2_TOLERANCE = 0.02
-ALIGN_BIAS_SCALE = True
 BIAS_BITWIDTH = 32
 
 # 与 examples/quick_start_kws.py 同一对 JSON：QuantSim 基础配置 + 混合精度。
@@ -377,7 +379,7 @@ def _run_onnx_ptq(run, args=None) -> None:
         )
         force_model_io_quantizers(sim, original_model)
         disabled_biases = disable_onnx_bias_quantizers(
-            sim, preserve_shared_percentile=True) if ALIGN_BIAS_SCALE else []
+            sim, preserve_shared_percentile=True)
         print(f"quantizer 数量: {len(sim.qc_quantize_op_dict)}")
         print(
             f"延后至校准后对齐的 bias quantizer: {len(disabled_biases)}"
@@ -386,10 +388,11 @@ def _run_onnx_ptq(run, args=None) -> None:
     # ------------------------------------------------------------------
     # 步骤 4: 校准 (PTQ)
     #   对应 aimet.nn.compute_encodings。
-    #   Percentile 按配置校准 bias；旧统计路径在校准后按实际 scale 对齐。
+    #   所有普通层 bias 在评估前按实际输入、权重 scale 对齐；不依赖 Po2。
     # ------------------------------------------------------------------
     with stage("步骤 4: 校准 (PTQ)", timings):
         sim.compute_encodings(feeds)
+        bias_report = align_onnx_bias_scale(sim, bias_bitwidth=BIAS_BITWIDTH)
         ptq_batches, ptq_evaluation = evaluate_onnx_dataset(
             sim, evaluation_feeds, reference=fp32_batches, labels=validation_labels, providers=providers
         )
@@ -397,10 +400,15 @@ def _run_onnx_ptq(run, args=None) -> None:
         print_compare_report("PTQ vs FP32", ptq_report)
         print_accuracy_report("PTQ 验证", ptq_evaluation)
 
+    po2_report = None
+    po2_metadata = {}
+    evaluations = {"fp32": fp32_evaluation, "ptq": ptq_evaluation}
+    output_stages = {"fp32": fp32_batches, "ptq": ptq_batches}
+
     # ------------------------------------------------------------------
     # 步骤 5: Power-of-2 量化（可选）
     #   算法是 aimet_common.power_of_2 里的 RX 原文；这里走 ONNX 入口，
-    #   不经过 aimet_torch。
+    #   不经过 aimet_torch。可整块注释；普通层 bias 已在步骤 4 完成对齐。
     # ------------------------------------------------------------------
     with stage("步骤 5: Power-of-2 量化（可选）", timings):
         print("按目标后端要求选用 Power-of-2；本示例执行转换演示。")
@@ -408,16 +416,26 @@ def _run_onnx_ptq(run, args=None) -> None:
             sim,
             method=PO2_METHOD,
             tolerance=PO2_TOLERANCE,
-            align_bias_scale=ALIGN_BIAS_SCALE,
+            align_bias_scale=False,
             verbose=True,
-            bias_bitwidth=BIAS_BITWIDTH,
         )
-        quantized_batches, po2_evaluation = evaluate_onnx_dataset(
+        po2_bias_report = align_onnx_bias_scale(sim, bias_bitwidth=BIAS_BITWIDTH)
+        po2_batches, po2_evaluation = evaluate_onnx_dataset(
             sim, evaluation_feeds, reference=fp32_batches, labels=validation_labels, providers=providers
         )
         po2_eval = po2_evaluation["comparison"]
         print_compare_report("Po2 vs FP32", po2_eval)
         print_accuracy_report("Po2 验证", po2_evaluation)
+        evaluations["po2"] = po2_evaluation
+        output_stages["po2"] = po2_batches
+        po2_metadata = {
+            "po2_method": PO2_METHOD,
+            "po2_tolerance": PO2_TOLERANCE,
+            "po2_vs_fp32": po2_eval,
+            "po2_bias_align": po2_bias_report,
+            "po2_changes": po2_report["po2_changes"],
+            "all_power_of_2": po2_report["all_power_of_2"],
+        }
 
     # ------------------------------------------------------------------
     # 步骤 6: QAT 微调
@@ -432,6 +450,7 @@ def _run_onnx_ptq(run, args=None) -> None:
     #   与 Torch 共用导出入口名：clean ONNX + compiler encodings + RX-MET raw。
     # ------------------------------------------------------------------
     with stage("步骤 7: 保存量化产物", timings):
+        quantized_batches = [run_onnx_feed(sim, feed) for feed in evaluation_feeds]
         artifacts = export_onnx_json(
             sim, original_model, run.exports, filename_prefix
         )
@@ -470,7 +489,7 @@ def _run_onnx_ptq(run, args=None) -> None:
         print("✅ ONNX 维度、量化输出和 compiler encodings 恢复验证通过")
 
     archived_outputs = {}
-    for stage_name, batches in (("fp32", fp32_batches), ("ptq", ptq_batches), ("po2", quantized_batches)):
+    for stage_name, batches in output_stages.items():
         count = len(batches[0])
         if any(len(batch) != count for batch in batches):
             raise ValueError(f"{stage_name}: output count changed between batches")
@@ -498,18 +517,16 @@ def _run_onnx_ptq(run, args=None) -> None:
                 feed[name].tobytes() for feed in evaluation_feeds for name in sorted(feed))).hexdigest(),
             "evaluation_source": "validation" if validation_dir is not None else "calibration",
             "validation_dir": str(validation_dir.resolve()) if validation_dir is not None else None,
-            "evaluation": {"fp32": fp32_evaluation, "ptq": ptq_evaluation, "po2": po2_evaluation},
+            "evaluation": evaluations,
             "quant_scheme": QUANT_SCHEME,
             "percentile_value": PERCENTILE_VALUE,
-            "po2_method": PO2_METHOD,
-            "align_bias_scale": ALIGN_BIAS_SCALE,
+            "align_bias_scale": True,
             "bias_bitwidth": BIAS_BITWIDTH,
             "coverage": artifacts["coverage"],
             "onnx_shapes": artifacts["onnx_shapes"],
             "ptq_vs_fp32": ptq_report,
-            "po2_vs_fp32": po2_eval,
-            "bias_align": po2_report["bias_align"],
-            "all_power_of_2": po2_report.get("all_power_of_2"),
+            "bias_align": bias_report,
+            **po2_metadata,
             "clean_onnx_vs_fp32": clean_report,
             "restored_quantized_vs_pre_export": reload_report,
             "onnx": str(artifacts["onnx"]),

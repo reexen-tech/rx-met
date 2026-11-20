@@ -49,13 +49,14 @@ C++/CUDA 实现，QuantGRU / QuantLSTM 在 PyTorch 中替换原始循环层；ON
 | 模块 | 主要接口 | 职责 |
 | --- | --- | --- |
 | `aimet_common` | QuantSim 公共定义、配置规则、Power-of-2 数值函数 | 框架无关的量化算法、图规则和原生库加载 |
-| `aimet_torch` | `QuantizationSimModel`、混合精度工具、QAT 工具、`export_onnx_json()` | PyTorch 图准备、量化器管理、QuantGRU / QuantLSTM 协作和导出后处理 |
-| `aimet_onnx` | ONNX QuantSim、`run_onnx_ptq()`、`CompilerEncodingConverter` | ONNX Runtime 会话、校准、Po2 对齐和节点级 encoding 映射 |
+| `aimet_torch` | `QuantizationSimModel`、`align_bias_scale()`、混合精度与 QAT 工具、`export_onnx_json()` | PyTorch 图准备、量化器管理、普通 bias 对齐、QuantGRU / QuantLSTM 协作和导出后处理 |
+| `aimet_onnx` | ONNX QuantSim、`align_onnx_bias_scale()`、`run_onnx_ptq()`、`CompilerEncodingConverter` | ONNX Runtime 会话、校准、普通 bias 对齐、可选 Po2 转换和节点级 encoding 映射 |
 | `native` | 安装到 `aimet_common` 的 Python 扩展和 ONNX Runtime custom op | AIMET C++/CUDA 量化内核与 Python binding |
 | `quant_gru` / `quant_lstm` | `QuantGRU` / `QuantLSTM`、`GRU_config` / `LSTM_config`、量化参数导入导出 | CPU/CUDA 循环层、校准器、激活实现、量化前向和 CUDA 反向传播 |
 | 构建与发布 | `scripts/environment/*.sh`、`scripts/release/*.sh` | 依赖锁、环境镜像、项目 wheel、验收和归档 |
 
-`aimet_onnx.rx_ptq` 根据 ONNX、配置和校准数据创建 QuantSim，完成校准、可选的 Power-of-2 和 bias 对齐、
+`aimet_onnx.rx_ptq` 根据 ONNX、配置和校准数据创建 QuantSim，完成校准、普通 bias 对齐与 PTQ 评估、
+可选的 Power-of-2 转换及 bias 重新对齐、
 制品导出和恢复验证。发布入口根据所选 CPU/CUDA 变体查找环境、构建 wheel、组装应用包并执行离线安装自检。
 
 ## 4. PyTorch 量化流程
@@ -70,9 +71,12 @@ flowchart LR
     Base[QuantSim 基础配置] --> Sim
     Sim --> Mixed[应用混合精度配置]
     Mixed --> Calibrate[compute_encodings 校准]
-    Calibrate -->|可选| Po2[Power-of-2 与 bias 对齐]
-    Calibrate -->|保留校准网格| Ready[选定量化网格]
-    Po2 --> Ready
+    Calibrate --> Bias[INT32 bias 对齐]
+    Bias --> PTQEval[PTQ 评估]
+    PTQEval -->|可选| Po2[Power-of-2 转换]
+    PTQEval -->|保留 affine 网格| Ready[选定量化网格]
+    Po2 --> ReAlign[bias 重新对齐并评估]
+    ReAlign --> Ready
     Ready -->|仅 PTQ| Quantized[量化模型]
     Ready -->|CUDA QAT| QAT[冻结量化参数并微调]
     QAT --> Quantized
@@ -87,18 +91,22 @@ flowchart LR
 1. `prepare_model` 在 QuantSim 创建前完成模型图规范化。
 2. 基础配置在创建 QuantSim 时加载，混合精度配置在校准前应用。
 3. `compute_encodings` 使用代表性数据收集激活范围，参数编码从模型权重和偏置计算。
-4. Power-of-2 是按目标后端要求选用的转换，会修改实际量化器 scale；普通层的 bias 可对齐到 `Sb = Sx * Sw`。
-5. KWS 的 QAT 阶段冻结量化参数和 BatchNorm 状态；只做 PTQ 时直接导出。
-6. KWS 在导出前将 QuantSim 模型切换到 CPU 和 eval 模式，导出器以 CPU 上的浮点模型生成 ONNX 图。
-7. 重载流程使用相同的模型准备参数、配置文件、默认位宽和量化方案。
+4. 校准后独立调用 `align_bias_scale()`，将普通 Conv/Linear bias 按 INT32、`Sb = Sx * Sw` 对齐，再评估 PTQ。
+5. Power-of-2 按目标后端要求选用。标准流程传入 `align_bias_scale=False` 转换 scale，随后独立重新对齐 bias 再评估；省略该块时沿用已对齐的 affine PTQ 网格。
+6. KWS 的 QAT 阶段冻结最终选定的量化参数和 BatchNorm 状态；只做 PTQ 时直接导出。
+7. KWS 在导出前将 QuantSim 模型切换到 CPU 和 eval 模式，导出器以 CPU 上的浮点模型生成 ONNX 图。
+8. 重载流程使用相同的模型准备参数、配置文件、默认位宽和量化方案。
 
 KWS 的 `--ptq-only` 路径从浮点检查点开始，跳过训练和 QAT，支持 CPU/CUDA。
 KWS 在导出接口之外显式保存主权重；`export_onnx_json()` 只返回 ONNX 和编码路径。
 主权重检查点不包含 QuantSim 内部状态；重载时先加载主权重，再创建 QuantSim 并加载
 编译器 encodings。
+PTQ-only 恢复验证使用保存前的最终输出快照；输出归档只包含实际执行的 FP32、PTQ 和可选 Po2 阶段。
 
 QuantGRU / QuantLSTM 与其他模块共享同一次 `compute_encodings` 前向过程。循环层通过自己的
 校准实现收集内部算子范围，并通过 `GRU_config` / `LSTM_config` 接收位宽和量化粒度。
+内部 bias 保留独立网格，通过 `bias_to_accumulator` 重缩放到各线性分支的乘积 scale 累加域；
+普通层 bias 对齐 helper 不改变原生算子的位宽、网格或训练余量。
 
 ## 5. ONNX PTQ 流程
 
@@ -107,8 +115,9 @@ QuantGRU / QuantLSTM 与其他模块共享同一次 `compute_encodings` 前向�
 示例默认复用 KWS 已有的最终浮点 ONNX，自行从同一份 Speech Commands 抽样并提取 MFCC；
 显式传入 `--model` 和 `--calib-dir` 时使用通用模型与预处理样本路径。
 KWS 的训练和导出流程不依赖 ONNX 示例。
-下图描述示例及 `run_onnx_ptq()` 的执行路径。Po2 按目标后端要求选用，当前入口执行该阶段
-以演示转换及其精度影响；导出和恢复接口支持一般 affine 编码，不强制要求 Po2。
+下图描述示例及 `run_onnx_ptq()` 的执行路径。校准后的普通 bias 对齐独立于可选 Po2。
+示例默认演示 Po2，可整块注释；库接口默认 `enable_po2=True`，传入 `False` 使用 affine PTQ。
+两条路径均支持后续导出和恢复。
 
 ```mermaid
 flowchart LR
@@ -118,17 +127,27 @@ flowchart LR
     BaseConfig[QuantSim 基础配置] --> Sim
     Sim --> MixedConfig[应用混合精度配置]
     MixedConfig --> Calibration[校准]
-    Calibration --> Alignment[演示可选的 Power-of-2 与 bias 对齐]
-    Alignment --> Clean[Clean ONNX]
-    Alignment --> Raw[AIMET 原始 encodings]
-    Alignment --> Compiler[编译器 encodings]
+    Calibration --> Bias[INT32 bias 对齐]
+    Bias --> PTQEval[PTQ 评估]
+    PTQEval -->|可选| Po2[Power-of-2 转换]
+    Po2 --> ReAlign[bias 重新对齐并评估]
+    PTQEval -->|保留 affine 网格| Final[最终量化状态]
+    ReAlign --> Final
+    Final --> Clean[Clean ONNX]
+    Final --> Raw[AIMET 原始 encodings]
+    Final --> Compiler[编译器 encodings]
     Clean --> Restore[重建 QuantSim 并比较量化输出]
     Raw -->|加载量化状态| Restore
     Compiler -->|校验恢复后的网格| Restore
     Restore --> Meta[metadata]
 ```
 
-`run_onnx_ptq()` 提供端到端接口。`CompilerEncodingConverter` 把已启用量化器映射到
+`run_onnx_ptq()` 提供端到端接口，始终独立对齐普通 bias。兼容参数 `align_bias_scale=False`
+会在读取输入前抛出 `ValueError`；需要 affine PTQ 时使用 `enable_po2=False`。
+低层 Po2 接口仍兼容合并 bias 对齐，标准流程不依赖它。metadata 只记录实际执行的评估阶段，
+恢复验证比较导出前最终量化状态的输出。
+
+`CompilerEncodingConverter` 把已启用量化器映射到
 节点输入、节点输出或参数条目，并输出 `schema_version: 4`，统一使用
 `real = scale * (q - zero_point)`。导出过程检查覆盖率和
 孤立键。Clean ONNX 与编译器 encodings 作为同一组部署制品使用。
@@ -242,7 +261,7 @@ flowchart LR
 | PyTorch 检查点 | KWS 示例 | 主权重、网络类型和外置 MFCC 状态；量化编码单独保存 |
 | 部署 ONNX + encodings | PyTorch 导出流程 | PyTorch 模型部署 |
 | Clean ONNX + compiler encodings | ONNX PTQ 流程 | 已有 ONNX 模型部署 |
-| metadata | ONNX PTQ 流程 | 输入、校准、Po2、覆盖率和数值对比记录 |
+| metadata | ONNX PTQ 流程 | 输入、校准、bias 对齐、已执行的可选 Po2、覆盖率和数值对比记录 |
 
 模型文件和 encodings 按同一次导出结果配套使用。应用包内的 `manifest.json` 描述安装内容，
 归档同名 `.sha256` 校验分发文件；应用包内的 `SHA256SUMS` 校验应用文件。

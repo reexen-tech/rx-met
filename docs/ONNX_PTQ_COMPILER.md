@@ -4,8 +4,10 @@
 并导出供目标编译器配套使用的 clean ONNX 和 `<prefix>.json`。已有模型和预处理数据
 可直接按下文量化；初次体验可从[复用 KWS ONNX](#复用-kws-onnx)开始。
 
-Po2 是按目标后端要求选用的可选转换，PTQ 本身不要求 scale 必须为 2 的幂。示例和
-`run_onnx_ptq()` 执行该步骤，以演示转换前后的精度比较；示例日志将其标为“可选”阶段。
+Po2 是按目标后端要求选用的可选转换，PTQ 本身不要求 scale 必须为 2 的幂。
+标准流程在校准后先对齐普通层 bias，再评估 PTQ；执行 Po2 后重新对齐 bias，再评估。
+示例保留独立的 Po2 演示块，可整块注释后继续导出和恢复；`run_onnx_ptq()` 默认执行 Po2，
+传入 `enable_po2=False` 使用 affine PTQ。示例日志将 Po2 标为“可选”阶段。
 导出和恢复接口支持一般 affine 编码，不强制要求 Po2；Po2 工作流仍验证转换是否满足幂次约束。
 
 ## 术语
@@ -19,8 +21,8 @@ Po2 是按目标后端要求选用的可选转换，PTQ 本身不要求 scale �
 - **数据清单**：ONNX 示例自动准备 KWS 数据时在 `manifest.json` 记录抽样和前处理信息，
   并将验证文件名与标签配对。使用自备数据校准时不要求提供该文件。
 - **Po2 scale**：通过 `cover_range` 规则选择并实际写入量化器的 `1/2^n` scale。
-- **Bias scale**：启用 bias 对齐时，Conv、Gemm 和 MatMul 的 bias 使用 `Sb = Sx * Sw`，
-  默认采用 INT32 位宽；bias 对齐不要求 scale 为 Po2。
+- **Bias scale**：标准流程中普通 Conv/ConvTranspose、Gemm 和带 bias 的 MatMul 使用
+  `Sb = Sx * Sw`，默认采用 INT32 位宽；bias 对齐不要求 scale 为 Po2。
 - **编译器覆盖率**：所有已启用的量化器都映射到编译器 encodings 的节点输入、
   节点输出或参数条目，每个 encoding 键都对应模型图中的对象。
 
@@ -111,7 +113,7 @@ KWS 通过 `--output-dir` 改变输出根目录后，ONNX 示例需用 `--model`
 
 命令退出码为 0，日志输出“量化流程完成”及 metadata 路径，并生成下述配套文件，
 即表示标准示例完成。`<prefix>.meta.json` 中的 `coverage`、`clean_onnx_vs_fp32`
-和 `all_power_of_2` 用于进一步确认制品完整性、输出一致性及本示例演示的 Po2 转换结果。
+用于进一步确认制品完整性与输出一致性；执行 Po2 后另记录 `all_power_of_2` 等转换结果。
 
 ## 输出
 
@@ -125,7 +127,10 @@ KWS 通过 `--output-dir` 改变输出根目录后，ONNX 示例需用 `--model`
 - `<prefix>.aimet.encodings`：用于重载的 AIMET 原始编码；
 - `<prefix>.encodings`：底层 QuantSim 导出保留的 AIMET 原始编码；
 - `<prefix>.meta.json`：输入 shape、校准数量、覆盖率、所选转换及各阶段的输出比较；
-- `outputs.npz`：FP32、PTQ 和 Po2 阶段评估输出，键名为 `<stage>_output<index>`。
+- `outputs.npz`：已执行的 FP32、PTQ 及可选 Po2 阶段评估输出，键名为 `<stage>_output<index>`。
+
+Po2 未执行时，metadata 和输出归档不生成 Po2 阶段记录。恢复验证始终比较实际导出前的
+最终量化输出，不要求存在 Po2 阶段。
 
 导出时自动补全 `graph.value_info`。中间张量可以保留符号维度，标量使用零维 shape；
 无法推导 dtype、rank 或维度时会报错。重载检查使用磁盘中已有的标注。
@@ -134,6 +139,9 @@ ONNX 的 `aimet_onnx.rx_ptq.export_onnx_json()` 返回 `onnx`、`encodings`、`a
 路径及 `coverage`、`onnx_shapes` 报告；原入口 `export_onnx_compiler_artifacts()` 保留原参数与返回值。
 `run_onnx_ptq()` 则返回这三条路径和 `metadata` 路径，覆盖率与 shape 报告写入 metadata。
 库函数未指定 `validation_dir` 时使用校准数据评估；它不会自动查找同级 `val/`。
+`run_onnx_ptq(..., enable_po2=False)` 保留校准后的 bias 对齐，导出一般 affine 编码并正常恢复。
+兼容参数 `align_bias_scale` 保留，但标准端到端流程要求它为 `True`；传入 `False` 会在读取
+模型前抛出 `ValueError`。底层导出与恢复接口继续支持合法的 affine 网格。
 PyTorch 同名导出入口及其元组返回值见[导出与重载](Export_and_reload.md)。
 
 ## 全连接量化边界
@@ -261,15 +269,16 @@ ONNX 示例与 `run_onnx_ptq()` 默认使用以下两份配置，与 KWS 示例�
 - [混合精度配置](../examples/config/quick_start_full_quant.json)。模型含标准 GRU/LSTM 时，`GRU_config` / `LSTM_config` 由对应原生算子处理；已知但图中不存在的类型配置会忽略。
 
 调用 `create_onnx_ptq_sim()` 时由调用方传入 `config_file`。该接口创建仿真模型，
-应用混合精度、校准以及按需进行的 Po2 转换是后续步骤。基础配置也可选用
+应用混合精度、校准、bias 对齐以及按需进行的 Po2 转换是后续步骤。基础配置也可选用
 [`onnx_ptq_compiler_w8a8.json`](../src/aimet_common/quantsim_config/onnx_ptq_compiler_w8a8.json)。
 
 示例的默认规则：
 
 - 在 `compute_encodings` 前设置 `percentile=99.99`。Torch 和 ONNX 共用 `aimet_common.percentile` 的 2048 桶动态直方图、样本计数和百分位取点；后续批次超出范围时扩容并合并历史统计。设为 100 时保留完整观测范围。
-- 激活和权重使用对称量化；Percentile PTQ 按 JSON2 的 `bias_bitwidth` 统计校准普通 bias，全零通道也保留有效网格；Po2 演示阶段再按 `Sb = Sx * Sw` 对齐，默认位宽为 INT32。旧原生统计路径的 bias 延后至该阶段对齐，避免近零通道产生 `scale=0`。
+- 激活和权重使用对称量化。校准后调用 `align_onnx_bias_scale()`，将已启用的普通层 bias 按 `Sb = Sx * Sw` 对齐，标准示例使用 INT32，然后评估 PTQ。Percentile 的 bias 统计不决定最终乘积 scale；旧统计路径暂时关闭的 bias 也在该步骤恢复对齐，显式禁用的 bias 保持禁用。
 - 默认整数类型固定为 INT；可通过 JSON2 `*_signed=false` 选择 UINT。整数符号与 `*_symmetric` 独立，UINT 对称模式将负值截为零，不自动退回 INT。
 - 启用 Power-of-2 时，使用与 `src/aimet_torch/power_of_2_quantization.py` 相同的 `cover_range`（容差 2%）。
+- 标准流程调用 `apply_power_of_2_workflow(..., align_bias_scale=False)`，再独立调用 `align_onnx_bias_scale()`，按转换后的输入和权重 scale 更新 bias 后评估。底层 Po2 接口仍兼容原来的 `align_bias_scale=True` 合并调用方式。
 - 权重默认 per-channel；Gemm 保持 per-channel；无 Conv+Relu supergroup
 
 JSON2 的显式激活位宽设置同时要求该有效量化点启用，与 Torch 的行为一致。
@@ -299,7 +308,7 @@ InstanceNorm 类型设置根据该 ONNX 节点实际输入的空间维数选择 
 上述普通 bias 的乘积 scale 对齐不覆盖原生 GRU/LSTM。循环层内部 bias 当前按
 独立配置的 bias 网格量化并重缩放到累加器域，不能将其默认视为 INT32 乘积 scale
 编码。两种方案的差异和待确认的部署约束见
-[Bias 编码差异（待讨论）](QuantLSTM_integration.md#bias-编码差异)。
+[Bias 编码差异](QuantLSTM_integration.md#bias-编码差异)。
 
 ONNX 适配器仅在校准期间使用临时 session 采集中间张量，并将公共模块计算出的网格
 写回原生量化器。公共模块使用 Torch 张量运算，统计与范围计算跟随 CPU/CUDA provider，

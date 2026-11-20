@@ -105,7 +105,7 @@ class OnnxBiasTest(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, 'await scale alignment'):
             pipeline.export_onnx_json(sim, model, self.path / 'pending', 'model')
 
-    def test_percentile_ptq_keeps_configured_bias_quantization(self):
+    def test_percentile_ptq_aligns_bias_before_evaluation(self):
         model = make_graph()
         model.graph.initializer[-1].CopyFrom(
             numpy_helper.from_array(np.array([0., .125], dtype=np.float32), 'b'))
@@ -124,15 +124,19 @@ class OnnxBiasTest(unittest.TestCase):
             if hasattr(source, 'qc_quantize_op_dict'):
                 bias = source.qc_quantize_op_dict['b']
                 observed.append((bias.enabled, bias.bitwidth))
+                self.assertFalse(getattr(source, '_rx_calibration_bias_quantizers', ()))
                 if bias.enabled:
                     self.assertTrue(all(np.isfinite(e.delta) and e.delta > 0 for e in bias.get_encodings()))
+                    sx = source.qc_quantize_op_dict['x'].get_encodings()[0].delta
+                    for eb, ew in zip(bias.get_encodings(), source.qc_quantize_op_dict['w'].get_encodings()):
+                        self.assertEqual(eb.delta, sx * ew.delta)
             return evaluate(source, *args, **kwargs)
         with patch.object(pipeline, 'evaluate_onnx_dataset', side_effect=capture):
             pipeline.run_onnx_ptq(model_path=model_path, calibration_dir=calibration_dir,
                 output_dir=self.path / 'percentile-run', filename_prefix='model',
                 config_file=str(self.config), bitwidth_config_file=str(mixed),
                 quant_scheme='percentile')
-        self.assertEqual(observed[:2], [(True, 16), (True, 32)])
+        self.assertEqual(observed[:2], [(True, 32), (True, 32)])
 
 
 class OnnxBiasGranularityTest(unittest.TestCase):

@@ -283,8 +283,21 @@ def verify_percentile_calibration(sim_model, verbose: bool = True) -> Dict[str, 
 
 
 # ============================================================================
-# Power-of-2 量化相关函数
+# 量化后处理：bias 对齐与可选 Power-of-2 转换
 # ============================================================================
+
+@logged_operation
+def align_bias_scale(sim_model, verbose: bool = True,
+                     bias_bitwidth: int = 32) -> Dict[str, Any]:
+    """Align ordinary layer biases to Sx * Sw without changing other grids."""
+    if hasattr(sim_model, "qc_quantize_op_dict"):
+        from aimet_onnx.rx_ptq.po2 import align_onnx_bias_scale
+
+        return align_onnx_bias_scale(sim_model, bias_bitwidth=bias_bitwidth)
+    return _align_conv_bias_scale(
+        sim_model, verbose=verbose, bias_bitwidth=bias_bitwidth,
+    )
+
 
 @logged_operation
 def apply_power_of_2_workflow(sim_model, method: str = "cover_range", tolerance: float = 0.02, 

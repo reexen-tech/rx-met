@@ -113,16 +113,19 @@ CPU runtime 的 CUDA 版本打印为 `None`。runtime 提供第三方依赖，�
 ```
 已有浮点模型与权重 → prepare_model → QuantizationSimModel + 混合精度位宽
   → compute_encodings 校准 (PTQ)
-  → 可选：apply_power_of_2_workflow (按目标后端要求转换为 Po2)
+  → 普通层 INT32 bias 对齐 (Sb = Sx * Sw) → PTQ 评估
+  → 可选：apply_power_of_2_workflow → bias 重新对齐 → Po2 评估
   → 可选：freeze_quantizer_parameters + CUDA QAT 微调
   → 分别保存主权重检查点、ONNX 和 .json 编码文件
   → 重建并加载主权重 → 创建 sim → load_quantizer_encodings → 精度对比
 ```
 
 已有权重可直接进行 PTQ；浮点训练不是量化前必须重复执行的步骤。KWS 完整示例同时演示
-浮点训练与 QAT，CPU 模式使用已有检查点，只执行校准、PTQ、Po2、导出与恢复。
+浮点训练与 QAT，CPU 模式使用已有检查点，只执行校准、bias 对齐、PTQ、可选 Po2、导出与恢复。
 Po2 是按目标后端要求选用的阶段，PTQ 或 QAT 本身不要求 scale 必须为 2 的幂。
-KWS 和 ONNX 示例执行 Po2，以演示该能力及转换前后的精度比较，日志将其标为“可选”阶段。
+KWS 和 ONNX 示例默认执行 Po2 演示；可整块注释其可选调用块，保留校准后的 bias 对齐，
+继续导出和恢复。日志与归档只记录实际执行的阶段。原生 GRU/LSTM 的 bias 通过独立网格
+重缩放到累加域，不由普通层对齐步骤改为 INT32。
 按[自有模型接入教程](PyTorch_quantization.md)准备模型、数据和评估函数，
 再根据[配置参考](Quant_config.md)调整量化设置。
 
@@ -176,7 +179,8 @@ PyTorch 和 ONNX 采用两层配置。下表以 PyTorch 调用为例；完整字
   → QuantizationSimModel
   → set_percentile_value(99.99)
   → compute_encodings
-  → 可选：cover_range Po2 + Sb = Sx * Sw（按部署要求选用，示例执行演示）
+  → 普通层 INT32 bias 对齐 (Sb = Sx * Sw) → PTQ 评估
+  → 可选：cover_range Po2 → bias 重新对齐 → Po2 评估
   → clean ONNX + compiler encodings
 ```
 
@@ -184,8 +188,9 @@ CPU runtime 显式传入 `--device cpu`。默认示例复用 KWS 已有的最终
 Speech Commands，并自行完成固定抽样和 MFCC，不需要额外准备脚本或修改 KWS 流程。
 模型选择、数据路径和运行命令见[示例说明](../examples/README.md#onnx-ptq复用-kws-的浮点-onnx)。
 使用其他模型时，显式传入 `--model` 和已经完成模型前处理的 `--calib-dir`。
-ONNX 示例和 `run_onnx_ptq()` 执行可选 Po2 阶段的转换演示。导出和恢复接口也支持非 Po2
-编码，仍严格检查网格、覆盖率和恢复输出；执行演示不表示 PTQ 必须经过 Po2。
+ONNX 示例默认执行可选 Po2 转换块；库接口 `run_onnx_ptq()` 可传入 `enable_po2=False`
+跳过该阶段。普通层 bias 对齐始终保留。导出和恢复接口支持非 Po2 编码，仍严格检查
+网格、覆盖率和恢复输出。
 
 当前 ONNX 流程适用于 PTQ；QAT 使用 PyTorch 流程。编译器 encodings 是 rx-met 的
 部署格式，必须与同次导出的 Clean ONNX 配套使用。
