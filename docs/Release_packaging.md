@@ -12,8 +12,9 @@ GNU coreutils、GNU findutils、`flock` 和加载归档时使用的 `gzip`，宿
 下载 runtime 时还需 `curl`。远程 Docker context 不支持安装器所需的本机路径挂载。
 宿主 Python 需能导入 `packaging`，可复用 pip 内置副本；Python 3.10 的 TOML 解析还会使用
 pip 内置的 `tomli`。
-产品 `VERSION` 与公共环境版本独立；环境定义、版本及兼容镜像复用规则以
-[公共环境](Shared_environment.md#版本与复用)为准。
+只升级软件包时，更新仓库根目录的 `VERSION` 和 `CHANGELOG.md` 即可。发布脚本读取 `VERSION`
+构建软件包，继续使用 `docker/variants.json` 中 `environment_version` 指定的公共环境。
+环境定义、版本及兼容镜像复用规则见[公共环境](Shared_environment.md#版本与复用)。
 
 ## 日常发布
 
@@ -27,6 +28,9 @@ pip 内置的 `tomli`。
 省略变体时默认仅构建 `cu118`、`cu126`、`cu130`；CPU 必须显式指定 `cpu`。
 环境构建、runtime 导出及 Docker bake 默认组遵循相同规则。可同时指定 CPU/CUDA，
 例如 `./scripts/release/build.sh cu126 cpu`。
+
+单独调用 Docker Bake 构建 wheel 时，从仓库根目录传入软件版本，例如
+`VERSION=$(cat VERSION) docker buildx bake -f docker/docker-bake.hcl cu126`。
 
 CPU 变体支持校准与 PTQ，不需要 NVIDIA Driver 或 Container Toolkit。
 发布 CPU 时使用以下流程替代上面的 CUDA 构建：

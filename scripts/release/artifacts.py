@@ -260,7 +260,8 @@ def main():
             if not args.skip_build:
                 run('docker', 'buildx', 'bake', '-f', ROOT / 'docker/docker-bake.hcl', '--progress=plain',
                     '--set', f'{variant}.args.JOBS={args.jobs}', '--set', f'{variant}.args.BUILD_ENV_IMAGE={build_ref}',
-                    '--set', f'{variant}.output=type=local,dest={wheel_output}', variant, cwd=ROOT)
+                    '--set', f'{variant}.output=type=local,dest={wheel_output}', variant, cwd=ROOT,
+                    env={**os.environ, 'VERSION': version, 'ENV_VERSION': env_version})
                 if image_info(build_ref, 'build', variant, env_version)['Id'] != build['Id']:
                     raise RuntimeError('构建过程中 build-env 身份发生变化')
                 if source_digest() != fingerprint['source_sha256']:

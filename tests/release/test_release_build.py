@@ -4,6 +4,7 @@ from contextlib import ExitStack
 import hashlib
 import importlib.util
 import json
+import os
 from pathlib import Path
 import subprocess
 import tempfile
@@ -355,6 +356,18 @@ class ReleaseBuildPreflightTest(unittest.TestCase):
             expected_checksum = hashlib.sha256(archive.read_bytes()).hexdigest()
             self.assertEqual((self.output / (name + '.sha256')).read_text(),
                              f'{expected_checksum}  {name}\n')
+        return mocks['run'].call_args_list
+
+    def test_bake_uses_release_versions_and_inherits_docker_context(self):
+        caller_env = {'VERSION': '9.9.9', 'ENV_VERSION': '199901', 'DOCKER_CONTEXT': 'release-builder'}
+        matrix = artifacts.dependencies.load_matrix()
+        with patch.dict(os.environ, caller_env), patch.dict(matrix, environment_version='203104'):
+            calls = self.assert_selected_targets(['cpu'], ['cpu'])
+            self.assertEqual({key: os.environ[key] for key in caller_env}, caller_env)
+        bake, = [call for call in calls if call.args[:3] == ('docker', 'buildx', 'bake')]
+        self.assertEqual(bake.kwargs['env']['VERSION'], '1.1.0')
+        self.assertEqual(bake.kwargs['env']['ENV_VERSION'], '203104')
+        self.assertEqual(bake.kwargs['env']['DOCKER_CONTEXT'], 'release-builder')
 
     def test_default_build_excludes_cpu(self):
         self.assert_selected_targets([], ['cu118', 'cu126', 'cu130'])

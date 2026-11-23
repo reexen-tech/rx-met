@@ -10,6 +10,7 @@ import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 
 from tests.support.paths import REPO_ROOT as ROOT
@@ -43,6 +44,16 @@ class DependencyConfigurationTest(unittest.TestCase):
 
     def test_generated_artifacts_are_current(self) -> None:
         dependencies.check_generated_artifacts(self.matrix)
+
+    def test_product_version_bump_preserves_generated_bake_file(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            with patch.object(dependencies, 'ROOT', root):
+                for version in ('1.2.3', '1.2.4'):
+                    with self.subTest(version=version):
+                        (root / 'VERSION').write_text(version + '\n', encoding='utf-8')
+                        self.assertEqual(dependencies.render_bake(self.matrix),
+                                         dependencies.BAKE_PATH.read_text(encoding='utf-8'))
 
     def test_public_cpu_uses_the_selected_compatible_torch_release(self) -> None:
         self.assertEqual(self.matrix['variants']['cpu']['torch']['packages'], {
