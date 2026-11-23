@@ -59,7 +59,8 @@ cp -a examples "$HOME/rx-met-user/"
 
 ## 步骤 3：进入容器并运行
 
-在宿主机执行时，按实际情况调整宿主机路径和 GPU 编号。
+以下命令默认使用宿主机的 0 号 GPU，可按需调整编号。
+使用 CPU 包时，删掉命令中的 `--gpus device=0` 这一行。
 将 `/path/to/models`、`/path/to/datasets` 替换为实际宿主机目录的绝对路径，
 并提前在宿主机创建这些目录。
 
@@ -70,8 +71,7 @@ docker run --rm -it --pull=never --shm-size=2g \
   -e USER="$(id -un)" -e LOGNAME="$(id -un)" \
   -w /workspace \
   -e PYTHONPATH=/opt/rx-met/python \
-  -e RX_MET_EXAMPLE_DEVICE="$example_device" \
-  "${gpu_args[@]}" \
+  --gpus device=0 \
   -v "$HOME/.local/share/rx-met/@BUNDLE_NAME@:/opt/rx-met:ro" \
   -v "/path/to/models:/models:ro" \
   -v "/path/to/datasets:/datasets:ro" \
@@ -100,26 +100,27 @@ python3 /workspace/examples/quick_start_kws.py --rnn-type gru --device cpu --ptq
   --data-dir /datasets/speech_commands_v0.02
 ```
 
-CUDA 也支持此模式，将 `--device cpu` 改为 `--device cuda`。复用固定校准与验证样本时，
-使用 [示例说明](examples/README.md) 中的 `--calib-dir` 和 `--validation-dir`。
+复用固定校准与验证样本时，使用 [示例说明](examples/README.md) 中的 `--calib-dir` 和 `--validation-dir`。
 
 ### ONNX PTQ
 
 已有上文 KWS 完整流程的运行结果时，保持在 `/workspace` 中执行：
 
 ```bash
-python3 /workspace/examples/quick_start_onnx_ptq.py --device "$RX_MET_EXAMPLE_DEVICE"
+python3 /workspace/examples/quick_start_onnx_ptq.py
 ```
+
+> 使用 CPU 时，在命令中加上 `--device cpu`。
 
 默认从 `output/quick_start_kws/gru/` 中选择最新成功完整运行的
 `exports/att_mh_rnn_kws.onnx`，由 ONNX 示例自行从同一份 Speech Commands 抽样和提取 MFCC，
 不需要额外模型、数据集、准备脚本或 KWS 检查点。使用 LSTM 时追加 `--rnn-type lstm`。
 KWS 最终导出的是 clean 浮点 ONNX，本流程重新校准并生成一套量化参数，不读取原来的量化 JSON。
 
-CPU 用户可使用已有的 KWS ONNX，或量化自己的静态 ONNX 和预处理 NPY/NPZ：
+也可以量化自己的静态 ONNX，并使用预处理的 NPY/NPZ 作为校准数据：
 
 ```bash
-python3 /workspace/examples/quick_start_onnx_ptq.py --device "$RX_MET_EXAMPLE_DEVICE" \
+python3 /workspace/examples/quick_start_onnx_ptq.py \
   --model /models/model.onnx --calib-dir /datasets/my_model/calib \
   --prefix my_model
 ```
