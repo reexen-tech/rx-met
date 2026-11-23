@@ -8,6 +8,15 @@ import json
 import re
 from pathlib import Path
 
+try:
+    from packaging.version import Version
+except ImportError:
+    from pip._vendor.packaging.version import Version
+
+
+def wheel_version(product_version: str, variant: str) -> str:
+    return str(Version(f"{product_version.strip()}+{variant}"))
+
 
 def _strip_pyproject(text: str) -> str:
     text = re.sub(
@@ -51,25 +60,23 @@ def main() -> None:
     )["variants"]
     if args.cuda_variant not in variants:
         raise SystemExit(f"unsupported variant: {args.cuda_variant}")
-    version = args.version.strip()
-    # Wheel / PEP 440 cannot start with "v". Use the component MAJOR.MINOR.PATCH.
-    if not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", version):
-        raise SystemExit(f"invalid wheel version, expected MAJOR.MINOR.PATCH: {version}")
-
     variant = args.cuda_variant
-    wheel_version = f"{version}+{variant}"
+    try:
+        version = wheel_version(args.version, variant)
+    except ValueError as exc:
+        parser.error(str(exc))
     pyproject = root / "pyproject.toml"
     project_text = _strip_pyproject(pyproject.read_text(encoding="utf-8"))
     if variant == "cpu":
         project_text = project_text.replace('"onnxruntime-gpu', '"onnxruntime')
     pyproject.write_text(project_text, encoding="utf-8")
-    (root / "VERSION").write_text(f"{wheel_version}\n", encoding="utf-8")
+    (root / "VERSION").write_text(f"{version}\n", encoding="utf-8")
 
     quant_version = root / "operators" / "quant-gru" / "pytorch" / "_version.py"
     quant_text = quant_version.read_text(encoding="utf-8")
     quant_text, count = re.subn(
-        r'^__version__ = "([0-9]+\.[0-9]+\.[0-9]+)(?:\+[^\"]+)?"$',
-        f'__version__ = "{wheel_version}"',
+        r'^__version__ = "[^"\n]+"$',
+        f'__version__ = "{version}"',
         quant_text,
         count=1,
         flags=re.M,
@@ -77,7 +84,7 @@ def main() -> None:
     if count != 1:
         raise SystemExit(f"failed to set QuantGRU CUDA variant in {quant_version}")
     quant_version.write_text(quant_text, encoding="utf-8")
-    print(f"prepared rx-met packaging at {root} version={wheel_version}")
+    print(f"prepared rx-met packaging at {root} version={version}")
 
 
 if __name__ == "__main__":

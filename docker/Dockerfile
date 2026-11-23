@@ -20,8 +20,7 @@ COPY . /opt/rx-met-src
 RUN grep -Fx "environment_role=build" /opt/rx-quant-env/environment.env \
     && grep -Fx "environment_version=${ENV_VERSION}" /opt/rx-quant-env/environment.env \
     && grep -Fx "cuda_variant=${CUDA_VARIANT}" /opt/rx-quant-env/environment.env \
-    && grep -Fx "cuda_version=${RX_MET_CUDA_VERSION}" /opt/rx-quant-env/environment.env \
-    && [[ "${RX_MET_VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+    && grep -Fx "cuda_version=${RX_MET_CUDA_VERSION}" /opt/rx-quant-env/environment.env
 
 RUN CUDA_VARIANT="${CUDA_VARIANT}" \
     RX_MET_VERSION="${RX_MET_VERSION}" \

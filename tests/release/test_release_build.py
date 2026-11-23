@@ -74,12 +74,12 @@ class ReleaseBuildTest(unittest.TestCase):
         if self.fail_install:
             raise subprocess.CalledProcessError(1, command, stderr='injected verification failure')
 
-    def assemble(self):
+    def assemble(self, version='1.1.0'):
         record = artifacts.environment_archives.requirement('runtime', 'cu118')
         record.update(config_sha256='config', image_id='runtime')
         artifacts.assemble(self.args, {'environment_version': '202610'}, 'cu118', {'Id': 'runtime'},
                            {'Id': 'build'}, record, self.root / record['filename'], self.wheel_dir,
-                           {'python_version': '3.10'}, version='1.1.0', changelog='# Changelog\n')
+                           {'python_version': '3.10'}, version=version, changelog='# Changelog\n')
 
     def bundle_manifest(self):
         with tarfile.open(self.output / (self.name + '.tar.gz')) as archive:
@@ -114,6 +114,14 @@ class ReleaseBuildTest(unittest.TestCase):
         self.assertTrue((self.output / (self.name + '.tar.gz')).is_file())
         self.assertFalse(any(path.is_dir() for path in self.output.iterdir()))
         self.assertFalse(list((self.root / '.release/staging').glob('.bundle-*')))
+
+    def test_prerelease_wheel_version_is_normalized_with_variant_suffix(self):
+        self.name = 'rx-met-v1.1.3-RC.1-cu118-linux-amd64'
+        self.assemble('1.1.3-RC.1')
+        manifest = json.loads(self.bundle_manifest())
+        self.assertEqual(manifest['version'], '1.1.3-RC.1')
+        self.assertEqual(manifest['wheel_version'], '1.1.3rc1+cu118')
+        artifacts.inspect_wheels.assert_called_once_with(self.wheel_dir, '1.1.3rc1+cu118', '3.10')
 
     def test_failed_temporary_verification_preserves_previous_artifacts(self):
         self.assemble()
@@ -220,6 +228,16 @@ class ReleaseBuildPreflightTest(unittest.TestCase):
     def test_existing_selected_archive_is_rejected_before_docker(self):
         path = self.existing('cu118', archive=True)
         self.assert_conflict_before_docker(path, 'cu118')
+
+    def test_invalid_wheel_versions_are_rejected_before_docker(self):
+        for version in ('1.1.3-tmp', '1.1.3+tmp'):
+            with self.subTest(version=version):
+                (self.root / 'VERSION').write_text(version + '\n')
+                with patch('sys.argv', ['artifacts.py', 'build', 'cu118']), \
+                        self.assertRaises(ValueError) as error:
+                    artifacts.main()
+                self.assertIn(version, str(error.exception))
+                self.ensure_image.assert_not_called()
 
     def test_existing_cpu_archive_is_rejected_before_docker(self):
         path = self.existing('cpu', archive=True)

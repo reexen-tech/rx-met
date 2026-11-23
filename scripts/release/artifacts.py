@@ -21,6 +21,7 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / 'scripts'))
 import dependencies
 from environment import common
+from internal import prepare_packaging
 from release import delivery, environment_archives
 
 
@@ -145,7 +146,7 @@ def assemble(args, matrix, variant, runtime, build, runtime_record, archive, whe
     packed = args.output_dir / (name + '.tar.gz')
     if packed.exists() and not args.replace:
         raise RuntimeError(f'应用产物已存在: {packed}；开发时可显式 --replace')
-    wheel_version = f'{version}+{variant}'
+    wheel_version = prepare_packaging.wheel_version(version, variant)
     wheels = inspect_wheels(wheel_dir, wheel_version, compatibility['python_version'])
     revision = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=ROOT).decode().strip()
     if subprocess.check_output(['git', 'status', '--porcelain'], cwd=ROOT).strip():
@@ -232,6 +233,8 @@ def main():
             parser.error(f'{option} 目录不存在: {directory}')
     env_version = matrix['environment_version']
     version = (ROOT / 'VERSION').read_text().strip()
+    for variant in targets:
+        prepare_packaging.wheel_version(version, variant)
     destination = (args.output_dir or ROOT / '.release/export' / f'rx-met-v{version}').resolve()
     args.runtime_env_dir = (args.runtime_env_dir or ROOT / '.release/runtime-images' / env_version).resolve()
     if args.build_env_dir is not None:
