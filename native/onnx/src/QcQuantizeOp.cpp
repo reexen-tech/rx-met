@@ -54,7 +54,7 @@ template<typename T>
 QcQuantizeOp<T>::QcQuantizeOp(const OrtApi* api, const OrtKernelInfo* info) : api_(*api), info_(info)
 {
     int64_t quantInfoPointer;
-    api->KernelInfoGetAttribute_int64(info_, "quant_info", &quantInfoPointer);
+    Ort::ThrowOnError(api->KernelInfoGetAttribute_int64(info_, "quant_info", &quantInfoPointer));
     quantInfo = reinterpret_cast<struct QcQuantizeInfo*>(quantInfoPointer);
 }
 
