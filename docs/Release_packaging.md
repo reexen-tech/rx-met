@@ -43,7 +43,8 @@ CPU 变体支持校准与 PTQ，不需要 NVIDIA Driver 或 Container Toolkit。
 
 CPU 的三个项目 wheel 使用 `+cpu` 版本后缀；构建原生库时设置
 `RX_MET_ENABLE_CUDA=0`，算子扩展不链接 CUDA。KWS CPU 验证加载现成浮点检查点并
-指定 `--ptq-only`，两个示例的固定输入及制品对照见 [示例说明](../examples/README.md)。
+指定 `--ptq-only`。检查点用法见[示例说明](../examples/README.md#从浮点检查点运行-ptq)。
+使用同一组输入比较两种设备的结果见[CPU 与 GPU 制品对照](../scripts/README.md#cpu-与-gpu-制品对照)。
 Torch 版本更新时须重新编译这三个 wheel，不能沿用旧版本环境下的原生扩展。
 
 新构建机器可在构建命令中指定已归档的环境目录，替代上面的本地环境构建命令。

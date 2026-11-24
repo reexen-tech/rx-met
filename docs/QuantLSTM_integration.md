@@ -7,7 +7,8 @@ QuantGRU 和 QuantLSTM 自行完成内部量化，AIMET 管理模型其余部分
 | 当前任务 | 阅读入口 |
 | --- | --- |
 | 在已安装的 rx-met 中接入自己的模型 | [PyTorch 模型量化](PyTorch_quantization.md)，循环层要求见下文 |
-| 运行 KWS 或比较 CPU/GPU PTQ | [运行示例](../examples/README.md) |
+| 运行 KWS | [运行示例](../examples/README.md) |
+| 比较两种设备的 PTQ 结果 | [CPU 与 GPU 制品对照](../scripts/README.md#cpu-与-gpu-制品对照) |
 | 单独使用或从源码构建循环算子 | [QuantGRU](../operators/quant-gru/README.md)、[QuantLSTM](../operators/quant-lstm/README.md) |
 | 修改 rx-met 与算子的集成实现 | 本文的框架接入点、实现归属和验证章节 |
 

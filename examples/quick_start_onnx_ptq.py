@@ -1,34 +1,22 @@
-"""
-RX-MET ONNX PTQ 演示 — 标准用法
+"""对已有静态 ONNX 模型做训练后量化（PTQ），导出配套的 ONNX 和编译器 JSON。
 
-对应 examples/quick_start_kws.py 的 Torch QAT 入口。流程对齐，接口尽量复用：
+将 PTQ 接入自己的项目时，可参照下方示例从 aimet_onnx.rx_ptq 导入各阶段接口。
+用模型自己的前处理准备校准样本。每份 feed 是按 ONNX 输入名组织的 NumPy 数组字典，
+包含一次前向所需的全部输入。用首份 feed 创建 QuantSim，应用混合精度配置后将
+校准 feeds 交给 sim.compute_encodings。校准后对齐 bias，比较浮点和量化输出。
+示例还演示了后端要求 Power-of-2 时如何转换 scale、重新对齐 bias。
+export_onnx_json 导出产物，verify_onnx_ptq_artifacts 验证恢复后的量化输出。
+已有 ONNX 和校准目录的项目也可直接调用 aimet_onnx.rx_ptq.run_onnx_ptq。
 
-    加载 ONNX + 真实校准样本
-        → create_onnx_ptq_sim（JSON 1 + IO quantizer + percentile）
-        → apply_mixed_precision_bitwidth（JSON 2，与 quick_start_kws.py 同一份）
-        → sim.compute_encodings 校准 (PTQ)
-        → align_onnx_bias_scale（普通层 bias 按 Sb=Sx*Sw 对齐）
-        → 可选：apply_power_of_2_workflow + bias 重新对齐
-        → export_onnx_json（clean ONNX + compiler encodings）
-        → 重建 QuantSim，恢复 encodings，对比保存前的量化输出
+在容器的 /workspace 中复用已有的 KWS GRU 完整导出和 Speech Commands v0.02：
 
-ONNX 没有 PyTorch 权重可训，因此没有 QAT 微调；其余步骤与 quick_start_kws.py 对应。
-main() 只编排已有模块，不复制量化规则。
-Power-of-2 按目标后端要求选用，本示例执行该步骤以演示转换和精度比较。
+    python3 examples/quick_start_onnx_ptq.py
 
-运行（先进入 examples/）：
-
-    python quick_start_onnx_ptq.py
-
-默认复用最近一次成功的 KWS GRU 导出 ONNX，并自行从 Speech Commands v0.02
-抽取校准、验证样本和计算固定的浮点 MFCC；无需检查点或独立准备脚本。
---rnn-type lstm 选择 LSTM 的默认产物。KWS 示例不需要为本入口改变运行方式。
-使用其他模型时，通过 --model、--calib-dir 提供静态 ONNX 和预处理 NPY/NPZ。
-
-默认模型: ./output/quick_start_kws/gru/<最近成功运行>/exports/att_mh_rnn_kws.onnx
-默认数据: /datasets/speech_commands_v0.02；--data-dir 可覆盖
-默认验证: 自动抽取独立验证样本；显式校准目录则查找同级 val/
-默认输出: 当前运行目录下的 output/onnx_ptq_quick_start
+无参数时自动选择最近一次成功的 KWS GRU 导出，从 /datasets/speech_commands_v0.02
+计算校准和验证用的 MFCC。使用自己的静态 ONNX 时，传入 --model 和 --calib-dir
+指定实际模型与样本目录。单输入可用 NPY，多输入可用按输入名保存的 NPZ。
+脚本默认查找校准目录旁的 val/，也可用 --validation-dir 指定验证集。
+默认验证目录缺失时，用校准输入比较数值；提供分类验证标签时才计算 Top-1。
 """
 
 from __future__ import annotations
@@ -76,12 +64,12 @@ PERCENTILE_VALUE = 99.99
 PARAM_TYPE = "int8"
 ACTIVATION_TYPE = "int8"
 
-# 与 Torch quick_start / train_qat 同一套 RX 契约。
+# Power-of-2 转换参数和普通层 bias 的量化位宽。
 PO2_METHOD = "cover_range"
 PO2_TOLERANCE = 0.02
 BIAS_BITWIDTH = 32
 
-# 与 examples/quick_start_kws.py 同一对 JSON：QuantSim 基础配置 + 混合精度。
+# 分别控制 QuantSim 的基础量化规则和各层的混合精度。
 CONFIG_FILE = _HERE / "config" / "mrnn_quantsim_config_custom_mixed_precision_v2.json"
 BITWIDTH_CONFIG_FILE = _HERE / "config" / "quick_start_full_quant.json"
 OUTPUT_DIR = Path.cwd() / "output" / "onnx_ptq_quick_start"
@@ -123,7 +111,7 @@ def require_active_cuda_session(session, device=None) -> None:
 
 @contextlib.contextmanager
 def stage(name: str, timings: dict | None = None):
-    """与 quick_start_kws.py 相同的阶段计时，不折叠业务调用。"""
+    """打印本阶段的耗时，并在提供 timings 时记录结果。"""
     print("\n" + "=" * 70)
     print(name)
     print("=" * 70)
@@ -173,7 +161,7 @@ def print_stage_timings(timings: dict) -> None:
 
 
 # ============================================================================
-# 主流程：与 quick_start_kws.py 对齐的步骤编号
+# 命令行参数与模型、样本的准备
 # ============================================================================
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(description="对静态 ONNX 执行 CPU/CUDA PTQ、可选 Po2、导出和恢复。")
@@ -313,7 +301,7 @@ def _run_onnx_ptq(run, args=None) -> None:
 
     # ------------------------------------------------------------------
     # 步骤 1: 加载数据和模型
-    #   对应 quick_start 的 build_dataloaders + 构建模型。
+    #   每份校准或验证样本提供模型执行一次前向所需的全部输入。
     # ------------------------------------------------------------------
     with stage("步骤 1: 加载数据和模型", timings):
         if not config_file.is_file():
@@ -355,8 +343,7 @@ def _run_onnx_ptq(run, args=None) -> None:
 
     # ------------------------------------------------------------------
     # 步骤 3: 创建 QuantizationSimModel
-    #   对应 prepare_model + QuantizationSimModel + set_percentile_value
-    #   + apply_mixed_precision_bitwidth。两份 JSON 与 quick_start_kws.py 相同。
+    #   先按基础配置创建 QuantSim，再按混合精度配置设置各层位宽。
     # ------------------------------------------------------------------
     with stage("步骤 3: 创建 sim", timings):
         args.output_dir.mkdir(parents=True, exist_ok=True)
@@ -387,7 +374,6 @@ def _run_onnx_ptq(run, args=None) -> None:
 
     # ------------------------------------------------------------------
     # 步骤 4: 校准 (PTQ)
-    #   对应 aimet.nn.compute_encodings。
     #   所有普通层 bias 在评估前按实际输入、权重 scale 对齐；不依赖 Po2。
     # ------------------------------------------------------------------
     with stage("步骤 4: 校准 (PTQ)", timings):
@@ -407,8 +393,7 @@ def _run_onnx_ptq(run, args=None) -> None:
 
     # ------------------------------------------------------------------
     # 步骤 5: Power-of-2 量化（可选）
-    #   算法是 aimet_common.power_of_2 里的 RX 原文；这里走 ONNX 入口，
-    #   不经过 aimet_torch。可整块注释；普通层 bias 已在步骤 4 完成对齐。
+    #   仅在后端要求时采用该转换。跳过整块将保留步骤 4 的 PTQ 编码。
     # ------------------------------------------------------------------
     with stage("步骤 5: Power-of-2 量化（可选）", timings):
         print("按目标后端要求选用 Power-of-2；本示例执行转换演示。")
@@ -439,15 +424,14 @@ def _run_onnx_ptq(run, args=None) -> None:
 
     # ------------------------------------------------------------------
     # 步骤 6: QAT 微调
-    #   直量化 ONNX 没有可训练的 PyTorch 权重，这一步跳过。
-    #   若后续要微调，应走 quick_start_kws.py 的 Torch QAT 路径。
+    #   ONNX PTQ 直接使用已训练的权重，此阶段仅打印提示。
     # ------------------------------------------------------------------
     with stage("步骤 6: QAT 微调", timings):
         print("ONNX 直量化路径没有 QAT，跳过 freeze_quantizer_parameters / finetune")
 
     # ------------------------------------------------------------------
     # 步骤 7: 保存量化产物
-    #   与 Torch 共用导出入口名：clean ONNX + compiler encodings + RX-MET raw。
+    #   导出 clean ONNX 和部署所需的编译器 JSON，同时保存可重载的 AIMET 原始编码。
     # ------------------------------------------------------------------
     with stage("步骤 7: 保存量化产物", timings):
         quantized_batches = [run_onnx_feed(sim, feed) for feed in evaluation_feeds]

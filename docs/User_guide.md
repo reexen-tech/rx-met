@@ -142,8 +142,8 @@ cd /workspace
 | 任务 | 输入与运行说明 |
 | --- | --- |
 | CUDA 上运行完整 KWS GRU/LSTM 流程 | [KWS 示例](../examples/README.md#kwsgru--lstm)，需要 Speech Commands v0.02 |
-| CPU/CUDA 上只做 KWS 校准与 PTQ | [固定检查点 PTQ](../examples/README.md#只校准和-ptqcpu--gpu)，需要同类型浮点检查点及数据 |
-| ONNX PTQ 演示 | [复用 KWS 的浮点 ONNX](../examples/README.md#onnx-ptq复用-kws-的浮点-onnx)，沿用同一份 Speech Commands，由 ONNX 示例自动抽样和提取 MFCC |
+| CPU/CUDA 上只做 KWS 校准与 PTQ | [固定检查点 PTQ](../examples/README.md#从浮点检查点运行-ptq)，需要同类型浮点检查点及数据 |
+| 对已有模型运行 ONNX PTQ | [量化已有 ONNX 模型](../examples/README.md#onnx-ptq量化已有模型)，准备静态 ONNX 和匹配的校准样本 |
 
 KWS 默认浮点训练和 QAT 各 1 epoch，用于学习流程，不能据此推断充分训练后的精度。
 示例验证重载输出，失败返回非零；产物位置和日志说明见[运行目录与日志](Runtime_outputs.md)。
@@ -186,7 +186,7 @@ PyTorch 和 ONNX 采用两层配置。下表以 PyTorch 调用为例；完整字
 
 CPU runtime 显式传入 `--device cpu`。默认示例复用 KWS 已有的最终浮点 ONNX，使用同一份
 Speech Commands，并自行完成固定抽样和 MFCC，不需要额外准备脚本或修改 KWS 流程。
-模型选择、数据路径和运行命令见[示例说明](../examples/README.md#onnx-ptq复用-kws-的浮点-onnx)。
+模型选择、数据路径和运行命令见[示例说明](../examples/README.md#onnx-ptq量化已有模型)。
 使用其他模型时，显式传入 `--model` 和已经完成模型前处理的 `--calib-dir`。
 ONNX 示例默认执行可选 Po2 转换块；库接口 `run_onnx_ptq()` 可传入 `enable_po2=False`
 跳过该阶段。普通层 bias 对齐始终保留。导出和恢复接口支持非 Po2 编码，仍严格检查

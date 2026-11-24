@@ -1,41 +1,37 @@
 """
-RX-MET 量化演示 — kws_streaming att_mh_rnn + QuantGRU / QuantLSTM
+PyTorch 量化脚本参考实现：用 RX-MET 量化 kws_streaming 的 att_mh_rnn 关键词分类器。
 
-流程用法：
-    FP 训练 → prepare_model → QuantizationSimModel + 混合精度位宽
-        → compute_encodings 校准 (PTQ)
-        → align_bias_scale (32 位 bias，Sb = Sx * Sw)
-        → 可选：apply_power_of_2_workflow (按目标后端要求选择 Po2 量化)
-        → freeze_quantizer_parameters + QAT 微调
-        → state_dict + ONNX + .json 编码文件三件套保存
-        → 重建 sim → load_state_dict → load_quantizer_encodings → 精度对比
+编写自己的脚本时，先读 _run_kws()。它从浮点训练开始，创建 QuantizationSimModel，
+设置位宽，在 compute_encodings() 中校准，再对齐 INT32 bias（Sb = Sx * Sw）。
+示例随后演示按部署要求选用的 Power-of-2 转换和 QAT 微调，保存主权重、导出
+ONNX 和配套编码 JSON，并重建 QuantSim 比较同一输入的输出。已有浮点检查点、
+只做 PTQ 时，读 _run_kws_ptq()。源码仓库中的 docs/PyTorch_quantization.md 提供自有模型的接入模板。
 
-训练侧按 google-research/kws_streaming/models/att_mh_rnn.py：
-    * Speech Commands v2 的 12 类协议（10 个 wanted word + _silence_ + _unknown_）
-    * 文件名 hash 划分 train/validation/testing（validation/testing 各 10%）
-    * 增强：time shift、背景噪声、时间拉伸（resample）
-    * 完整浮点 SpeechFeatures（mfcc_tf）外置，分类网络输入 [49, 20] MFCC
-    * Conv2D 10,1  kernel (5,1)  same + ReLU + BN
-    * 2 层 Bidirectional GRU 或 LSTM（rnn_units=128）+ 4-head 注意力 + Dense
-    * 上游原生支持 rnn_type=gru/lstm，本示例使用对应的 rx-met 量化算子
+接入自己的模型时，对照以下实现替换项目代码：
+    * 模型与权重：将 _new_model() 和检查点读写替换为自己的浮点模型与权重格式。
+      本文件的 prepare_model() 和 configure_attention_quantizers() 为 KWS 注意力层
+      保留显式运算并共享编码；按自己的图结构设置。
+    * 数据与输入：build_dataloaders() 提供训练、校准和评估数据。FeatureLoader 用
+      外置的浮点 SpeechFeatures 将波形 [B, 16000] 转为分类器输入 [B, 49, 20] MFCC。
+      为自己的模型提供实际推理前处理后的代表性样本，dummy_input、校准前向与
+      ONNX 导出应采用相同的输入格式。此例校准取自关闭随机增强的训练集。
+    * 训练与验证：qat_finetune() 在 sim.model 上计算分类损失，evaluate() 比较分类
+      准确率。按任务替换训练循环、损失和指标，再比较各量化阶段的输出与精度。
 
-数据集 Speech Commands v0.02（官方包，解压后指向容器内路径）：
+本例按 google-research/kws_streaming/models/att_mh_rnn.py 搭建卷积、两层双向
+QuantGRU 或 QuantLSTM（每方向 128 单元）、四头注意力和分类层。Speech Commands
+v0.02 使用 12 类（10 个关键词、_silence_、_unknown_），按文件名 hash 划分样本，
+验证集和测试集各占 10%。训练增强包括时间偏移、背景噪声和时间拉伸。
 
-    mkdir -p /datasets/speech_commands_v0.02
-    wget https://storage.googleapis.com/download.tensorflow.org/data/speech_commands_v0.02.tar.gz
-    tar -xf speech_commands_v0.02.tar.gz -C /datasets/speech_commands_v0.02
+复现 KWS 示例时，在宿主机将 Speech Commands v0.02 解压到挂载的数据目录，使其在容器内
+对应 /datasets/speech_commands_v0.02/。在 RX-MET CUDA 容器的工作目录运行：
 
-运行（先进入 examples/）：
+    cd /workspace
+    python3 examples/quick_start_kws.py --rnn-type gru --data-dir /datasets/speech_commands_v0.02
 
-    python quick_start_kws.py --rnn_type gru
-    python quick_start_kws.py --rnn_type lstm
-
-数据集路径可用 --data-dir 指定，默认 /datasets/speech_commands_v0.02。
-两种模式共用 config/quick_start_full_quant.json，分别读取 GRU_config / LSTM_config。
-默认输出到运行目录的 output/quick_start_kws/，再分到 gru/ 或 lstm/ 下。
-默认各训练 1 epoch，用于学习流程；
-精度取决于训练轮数和配置，不代表上游论文成绩。完整说明见同目录 README.md。
-Power-of-2 是按目标后端要求选择的可选步骤，本示例执行该步骤以演示转换和精度比较。
+将 --rnn-type 改为 lstm 即可运行 LSTM 示例。两种模式从 examples/config/quick_start_full_quant.json
+分别读取 GRU_config / LSTM_config，默认浮点训练与 QAT 各 1 epoch。输出写入当前目录下的
+output/quick_start_kws/gru/ 或 lstm/。运行条件与产物说明见 examples/README.md。
 """
 
 from __future__ import annotations

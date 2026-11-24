@@ -87,7 +87,7 @@ NPZ，键必须与 ONNX 输入名完全一致，不得缺失或增加键。多�
 
 ONNX 示例默认复用 KWS 完整流程已有的最终浮点 ONNX，自己从 Speech Commands v0.02
 抽样并提取 MFCC，不需要运行独立准备脚本，也不需要 KWS 检查点或原来的量化 JSON。
-数据集准备和运行命令由[示例说明](../examples/README.md#onnx-ptq复用-kws-的浮点-onnx)维护。
+数据集准备和运行命令见[ONNX PTQ 示例](../examples/README.md#onnx-ptq量化已有模型)。
 KWS 与 ONNX 示例独立执行；KWS 的现有训练、校准与导出流程不变。
 
 默认从当前运行目录的 `output/quick_start_kws/gru/` 中选择最新成功的完整 KWS 运行，读取

@@ -1,214 +1,53 @@
 # 运行示例
 
-本文可随应用包独立阅读。先安装应用并按应用包 README 启动匹配的容器，再准备对应数据：
+两份代码示例都演示了导出和重新加载，便于在自己的项目中检查量化结果。
 
-| 要运行的流程 | 设备 | 必需输入 |
-| --- | --- | --- |
-| KWS 浮点训练、PTQ、可选 Po2 演示、QAT、恢复 | CUDA | Speech Commands v0.02 |
-| KWS 只校准与 PTQ | CPU / CUDA | 同类型浮点检查点，以及 Speech Commands 或已保存的校准和验证波形 |
-| 已有 ONNX 的 PTQ | CPU / CUDA | 默认使用 KWS 导出的浮点 ONNX 和同一份 Speech Commands；也可指定自己的静态 ONNX 和预处理样本 |
+- 为 PyTorch 模型编写量化代码时，可从 [quick_start_kws.py](quick_start_kws.py) 看如何把量化接入训练循环。
+- 已有静态 ONNX 时，可从 [quick_start_onnx_ptq.py](quick_start_onnx_ptq.py) 看如何用校准数据做 PTQ。
 
-Power-of-2（Po2）是按目标后端要求选择的可选转换，不是 PTQ 的必要步骤。KWS 和 ONNX PTQ
-示例先在校准后将普通层 bias 按 INT32、`Sb = Sx * Sw` 对齐，再评估 PTQ。
-示例默认保留 Po2 转换演示，转换后重新对齐 bias 再评估；不需要 Po2 时，可在所运行的
-脚本中整块注释标为“Power-of-2 量化（可选）”的调用块，后续导出和恢复仍正常执行。
-原生 GRU/LSTM 保留独立的 bias 网格，通过重缩放加入累加域。
-
-在宿主机的应用包目录执行：
-
-```bash
-mkdir -p "$HOME/rx-met-user"
-cp -a examples "$HOME/rx-met-user/"
-```
-
-按应用包 README 启动匹配的 CPU/CUDA 容器，CPU 应用包省略 GPU 参数。
-工作目录使用以下挂载：
-
-```bash
-  -v "$HOME/rx-met-user:/workspace" \
-  -w /workspace \
-```
-
-下面的模型、数据挂载也加入同一条 Docker 命令，将 `/path/to/...` 替换为实际路径。
-运行命令在容器内执行。
+这两份示例在模型外完成数据前处理，导出的 ONNX 接收前处理后的特征。接入自己的模型和数据时，由开发者在代码中实现相应的前处理，将与模型输入形状和 dtype 匹配的数据交给 rx-met 校准。校准与实际推理应使用相同的前处理。
 
 ## KWS：GRU / LSTM
 
-下载并解压 [Speech Commands v0.02](https://storage.googleapis.com/download.tensorflow.org/data/speech_commands_v0.02.tar.gz)
-到宿主机 `/path/to/datasets/speech_commands_v0.02/`，增加挂载：
+从 [quick_start_kws.py](quick_start_kws.py) 的 `_run_kws()` 开始读。示例量化的是 `AttMHRNN` 分类网络。`SpeechFeatures` 和 `FeatureLoader` 将波形转换为 MFCC，供 QuantSim 的 `dummy_input`、校准前向和 ONNX 导出使用。接入自己的项目时，替换模型、浮点权重、数据加载和验证指标。
+
+| 代码位置 | 在自己的量化脚本中如何使用 |
+| --- | --- |
+| `prepare_model()` 和 `quantsim.QuantizationSimModel` | 参考示例用 `aimet_torch.model_preparer.prepare_model` 准备模型，再用符合模型输入格式的 `dummy_input` 创建 QuantSim。`prepare_model()` 里的 FX 排除项和 `configure_attention_quantizers()` 中按层名共享编码的处理针对 KWS 网络，换模型时按实际结构决定是否需要。 |
+| 校准和 PTQ 评估 | 用 `apply_mixed_precision_bitwidth` 为模型应用位宽配置。在 `aimet.nn.compute_encodings(sim.model)` 上下文中，让自己的校准数据经过 `sim.model`，再调用 `align_bias_scale` 并用自己的验证集评估。脚本中的 `aimet` 是 `aimet_torch.v2` 的导入别名。 |
+| QAT 微调 | 需要 QAT 时，参考 `freeze_quantizer_parameters` 和 `qat_finetune()`，使用项目自己的训练数据、损失函数和优化器微调 `sim.model`。 |
+| 导出和恢复 | 参考 `aimet_torch.rx_export.export_onnx_json` 中的 `export_onnx_json` 导出浮点 ONNX 与配套的量化 JSON。另存模型权重，按相同配置重建 QuantSim，加载权重和编码，用同一输入比较导出前和恢复后的输出。 |
+
+**试跑 GRU 示例。** 按应用包 README 复制示例并启动 CUDA 容器。将 [Speech Commands v0.02](https://storage.googleapis.com/download.tensorflow.org/data/speech_commands_v0.02.tar.gz) 解压到宿主机挂载的数据目录，然后在容器的 `/workspace` 执行：
 
 ```bash
-  -v "/path/to/datasets/speech_commands_v0.02:/datasets/speech_commands_v0.02:ro" \
+python3 examples/quick_start_kws.py \
+  --rnn-type gru \
+  --data-dir /datasets/speech_commands_v0.02
 ```
 
-使用 CUDA 容器，选择 GRU 或 LSTM 运行：
+本例默认浮点训练和 QAT 各 1 个 epoch，结果在 `output/quick_start_kws/gru/<execution-id>/`。其中 `exports/att_mh_rnn_kws.onnx` 与 `exports/att_mh_rnn_kws.json` 配套使用。试跑 LSTM 时，将 `gru` 改为 `lstm`。
 
-```bash
-python3 examples/quick_start_kws.py --rnn_type gru
-python3 examples/quick_start_kws.py --rnn_type lstm
-```
+### 从浮点检查点运行 PTQ
 
-默认浮点训练和 QAT 各 1 epoch。每次任务保存在
-`./output/quick_start_kws/<gru|lstm>/<execution-id>/`，最终模型位于 `exports/`，
-供下文复用的浮点检查点为 `checkpoints/model_fp_kws.pth`。
-数据默认读取 `/datasets/speech_commands_v0.02`，可用 `--data-dir` 覆盖；
-`--output-dir` 可改变输出根目录，仍会追加 `gru/` 或 `lstm/`。
-完整流程中，`--fp-checkpoint` 可指定浮点检查点的保存与读取路径。
+只做校准和 PTQ 时，可阅读同一脚本的 `_run_kws_ptq()`：它先加载浮点权重，再校准、评估、导出并验证恢复结果。用本示例的浮点检查点试跑时，在上面的命令中加上 `--ptq-only --fp-checkpoint /models/model_fp_kws.pth`，模型类型与检查点保持一致。CPU 包支持这一模式，运行时另加 `--device cpu`。
 
-完整浮点 MFCC 在分类网络外执行，导出 ONNX 输入为 `[1,49,20]` 特征，输出为 `[1,12]` logits。
-Attention 使用广播乘法、归约、指数和除法，Linear 使用等价的 1×1 Conv2d；
-仍使用 `config/quick_start_full_quant.json`，修改配置后需要重新校准。
+## ONNX PTQ：量化已有模型
 
-### 只校准和 PTQ（CPU / GPU）
+从 [quick_start_onnx_ptq.py](quick_start_onnx_ptq.py) 的 `_run_onnx_ptq()` 开始读。它以已有的静态 ONNX 为输入，逐步调用 `aimet_onnx.rx_ptq` 中的接口。示例沿用语音模型只是为了提供具体的输入、输出和精度指标，模型可以来自其他项目。
 
-已有同类型的浮点检查点时，可以跳过训练。下例的 `/models/model_fp_kws.pth` 是容器内
-的检查点路径；若使用上一步生成的文件，改为其 `/workspace/output/...` 路径。若检查点
-存放在宿主机的其他目录，在启动容器时将该目录挂载到 `/models:ro`。
+1. **准备输入。** 示例用 `load_onnx_ptq_inputs` 读取模型和已完成前处理的样本。写自己的数据加载器时，每次前向将处理后的数组组织成 `{输入名: NumPy 数组}` 字典，各输入的形状（含 batch 维）和 dtype 与 ONNX 一致。验证数据和评估指标按自己的任务准备。
+2. **创建 QuantSim 并校准。** 参考 `create_onnx_ptq_sim`，用模型和第一份输入创建 QuantSim，再设置位宽和输入输出量化器。脚本用 `sim.compute_encodings(feeds)` 遍历校准输入，随后用 `align_onnx_bias_scale` 对齐 bias。Po2 转换按目标后端需要选用。
+3. **导出并验证。** 参考 `export_onnx_json` 导出 ONNX 和编译器量化参数，用 `verify_onnx_ptq_artifacts` 比较恢复前后的输出。示例在有分类验证标签时计算 Top-1。换成其他任务时，可用 `evaluate_onnx_dataset` 返回的输出计算自己的指标。
 
-若还没有固定样本，下面的命令从挂载的 Speech Commands 中分别为校准和验证抽取每类
-20 个未增强样本，写入 `shared_kws/calib/`、`shared_kws/val/` 和 `shared_kws/manifest.json`。
-请使用尚无 `calib/` 和 `val/` 子目录的输出路径。CPU 和 CUDA 均可准备样本和运行 PTQ：
+若项目已有静态 ONNX 和预处理好的校准样本目录，也可从 `aimet_onnx.rx_ptq` 直接导入 `run_onnx_ptq` 调用封装流程。该接口默认使用 CPU provider；示例脚本的 `choose_providers()` 演示了如何选择 CUDA provider。
 
-```bash
-python3 examples/quick_start_kws.py --rnn-type gru --device cpu --ptq-only \
-  --fp-checkpoint /models/model_fp_kws.pth \
-  --data-dir /datasets/speech_commands_v0.02 \
-  --export-feeds-dir /workspace/shared_kws
-```
-
-已保存固定波形时，可直接指定其目录，跳过对 Speech Commands 的挂载和抽样。
-每个 NPY 文件保存一条 `[1,16000]` float32 波形；NPZ 文件使用 `input` 键保存同样的数组。
-数据须为 16 kHz，按训练时的规则完成长度处理；示例按文件名排序读取，目录中有 NPZ
-时只读取 NPZ。验证目录默认是校准目录旁的 `val/`，也可用 `--validation-dir` 指定；
-它必须存在且非空，不会自动复用校准集。Top-1 指标还需在样本目录的上一级提供
-`manifest.json`，用 `calib_files` / `calib_labels` 和 `val_files` / `val_labels` 配对文件名与
-整数类别编号；使用自定义验证目录名时，加载器选择 `calib_*` 字段。上面的样本导出已生成清单。
-以下以 GRU 为例：
-
-```bash
-python3 examples/quick_start_kws.py --rnn-type gru --device cpu --ptq-only \
-  --fp-checkpoint /models/model_fp_kws.pth \
-  --calib-dir /workspace/shared_kws/calib --validation-dir /workspace/shared_kws/val \
-  --output-dir output/kws_cpu
-```
-
-LSTM 将 `--rnn-type gru` 改为 `--rnn-type lstm`，并使用对应的浮点检查点。
-
-此模式执行 FP 评估、校准、bias 对齐与 PTQ 评估、可选 Po2 演示、导出和恢复，不执行浮点训练或 QAT。产物为
-`att_mh_rnn_kws_ptq.onnx`（不含 Q/DQ）、`att_mh_rnn_kws_ptq.json`、
-`outputs.npz` 和 metadata，PTQ 权重保存在 `checkpoints/att_mh_rnn_kws_ptq.pth`。
-metadata 记录检查点和实际波形数组的 SHA-256、设备和恢复误差。验证样本带标签时也记录 Top-1。
-恢复比较以导出前的最终量化输出为基准；跳过 Po2 时不写入该阶段的输出或评估记录。
-`--calib-limit N` 和 `--validation-limit N` 可限制共享目录中按文件名排序的前 N 个样本。
-
-## ONNX PTQ：复用 KWS 的浮点 ONNX
-
-两个示例独立运行。ONNX PTQ 默认读取 KWS 完整流程已有的最终 ONNX，并自行从同一份
-Speech Commands v0.02 抽样和提取 MFCC，无需额外下载模型、数据或执行准备脚本。
-KWS 导出的 ONNX 是不含 Q/DQ 的浮点图，量化参数保存在外部 JSON 中；即使经过 QAT，
-这份 ONNX 仍可作为新一轮 PTQ 的输入。本流程重新生成量化参数，不加载原来的量化 JSON。
-
-在运行过 KWS 的同一工作目录、使用同一数据挂载执行：
+**试跑 ONNX 示例。** 如果 `/workspace` 中已有成功的 KWS GRU 完整运行，且 Speech Commands v0.02 已挂载到 `/datasets/speech_commands_v0.02`，在容器的 `/workspace` 执行：
 
 ```bash
 python3 examples/quick_start_onnx_ptq.py
 ```
 
-默认使用 GRU，自动选择当前运行目录的 `output/quick_start_kws/gru/` 中最新成功的完整 KWS 运行，读取
-`exports/att_mh_rnn_kws.onnx`。若通过 `--output-dir` 修改了 KWS 输出根目录，
-ONNX 示例需用 `--model` 指定其中的 ONNX 文件。
-LSTM 指定 `--rnn-type lstm`。CPU runtime 另加 `--device cpu`；准备 ONNX 的 KWS 完整训练使用 CUDA。
-LSTM ONNX PTQ 可直接使用 `cpu`、`cu126` 或 `cu130` 应用；当前 `cu118` 默认构建的
-LSTM bridge 与其 ONNX Runtime API 不匹配，需要先用匹配头文件重建算子 wheel。
+脚本自动选择 `output/quick_start_kws/gru/` 下最近一次成功运行的 `exports/att_mh_rnn_kws.onnx`，并从语音数据生成校准和验证用的 MFCC。量化结果写入本次运行的 `output/onnx_ptq_quick_start/<execution-id>/exports/`。
 
-数据默认读取 `/datasets/speech_commands_v0.02`，可用 `--data-dir` 覆盖。
-ONNX 示例分别从训练、验证划分中固定抽取每类 20 个未增强样本，
-使用与标准 KWS 示例相同的固定前端提取 `[1,49,20]` MFCC，并保存本次使用的特征和标签，
-无需 KWS 检查点。可用 `--samples-per-class` 调整数量。显式选择另一份标准 KWS ONNX 时：
-
-```bash
-python3 examples/quick_start_onnx_ptq.py --device cpu \
-  --model /path/to/exports/att_mh_rnn_kws.onnx \
-  --data-dir /datasets/speech_commands_v0.02
-```
-
-Po2 按目标后端要求选用，本示例默认执行转换演示。整块注释该阶段后，保留已完成 bias 对齐的
-affine PTQ 网格并继续导出和恢复；导出接口不要求 scale 必须为 2 的幂。
-
-### 使用自己的模型和预处理样本
-
-通用流程通过 `--model` 和 `--calib-dir` 接收静态 ONNX 及匹配的 NPY/NPZ，
-此时不读取 Speech Commands，也不执行 MFCC。输入名称、shape 和 dtype
-必须与模型一致；使用 KWS ONNX 时，样本应为 `[1,49,20]` 特征，不能直接使用 `[1,16000]` 波形。
-
-```bash
-python3 examples/quick_start_onnx_ptq.py --device cpu \
-  --model /models/model.onnx \
-  --calib-dir /datasets/my_model/calib --validation-dir /datasets/my_model/val \
-  --prefix my_model --output-dir output/my_model
-```
-
-模型输入维度须为静态正整数，每份样本包含一次前向所需的全部输入，shape 包含模型声明的
-batch 维度，dtype 与模型声明一致，数组不能包含非有限值。单输入可将每份样本保存为一个
-NPY；多输入使用 NPZ，每个键与 ONNX 输入名完全一致，不得缺失或增加键。每份 NPZ
-保存一次完整前向的输入。文件名可自定，按文件名排序读取；同一目录中有 NPZ 时只读取 NPZ。
-
-验证目录默认使用校准目录旁的 `val/`，也可通过 `--validation-dir` 指定。显式指定的目录
-须存在且有效；默认 `val/` 不存在时复用校准样本作数值比较。分类模型使用 batch-1 样本，
-并在验证目录上一级的 `manifest.json` 中提供 `val_files` 和 `val_labels` 数组，按文件名
-与整数类别编号一一配对；每份前向须保存为单输入 NPY 或完整输入 NPZ。
-脚本可计算 `output[0]` 的 Top-1；该输出必须为 `[batch, classes]`，
-不会自动查找后续输出。未提供标签时
-只比较输出数值；正式精度评估应使用独立于校准数据的验证集。需要调整量化配置时，使用
-`--config-file` 和 `--quant-config` 指定 JSON，字段说明见同目录的
-[config/README.md](config/README.md)。
-
-默认结果保存到 `./output/onnx_ptq_quick_start/<execution-id>/exports/`，可用 `--output-dir` 改变输出根目录。
-部署时配套使用同次导出的
-ONNX 和 JSON；metadata 和 `outputs.npz` 保存各阶段的评估结果。
-日志比较 FP32、PTQ、实际执行的 Po2 阶段和恢复后的输出，metadata 与 `outputs.npz` 只记录
-实际执行的评估阶段。默认 KWS 示例以及提供
-分类验证标签的模型另报告 Top-1；其他模型只报告输出误差。
-日志输出“量化流程完成”表示运行成功。
-
-`execution-id` 自动使用北京时间，格式为 `YYYYMMDD_HHMMSS_ffffff`，例如
-`20261027_105308_820401`。每次任务的详细日志和运行记录位于同级的
-`run.log`、`run.json`，产物位置见终端输出。
-
-## 源码仓库中的 CPU/GPU 对照
-
-以下命令从源码仓库根目录执行。运行对照工具的 Python 环境需能导入 NumPy、ONNX 和 Protobuf。
-应用包用户运行上面的示例即可完成量化。
-
-源码仓库提供逐项精确比较命令；任一数值、结构或字段不同都会写入报告并返回 1，
-不自动使用容差或忽略差异：
-
-```bash
-python3 scripts/validation/compare_ptq_artifacts.py \
-  --left-onnx /cpu/exports/att_mh_rnn_kws_ptq.onnx \
-  --right-onnx /cuda/exports/att_mh_rnn_kws_ptq.onnx \
-  --left-encodings /cpu/exports/att_mh_rnn_kws_ptq.json \
-  --right-encodings /cuda/exports/att_mh_rnn_kws_ptq.json \
-  --left-outputs /cpu/exports/outputs.npz --right-outputs /cuda/exports/outputs.npz \
-  --report output/comparison.json
-```
-
-报告分别记录部署 ONNX、最终 JSON 和 FP32 / affine PTQ / Po2 输出。CPU/CUDA
-浮点累加及独立校准网格可能存在差异；最终 Po2 制品相同也不代表前面各阶段逐位相同。
-Torch 与 ONNX 的传播节点、常量编码归属也会逐项报告，不能只依据文件数量判定一致。
-
-完整编排命令接受上文保存的固定波形目录和带验证标签的 `manifest.json`。它会在两种设备上分别运行
-KWS PTQ，再把同一份 clean ONNX 和从同一组波形生成的 MFCC 特征交给两个设备做 ONNX PTQ。
-`--output-dir` 必须是尚未创建的目录，其中将生成日志、四份逐项比较报告和汇总 `comparison.json`：
-
-```bash
-python3 scripts/validation/verify_examples_cpu_gpu.py --rnn-type gru \
-  --fp-checkpoint /models/model_fp_kws.pth \
-  --calib-dir /workspace/shared_kws/calib --validation-dir /workspace/shared_kws/val \
-  --cpu-command /cpu-env/bin/python --cuda-command /gpu-env/bin/python \
-  --output-dir output/gru_cpu_gpu_comparison
-```
-
-两个命令必须使用各自已安装 CPU/GPU wheel 的环境。也可传入以 `python3` 结尾的 Docker 命令；
-此时仓库、模型、样本和输出目录须以相同绝对路径挂载到容器。
-四份报告均一致时退出码为 0；任一报告有差异时为 1，可按汇总定位报告。
+使用自己的静态 ONNX 时，传入 `--model` 指定模型在容器内的实际路径，用 `--calib-dir` 指定已预处理的 NPY/NPZ 样本目录。脚本默认从校准目录旁的 `val/` 读取验证样本；该目录不存在时，用校准样本比较数值。使用 CPU 包时加上 `--device cpu`。量化配置见[示例配置说明](config/README.md)。
