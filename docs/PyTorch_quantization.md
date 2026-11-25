@@ -70,8 +70,8 @@ dummy_input = next(iter(calibration_loader))[0].to(device)
 ```
 
 路径和 `checkpoint["model"]` 应按项目实际格式调整。在源码仓库运行时，将 `config_dir`
-改为仓库内的 `examples/config`。应用目录只读；需要自定义配置时，先复制两份 JSON 到
-工作目录，再改为使用副本路径。两份配置的职责、默认值和匹配优先级见[配置参考](Quant_config.md)。
+改为仓库内的 `examples/config`。应用目录只读；需要自定义配置时，先复制需要修改的 JSON 到
+工作目录，再改为使用副本路径。基础配置与可选覆盖配置的职责、默认值和匹配优先级见[配置参考](Quant_config.md)。
 
 本模板用分类 Top-1 作为任务指标；其他任务替换此函数：
 
@@ -96,7 +96,9 @@ print("FP32:", evaluate(model))
 
 ## 2. 准备模型并创建 QuantSim
 
-先在浮点模型上调用 `prepare_model()`，再创建模拟器并应用混合精度设置。
+先在浮点模型上调用 `prepare_model()`，再创建模拟器，按需应用混合精度设置。
+整数 QuantSim 默认启用已替换的 QuantGRU / QuantLSTM 内部量化；只使用基础配置时，
+可省略下面的 `apply_mixed_precision_bitwidth()` 调用，原生内部位宽沿用算子配置。
 下面的辅助函数供首次量化和后续恢复共用，避免两侧配置不一致：
 
 ```python
@@ -270,6 +272,6 @@ print("Restored:", evaluate(restored_sim.model))
 同时比较固定样本输出和独立验证集指标，记录 FP32、PTQ、已选用的 Po2/QAT 阶段及恢复后的结果。
 本模板直接组合库 API；导出运行记录的 `success` 只表示该次导出结束，不包含后续的
 主权重保存和恢复断言。完整接入应以脚本正常退出、恢复断言和任务指标共同判断。
-若恢复失败，先核对模型结构、准备方式、两份配置、默认位宽和量化方案，再检查编码覆盖。
+若恢复失败，先核对模型结构、准备方式、基础配置及所用的可选覆盖配置、默认位宽和量化方案，再检查编码覆盖。
 保存的是 QuantSim `state_dict` 或阶段文件时，按[对应恢复方式](Export_and_reload.md#权重和编码恢复)
 处理，不与本教程的主权重检查点混用。

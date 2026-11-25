@@ -12,6 +12,7 @@
 
 ### Changed
 
+- PyTorch v2 整数 QuantSim 默认启用已有 QuantGRU / QuantLSTM 的内部量化，仅使用基础配置时也会参与量化；混合精度配置继续支持显式禁用和位宽覆盖。恢复循环层保持浮点的阶段时，需在创建 QuantSim 后、加载编码前重新应用禁用设置。
 - KWS 和 ONNX PTQ 示例的逐样本推理归档迁至独立验证工具，CPU/CUDA 对照继续比较三个阶段的输出，并验证导出后的重载结果。
 - KWS 公共定义拆分为 `examples/common/kws_data.py` 和 `kws_model.py`，分别提供数据前处理与模型、检查点支持，两个示例独立调用这些模块。
 - ONNX PTQ 示例默认输出目录调整为 `output/quick_start_onnx_ptq/`，生成的 MFCC 位于 `mfcc_feeds/`。自动选择 KWS 模型时选择最近成功运行生成的 ONNX，忽略失败、未完成及本次运行未生成的留存模型。

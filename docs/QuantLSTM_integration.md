@@ -22,7 +22,8 @@ QuantGRU 和 QuantLSTM 自行完成内部量化，AIMET 管理模型其余部分
 AIMET 对普通 GRU/LSTM 的默认包装在整个循环算子调用前后，对输入、初始状态、参数、
 输出和最终状态执行量化与反量化（QDQ）。QuantGRU / QuantLSTM 进一步在循环计算中
 校准和量化每个时间步的门控、中间结果及状态更新，并导出相应的 `internal_ops` 编码。
-这些内部量化点由 `GRU_config` / `LSTM_config` 控制，用于模拟循环过程中的量化误差。
+这些内部量化点默认采用算子自身配置，可通过 `GRU_config` / `LSTM_config` 覆盖，
+用于模拟循环过程中的量化误差。
 RX-MET 编译器导出校验要求已量化的标准 GRU/LSTM 节点具有原生打包编码，只有普通
 输入、输出和参数编码时会报错。因此，这条部署路径需要使用对应的原生循环算子。
 
@@ -79,7 +80,8 @@ def replace_recurrent_layer(original):
 model.encoder.rnn = replace_recurrent_layer(model.encoder.rnn)
 ```
 
-替换在模型准备、QuantSim 和 optimizer 创建之前完成。先在浮点模式下用固定输入
+替换在模型准备、QuantSim 和 optimizer 创建之前完成。原生算子独立构造时默认使用
+浮点，`prepare_model()` 不改变其量化开关。先在浮点模式下用固定输入
 检查输出、状态和任务指标，再开始校准；CPU 前向前需切换到 `eval()`。不同实现的浮点累加
 不保证逐位相同。
 
@@ -87,10 +89,12 @@ model.encoder.rnn = replace_recurrent_layer(model.encoder.rnn)
 
 1. 创建与原模型形状、方向、bias 和布局一致的 QuantGRU / QuantLSTM，严格加载浮点权重。
 2. 调用 `prepare_model()`，再创建 `QuantizationSimModel`。原生循环层保持叶节点，
-   通用量化器不会重复包裹其输入、输出和参数。
-3. 校准前应用混合精度 JSON。普通层读取 `layer_type_config` 等规则，循环层分别读取
+   通用量化器不会重复包裹其输入、输出和参数。整数 QuantSim 创建后自动启用这些
+   循环层的内部量化，使用原生配置；浮点 QuantSim 保留现有开关状态。
+3. 如需覆盖位宽或关闭部分算子量化，在校准前应用混合精度 JSON。
+   普通层读取 `layer_type_config` 等规则，循环层分别读取
    `GRU_config` / `LSTM_config`；配置结构与默认值见[量化配置](Quant_config.md)和
-   [示例配置](../examples/config/README.md)。
+   [示例配置](../examples/config/README.md)。使用默认设置时可跳过此步。
 4. 使用同一次 `compute_encodings` 前向校准整模型。量化方案和 Percentile 值传入
    原生收集器，已锁定参数跳过收集，异常时恢复校准标志。新建原生循环层默认使用
    affine 网格。随后调用 `align_bias_scale(sim.model, bias_bitwidth=32)`，对齐普通层 bias 后评估 PTQ；
@@ -118,7 +122,10 @@ GRU 与 LSTM 的配置接口并不相同。LSTM 使用原生 sparse override，�
 开关筛选和 `allow_overwrite=False` 的锁定语义见
 [量化开关与阶段恢复](../operators/quant-lstm/docs/aimet_integration.md#量化开关与阶段恢复)。
 
-恢复时沿用相同的模型结构、准备方式和配置。只替换 JSON 而继续使用语义不同的旧版
+恢复时沿用相同的模型结构、准备方式和配置。若保存阶段的某个循环层使用浮点，需在
+创建整数 QuantSim 后、加载编码前重新应用该层的禁用配置，或显式设置其
+`use_quantization=False`，包括恢复旧版本保存的浮点阶段。
+只替换 JSON 而继续使用语义不同的旧版
 算子库不能保证等价；源码升级及旧版 LSTM 窄范围编码的迁移条件见
 [LSTM 升级说明](../operators/quant-lstm/docs/installation.md#21-升级已有安装)和
 [编码兼容性](../operators/quant-lstm/docs/aimet_integration.md#编码与-onnx)。
@@ -133,7 +140,7 @@ GRU 与 LSTM 的配置接口并不相同。LSTM 使用原生 sparse override，�
 | `v2/nn/modules/custom.py` | `QuantizedQuantGRU` 透传包装 | `QuantizedQuantLSTM`，关闭通用输入、输出及权重量化器 |
 | `aimet_common/quantsim_config/compute_ops.py` | 跳过 GRU 的通用量化默认值 | 同时跳过 LSTM，防止二次量化 |
 | `utils_rx.py` | `GRU_config`、Po2、统计 | 同一入口分发配置/Po2，算子负责处理；保留独立计数 |
-| `v2/quantsim/quantsim.py` | QuantScheme 映射及 Percentile | TF→MinMax、TF Enhanced→SQNR、Percentile 数值传入原生收集器 |
+| `v2/quantsim/quantsim.py` | 整数 QuantSim 默认启用原生量化，并配置 QuantScheme 和 Percentile | 同样默认启用；TF→MinMax、TF Enhanced→SQNR、Percentile 数值传入原生收集器 |
 | `v2/nn.compute_encodings` | 同次前向收集 GRU 与普通层数据 | 同次收集 LSTM 两个方向，跳过已锁定参数，异常时恢复校准标志 |
 | `staged_quantization_utils.py` | GRU AIMET encodings 加载 | LSTM 参数保存、加载、筛选、锁定；普通层输入编码也保存，保证阶段恢复完整 |
 | `rx_export/export_onnx_json.py` | 标准 GRU 节点、编码回填 | 统一调用原生导出接口；算子负责 h/c、门与双向参数重排 |

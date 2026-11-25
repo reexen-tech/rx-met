@@ -12,11 +12,18 @@ ONNX 量化器使用相同的配置思路，但匹配对象是 ONNX 图；见 [O
 
 | 文件 | 使用位置 | 作用 |
 | --- | --- | --- |
-| `examples/config/mrnn_quantsim_config_custom_mixed_precision_v2.json` | `QuantizationSimModel(..., config_file=...)` | 控制量化器是否启用、对称性和逐通道量化 |
+| `examples/config/mrnn_quantsim_config_custom_mixed_precision_v2.json` | `QuantizationSimModel(..., config_file=...)` | 控制普通量化器是否启用、对称性和逐通道量化 |
 | `examples/config/quick_start_full_quant.json` | `apply_mixed_precision_bitwidth(..., config_file=...)` | 控制普通层位宽、禁用规则，以及独立的 `GRU_config` / `LSTM_config` |
 
-基础配置负责创建 QuantSim，混合精度配置负责设置 `sim.model`。配置路径相对于运行
+基础配置用于创建 QuantSim，混合精度配置按需覆盖 `sim.model`。配置路径相对于运行
 命令的当前目录解析。
+
+PyTorch v2 的整数 QuantSim（默认的 `default_data_type=QuantizationDataType.int`）
+自动启用模型中已有的 QuantGRU / QuantLSTM 内部量化，因此只使用基础配置也可校准和
+量化这些循环层。内部位宽沿用原生算子的配置，不从 `default_output_bw` / `default_param_bw`
+广播到门控或状态等量化点；需要覆盖位宽或关闭循环层量化时，再应用混合精度配置。
+原生算子独立构造时默认使用浮点，`prepare_model()` 不改变其量化开关；浮点 QuantSim
+也保留原生算子的现有开关状态。普通 `nn.GRU` / `nn.LSTM` 仍需[显式替换](QuantLSTM_integration.md#使用与配置)。
 
 ## QuantSim 基础配置
 
@@ -297,7 +304,7 @@ QuantSim 在 FX `get_attr` 后、reshape/view 前执行这些量化器；直接�
 
 ## QuantGRU 配置
 
-QuantGRU 使用独立的 `GRU_config` 配置路径。`apply_mixed_precision_bitwidth()` 会把
+QuantGRU 的可选覆盖配置使用独立的 `GRU_config`。`apply_mixed_precision_bitwidth()` 会把
 同一 JSON 文件交给每个 QuantGRU 实例，并读取该节点：
 
 ```json
@@ -328,6 +335,9 @@ QuantGRU 使用独立的 `GRU_config` 配置路径。`apply_mixed_precision_bitw
 [GRU 配置参考](../operators/quant-gru/pytorch/config/README.md)；
 `examples/config/quick_start_full_quant.json` 提供整模型使用的配置实例。
 
+创建整数 QuantSim 后 QuantGRU 默认启用量化。若需关闭，在校准前设置
+`GRU_config.default_config.disable_quantization=true`；省略此字段保留当前开关状态。
+
 GRU 和 LSTM 的所有内部量化点默认均为对称量化。新建实例的 JSON 省略整个量化点
 或该点的 `is_symmetric` 时，使用 `true`；激活量化点显式设置 `false` 时仍按非对称
 配置执行。对称性与 signedness 独立，sigmoid 门输出保持默认无符号量化。
@@ -344,7 +354,9 @@ GRU 和 LSTM 的所有内部量化点默认均为对称量化。新建实例的 
 
 ## QuantLSTM 配置
 
-`LSTM_config` 独立控制 LSTM 量化开关和原生 `quant_config`，在校准前应用。
+`LSTM_config` 按需覆盖 LSTM 量化开关和原生 `quant_config`，在校准前应用。
+创建整数 QuantSim 后 QuantLSTM 默认启用量化；显式设置 `use_quantization=false`
+可关闭，省略此字段保留当前开关状态。
 KWS 的两种模式共用 `examples/config/quick_start_full_quant.json`，分别读取
 `GRU_config` / `LSTM_config`。LSTM 示例设置 cell state 为 16 位、权重为 8 位
 per-channel；未列出的量化点保留默认值。用户可直接修改配置中的对应节。
@@ -462,7 +474,7 @@ QuantSim、应用相同配置并加载编码；完整 QuantSim `state_dict` 则�
 ## 检查清单
 
 - 配置文件路径指向仓库中实际存在的文件。
-- 基础配置在创建 QuantSim 时加载，混合精度配置在校准前应用。
+- 基础配置在创建 QuantSim 时加载；如需混合精度覆盖，在校准前应用。
 - 百分位参数在 `compute_encodings` 前设置。
 - 校准数据与部署输入的名称、形状、类型和分布一致。
 - 普通层 bias 在校准后对齐到乘积 scale，再评估 PTQ；执行 Po2 后重新对齐再评估。

@@ -11,6 +11,8 @@ from importlib import import_module
 from typing import Callable
 import json
 
+from aimet_common.defs import QuantizationDataType
+
 
 @dataclass(frozen=True)
 class RecurrentOperator:
@@ -140,7 +142,13 @@ def calibrate_native_recurrent(model):
         yield
 
 
-def configure_recurrent_calibration(model, quant_scheme, percentile):
+def initialize_recurrent_simulation(model, quant_scheme, percentile, default_data_type):
+    """Initialize native layers once, after QuantSim's tracing forwards finish.
+
+    Integer simulation enables native quantization using the operator's existing
+    configuration. Later explicit overrides remain effective during calibration.
+    Floating-point simulation preserves the operator's quantization mode.
+    """
     scheme = getattr(quant_scheme, "name", str(quant_scheme)).lower()
     method = ("percentile" if "percentile" in scheme else
               "sqnr" if "enhanced" in scheme else "minmax")
@@ -149,6 +157,8 @@ def configure_recurrent_calibration(model, quant_scheme, percentile):
         module.reset_calibration()
         if method == "percentile":
             module.percentile_value = percentile
+        if default_data_type == QuantizationDataType.int:
+            module.use_quantization = True
 
 
 @contextmanager

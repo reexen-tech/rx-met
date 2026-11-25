@@ -9,6 +9,11 @@ KWS 和 ONNX PTQ 示例默认使用本目录的两份 JSON。示例先按基础�
 | [`mrnn_quantsim_config_custom_mixed_precision_v2.json`](mrnn_quantsim_config_custom_mixed_precision_v2.json) | 基础量化规则：是否量化、对称性、per-channel |
 | [`quick_start_full_quant.json`](quick_start_full_quant.json) | 普通层位宽，以及 `GRU_config`、`LSTM_config` |
 
+PyTorch v2 整数 QuantSim 创建后会自动启用已有 QuantGRU / QuantLSTM 的内部量化，
+只使用基础配置也可完成循环层校准与量化。位宽配置用于按需覆盖普通层和循环层设置；
+省略循环层开关保留当前状态，显式禁用仍生效。原生内部位宽沿用算子配置，不随 QuantSim
+的通用默认位宽统一改变。默认行为和调用顺序见[量化配置参考](../../docs/Quant_config.md)。
+
 KWS 的 `--rnn-type` 决定模型使用的循环算子。两个配置节可以同时放在完整 JSON 中，
 模型中的循环算子只读取各自的配置。可用 `--quant-config` 指定另一份位宽配置；改动量化参数后
 重新校准。普通 Conv/Linear（ONNX 的 Conv/ConvTranspose/Gemm/MatMul）中已启用的 bias
@@ -45,6 +50,8 @@ Po2 是可选转换；示例默认演示转换，随后按新 scale 重新对齐
 
 GRU 示例的各量化点和说明已列在完整 JSON 的 `GRU_config` 中。
 LSTM 使用独立的原生配置格式，不能只把 GRU 配置节改名后复用。
+若需保留浮点循环层，在创建 QuantSim 后、校准或加载编码前应用
+`GRU_config.default_config.disable_quantization=true` 或 `LSTM_config.use_quantization=false`。
 
 两种算子的所有量化点默认均为对称量化，新建实例省略算子条目或 `is_symmetric`
 不会启用非对称量化；激活量化点仍可显式配置 `is_symmetric=false`。

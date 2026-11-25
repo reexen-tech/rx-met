@@ -495,8 +495,12 @@ class QuantizationSimModel(_QuantizationSimModelBase):  # pylint: disable=missin
             # Let input/output of HTP resize ops to share same encoding
             self._propagate_encodings()
 
-        from aimet_torch.native_recurrent import configure_recurrent_calibration
-        configure_recurrent_calibration(self.model, quant_scheme, self._percentile_value)
+        # Native quantization requires encodings, so enable it only after all
+        # construction-time forwards. Calibration and optional overrides follow.
+        from aimet_torch.native_recurrent import initialize_recurrent_simulation
+        initialize_recurrent_simulation(
+            self.model, quant_scheme, self._percentile_value, default_data_type
+        )
 
     # pylint: disable=arguments-differ
     @overload
