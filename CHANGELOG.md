@@ -6,6 +6,8 @@
 
 ## [Unreleased]
 
+## [1.1.3b1] - 2026-11-24
+
 ### Changed
 
 - 普通层 bias 对齐独立于 Po2，标准 PTQ 在校准后及 Po2 转换后对齐为 INT32 乘积 scale 再评估；`run_onnx_ptq()` 新增 `enable_po2=False` 的 affine 路径，原 `align_bias_scale=False` 请求改为及早报错。
