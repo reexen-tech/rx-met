@@ -11,6 +11,7 @@ import numpy as np
 import onnx
 from onnx import helper, numpy_helper
 
+from scripts.validation.kws_ptq_worker import archive_outputs
 from tests.support.paths import REPO_ROOT
 
 
@@ -19,6 +20,44 @@ COMMAND = ROOT / "scripts/validation/compare_ptq_artifacts.py"
 
 
 class PtqArtifactComparisonTest(unittest.TestCase):
+    def test_validation_archive_keeps_scalar_and_batched_outputs_in_order(self):
+        batches = [
+            [np.array(3, dtype=np.int32), np.array([[2.0, 4.0]], dtype=np.float32)],
+            [np.array(1, dtype=np.int32), np.array([[6.0, 8.0]], dtype=np.float32)],
+        ]
+        stages = {name: batches for name in ("fp32", "ptq", "po2")}
+        with tempfile.TemporaryDirectory() as directory:
+            archive = Path(directory) / "outputs.npz"
+            archive_outputs(stages, archive)
+            with np.load(archive) as outputs:
+                self.assertEqual(set(outputs.files), {
+                    f"{stage}_output{index}" for stage in stages for index in range(2)
+                })
+                for stage in stages:
+                    scalars = outputs[f"{stage}_output0"]
+                    self.assertEqual(scalars.dtype, np.dtype("int32"))
+                    np.testing.assert_array_equal(scalars, [3, 1])
+                    vectors = outputs[f"{stage}_output1"]
+                    self.assertEqual(vectors.dtype, np.dtype("float32"))
+                    np.testing.assert_array_equal(vectors, [[2.0, 4.0], [6.0, 8.0]])
+
+    def test_validation_archive_rejects_batch_shape_and_dtype_changes(self):
+        first = np.array([[2.0, 4.0]], dtype=np.float32)
+        cases = (
+            ("shape", np.array([2.0, 4.0], dtype=np.float32)),
+            ("shape", np.array([[2.0]], dtype=np.float32)),
+            ("dtype", np.array([[2.0, 4.0]], dtype=np.float64)),
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            archive = Path(directory) / "outputs.npz"
+            for field, next_batch in cases:
+                with self.subTest(field=field, batch=next_batch):
+                    stages = {name: [[first]] for name in ("fp32", "ptq", "po2")}
+                    stages["ptq"].append([next_batch])
+                    with self.assertRaisesRegex(ValueError, f"{field} changed"):
+                        archive_outputs(stages, archive)
+                    self.assertFalse(archive.exists())
+
     def test_cli_preserves_a_report_when_outputs_contain_nonfinite_values(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

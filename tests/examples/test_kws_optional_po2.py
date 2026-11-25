@@ -179,9 +179,7 @@ class KwsOptionalPo2Test(unittest.TestCase):
                             expected_stages.add('po2')
                         self.assertEqual(set(metadata['accuracy']), expected_stages)
                         self.assertLessEqual(metadata['restore_max_abs'], 1e-5)
-                        with np.load(root / 'exports/outputs.npz') as values:
-                            self.assertEqual(set(values.files), {
-                                f'{name}_output0' for name in expected_stages if name != 'restored'})
+                        self.assertFalse((root / 'exports/outputs.npz').exists())
                     else:
                         self.assertTrue((root / 'checkpoints/att_mh_rnn_kws_qat.pth').is_file())
 

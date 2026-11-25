@@ -101,7 +101,7 @@ KWS 的 `--ptq-only` 路径从浮点检查点开始，跳过训练和 QAT，支�
 KWS 在导出接口之外显式保存主权重；`export_onnx_json()` 只返回 ONNX 和编码路径。
 主权重检查点不包含 QuantSim 内部状态；重载时先加载主权重，再创建 QuantSim 并加载
 编译器 encodings。
-PTQ-only 恢复验证使用保存前的最终输出快照；输出归档只包含实际执行的 FP32、PTQ 和可选 Po2 阶段。
+PTQ-only 恢复验证使用内存中的最终输出快照，评估指标和恢复误差写入 metadata。
 
 QuantGRU / QuantLSTM 与其他模块共享同一次 `compute_encodings` 前向过程。循环层通过自己的
 校准实现收集内部算子范围，并通过 `GRU_config` / `LSTM_config` 接收位宽和量化粒度。
@@ -112,9 +112,15 @@ QuantGRU / QuantLSTM 与其他模块共享同一次 `compute_encodings` 前向�
 
 标准入口位于 [`examples/quick_start_onnx_ptq.py`](../examples/quick_start_onnx_ptq.py)，
 主要实现位于 [`src/aimet_onnx/rx_ptq`](../src/aimet_onnx/rx_ptq/)。
-示例默认复用 KWS 已有的最终浮点 ONNX，自行从同一份 Speech Commands 抽样并提取 MFCC；
-显式传入 `--model` 和 `--calib-dir` 时使用通用模型与预处理样本路径。
-KWS 的训练和导出流程不依赖 ONNX 示例。
+示例默认从 `output/quick_start_kws/<gru|lstm>/` 查找最近成功运行的 ONNX 文件，
+`--rnn-type` 默认是 `gru`。`--model` 可指定已有模型，`--calib-dir` 接收预处理样本。
+省略校准目录时，标准 KWS 模型可使用 Speech Commands 抽样和 MFCC 前处理。
+KWS 示例从 `examples/common/kws_model.py` 加载模型、图准备和检查点定义，从
+`examples/common/kws_data.py` 加载数据和 MFCC。模型模块引用数据模块的输入维度、类别数量和
+前处理定义，ONNX 示例的内置语音前处理直接使用数据模块。量化流程各自由入口组织。
+CPU/CUDA 验证驱动调用量化库
+并保存逐阶段输出，ONNX 的阶段结果由
+`run_onnx_ptq(on_evaluation=...)` 交付。
 下图描述示例及 `run_onnx_ptq()` 的执行路径。校准后的普通 bias 对齐独立于可选 Po2。
 示例默认演示 Po2，可整块注释；库接口默认 `enable_po2=True`，传入 `False` 使用 affine PTQ。
 两条路径均支持后续导出和恢复。
@@ -277,7 +283,7 @@ flowchart LR
 | 应用安装目录 | `scripts/release/verify_bundle.sh` | 包版本、原生依赖、AIMET、QuantGRU / QuantLSTM；CPU PTQ 或显式启用的 GPU 冒烟流程 |
 | KWS 示例 | `scripts/release/verify_kws_example.sh` | PyTorch PTQ、Po2、QAT、导出和重载 |
 | ONNX PTQ 示例 | `scripts/release/verify_onnx_ptq_example.sh` | ONNX 校准、Po2 转换演示、制品导出和重载 |
-| CPU/GPU 示例对照 | `scripts/validation/verify_examples_cpu_gpu.py` | 同一检查点、固定样本下的 Torch/ONNX PTQ 制品和逐阶段输出比较 |
+| CPU/GPU PTQ 对照 | `scripts/validation/verify_examples_cpu_gpu.py` | 独立调用量化库，在同一检查点、固定样本下比较 Torch/ONNX PTQ 制品和逐阶段输出 |
 
 正式发布应完成静态验收和对应设备的示例验证；CUDA 变体还需目标 GPU 验收。
 

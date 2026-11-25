@@ -95,14 +95,21 @@ class PtqEvaluationTest(unittest.TestCase):
         np.save(val / 'val_0000.npy', self.fixture.feed['x'] + .2)
         np.save(val / 'val_0001.npy', self.fixture.feed['x'] + .3)
         np.save(val / 'val_0002.npy', self.fixture.feed['x'] + .4)
+        stages = {}
         result = pipeline.run_onnx_ptq(model_path=model_path, calibration_dir=calib,
             output_dir=self.path / 'pipeline', filename_prefix='model',
             config_file=str(self.fixture.config), bitwidth_config_file='', quant_scheme='tf',
-            validation_dir=val, validation_labels=[0, 0, 0])
+            validation_dir=val, validation_labels=[0, 0, 0],
+            on_evaluation=lambda stage, batches: stages.update({stage: batches}))
+        expected, _ = evaluate_onnx_dataset(model_path,
+            [{'x': self.fixture.feed['x'] + offset} for offset in (.2, .3, .4)])
+        for actual_batch, expected_batch in zip(stages['fp32'], expected):
+            np.testing.assert_array_equal(actual_batch[0], expected_batch[0])
         metadata = json.loads(result['metadata'].read_text())
         self.assertEqual(metadata['calibration_count'], 2)
         self.assertEqual(metadata['evaluation_source'], 'validation')
         for stage in ['fp32', 'ptq', 'po2']:
+            self.assertEqual(len(stages[stage]), 3)
             self.assertEqual(metadata['evaluation'][stage]['feed_count'], 3)
             self.assertEqual(metadata['evaluation'][stage]['sample_count'], 3)
             self.assertIn('top1_accuracy', metadata['evaluation'][stage])

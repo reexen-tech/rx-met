@@ -8,13 +8,18 @@
 export_onnx_json 导出产物，verify_onnx_ptq_artifacts 验证恢复后的量化输出。
 已有 ONNX 和校准目录的项目也可直接调用 aimet_onnx.rx_ptq.run_onnx_ptq。
 
-在容器的 /workspace 中复用已有的 KWS GRU 完整导出和 Speech Commands v0.02：
+在 KWS 示例的工作目录中自动读取最近一次成功的 GRU ONNX 导出：
 
     python3 examples/quick_start_onnx_ptq.py
 
-无参数时自动选择最近一次成功的 KWS GRU 导出，从 /datasets/speech_commands_v0.02
-计算校准和验证用的 MFCC。使用自己的静态 ONNX 时，传入 --model 和 --calib-dir
-指定实际模型与样本目录。单输入可用 NPY，多输入可用按输入名保存的 NPZ。
+对指定模型和预处理样本执行量化：
+
+    python3 examples/quick_start_onnx_ptq.py --model /models/model.onnx --calib-dir /data/calib
+
+--model 指定实际模型，--rnn-type lstm 可自动选择 LSTM 导出。
+省略 --calib-dir 时，从 /datasets/speech_commands_v0.02
+计算校准和验证用的 MFCC，适用于 input: float32 [1,49,20] 的语音模型。
+--calib-dir 指定已预处理的样本目录。单输入可用 NPY，多输入可用按输入名保存的 NPZ。
 脚本默认查找校准目录旁的 val/，也可用 --validation-dir 指定验证集。
 默认验证目录缺失时，用校准输入比较数值；提供分类验证标签时才计算 Top-1。
 """
@@ -72,7 +77,7 @@ BIAS_BITWIDTH = 32
 # 分别控制 QuantSim 的基础量化规则和各层的混合精度。
 CONFIG_FILE = _HERE / "config" / "mrnn_quantsim_config_custom_mixed_precision_v2.json"
 BITWIDTH_CONFIG_FILE = _HERE / "config" / "quick_start_full_quant.json"
-OUTPUT_DIR = Path.cwd() / "output" / "onnx_ptq_quick_start"
+OUTPUT_DIR = Path.cwd() / "output" / "quick_start_onnx_ptq"
 DEVICE = "cuda"
 CALIB_LIMIT = None
 
@@ -167,7 +172,7 @@ def parse_args(argv=None):
     parser = argparse.ArgumentParser(description="对静态 ONNX 执行 CPU/CUDA PTQ、可选 Po2、导出和恢复。")
     parser.add_argument("--model", type=Path, help="默认使用最近一次成功的 KWS 导出")
     parser.add_argument("--rnn-type", choices=("gru", "lstm"), default="gru",
-                        help="默认 KWS ONNX 的循环层类型")
+                        help="自动选择的 KWS ONNX 循环层类型，默认 gru")
     parser.add_argument("--data-dir", type=Path,
                         default=Path("/datasets/speech_commands_v0.02"),
                         help="未提供校准目录时，自行从 Speech Commands 计算 MFCC")
@@ -199,25 +204,32 @@ def resolve_model_path(args) -> Path:
     candidates += list(root.glob("exports/att_mh_rnn_kws.onnx"))
     successful = []
     for model in candidates:
-        record_path = model.parent.parent / "run.json"
-        if not record_path.is_file():
+        if not model.is_file():
             continue
+        record_path = model.parent.parent / "run.json"
         try:
             record = json.loads(record_path.read_text(encoding="utf-8"))
         except (OSError, ValueError):
             continue
-        if record.get("status") == "success":
-            successful.append((record.get("started_at", ""), model.stat().st_mtime_ns, model))
+        if not isinstance(record, dict) or record.get("status") != "success":
+            continue
+        started_at = record.get("started_at", "")
+        if not isinstance(started_at, str):
+            continue
+        outputs = record.get("outputs")
+        if isinstance(outputs, dict) and "exports/att_mh_rnn_kws.onnx" not in outputs:
+            continue
+        successful.append((started_at, model.stat().st_mtime_ns, model))
     if successful:
         return max(successful, key=lambda item: item[:2])[2]
     raise FileNotFoundError(
         f"未找到 {root} 中成功运行的 KWS ONNX；请用 --model 指定已有 ONNX，"
-        "或先独立运行 quick_start_kws.py。"
+        "或先在当前工作目录运行 KWS 示例生成模型。"
     )
 
 
 def prepare_kws_inputs(model_path, data_dir, output_dir, samples_per_class):
-    """Prepare this example's MFCC feeds without reading or changing a KWS run."""
+    """Prepare deterministic MFCC feeds from the supplied audio dataset."""
     import onnx
     from aimet_onnx.rx_ptq import inspect_model_inputs, inspect_model_input_dtypes
 
@@ -226,23 +238,22 @@ def prepare_kws_inputs(model_path, data_dir, output_dir, samples_per_class):
     dtypes = inspect_model_input_dtypes(model)
     if shapes != {"input": [1, 49, 20]} or dtypes != {"input": np.dtype("float32")}:
         raise ValueError("内置 Speech Commands 前处理只适用于 input: float32 [1,49,20]；其他模型请提供 --calib-dir")
-    # Share the fixed data protocol and frontend, without executing KWS training.
     if str(_ROOT) not in sys.path:
         sys.path.insert(0, str(_ROOT))
-    from examples import quick_start_kws as kws
+    from examples.common import kws_data
     import torch
 
-    frontend = kws.make_speech_features("cpu").eval()
+    frontend = kws_data.make_speech_features("cpu").eval()
     output_dir.mkdir(parents=True, exist_ok=False)
-    manifest = {"labels": list(kws.LABELS), "seed": kws.SEED, "batch_size": 1,
-                "augmentation": False, "input_shape": [1, *kws.FEATURE_SHAPE],
+    manifest = {"labels": list(kws_data.LABELS), "seed": kws_data.SEED, "batch_size": 1,
+                "augmentation": False, "input_shape": [1, *kws_data.FEATURE_SHAPE],
                 "preprocessing": "kws_streaming mfcc_tf; fixed floating-point frontend"}
     for split, folder in (("train", "calib"), ("val", "val")):
-        dataset = kws.SpeechCommandsKWS(str(data_dir), split=split)
+        dataset = kws_data.SpeechCommandsKWS(str(data_dir), split=split)
         dataset.train_mode = False
-        rng = random.Random(kws.SEED)
+        rng = random.Random(kws_data.SEED)
         selected = []
-        for label in kws.LABELS:
+        for label in kws_data.LABELS:
             indices = [index for index, (_, name) in enumerate(dataset.items) if name == label]
             if len(indices) < samples_per_class:
                 raise ValueError(f"{split}/{label} 样本少于 {samples_per_class}")
@@ -274,8 +285,7 @@ def main(argv=None) -> None:
         _run_onnx_ptq(run, args)
 
 
-def _run_onnx_ptq(run, args=None) -> None:
-    args = parse_args([]) if args is None else args
+def _run_onnx_ptq(run, args) -> None:
     model_path = resolve_model_path(args)
     calib_dir = args.calib_dir
     filename_prefix = args.prefix or f"{model_path.stem}_ptq"
@@ -309,7 +319,7 @@ def _run_onnx_ptq(run, args=None) -> None:
         if calib_dir is None:
             run.note_inputs(dataset=args.data_dir)
             calib_dir, _ = prepare_kws_inputs(
-                model_path, args.data_dir, run.root / "data", args.samples_per_class)
+                model_path, args.data_dir, run.root / "mfcc_feeds", args.samples_per_class)
         run.note_inputs(calibration=calib_dir)
         original_model, input_shapes, feeds = load_onnx_ptq_inputs(
             model_path, calib_dir, args.calib_limit
@@ -379,7 +389,7 @@ def _run_onnx_ptq(run, args=None) -> None:
     with stage("步骤 4: 校准 (PTQ)", timings):
         sim.compute_encodings(feeds)
         bias_report = align_onnx_bias_scale(sim, bias_bitwidth=BIAS_BITWIDTH)
-        ptq_batches, ptq_evaluation = evaluate_onnx_dataset(
+        _, ptq_evaluation = evaluate_onnx_dataset(
             sim, evaluation_feeds, reference=fp32_batches, labels=validation_labels, providers=providers
         )
         ptq_report = ptq_evaluation["comparison"]
@@ -389,7 +399,6 @@ def _run_onnx_ptq(run, args=None) -> None:
     po2_report = None
     po2_metadata = {}
     evaluations = {"fp32": fp32_evaluation, "ptq": ptq_evaluation}
-    output_stages = {"fp32": fp32_batches, "ptq": ptq_batches}
 
     # ------------------------------------------------------------------
     # 步骤 5: Power-of-2 量化（可选）
@@ -405,14 +414,13 @@ def _run_onnx_ptq(run, args=None) -> None:
             verbose=True,
         )
         po2_bias_report = align_onnx_bias_scale(sim, bias_bitwidth=BIAS_BITWIDTH)
-        po2_batches, po2_evaluation = evaluate_onnx_dataset(
+        _, po2_evaluation = evaluate_onnx_dataset(
             sim, evaluation_feeds, reference=fp32_batches, labels=validation_labels, providers=providers
         )
         po2_eval = po2_evaluation["comparison"]
         print_compare_report("Po2 vs FP32", po2_eval)
         print_accuracy_report("Po2 验证", po2_evaluation)
         evaluations["po2"] = po2_evaluation
-        output_stages["po2"] = po2_batches
         po2_metadata = {
             "po2_method": PO2_METHOD,
             "po2_tolerance": PO2_TOLERANCE,
@@ -471,20 +479,6 @@ def _run_onnx_ptq(run, args=None) -> None:
         print_compare_report("恢复后的量化输出 vs 保存前", reload_report)
         print_accuracy_report("恢复验证", reload_report[0])
         print("✅ ONNX 维度、量化输出和 compiler encodings 恢复验证通过")
-
-    archived_outputs = {}
-    for stage_name, batches in output_stages.items():
-        count = len(batches[0])
-        if any(len(batch) != count for batch in batches):
-            raise ValueError(f"{stage_name}: output count changed between batches")
-        for index in range(count):
-            values = [np.asarray(batch[index]) for batch in batches]
-            rank, nonbatch_shape = values[0].ndim, values[0].shape[1:]
-            if any(value.ndim != rank or value.shape[1:] != nonbatch_shape for value in values):
-                raise ValueError(f"{stage_name}: output {index} rank or nonbatch shape changed between batches")
-            archived_outputs[f"{stage_name}_output{index}"] = (
-                np.stack(values) if rank == 0 else np.concatenate(values, axis=0))
-    np.savez(run.exports / "outputs.npz", **archived_outputs)
 
     metadata_path = write_onnx_ptq_metadata(
         run.exports,

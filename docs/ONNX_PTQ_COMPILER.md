@@ -2,7 +2,7 @@
 
 通过 `aimet_onnx` 可以直接校准已有 ONNX 模型、按需将量化 scale 对齐到 Power-of-2，
 并导出供目标编译器配套使用的 clean ONNX 和 `<prefix>.json`。已有模型和预处理数据
-可直接按下文量化；初次体验可从[复用 KWS ONNX](#复用-kws-onnx)开始。
+可直接按下文量化，标准 KWS 模型也可使用[内置 MFCC 前处理](#复用-kws-onnx)。
 
 Po2 是按目标后端要求选用的可选转换，PTQ 本身不要求 scale 必须为 2 的幂。
 标准流程在校准后先对齐普通层 bias，再评估 PTQ；执行 Po2 后重新对齐 bias，再评估。
@@ -85,14 +85,16 @@ NPZ，键必须与 ONNX 输入名完全一致，不得缺失或增加键。多�
 
 ## 复用 KWS ONNX
 
-ONNX 示例默认复用 KWS 完整流程已有的最终浮点 ONNX，自己从 Speech Commands v0.02
-抽样并提取 MFCC，不需要运行独立准备脚本，也不需要 KWS 检查点或原来的量化 JSON。
-数据集准备和运行命令见[ONNX PTQ 示例](../examples/README.md#onnx-ptq量化已有模型)。
-KWS 与 ONNX 示例独立执行；KWS 的现有训练、校准与导出流程不变。
+省略 `--model` 时，ONNX 示例从当前工作目录的 `output/quick_start_kws/gru/` 查找
+`*/exports/att_mh_rnn_kws.onnx`，也支持关闭时间戳后的 `exports/att_mh_rnn_kws.onnx`。
+候选模型所属运行的 `run.json` 须记录 `status=success`，按 `started_at` 选择最近运行，
+时间相同时按模型文件修改时间选择。`--rnn-type lstm` 改为查找 `lstm/`。
+找不到成功导出时，错误信息会提示用 `--model` 指定模型；显式传入该参数时直接使用所给路径。
 
-默认从当前运行目录的 `output/quick_start_kws/gru/` 中选择最新成功的完整 KWS 运行，读取
-`exports/att_mh_rnn_kws.onnx`。用 `--rnn-type lstm` 选择 LSTM，或用 `--model` 明确指定模型。
-KWS 通过 `--output-dir` 改变输出根目录后，ONNX 示例需用 `--model` 指定其中的 ONNX 文件。
+ONNX 示例从 Speech Commands v0.02 抽样并提取 MFCC，数据集和前处理实现来自
+`examples/common/kws_data.py`。无参数运行的工作目录、数据集准备和命令见
+[ONNX PTQ 示例](../examples/README.md#onnx-ptq量化已有模型)。
+
 数据默认读取 `/datasets/speech_commands_v0.02`，可用 `--data-dir` 覆盖。
 自动准备分别从训练、验证划分固定抽取每类 20 个未增强样本，
 使用标准 KWS 的固定浮点前端生成 `[1,49,20]` MFCC；`--samples-per-class` 可调整抽样数量。
@@ -105,11 +107,11 @@ KWS 通过 `--output-dir` 改变输出根目录后，ONNX 示例需用 `--model`
 输入名从 ONNX 图自动读取。多输入文件格式与命名规则见上文的输入要求。
 示例与 `run_onnx_ptq` 的数据加载器要求模型输入具有静态的正整数维度；动态或缺失的
 输入维度会在校准前报错。导出时可保留中间张量的符号维度。
-默认输出根目录为当前运行目录下的 `output/onnx_ptq_quick_start/`，可用
+默认输出根目录为当前运行目录下的 `output/quick_start_onnx_ptq/`，可用
 `--output-dir` 覆盖。每次量化在该根目录下创建北京时间运行目录，
 格式为 `YYYYMMDD_HHMMSS_ffffff`，例如 `20261027_105308_820401`。
 产物写入其中的 `exports/`，日志和运行信息写入 `run.log`、`run.json`。
-自动准备的 MFCC 样本和标签保存在本次运行目录中。
+自动生成的校准与验证 MFCC 分别写入 `mfcc_feeds/calib/` 和 `mfcc_feeds/val/`，标签记录在 `mfcc_feeds/manifest.json`。
 
 命令退出码为 0，日志输出“量化流程完成”及 metadata 路径，并生成下述配套文件，
 即表示标准示例完成。`<prefix>.meta.json` 中的 `coverage`、`clean_onnx_vs_fp32`
@@ -126,10 +128,9 @@ KWS 通过 `--output-dir` 改变输出根目录后，ONNX 示例需用 `--model`
 - `<prefix>.json`：编译器的节点输入、输出和参数编码；
 - `<prefix>.aimet.encodings`：用于重载的 AIMET 原始编码；
 - `<prefix>.encodings`：底层 QuantSim 导出保留的 AIMET 原始编码；
-- `<prefix>.meta.json`：输入 shape、校准数量、覆盖率、所选转换及各阶段的输出比较；
-- `outputs.npz`：已执行的 FP32、PTQ 及可选 Po2 阶段评估输出，键名为 `<stage>_output<index>`。
+- `<prefix>.meta.json`：输入 shape、校准数量、覆盖率、所选转换及各阶段的输出比较。
 
-Po2 未执行时，metadata 和输出归档不生成 Po2 阶段记录。恢复验证始终比较实际导出前的
+metadata 记录实际执行的量化阶段。恢复验证始终比较实际导出前的
 最终量化输出，不要求存在 Po2 阶段。
 
 导出时自动补全 `graph.value_info`。中间张量可以保留符号维度，标量使用零维 shape；
@@ -138,6 +139,11 @@ Po2 未执行时，metadata 和输出归档不生成 Po2 阶段记录。恢复�
 ONNX 的 `aimet_onnx.rx_ptq.export_onnx_json()` 返回 `onnx`、`encodings`、`aimet_encodings`
 路径及 `coverage`、`onnx_shapes` 报告；原入口 `export_onnx_compiler_artifacts()` 保留原参数与返回值。
 `run_onnx_ptq()` 则返回这三条路径和 `metadata` 路径，覆盖率与 shape 报告写入 metadata。
+需要逐样本结果时，可传入 `on_evaluation(stage, batches)`。每个已执行的 `fp32`、`ptq`、
+`po2` 阶段评估完成后调用一次，`batches` 按输入顺序保存每次前向的结果，每个结果列表按
+ONNX 输出顺序包含 NumPy 数组。回调应只读使用这些数组，自行决定是否归档；回调抛出的异常
+会传给调用方。CPU/CUDA 验证工具通过该接口保存自己的阶段输出，使用方式见
+[制品对照说明](../scripts/README.md#cpu-与-gpu-制品对照)。
 库函数未指定 `validation_dir` 时使用校准数据评估；它不会自动查找同级 `val/`。
 `run_onnx_ptq(..., enable_po2=False)` 保留校准后的 bias 对齐，导出一般 affine 编码并正常恢复。
 兼容参数 `align_bias_scale` 保留，但标准端到端流程要求它为 `True`；传入 `False` 会在读取

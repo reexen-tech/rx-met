@@ -15,8 +15,16 @@ QuantGRU 和 QuantLSTM 自行完成内部量化，AIMET 管理模型其余部分
 ## 使用与配置
 
 通过应用包安装的用户已经具备对应的算子 wheel，无需为整模型量化再次独立编译。
-PyTorch 模型中的循环层需要显式替换：`prepare_model()` 保留已有 QuantGRU /
-QuantLSTM，不自动转换任意 `nn.GRU` / `nn.LSTM`。
+通过 PyTorch 路径量化 GRU/LSTM 并导出 RX-MET 编译器编码时，需要将模型中的
+`torch.nn.GRU` / `torch.nn.LSTM` 显式替换为 `QuantGRU` / `QuantLSTM`。
+`prepare_model()` 保留已有的原生循环层，不自动完成这项替换。
+
+AIMET 对普通 GRU/LSTM 的默认包装在整个循环算子调用前后，对输入、初始状态、参数、
+输出和最终状态执行量化与反量化（QDQ）。QuantGRU / QuantLSTM 进一步在循环计算中
+校准和量化每个时间步的门控、中间结果及状态更新，并导出相应的 `internal_ops` 编码。
+这些内部量化点由 `GRU_config` / `LSTM_config` 控制，用于模拟循环过程中的量化误差。
+RX-MET 编译器导出校验要求已量化的标准 GRU/LSTM 节点具有原生打包编码，只有普通
+输入、输出和参数编码时会报错。因此，这条部署路径需要使用对应的原生循环算子。
 
 | 约束 | QuantGRU / QuantLSTM |
 | --- | --- |
@@ -32,8 +40,9 @@ GRU 时，可在创建 QuantSim 前改用 `bias=True` 并将两个 bias 参数�
 这仍会引入 bias 量化点，需重新校准并验证量化结果。
 
 普通 CPU 前向无需额外关闭梯度；推荐 `torch.no_grad()` 或
-`torch.inference_mode()` 减少推理开销。已有 ONNX 的原生循环层 PTQ 另有输入限制，
-见 [ONNX GRU/LSTM 适配](ONNX_PTQ_COMPILER.md#gru--lstm-原生适配)。
+`torch.inference_mode()` 减少推理开销。已有 ONNX 模型可直接进入 ONNX PTQ，
+工具会自动识别受支持的标准 GRU/LSTM 节点并调用原生适配器。支持范围及输入限制见
+[ONNX GRU/LSTM 适配](ONNX_PTQ_COMPILER.md#gru--lstm-原生适配)。
 
 以下片段将已经加载浮点权重的单个 `nn.GRU` / `nn.LSTM` 转为对应原生算子，
 保留权重、方向、bias、布局、设备、参数冻结状态和训练模式。`model.encoder.rnn` 代表模型中实际的

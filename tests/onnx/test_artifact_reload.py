@@ -81,11 +81,19 @@ class OnnxArtifactsTest(unittest.TestCase):
         np.save(calibration_dir / 'sample1.npy', self.feed['x'] + 1.0)
         for enable_po2 in (False, True):
             with self.subTest(enable_po2=enable_po2):
+                stages = {}
                 result = pipeline.run_onnx_ptq(model_path=model_path, calibration_dir=calibration_dir,
                     output_dir=self.path / f'pipeline-{enable_po2}', filename_prefix='model',
                     config_file=str(self.config), bitwidth_config_file='', quant_scheme='tf',
-                    enable_po2=enable_po2)
+                    enable_po2=enable_po2, on_evaluation=lambda stage, batches: stages.update({stage: batches}))
+                self.assertEqual(list(stages), ['fp32', 'ptq', 'po2'] if enable_po2 else ['fp32', 'ptq'])
+                for batches in stages.values():
+                    self.assertEqual(len(batches), 2)
+                    self.assertEqual(len(batches[0]), 1)
+                    self.assertEqual(batches[0][0].shape, (1, 2))
                 metadata = json.loads(result['metadata'].read_text())
+                comparison = pipeline.compare_output_batches(stages['fp32'], stages['ptq'])
+                self.assertEqual(metadata['evaluation']['ptq']['comparison'], comparison)
                 self.assertTrue(all(item['max_abs'] == 0 for item in
                     metadata['restored_quantized_vs_pre_export']))
                 self.assertIn('b', metadata['coverage']['enabled_quantizer_names'])

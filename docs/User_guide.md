@@ -110,6 +110,10 @@ CPU runtime 的 CUDA 版本打印为 `None`。runtime 提供第三方依赖，�
 
 ### 4.1 完整流程总览
 
+通过 PyTorch 路径量化 GRU/LSTM 并导出 RX-MET 编译器编码时，先将循环层替换为
+`QuantGRU` / `QuantLSTM` 并复制浮点权重，再进入下面的模型准备步骤。
+内部量化和编码要求、替换方法及支持限制见[循环算子接入](QuantLSTM_integration.md#使用与配置)。
+
 ```
 已有浮点模型与权重 → prepare_model → QuantizationSimModel + 混合精度位宽
   → compute_encodings 校准 (PTQ)
@@ -184,10 +188,11 @@ PyTorch 和 ONNX 采用两层配置。下表以 PyTorch 调用为例；完整字
   → clean ONNX + compiler encodings
 ```
 
-CPU runtime 显式传入 `--device cpu`。默认示例复用 KWS 已有的最终浮点 ONNX，使用同一份
-Speech Commands，并自行完成固定抽样和 MFCC，不需要额外准备脚本或修改 KWS 流程。
-模型选择、数据路径和运行命令见[示例说明](../examples/README.md#onnx-ptq量化已有模型)。
-使用其他模型时，显式传入 `--model` 和已经完成模型前处理的 `--calib-dir`。
+无参数运行时，脚本从当前工作目录 `output/quick_start_kws/gru/` 选择最近成功的 ONNX 导出，
+并从 Speech Commands 固定抽样、提取 MFCC。`--rnn-type lstm` 切换模型查找目录。
+使用自己的模型和预处理样本时，传入 `--model` 与 `--calib-dir`。CPU runtime
+显式传入 `--device cpu`。输入契约、数据路径和运行命令见
+[示例说明](../examples/README.md#onnx-ptq量化已有模型)。
 ONNX 示例默认执行可选 Po2 转换块；库接口 `run_onnx_ptq()` 可传入 `enable_po2=False`
 跳过该阶段。普通层 bias 对齐始终保留。导出和恢复接口支持非 Po2 编码，仍严格检查
 网格、覆盖率和恢复输出。

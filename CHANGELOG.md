@@ -6,6 +6,16 @@
 
 ## [Unreleased]
 
+### Added
+
+- `run_onnx_ptq()` 支持 `on_evaluation(stage, batches)`，按实际执行的 FP32、PTQ 和 Po2 阶段交付各评估批次的输出，由调用方决定如何使用和归档。
+
+### Changed
+
+- KWS 和 ONNX PTQ 示例的逐样本推理归档迁至独立验证工具，CPU/CUDA 对照继续比较三个阶段的输出，并验证导出后的重载结果。
+- KWS 公共定义拆分为 `examples/common/kws_data.py` 和 `kws_model.py`，分别提供数据前处理与模型、检查点支持，两个示例独立调用这些模块。
+- ONNX PTQ 示例默认输出目录调整为 `output/quick_start_onnx_ptq/`，生成的 MFCC 位于 `mfcc_feeds/`。自动选择 KWS 模型时选择最近成功运行生成的 ONNX，忽略失败、未完成及本次运行未生成的留存模型。
+
 ## [1.1.3b1] - 2026-11-24
 
 ### Changed

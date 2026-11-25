@@ -85,7 +85,7 @@ PyTorch 恢复示例通过 `load_quantizer_encodings()` 加载该 `.json`；ONNX
 ## 默认位置
 
 - KWS：`./output/quick_start_kws/<gru|lstm>/<execution-id>/`。
-- ONNX PTQ 示例：`./output/onnx_ptq_quick_start/<execution-id>/`。
+- ONNX PTQ 示例位于 `./output/quick_start_onnx_ptq/<execution-id>/`。
 - 尚未知输出根目录的底层调用：`./output/<execution-id>/`，可用 `RX_MET_OUTPUT_DIR` 覆盖。
 
 两个示例均可用 `--output-dir` 覆盖输出根目录，KWS 仍会追加 `gru/` 或 `lstm/`。
@@ -94,9 +94,12 @@ PyTorch 恢复示例通过 `load_quantizer_encodings()` 加载该 `.json`；ONNX
 尚未指定根目录且当前目录不可写时，早期日志暂存在系统临时目录，导出时一并迁移；
 绑定的输出目录不可写则报错。
 
-ONNX 默认示例从已有 KWS 成功运行中读取浮点 ONNX，自动抽样生成的 MFCC 样本和
-`manifest.json` 保存在本次运行目录的 `data/` 下；无需独立准备脚本。显式传入的模型、
-校准目录和验证目录仍从原路径读取，不复制到运行目录。
+ONNX PTQ 示例默认读取当前工作目录 `output/quick_start_kws/gru/` 下最近成功运行的
+`exports/att_mh_rnn_kws.onnx`，可用 `--rnn-type lstm` 切换查找目录，或用 `--model` 指定路径。
+使用内置语音前处理时，校准和验证 MFCC 写入
+`mfcc_feeds/calib/` 和 `mfcc_feeds/val/`，标签记录在 `mfcc_feeds/manifest.json`。
+传入 `--calib-dir` 时直接读取指定的预处理样本。评估指标和恢复比较结果记录在
+`exports/<prefix>.meta.json`。
 
 ## 日志与失败处理
 

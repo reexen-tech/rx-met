@@ -1,7 +1,9 @@
 # 量化算子
 
-本目录保存 rx-met 自行维护的量化算子。PyTorch 模型需要显式使用这些算子替换原始
-网络层并加载权重；`prepare_model()` 保留已有实例，不自动替换任意 `nn.GRU` / `nn.LSTM`。
+本目录保存 rx-met 自行维护的量化算子。通过 PyTorch 路径量化 GRU/LSTM 并导出
+RX-MET 编译器编码时，需要将 `torch.nn.GRU` / `torch.nn.LSTM` 显式替换为
+`QuantGRU` / `QuantLSTM` 并加载权重，以校准循环内部量化点并生成对应编码。
+`prepare_model()` 保留已有原生算子实例，不自动完成替换。
 
 ## 按任务阅读
 

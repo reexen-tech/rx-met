@@ -18,7 +18,6 @@ from pathlib import Path
 import pkgutil
 import random
 import sys
-from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path[:0] = [str(ROOT / "src"), str(ROOT)]
@@ -31,15 +30,26 @@ import numpy as np
 import onnx
 import torch
 
-from examples import quick_start_kws as kws
+from examples.common import kws_data, kws_model
 from aimet_common.evaluation import classification_accuracy, compare_output_batches
 from aimet_common.compiler_artifacts import validate_compiler_artifacts
 from aimet_onnx.rx_ptq import run_onnx_ptq, create_onnx_ptq_sim
-from aimet_onnx.rx_ptq import pipeline as ptq_pipeline
 from aimet_onnx.rx_ptq.calibration import iter_calibration_feeds
 from aimet_onnx.rx_ptq.evaluation import evaluate_onnx_dataset
 from aimet_onnx.rx_ptq.mixed_precision import apply_onnx_mixed_precision_bitwidth
 from aimet_onnx.quantsim import load_encodings_to_sim
+from aimet_torch.rx_export.export_onnx_json import export_onnx_json
+from aimet_torch.utils_rx import apply_power_of_2_workflow
+from scripts.validation.kws_ptq_worker import (
+    BITWIDTH_CONFIG_FILE,
+    CONFIG_FILE,
+    PERCENTILE_VALUE,
+    QUANT_SCHEME,
+    calibrate_torch,
+    evaluate_torch,
+)
+
+CUDA_PROVIDERS = ("CUDAExecutionProvider", "CPUExecutionProvider")
 
 ENCODING_FIELDS = ("bitwidth", "dtype", "is_symmetric", "enc_type", "scale", "n",
                    "zero_point", "qmin", "qmax", "real_min", "real_max")
@@ -63,17 +73,17 @@ def state_fingerprint(model):
 
 
 def prepare_feeds(root, output, samples_per_class, seed):
-    manifest = {"labels": list(kws.LABELS), "seed": seed, "batch_size": 1, "augmentation": False}
+    manifest = {"labels": list(kws_data.LABELS), "seed": seed, "batch_size": 1, "augmentation": False}
     digest = hashlib.sha256()
     for split, folder in (("train", "calib"), ("val", "val")):
-        dataset = kws.SpeechCommandsKWS(str(root), split=split)
+        dataset = kws_data.SpeechCommandsKWS(str(root), split=split)
         dataset.train_mode = False
         by_label = defaultdict(list)
         for index, (_, label) in enumerate(dataset.items):
             by_label[label].append(index)
         rng = random.Random(seed)
         selected = []
-        for label in kws.LABELS:
+        for label in kws_data.LABELS:
             if len(by_label[label]) < samples_per_class:
                 raise ValueError(f"Not enough samples for {split}/{label}")
             selected.extend(rng.sample(by_label[label], samples_per_class))
@@ -98,21 +108,8 @@ def prepare_feeds(root, output, samples_per_class, seed):
 
 
 def load_feeds(directory):
-    return list(iter_calibration_feeds(directory, {"input": [1, kws.TARGET_LEN]},
+    return list(iter_calibration_feeds(directory, {"input": [1, kws_data.TARGET_LEN]},
                 input_dtypes={"input": np.dtype("float32")}))
-
-
-def evaluate(model, feeds, labels, *, return_outputs=False):
-    model.eval()
-    outputs = []
-    with torch.no_grad():
-        for feed in feeds:
-            value = model(torch.from_numpy(feed["input"]).to(kws.DEVICE)).detach().cpu().numpy()
-            if not np.isfinite(value).all():
-                raise RuntimeError("Nonfinite KWS output")
-            outputs.append([value])
-    metrics = classification_accuracy(outputs, labels)
-    return (metrics, outputs) if return_outputs else metrics
 
 
 def encoding_records(value, path=()):
@@ -260,13 +257,14 @@ def write_summary(output, report):
 def run(args):
     if not torch.cuda.is_available():
         raise RuntimeError("This test requires CUDA and the native recurrent runtime")
+    device = torch.device("cuda")
     for path in (args.fp_checkpoint, args.config_file, args.bitwidth_config):
         if not path.is_file():
             raise FileNotFoundError(path)
     if not args.data_dir.is_dir():
         raise FileNotFoundError(args.data_dir)
     args.output_dir.mkdir(parents=True, exist_ok=False)
-    kws.set_seed(args.seed)
+    kws_data.set_seed(args.seed)
     config_dir = args.output_dir / "config"
     config_dir.mkdir()
     configs = []
@@ -285,12 +283,12 @@ def run(args):
     labels = manifest["val_labels"]
 
     print("2. Load floating checkpoint; KWS PTQ -> Po2 -> export (no QAT)", flush=True)
-    model = kws._new_model(args.rnn_type).eval()
-    frontend = kws.make_speech_features(device=kws.DEVICE).eval()
-    kws.load_checkpoint(model, args.fp_checkpoint, args.rnn_type, kws.DEVICE,
-                        speech_features=frontend)
-    feeds = kws.extract_mfcc_feeds(feeds, frontend, kws.DEVICE)
-    validation = kws.extract_mfcc_feeds(validation, frontend, kws.DEVICE)
+    model = kws_model.make_model(args.rnn_type, device).eval()
+    frontend = kws_data.make_speech_features(device=device).eval()
+    kws_model.load_checkpoint(model, args.fp_checkpoint, args.rnn_type, device,
+                             speech_features=frontend)
+    feeds = kws_data.extract_mfcc_feeds(feeds, frontend, device)
+    validation = kws_data.extract_mfcc_feeds(validation, frontend, device)
     # Preserve raw waveform identities while giving both PTQ frontends the
     # same materialized MFCC inputs.
     feature_dir = args.output_dir / "features"
@@ -301,61 +299,44 @@ def run(args):
             np.savez(directory / filename, **feed)
     feature_manifest = {key: value for key, value in manifest.items() if key != "feed_sha256"}
     (feature_dir / "manifest.json").write_text(json.dumps(feature_manifest, indent=2) + "\n")
-    prepared = kws.prepare_model(model)
+    prepared = kws_model.prepare_model(model)
     before = state_fingerprint(prepared)
-    sim = kws.quantsim.QuantizationSimModel(prepared,
-        dummy_input=torch.from_numpy(feeds[0]["input"]).to(kws.DEVICE),
-        quant_scheme=kws.QUANT_SCHEME, config_file=str(configs[0]),
-        default_output_bw=kws.DEFAULT_BW, default_param_bw=kws.DEFAULT_BW)
-    sim.set_percentile_value(kws.PERCENTILE_VALUE)
-    kws.apply_mixed_precision_bitwidth(sim.model, config_file=str(configs[1]), verbose=False)
-    kws.configure_attention_quantizers(sim.model)
-    sim.model.eval()
-    with torch.no_grad(), kws.aimet.nn.compute_encodings(sim.model):
-        for index, feed in enumerate(feeds, 1):
-            sim.model(torch.from_numpy(feed["input"]).to(kws.DEVICE))
-            if index % 64 == 0:
-                print(f"  calibrated {index}/{len(feeds)}", flush=True)
-    ptq, torch_ptq_outputs = evaluate(sim.model, validation, labels, return_outputs=True)
-    kws.apply_power_of_2_workflow(sim.model, align_bias_scale=True, verbose=False)
-    po2, torch_po2_outputs = evaluate(sim.model, validation, labels, return_outputs=True)
+    sim = calibrate_torch(prepared, feeds, device, *configs)
+    torch_ptq_outputs = evaluate_torch(sim.model, validation, device)
+    ptq = classification_accuracy(torch_ptq_outputs, labels)
+    apply_power_of_2_workflow(sim.model, align_bias_scale=True, verbose=False)
+    torch_po2_outputs = evaluate_torch(sim.model, validation, device)
+    po2 = classification_accuracy(torch_po2_outputs, labels)
     after = state_fingerprint(sim.get_original_model(sim.model, qdq_weights=False))
     if before != after:
         raise RuntimeError("PTQ unexpectedly changed the floating weights or buffers")
     sim.model.cpu().eval()
-    first_onnx, first_enc = kws.export_onnx_json(sim,
+    first_onnx, first_enc = export_onnx_json(sim,
         export_dir=str(args.output_dir / "torch_ptq"), filename_prefix="att_mh_rnn_kws",
-        dummy_input_shape=(1, *kws.FEATURE_SHAPE), opset=18)
+        dummy_input_shape=(1, *kws_data.FEATURE_SHAPE), opset=18)
 
     print("3. Feed the first exported ONNX into ONNX PTQ with the same JSON/data", flush=True)
-    stage_outputs = []
-    evaluator = ptq_pipeline.evaluate_onnx_dataset
-    def capture_evaluation(source, *values, **options):
-        outputs, metrics = evaluator(source, *values, **options)
-        if hasattr(source, "qc_quantize_op_dict"):
-            stage_outputs.append(outputs)
-        return outputs, metrics
-    with patch.object(ptq_pipeline, "evaluate_onnx_dataset", side_effect=capture_evaluation):
-        second = run_onnx_ptq(model_path=first_onnx, calibration_dir=feature_dir / "calib",
-            validation_dir=feature_dir / "val", output_dir=args.output_dir / "onnx_ptq",
-            filename_prefix="att_mh_rnn_kws", config_file=str(configs[0]),
-            bitwidth_config_file=str(configs[1]), quant_scheme=kws.QUANT_SCHEME,
-            percentile_value=kws.PERCENTILE_VALUE, providers=("CUDAExecutionProvider", "CPUExecutionProvider"))
-    if len(stage_outputs) < 2:
-        raise RuntimeError("Missing ONNX PTQ/Po2 evaluation stages")
-    ptq_comparison = compare_output_batches(torch_ptq_outputs, stage_outputs[0])
+    stage_outputs = {}
+    second = run_onnx_ptq(model_path=first_onnx, calibration_dir=feature_dir / "calib",
+        validation_dir=feature_dir / "val", output_dir=args.output_dir / "onnx_ptq",
+        filename_prefix="att_mh_rnn_kws", config_file=str(configs[0]),
+        bitwidth_config_file=str(configs[1]), quant_scheme=QUANT_SCHEME,
+        percentile_value=PERCENTILE_VALUE, providers=CUDA_PROVIDERS,
+        on_evaluation=stage_outputs.__setitem__)
+    onnx_ptq_outputs = stage_outputs["ptq"]
+    ptq_comparison = compare_output_batches(torch_ptq_outputs, onnx_ptq_outputs)
     ptq_functional_match = all(item["max_abs"] == 0 for item in ptq_comparison)
     ptq_prediction_differences = sum(
         int(np.argmax(left[0]) != np.argmax(right[0]))
-        for left, right in zip(torch_ptq_outputs, stage_outputs[0]))
+        for left, right in zip(torch_ptq_outputs, onnx_ptq_outputs))
     np.savez_compressed(args.output_dir / "quantized_outputs.npz",
         torch_ptq=np.concatenate([batch[0] for batch in torch_ptq_outputs]),
-        onnx_ptq=np.concatenate([batch[0] for batch in stage_outputs[0]]),
+        onnx_ptq=np.concatenate([batch[0] for batch in onnx_ptq_outputs]),
         torch_po2=np.concatenate([batch[0] for batch in torch_po2_outputs]),
-        onnx_po2=np.concatenate([batch[0] for batch in stage_outputs[1]]), labels=labels)
+        onnx_po2=np.concatenate([batch[0] for batch in stage_outputs["po2"]]), labels=labels)
     restored = create_onnx_ptq_sim(onnx.load(first_onnx), feeds[0], config_file=str(configs[0]),
-        quant_scheme=kws.QUANT_SCHEME, percentile_value=kws.PERCENTILE_VALUE,
-        providers=("CUDAExecutionProvider", "CPUExecutionProvider"))
+        quant_scheme=QUANT_SCHEME, percentile_value=PERCENTILE_VALUE,
+        providers=CUDA_PROVIDERS)
     apply_onnx_mixed_precision_bitwidth(restored, str(configs[1]), verbose=False)
     load_encodings_to_sim(restored, str(second["aimet_encodings"]), strict=False,
         allow_overwrite=False, disable_missing_quantizers=True)
@@ -418,18 +399,16 @@ def run(args):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--rnn-type", "--rnn_type", choices=("gru", "lstm"), default="gru")
-    parser.add_argument("--fp-checkpoint", type=Path)
-    parser.add_argument("--data-dir", type=Path, default=Path(kws.DATA_ROOT))
-    parser.add_argument("--config-file", type=Path, default=kws.CONFIG_FILE)
-    parser.add_argument("--bitwidth-config", type=Path, default=kws.BITWIDTH_CONFIG_FILE)
+    parser.add_argument("--fp-checkpoint", type=Path, required=True)
+    parser.add_argument("--data-dir", type=Path, default=Path("/datasets/speech_commands_v0.02"))
+    parser.add_argument("--config-file", type=Path, default=CONFIG_FILE)
+    parser.add_argument("--bitwidth-config", type=Path, default=BITWIDTH_CONFIG_FILE)
     parser.add_argument("--samples-per-class", type=int, default=20)
-    parser.add_argument("--seed", type=int, default=kws.SEED)
+    parser.add_argument("--seed", type=int, default=kws_data.SEED)
     parser.add_argument("--output-dir", type=Path,
         default=Path("output/kws_ptq_roundtrip") / datetime.now().strftime("%Y%m%d_%H%M%S_%f"))
     parser.add_argument("--report-only", action="store_true", help="Return 0 even when artifacts differ")
     args = parser.parse_args()
-    if args.fp_checkpoint is None:
-        args.fp_checkpoint = Path('output/quick_start_kws') / args.rnn_type / 'model_fp_kws.pth'
     if args.samples_per_class < 1:
         parser.error("--samples-per-class must be positive")
     return run(args)

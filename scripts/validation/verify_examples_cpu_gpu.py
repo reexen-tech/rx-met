@@ -1,4 +1,4 @@
-"""Run both public PTQ examples on fixed CPU/GPU inputs and compare their artifacts.
+"""Run Torch and ONNX PTQ on fixed CPU/GPU inputs and compare their artifacts.
 
 Each command prefix must select a Python environment with the corresponding
 rx-met wheels. Container prefixes must mount this repository and input paths
@@ -18,6 +18,7 @@ from compare_ptq_artifacts import sha256
 
 
 ROOT = Path(__file__).resolve().parents[2]
+WORKER = ROOT / "scripts/validation/kws_ptq_worker.py"
 
 
 def run(command, log):
@@ -28,17 +29,13 @@ def run(command, log):
         raise RuntimeError(f"Command failed ({result.returncode}); see {log}")
 
 
-def exported(directory, filename):
-    records = list(directory.rglob("run.json"))
-    if len(records) != 1:
-        raise RuntimeError(f"Expected exactly one example run under {directory}: {records}")
-    record = json.loads(records[0].read_text())
-    if record["status"] != "success":
-        raise RuntimeError(f"Example did not succeed: {records[0]}")
-    result = records[0].parent / "exports" / filename
-    if not result.is_file():
-        raise FileNotFoundError(result)
-    return result
+def read_artifacts(directory):
+    record = json.loads((directory / "artifacts.json").read_text())
+    artifacts = {name: Path(record[name]) for name in ("onnx", "encodings", "outputs")}
+    for path in artifacts.values():
+        if not path.is_file():
+            raise FileNotFoundError(path)
+    return artifacts
 
 
 def main(argv=None):
@@ -56,77 +53,46 @@ def main(argv=None):
     args = parser.parse_args(argv)
     args.output_dir = args.output_dir.resolve()
     args.output_dir.mkdir(parents=True, exist_ok=False)
-    common = ["--calib-dir", args.calib_dir.resolve(),
-              "--validation-dir", args.validation_dir.resolve()]
+    waveform_options = ["--rnn-type", args.rnn_type, "--fp-checkpoint", args.fp_checkpoint.resolve(),
+                        "--calib-dir", args.calib_dir.resolve(),
+                        "--validation-dir", args.validation_dir.resolve()]
     for name in ("calib_limit", "validation_limit"):
         value = getattr(args, name)
         if value is not None:
             if value < 1:
                 parser.error(f"--{name.replace('_', '-')} must be positive")
-            common += ["--" + name.replace("_", "-"), str(value)]
+            waveform_options += ["--" + name.replace("_", "-"), value]
+    waveform_options = list(map(str, waveform_options))
+    prefixes = {device: shlex.split(getattr(args, device + "_command"))
+                for device in ("cpu", "cuda")}
     checkpoint_sha = sha256(args.fp_checkpoint)
     products, commands = {}, []
     for device in ("cpu", "cuda"):
-        prefix = shlex.split(getattr(args, device + "_command"))
-        command = prefix + [str(ROOT / "examples/quick_start_kws.py"),
-            "--rnn-type", args.rnn_type, "--device", device, "--ptq-only",
-            "--fp-checkpoint", str(args.fp_checkpoint.resolve()),
-            "--output-dir", str(args.output_dir / ("kws_" + device)), *map(str, common)]
+        directory = args.output_dir / f"kws_{device}"
+        command = prefixes[device] + [str(WORKER), "torch", "--device", device,
+                                     "--output-dir", str(directory), *waveform_options]
         commands.append(command)
         run(command, args.output_dir / f"kws_{device}.log")
-        products["kws_" + device] = exported(args.output_dir / ("kws_" + device), "att_mh_rnn_kws_ptq.onnx")
+        products[f"kws_{device}"] = read_artifacts(directory)
     # Both ONNX passes start from one identical clean ONNX, preventing graph
     # differences in the first pair from changing the second pair's inputs.
-    shared_onnx = products["kws_cuda"]
+    shared_onnx = products["kws_cuda"]["onnx"]
     # KWS accepts waveform feeds; its deployment ONNX accepts external MFCC.
     feature_root = args.output_dir / "mfcc_feeds"
-    prepare_features = """
-import json
-from pathlib import Path
-import sys
-import numpy as np
-sys.path.insert(0, sys.argv[1])
-from examples import quick_start_kws as kws
-checkpoint, rnn_type, output, calib, validation = sys.argv[2:7]
-frontend = kws.make_speech_features().eval()
-kws.load_checkpoint(kws.AttMHRNN(rnn_type=rnn_type), Path(checkpoint),
-                    rnn_type, 'cpu', speech_features=frontend)
-root = Path(output)
-root.mkdir()
-manifest = {'labels': list(kws.LABELS), 'batch_size': 1, 'augmentation': False}
-for folder, source, raw_limit in (('calib', calib, sys.argv[7]),
-                                  ('val', validation, sys.argv[8])):
-    feeds, labels = kws.load_ptq_feeds(Path(source), int(raw_limit) if raw_limit else None)
-    features = kws.extract_mfcc_feeds(feeds, frontend)
-    directory = root / folder
-    directory.mkdir()
-    files = []
-    for index, feed in enumerate(features):
-        filename = f'{index:05d}.npz'
-        np.savez(directory / filename, **feed)
-        files.append(filename)
-    manifest[folder + '_files'] = files
-    if labels is not None:
-        manifest[folder + '_labels'] = labels
-(root / 'manifest.json').write_text(json.dumps(manifest, indent=2) + '\\n')
-"""
-    command = shlex.split(args.cpu_command) + ["-c", prepare_features, str(ROOT),
-        str(args.fp_checkpoint.resolve()), args.rnn_type, str(feature_root),
-        str(args.calib_dir.resolve()), str(args.validation_dir.resolve()),
-        str(args.calib_limit or ""), str(args.validation_limit or "")]
+    command = prefixes["cpu"] + [str(WORKER), "mfcc", "--output-dir", str(feature_root),
+                                 *waveform_options]
     commands.append(command)
     run(command, args.output_dir / "mfcc_feeds.log")
-    onnx_common = ["--calib-dir", feature_root / "calib",
-                   "--validation-dir", feature_root / "val"]
+    onnx_options = ["--calib-dir", str(feature_root / "calib"),
+                    "--validation-dir", str(feature_root / "val")]
     for device in ("cpu", "cuda"):
-        prefix = shlex.split(getattr(args, device + "_command"))
-        command = prefix + [str(ROOT / "examples/quick_start_onnx_ptq.py"),
-            "--model", str(shared_onnx), "--device", device,
-            "--prefix", "att_mh_rnn_kws_ptq", "--output-dir",
-            str(args.output_dir / ("onnx_" + device)), *map(str, onnx_common)]
+        directory = args.output_dir / f"onnx_{device}"
+        command = prefixes[device] + [str(WORKER), "onnx", "--device", device,
+                                     "--model", str(shared_onnx), "--output-dir", str(directory),
+                                     *onnx_options]
         commands.append(command)
         run(command, args.output_dir / f"onnx_{device}.log")
-        products["onnx_" + device] = exported(args.output_dir / ("onnx_" + device), "att_mh_rnn_kws_ptq.onnx")
+        products[f"onnx_{device}"] = read_artifacts(directory)
     comparisons = {}
     pairs = {"kws_cpu_cuda": ("kws_cpu", "kws_cuda"),
              "onnx_cpu_cuda": ("onnx_cpu", "onnx_cuda"),
@@ -136,11 +102,10 @@ for folder, source, raw_limit in (('calib', calib, sys.argv[7]),
         left, right = products[left_name], products[right_name]
         report = args.output_dir / f"{name}_comparison.json"
         command = [sys.executable, str(ROOT / "scripts/validation/compare_ptq_artifacts.py"),
-            "--left-onnx", str(left), "--right-onnx", str(right),
-            "--left-encodings", str(left.with_suffix(".json")),
-            "--right-encodings", str(right.with_suffix(".json")),
-            "--left-outputs", str(left.parent / "outputs.npz"),
-            "--right-outputs", str(right.parent / "outputs.npz"), "--report", str(report)]
+            "--left-onnx", str(left["onnx"]), "--right-onnx", str(right["onnx"]),
+            "--left-encodings", str(left["encodings"]), "--right-encodings", str(right["encodings"]),
+            "--left-outputs", str(left["outputs"]), "--right-outputs", str(right["outputs"]),
+            "--report", str(report)]
         result = subprocess.run(command)
         if result.returncode not in (0, 1) or not report.is_file():
             raise RuntimeError(f"Artifact comparison failed: {report}")
@@ -153,7 +118,7 @@ for folder, source, raw_limit in (('calib', calib, sys.argv[7]),
                "comparisons": {name: {"equal": value["equal"], "report": f"{name}_comparison.json"}
                                for name, value in comparisons.items()}}
     (args.output_dir / "comparison.json").write_text(json.dumps(summary, indent=2) + "\n")
-    print(f"Example validation {'matches' if summary['equal'] else 'differs'}: {args.output_dir / 'comparison.json'}")
+    print(f"PTQ validation {'matches' if summary['equal'] else 'differs'}: {args.output_dir / 'comparison.json'}")
     return 0 if summary["equal"] else 1
 
 

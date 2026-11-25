@@ -24,9 +24,13 @@ runtime。复现项目现成模型时，直接使用[KWS 示例](../examples/REA
 并明确放在模型内还是模型外；外置前处理的参数需随主权重另行保存。
 随机 Tensor 只适合检查接口和 shape，不能替代正式校准数据。
 
-若要对 `nn.GRU` / `nn.LSTM` 的内部量化点使用原生算子，按
-[循环算子接入](QuantLSTM_integration.md#使用与配置)显式替换；`prepare_model()` 不会
-自动转换。可先将原始检查点加载到普通模型，再逐层替换并复制权重，或准备与
+通过本教程的 PyTorch 路径量化 GRU/LSTM 并导出 RX-MET 编译器编码时，需要将
+`torch.nn.GRU` / `torch.nn.LSTM` 显式替换为 `QuantGRU` / `QuantLSTM`。
+原生算子负责每个时间步的门控、中间结果和状态量化，生成编译器所需的内部编码。
+普通 GRU/LSTM 的 AIMET 包装对输入、输出、首尾状态和参数执行量化与反量化（QDQ），覆盖的是整个
+循环算子的调用边界。两者的作用、支持限制及替换代码见
+[循环算子接入](QuantLSTM_integration.md#使用与配置)。`prepare_model()` 不会自动替换。
+可先将原始检查点加载到普通模型，再逐层替换并复制权重，或准备与
 `build_model()` 所建结构匹配的检查点。验证替换前后的浮点输出后，再创建 QuantSim。
 
 在容器的可写工作目录运行，确保 `my_project` 可导入：

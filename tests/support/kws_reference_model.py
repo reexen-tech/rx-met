@@ -3,20 +3,20 @@
 import torch
 from torch import nn
 
-from examples import quick_start_kws as kws
+from examples.common import kws_data, kws_model
 
 
-class ReferenceConvActBN(kws.ConvActBN):
+class ReferenceConvActBN(kws_model.ConvActBN):
     def forward(self, x):
         return self.bn(self.act(self.conv(x)))
 
 
-class ReferenceAttMHRNN(kws.AttMHRNN):
+class ReferenceAttMHRNN(kws_model.AttMHRNN):
     """Reuse recurrent shapes while retaining the previous arithmetic boundary."""
 
     def __init__(self, **options):
         super().__init__(**options)
-        self.speech_features = kws.make_speech_features()
+        self.speech_features = kws_data.make_speech_features()
         for index, block in enumerate(self.convs):
             reference = ReferenceConvActBN(block.conv.in_channels, block.conv.out_channels,
                                            block.conv.kernel_size)
@@ -26,7 +26,7 @@ class ReferenceAttMHRNN(kws.AttMHRNN):
             self.query_projs[index] = nn.Linear(projection.conv.in_channels,
                                                 projection.conv.out_channels)
         for index, layer in enumerate(self.mlp):
-            if isinstance(layer, kws.LinearAsConv2d):
+            if isinstance(layer, kws_model.LinearAsConv2d):
                 self.mlp[index] = nn.Linear(layer.conv.in_channels, layer.conv.out_channels)
         self.fc = nn.Linear(self.fc.conv.in_channels, self.fc.conv.out_channels)
         del self.attention

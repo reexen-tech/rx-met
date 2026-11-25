@@ -7,7 +7,7 @@ import hashlib
 import json
 import tempfile
 from pathlib import Path
-from typing import Any, Dict, List, Sequence
+from typing import Any, Callable, Dict, List, Sequence
 
 import numpy as np
 import onnx
@@ -424,11 +424,17 @@ def run_onnx_ptq(
     calibration_limit: int | None = None,
     validation_dir: str | Path | None = None,
     validation_labels: Sequence[int] | None = None,
+    on_evaluation: Callable[[str, list[list[np.ndarray]]], None] | None = None,
 ) -> Dict[str, Path]:
     """Run PTQ with accumulator bias alignment and optional Po2 conversion.
 
     ``align_bias_scale`` remains for call compatibility; the standard workflow
     requires it to be true. Use ``enable_po2=False`` to export affine encodings.
+
+    ``on_evaluation(stage, batches)`` receives evaluation outputs after each
+    executed ``fp32``, ``ptq`` and ``po2`` stage. Each batch contains the model
+    outputs in ONNX order. Callbacks should treat the arrays as read-only.
+    Callback exceptions propagate to the caller.
     """
     if not align_bias_scale:
         raise ValueError("run_onnx_ptq requires align_bias_scale=True for accumulator bias alignment")
@@ -448,6 +454,8 @@ def run_onnx_ptq(
     reference_batches, fp32_evaluation = evaluate_onnx_dataset(
         model_path, evaluation_feeds, labels=validation_labels, providers=providers
     )
+    if on_evaluation is not None:
+        on_evaluation("fp32", reference_batches)
     if config_file is None:
         config_file = str(DEFAULT_QUANTSIM_CONFIG)
     sim = create_onnx_ptq_sim(
@@ -487,12 +495,22 @@ def run_onnx_ptq(
             sim, bitwidth_config_file, verbose=False
         )
         force_model_io_quantizers(sim, normalized_model)
+    first_provider = providers[0] if providers else None
+    if isinstance(first_provider, tuple):
+        first_provider = first_provider[0]
+    if first_provider == "CUDAExecutionProvider":
+        active = sim.session.get_providers()
+        if not active or active[0] != "CUDAExecutionProvider":
+            raise RuntimeError(f"ONNX PTQ requested CUDAExecutionProvider but initialized {active}")
     disable_onnx_bias_quantizers(sim, preserve_shared_percentile=True)
     sim.compute_encodings(feeds)
     bias_report = align_onnx_bias_scale(sim, bias_bitwidth=bias_bitwidth)
-    _, ptq_evaluation = evaluate_onnx_dataset(
+    ptq_batches, ptq_evaluation = evaluate_onnx_dataset(
         sim, evaluation_feeds, reference=reference_batches, labels=validation_labels, providers=providers
     )
+    if on_evaluation is not None:
+        on_evaluation("ptq", ptq_batches)
+    del ptq_batches
     evaluations = {"fp32": fp32_evaluation, "ptq": ptq_evaluation}
     po2_report = None
     po2_metadata = {}
@@ -505,9 +523,12 @@ def run_onnx_ptq(
             verbose=False,
         )
         po2_bias_report = align_onnx_bias_scale(sim, bias_bitwidth=bias_bitwidth)
-        _, po2_evaluation = evaluate_onnx_dataset(
+        po2_batches, po2_evaluation = evaluate_onnx_dataset(
             sim, evaluation_feeds, reference=reference_batches, labels=validation_labels, providers=providers
         )
+        if on_evaluation is not None:
+            on_evaluation("po2", po2_batches)
+        del po2_batches
         evaluations["po2"] = po2_evaluation
         po2_metadata = {
             "po2_method": po2_method,
