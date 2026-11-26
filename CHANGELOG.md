@@ -17,6 +17,10 @@
 - KWS 公共定义拆分为 `examples/common/kws_data.py` 和 `kws_model.py`，分别提供数据前处理与模型、检查点支持，两个示例独立调用这些模块。
 - ONNX PTQ 示例默认输出目录调整为 `output/quick_start_onnx_ptq/`，生成的 MFCC 位于 `mfcc_feeds/`。自动选择 KWS 模型时选择最近成功运行生成的 ONNX，忽略失败、未完成及本次运行未生成的留存模型。
 
+### Fixed
+
+- 修复 PyTorch QuantSim 在省略 `config_file` 或使用内置默认配置时，将合法 ONNX 类型 `Mean`、`If` 误判为不支持的问题。`op_type` 接受标准 ONNX 名称，保留未知名称与超级组类型校验，不改变共享配置的量化规则。
+
 ## [1.1.3b1] - 2026-11-24
 
 ### Changed

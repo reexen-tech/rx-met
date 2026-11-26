@@ -39,6 +39,7 @@
 import copy
 from abc import abstractmethod
 from typing import Dict, List, Tuple, Set, Union
+from onnx import defs as onnx_defs
 import torch
 from torch.nn.modules import ConvTranspose2d
 
@@ -1220,7 +1221,7 @@ def _get_tensor_quantizers_to_modify(
 
 
 def _report_unsupported_ops(quantsim_config: ConfigDictType):
-    """Raise on unsupported op types found in the config."""
+    """Validate shared op rules and Torch-specific supergroup patterns."""
 
     known_op_types = set()
     for op_list in map_torch_types_to_onnx.values():
@@ -1230,14 +1231,23 @@ def _report_unsupported_ops(quantsim_config: ConfigDictType):
     known_op_types_list = sorted(known_op_types)
     known_op_types_msg = "\n  - " + "\n  - ".join(known_op_types_list)
 
+    # Shared JSON1 rules may name standard ONNX operators absent from Torch's
+    # mappings (for example Mean and If). They only apply to matching modules;
+    # accepting their names does not add support for executing those operators.
+    valid_op_types = known_op_types | {
+        schema.name for schema in onnx_defs.get_all_schemas() if schema.domain == ""
+    }
+    valid_op_types_list = sorted(valid_op_types)
+    valid_op_types_msg = "\n  - " + "\n  - ".join(valid_op_types_list)
+
     # Look for unsupported ops in op_type section
     op_type_configs = quantsim_config[ConfigDictKeys.OP_TYPE]
     for op in op_type_configs.keys():
-        if op not in known_op_types:
+        if op not in valid_op_types:
             error_msg = (
                 f"Unsupported op type {op!r} in quantsim config op_type section.\n"
                 "Op type names are case-sensitive and must match AIMET backend or ONNX op names.\n"
-                f"Supported op_type keys ({len(known_op_types_list)} total):{known_op_types_msg}"
+                f"Supported op_type keys ({len(valid_op_types_list)} total):{valid_op_types_msg}"
             )
             logger.error(error_msg)
             raise AssertionError(error_msg)

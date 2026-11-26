@@ -27,10 +27,10 @@ CONFIG = REPO_ROOT / "examples/config/mrnn_quantsim_config_custom_mixed_precisio
 
 
 class RecurrentModel(nn.Module):
-    def __init__(self, operator_type, bidirectional=False):
+    def __init__(self, operator_type, bidirectional=False, head_bias=True):
         super().__init__()
         self.rnn = operator_type(3, 4, batch_first=True, bidirectional=bidirectional)
-        self.head = nn.Linear(8 if bidirectional else 4, 2)
+        self.head = nn.Linear(8 if bidirectional else 4, 2, bias=head_bias)
 
     def forward(self, x):
         output, _ = self.rnn(x)
@@ -44,7 +44,7 @@ class NativeRecurrentSimInitializationTest(unittest.TestCase):
         self.addCleanup(temporary.cleanup)
         self.directory = Path(temporary.name)
 
-    def fixture(self, kind, *, bidirectional=False, config_file=str(CONFIG), **kwargs):
+    def fixture(self, kind, *, bidirectional=False, head_bias=True, config_file=str(CONFIG), **kwargs):
         if kind == "GRU":
             operator_type = quant_gru.QuantGRU
             cpu_only = quant_gru._CPU_ONLY
@@ -55,7 +55,7 @@ class NativeRecurrentSimInitializationTest(unittest.TestCase):
             self.skipTest(f"{kind} execution requires a CPU wheel or CUDA")
         device = "cpu" if cpu_only else "cuda"
         x = torch.randn(2, 5, 3, device=device) * .3 + .15
-        model = RecurrentModel(operator_type, bidirectional).to(device).eval()
+        model = RecurrentModel(operator_type, bidirectional, head_bias).to(device).eval()
         self.assertFalse(model.rnn.use_quantization)
         prepared = prepare_model(model)
         self.assertFalse(prepared.rnn.use_quantization)
@@ -78,12 +78,20 @@ class NativeRecurrentSimInitializationTest(unittest.TestCase):
         path.write_text(json.dumps(document), encoding="utf-8")
         apply_mixed_precision_bitwidth(sim.model, str(path), verbose=False)
 
-    def test_json1_only_quantizes_and_exports_native_layers(self):
+    def test_json1_only_and_builtin_defaults_quantize_and_export_native_layers(self):
+        cases = (
+            ("builtin_default", None, False),
+            ("json1", str(CONFIG), False),
+            ("json1", str(CONFIG), True),
+        )
         for kind in ("GRU", "LSTM"):
-            for bidirectional in (False, True):
-                with self.subTest(kind=kind, bidirectional=bidirectional):
+            for config_name, config_file, bidirectional in cases:
+                with self.subTest(kind=kind, config=config_name, bidirectional=bidirectional):
                     sim, original, x, baseline = self.fixture(
-                        kind, bidirectional=bidirectional,
+                        # Built-in defaults leave ordinary bias unquantized;
+                        # omit it from this compiler-export fixture.
+                        kind, bidirectional=bidirectional, head_bias=config_file is not None,
+                        config_file=config_file,
                     )
                     native = sim.model.rnn
                     self.assertTrue(native.use_quantization)
@@ -105,7 +113,7 @@ class NativeRecurrentSimInitializationTest(unittest.TestCase):
                     with torch.no_grad():
                         torch.testing.assert_close(original(x), baseline, rtol=0, atol=0)
 
-                    prefix = f"{kind.lower()}_{'bi' if bidirectional else 'uni'}"
+                    prefix = f"{kind.lower()}_{config_name}_{'bi' if bidirectional else 'uni'}"
                     graph_path, encodings_path = export_onnx_json(
                         sim, str(self.directory), prefix, tuple(x.shape),
                     )

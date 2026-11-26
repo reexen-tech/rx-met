@@ -43,6 +43,12 @@ PyTorch v2 的整数 QuantSim（默认的 `default_data_type=QuantizationDataTyp
 `op_type` 遵循 ONNX 算子命名，例如 `Conv`、`Gemm`、`Add`。当前仓库的基础配置
 将 `op_type` 留空，由全局默认值控制。
 
+省略 `config_file`、传入 `None` 或 `"default"` 时，QuantSim 使用内置默认配置。
+PyTorch 的 `op_type` 可包含当前模型中不存在的标准 ONNX 类型，例如 `Mean`、`If`；
+规则仅对实际匹配的算子生效，未知或大小写错误的名称仍会报错。
+`Mean` 是逐元素均值，`ReduceMean` 是归约均值，两者不会互相替代；
+`supergroups` 仍要求使用 Torch 已知的图算子类型。
+
 `strict_symmetric` 与 `is_symmetric` 不同：本仓库的 PyTorch v2 INT 对称量化使用完整有符号
 整数范围，启用严格对称会在创建量化器时报错。两条路径共用配置时保持
 `defaults.strict_symmetric="False"`；ONNX 可单独启用严格对称，使用窄范围（例如
